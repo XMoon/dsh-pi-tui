@@ -974,9 +974,18 @@ owns only the lease, focus and write-lifecycle mechanics.
   the admission for every body press; the parent gutters/header/blank bar stay
   inert). This is the documented exception to
   "a mounted specialist owns the whole body": it is not a second screen, lease
-  or focus owner. The pointer, `Tab`/`Shift+Tab` and pane-activation parent
-  paths ask the page's ONE leave query before any selection/focus mutation;
-  the first three tenants' own local key/draft rules are owned by
+  or focus owner. The `Web Search / Fetch` Adaptive Workbench is the SECOND
+  documented exception: its page is mounted in the SAME lease while the REAL
+  Categories rail stays painted beside its own local List/Detail grant; the
+  Root's ONE focus state seats either the rail or the child's current region,
+  and only the page's last-painted body box admits a body press. Its exact
+  geometry, active device, explicit Open separation, local `Tab`, parent
+  leave/return and ONE physical Action Bar grammar are owned by
+  [surface-settings.md](./surface-settings.md#settings-workspace); this section
+  owns only that shared seat rule. The pointer, `Tab`/`Shift+Tab` and
+  pane-activation parent paths ask the page's ONE leave query before any
+  selection/focus mutation; the first three tenants' own local key/draft rules
+  are owned by
   [surface-settings.md](./surface-settings.md#host-numeric-pages-session-log-upload-and-the-host-category),
   while the Web and ACP pages allow a clean/loading/settled leave, refuse
   parent routes while a next-start choice or disable/save confirmation is open

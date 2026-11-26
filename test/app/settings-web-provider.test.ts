@@ -802,9 +802,10 @@ async function openWebPage(h: Harness): Promise<string> {
  */
 function detailPaneText(vt: VirtualTerminal): string {
   const rows = vt.getViewport().map(stripTerminalSequences)
-  const header = rows.find(candidate => candidate.includes('Details'))
+  const header = rows.find(candidate => candidate.includes('Current / Detail') || candidate.includes('Details'))
   assert.ok(header !== undefined, `the detail pane header must be painted:\n${rows.join('\n')}`)
-  const label = header.indexOf('Details')
+  const needle = header.includes('Current / Detail') ? 'Current / Detail' : 'Details'
+  const label = header.indexOf(needle)
   const start = header[label - 1] === '[' ? label - 1 : label
   return rows.map(line => line.slice(start)).join(' ').replace(/\s+/gu, ' ').trim()
 }
@@ -935,7 +936,7 @@ test('a resolved provider mutation the Host does not commit is Could not confirm
     frame.includes('Could not confirm save') && !frame.includes('Saving…'))
   assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation really ran')
   assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host kept its own value')
-  assert.match(refused, /the Host readback does not confirm the requested search USER selection/u,
+  assert.match(detailPaneText(h.vt), /the Host readback does not confirm the requested search USER selection/u,
     `the verdict states the readback could not prove the request:\n${refused}`)
   assert.match(refused, /The change may have been saved/u, 'the warning is the accepted-but-unproven wording')
   assert.match(refused, /Current: DeepSeek server-side search/u, 'the Detail reports the Host value, never the request')
@@ -980,7 +981,7 @@ test('two confirmed selections end on the Host value when the second is not comm
   const refused = await settlePainted(h, 'the refused second intent', frame =>
     frame.includes('Could not confirm save') && !frame.includes('Saving…'))
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api', 'the Host keeps the first selection')
-  assert.match(refused, /the Host readback does not confirm the requested search USER selection/u,
+  assert.match(detailPaneText(h.vt), /the Host readback does not confirm the requested search USER selection/u,
     `the verdict states the readback could not prove the request:\n${refused}`)
 
   // The highlight follows the Host value (index 1), so the next confirm submits
@@ -1008,7 +1009,7 @@ test('the page deeplink is reachable and Esc cancels without a write', async t =
   assert.equal(h.writes.length, 0, 'moving the highlight writes nothing')
   await key(h, ESC) // Detail -> list, still no write
   assert.deepEqual(h.writes, [])
-  assert.match(h.view(), /Enter open/u, 'Esc from the Detail returned to the page list')
+  assert.match(h.view(), /Open \[Enter\]/u, 'Esc from the Detail returned to the page list')
   await key(h, ESC) // list -> Tools rows
   // The root keeps the row's Detail focus, exactly like the allowlist picker
   // return: the Tools rows are painted again with the Web row selected.
@@ -1538,6 +1539,63 @@ test('a billing write reports Could not confirm save when the read-back is unrea
   assert.doesNotMatch(frame, /Saved/u, 'an unreadable read-back is never a save')
 })
 
+test('a settled unknown in the list is not a Detail task seat: a clean parent change retires the page', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // Search Billing
+  await chooseCandidate(h, 1)
+  // The ACTIVE choice Detail owns the local task seat: a real parent rail click
+  // is refused with no write and no focus transfer.
+  const writesBeforeChoice = h.writes.length
+  const choiceRail = paintedWordCell(h, 'Appearance')
+  pointerClick(h, choiceRail.row, choiceRail.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u,
+    'the active choice Detail keeps the workbench')
+  assert.match(h.view(), /› Account/u, 'the local choice stays selected')
+  assert.equal(h.writes.length, writesBeforeChoice, 'the refused parent click writes nothing')
+  // Force the write's verification readback unreadable, so the settled row is a
+  // visible unknown rather than a save or a refusal.
+  const releasePre = h.holdRead()
+  const readsBefore = h.readCount()
+  await key(h, ENTER)
+  await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 1,
+    () => h.vt.waitForRender(), 'the queue-head fresh pre-read to be issued')
+  h.store.readUndefined = true
+  releasePre()
+  await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 2,
+    () => h.vt.waitForRender(), 'the write readback to be issued')
+  await settlePainted(h, 'the settled unknown verdict', frame =>
+    frame.includes('Could not confirm save') && !frame.includes('Saving…'))
+  // The visible unknown is a Detail-held task seat: a parent rail click is
+  // refused until the user's own Detail Back ends that seat.
+  const writesBeforeUnknown = h.writes.length
+  await settlePointerClick(h)
+  const unknownRail = paintedWordCell(h, 'Conversation')
+  pointerClick(h, unknownRail.row, unknownRail.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u,
+    'the unknown Detail keeps the workbench')
+  assert.match(h.view(), /Could not confirm save/u, 'the unknown verdict stays visible')
+  assert.equal(h.writes.length, writesBeforeUnknown, 'the refused parent click never replays')
+  // The explicit Detail Back ends the local task seat; the warning stays on the
+  // list row but the user is now deliberately in the clean list.
+  await key(h, ESC)
+  assert.match(h.view(), /Could not confirm save/u, 'the list keeps the warning')
+  assert.match(h.view(), /Open \[Enter\]/u, 'the list owns the seat again')
+  const writesBefore = h.writes.length
+  await settlePointerClick(h)
+  const appearance = paintedWordCell(h, 'Appearance')
+  pointerClick(h, appearance.row, appearance.column + 1)
+  await waitForFrame(() => h.view(),
+    () => h.view().includes('Configured theme') && h.view().includes('Settings · Categories'),
+    () => h.vt.waitForRender(), 'the clean parent category change')
+  assert.doesNotMatch(h.view(), /Settings · Tools · Web Search \/ Fetch/u,
+    'the retired page is gone')
+  assert.equal(h.writes.length, writesBefore, 'the parent retire never replays or writes')
+})
+
 /** One SUPERSEDED billing-readback scenario over the frozen sizes: R1 (the
  *  write's verification read) observes an UNREADABLE Host and is held; R2 (the
  *  page's `r`) observes the NEWEST facts and is also held. R1 settles while R2
@@ -1627,7 +1685,7 @@ supersededBillingCase(
       // The narrow page paints only the list, so the kept mode is read from the
       // row Detail, which always paints the authoritative value.
       await openWebRow(h, 4)
-      assert.match(h.view(), /Current: API key/u,
+      assert.match(h.view(), /Current: API key|› API key \[current\]/u,
         `the row paints the value the Host keeps:\n${h.view()}`)
       await key(h, ESC)
     }
@@ -1675,7 +1733,7 @@ test('Clear in Models… is painted as a disabled fact and is never focusable', 
   assert.doesNotMatch(detail, /› Clear in Models…/u, 'the disabled Clear never owns the cursor')
   await key(h, DOWN)
   assert.match(h.view(), /› Configure in Models…/u, 'the cursor stays on the ONE enabled action')
-  assert.match(h.view(), /Enter open in Models/u, 'the bar describes the enabled action the cursor owns')
+  assert.match(h.view(), /Open in Models… \[Enter\]/u, 'the bar describes the enabled action the cursor owns')
   assert.doesNotMatch(h.view(), /› Clear in Models…\(unavailable\)/u)
   assert.deepEqual(h.writes, [])
 })
@@ -1688,7 +1746,7 @@ test('no credential action is offered when the store is unavailable, and the bar
   await key(h, ENTER)
   const detail = h.view()
   assert.match(detail, /The official credential store is unavailable/u)
-  assert.doesNotMatch(detail, /Enter open in Models/u, 'no false Enter affordance without an action')
+  assert.doesNotMatch(detail, /Open in Models… \[Enter\]/u, 'no false Enter affordance without an action')
   assert.match(detail, /Back \[Esc\]/u)
   await key(h, ENTER)
   assert.doesNotMatch(h.view(), /Settings · Models/u)
@@ -1736,7 +1794,7 @@ test('an external clear while the cursor sits on Clear clamps it to the still-en
   assert.match(h.view(), /› Configure in Models…/u, `the cursor is clamped onto the enabled action:\n${h.view()}`)
   assert.doesNotMatch(h.view(), /› Clear in Models…/u)
   assert.match(h.view(), /Clear in Models… \(unavailable\)/u)
-  assert.match(h.view(), /Enter open in Models/u, 'the bar describes the action Enter really runs')
+  assert.match(h.view(), /Open in Models… \[Enter\]/u, 'the bar describes the action Enter really runs')
   // Enter really runs the clamped Configure (never a silent no-op).
   await key(h, ENTER)
   await settlePainted(h, 'the clamped Configure deeplink', frame =>
@@ -1751,14 +1809,14 @@ test('a resize that clips the credential actions removes the Enter affordance an
   await pageListSelect(h, 8)
   await key(h, ENTER) // credential Detail
   await key(h, DOWN) // Configure -> Clear
-  assert.match(h.view(), /Enter open in Models/u)
+  assert.match(h.view(), /Open in Models… \[Enter\]/u)
   // Tall -> very short: this frame grants ONE Detail row (the reference line),
   // so the actions are cropped out of the CURRENT frame.
   h.vt.resize(120, 4)
   await h.vt.waitForRender()
   const clipped = h.view()
-  assert.doesNotMatch(clipped, /Enter open in Models/u, `the clipped frame must not advertise Enter:\n${clipped}`)
-  assert.match(clipped, /r refresh · Back \[Esc\]/u, 'only the read refresh is offered')
+  assert.doesNotMatch(clipped, /Open in Models… \[Enter\]/u, `the clipped frame must not advertise Enter:\n${clipped}`)
+  assert.match(clipped, /Refresh \[R\] · Back \[Esc\]/u, 'only the read refresh is offered')
   // No hit target either: Enter cannot navigate.
   await key(h, ENTER)
   assert.doesNotMatch(h.view(), /Settings · Models/u, 'Enter on a cropped action never navigates')
@@ -1766,7 +1824,7 @@ test('a resize that clips the credential actions removes the Enter affordance an
   h.vt.resize(120, 40)
   await h.vt.waitForRender()
   assert.match(h.view(), /› Clear in Models…/u, 'the restored frame paints the action cursor')
-  assert.match(h.view(), /Enter open in Models/u, 'the restored frame advertises the Enter')
+  assert.match(h.view(), /Open in Models… \[Enter\]/u, 'the restored frame advertises the Enter')
 })
 
 test('an EXTERNAL provider change after the page read is never overwritten by a stale base', async t => {
@@ -1873,7 +1931,7 @@ test('a resize that crops the highlighted candidate removes the Confirm [Enter] 
   assert.deepEqual(h.writes, [], 'Enter on an invisible candidate dispatches nothing')
   h.vt.resize(120, 40)
   await h.vt.waitForRender()
-  assert.match(h.view(), /Confirm \[Enter\] · Back \[Esc\]/u, 'the restored frame advertises the Confirm again')
+  assert.match(h.view(), /Confirm \[Enter\].*Back \[Esc\]/u, 'the restored frame advertises the Confirm again')
   await key(h, ENTER)
   await settlePainted(h, 'the confirmed count write', frame => frame.includes('Saved'))
   assert.deepEqual(h.writes, ['count:20'])
@@ -1886,9 +1944,10 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
   await openWebRow(h, 0) // provider Detail keeps the keyboard
   await chooseCandidate(h, 2) // DeepSeek Search API highlighted, not confirmed
   assert.match(h.view(), /› DeepSeek Search API/u)
-  const listY = 5 // header + metadata + rule + pane header + row 0 (1-based SGR cell)
-  // The wheel moves the list SELECTION while the Detail keeps the keyboard.
-  h.vt.sendInput(`\x1b[<65;5;${listY}M`)
+  // The REAL Web List column of the workbench (the rail is left of it). The
+  // wheel moves the list SELECTION while the Detail keeps the keyboard.
+  const listCell = paintedWordCell(h, 'Web Search Provider')
+  h.vt.sendInput(`\x1b[<65;${listCell.column + 1};${listCell.row + 1}M`)
   await h.vt.waitForRender()
   const after = h.view()
   assert.match(after, /Current: HTTP/u, 'the Detail followed the scrolled row')
@@ -1906,9 +1965,9 @@ test('a list wheel re-anchors the Detail on the NEW row authoritative candidates
   await key(h, ENTER) // credential Detail
   await key(h, DOWN) // Configure -> Clear
   assert.match(h.view(), /› Clear in Models…/u)
-  h.vt.sendInput(`\x1b[<64;5;${listY}M`) // wheel up -> the billing row
+  h.vt.sendInput(`\x1b[<64;${listCell.column + 1};${listCell.row + 1}M`) // wheel up -> the billing row
   await h.vt.waitForRender()
-  h.vt.sendInput(`\x1b[<65;5;${listY}M`) // wheel down -> credential row again
+  h.vt.sendInput(`\x1b[<65;${listCell.column + 1};${listCell.row + 1}M`) // wheel down -> credential row again
   await h.vt.waitForRender()
   const credential = h.view()
   assert.match(credential, /› Configure in Models…/u,
@@ -2015,17 +2074,15 @@ test('a mouse click on a credential action invalidated by a fresh read is refuse
   await pageListSelect(h, 8)
   await key(h, ENTER)
   await key(h, DOWN) // cursor on Clear
-  const line = h.view().split('\n').findIndex(text => text.includes('Clear in Models…'))
-  assert.ok(line >= 0)
-  const column = 40
+  const clear = paintedWordCell(h, 'Clear in Models…')
   h.store.web.credential = { configured: false }
   const settledBefore = h.settledReadCount()
   h.vt.sendInput('r')
   await settleReadsWithoutRender(h, settledBefore + 1, 'the fresh credential read')
   // Press AND release on the PAINTED Clear target BEFORE any render: the click
   // must not redirect onto the reconciled Configure.
-  h.vt.sendInput(`\x1b[<0;${column + 1};${line + 1}M`)
-  h.vt.sendInput(`\x1b[<0;${column + 1};${line + 1}m`)
+  h.vt.sendInput(`\x1b[<0;${clear.column + 1};${clear.row + 1}M`)
+  h.vt.sendInput(`\x1b[<0;${clear.column + 1};${clear.row + 1}m`)
   await h.vt.waitForRender()
   assert.doesNotMatch(h.view(), /Settings · Models/u, 'the stale mouse target never routes')
   assert.match(h.view(), /› Configure in Models…/u, 'the repaint shows the reconciled cursor')
@@ -2095,6 +2152,7 @@ test('the page states the automatic routing facts, billing and read-only overrid
   t.after(h.dispose)
   await openWebPage(h)
   const compact = (): string => h.view().replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
+  const detail = (): string => detailPaneText(h.vt)
   assert.match(compact(), /a Messages plan does not guarantee coverage/u)
   assert.match(compact(), /No write happens without an explicit Enter/u)
   // The Share Original Question row states the packed ON default and the exact
@@ -2103,36 +2161,36 @@ test('the page states the automatic routing facts, billing and read-only overrid
   // boundary sentence is asserted in its wrapped fragments.
   await pageListSelect(h, 3)
   assert.match(compact(), /Current: on/u)
-  assert.match(compact(), /packed default for the DeepSeek Search API/u)
-  assert.match(compact(), /up to 128 characters of the/u)
-  assert.match(compact(), /triggering human question as ori_question/u)
-  assert.match(compact(), /never the full history or the system prompt/u)
+  assert.match(detail(), /packed default for the DeepSeek Search API/u)
+  assert.match(detail(), /up to 128 characters of the/u)
+  assert.match(detail(), /triggering human question as ori_question/u)
+  assert.match(detail(), /never the full history or the system prompt/u)
   // The Search provider row states the rc.5 AUTOMATIC routing rule (DeepSeek
   // models take the server-side search, other routes prefer the billed Search
   // API) and that an explicit selection always overrides the automatic routing;
   // it never claims a fixed official default.
   await pageListSelect(h, 0)
-  assert.match(compact(), /routes AUTOMATICALLY/u)
-  assert.match(compact(), /DeepSeek server-side search \(no per-search charge\)/u)
-  assert.match(compact(), /billed per Search API call/u)
-  assert.match(compact(), /An explicit USER selection always overrides the automatic routing/u)
-  assert.doesNotMatch(compact(), /official default is the/u)
+  assert.match(detail(), /routes AUTOMATICALLY/u)
+  assert.match(detail(), /DeepSeek server-side search \(no per-search charge\)/u)
+  assert.match(detail(), /billed per Search API call/u)
+  assert.match(detail(), /An explicit USER selection always overrides the automatic routing/u)
+  assert.doesNotMatch(detail(), /official default is the/u)
   // The Search billing row states the three explicit modes' credential claims
   // and the per-call billing fact; Automatic is a persisted choice, not a reset.
   await pageListSelect(h, 4)
-  assert.match(compact(), /Current: Automatic/u)
-  assert.match(compact(), /follows the credential the CURRENT conversation's DeepSeek route selects/u)
-  assert.match(compact(), /Account uses only the signed-in account/u)
-  assert.match(compact(), /API key uses only the DEEPSEEK_API_KEY credential/u)
-  assert.match(compact(), /billed separately per call/u)
-  assert.match(compact(), /Automatic is NOT a reset of an override/u)
+  assert.match(detail(), /Current: Automatic/u)
+  assert.match(detail(), /follows the credential the CURRENT conversation's DeepSeek route selects/u)
+  assert.match(detail(), /Account uses only the signed-in account/u)
+  assert.match(detail(), /API key uses only the DEEPSEEK_API_KEY credential/u)
+  assert.match(detail(), /billed separately per call/u)
+  assert.match(detail(), /Automatic is NOT a reset of an override/u)
   // The read-only Search override row: the unset fact names the conversation
   // route (never a fabricated fixed URL) and the legacy keys are stated inert.
   await pageListSelect(h, 6)
-  assert.match(compact(), /Current: Host YAML: not set — follows current conversation's DeepSeek route/u)
-  assert.match(compact(), /Legacy web-deepseek-api\.baseURL\/apiKeyEnv\/apiKey no longer control Search\/Fetch/u)
-  assert.match(compact(), /no automatic conversion/u)
-  assert.match(compact(), /read-only here, Enter never opens/u)
+  assert.match(detail(), /Current: Host YAML: not set — follows current conversation's DeepSeek route/u)
+  assert.match(detail(), /Legacy web-deepseek-api\.baseURL\/apiKeyEnv\/apiKey no longer control Search\/Fetch/u)
+  assert.match(detail(), /no automatic conversion/u)
+  assert.match(detail(), /read-only here, Enter never opens/u)
   // An OVERRIDE-bearing capability shows its fields (masked URL/env NAME, no
   // secret) and states that the override owns the configuration over the
   // billing row. The URL carries userinfo ON PURPOSE: the painted fact must
@@ -2167,6 +2225,7 @@ test('the page states the automatic routing facts, billing and read-only overrid
     run: () => {},
     done: () => {},
   })
+  overridden.focused = true
   try {
     overridden.setMaxRows(24)
     overridden.render(140)
@@ -2176,7 +2235,7 @@ test('the page states the automatic routing facts, billing and read-only overrid
     const billingFrame = stripTerminalSequences(overridden.render(140).join('\n'))
     assert.match(billingFrame, /Overridden by Host YAML \(stored: Automatic\)/u,
       `the overridden billing row states the override and its stored mode:\n${billingFrame}`)
-    assert.match(billingFrame, /the advanced searchBaseURL and searchApiKeyEnv field\(s\) own this capability/u)
+    assert.match(billingFrame, /the advanced searchBaseURL and searchApiKeyEnv\s+field\(s\) own this capability/u)
     assert.match(billingFrame, /searchBaseURL=https:\/\/\*\*\*@search\.example\.test\/v1/u,
       'the Billing Detail paints the MASKED override URL (userinfo/query never)')
     assert.match(billingFrame, /searchApiKeyEnv=SEARCH_API_KEY_ENV/u,
@@ -2230,6 +2289,7 @@ test('the page bar publishes the complete Esc span in its OWN content columns', 
     // Before ANY paint there is no frame to describe.
     assert.equal(page.paintedEscapeSpan(), undefined)
     assert.deepEqual(page.paintedBarSpans(), [], 'no delegated span exists before the first paint')
+    page.focused = true
     page.setMaxRows(20)
     // Paint the frame FIRST: the span always describes the last completed paint.
     const bar = (): string => stripTerminalSequences(page.render(80).at(-1)!)
@@ -2314,11 +2374,13 @@ test('the delegated Confirm re-proves the LIVE authority and revokes a stale ges
     for (let index = 0; index < 20; index += 1) await Promise.resolve()
   }
   try {
+    page.focused = true
     page.setMaxRows(20)
     page.render(140) // list
     page.handleInput('\r') // the provider Detail
     page.render(140)
-    assert.equal(page.paintedBarSpans().length, 1, 'precondition — the Detail publishes Confirm')
+    assert.ok(page.paintedBarSpans().some(span => span.id === 'web:confirm'),
+      'precondition — the Detail publishes Confirm')
     // The live candidate the authority holds is already current; confirming it
     // still joins the command owner's FIFO exactly once.
     page.activateBarSpan('web:confirm')
@@ -2415,7 +2477,8 @@ test('a wide Detail whose candidate is cropped by a long verdict publishes no Co
     for (let index = 0; index < 40; index += 1) await Promise.resolve()
   }
   try {
-    page.setMaxRows(8)
+    page.focused = true
+    page.setWebWorkbenchGrant({ width: 100, rows: 7, barWidth: 100, allowDual: true })
     page.render(100)
     page.handleInput('\r') // the provider Detail
     page.render(100)
@@ -2427,7 +2490,8 @@ test('a wide Detail whose candidate is cropped by a long verdict publishes no Co
     assert.match(cropped, /Could not save/u)
     assert.doesNotMatch(cropped, /Confirm \[Enter\]/u,
       'a candidate the REAL Detail pane cropped must not advertise a Confirm')
-    assert.deepEqual(page.paintedBarSpans(), [], 'a cropped candidate publishes no delegated span')
+    assert.equal(page.paintedBarSpans().find(span => span.id === 'web:confirm'), undefined,
+      'a cropped candidate publishes no delegated Confirm span')
     page.activateBarSpan('web:confirm')
     await drainVerdict()
     assert.equal(commits.length, 1, 'only the keyboard dispatch is a commit; the absent span dispatches nothing')
@@ -2435,10 +2499,11 @@ test('a wide Detail whose candidate is cropped by a long verdict publishes no Co
     // The same state at a roomy grant really paints the candidate and restores
     // the delegated target; the positive control proves the probe was not
     // vacuous.
-    page.setMaxRows(20)
+    page.focused = true
+    page.setWebWorkbenchGrant({ width: 100, rows: 19, barWidth: 100, allowDual: true })
     const roomy = stripTerminalSequences(page.render(100).join('\n'))
     assert.match(roomy, /Confirm \[Enter\]/u)
-    assert.equal(page.paintedBarSpans().length, 1)
+    assert.ok(page.paintedBarSpans().some(span => span.id === 'web:confirm'))
     page.activateBarSpan('web:confirm')
     await drainVerdict()
     assert.equal(commits.length, 2, 'the roomy frame publishes an executable delegated target')
@@ -2484,7 +2549,8 @@ test('a wide Detail wheel onto the candidate row keeps the bar and the activatio
     for (let index = 0; index < 40; index += 1) await Promise.resolve()
   }
   try {
-    page.setMaxRows(6) // 5 body rows: the wide Detail column is 64 cells
+    page.focused = true
+    page.setWebWorkbenchGrant({ width: 100, rows: 5, barWidth: 100, allowDual: true }) // the wide Detail column is 64 cells
     page.render(100)
     page.handleInput('\r') // provider Detail
     page.render(100)
@@ -2506,7 +2572,7 @@ test('a wide Detail wheel onto the candidate row keeps the bar and the activatio
     assert.equal(internals.detailOffset, 7, 'precondition — the Detail is scrolled onto the candidate row')
     const frame = stripTerminalSequences(page.render(100).join('\n'))
     assert.match(frame, /Confirm \[Enter\]/u, 'the candidate row really owns the first painted Detail row')
-    assert.equal(page.paintedBarSpans().length, 1)
+    assert.ok(page.paintedBarSpans().some(span => span.id === 'web:confirm'))
     page.activateBarSpan('web:confirm')
     await drainVerdict()
     assert.equal(commits.length, 2,
@@ -2545,6 +2611,7 @@ test('Billing rows are Not selected and inert when their API provider is not the
     done: () => {},
   })
   try {
+    page.focused = true
     page.setMaxRows(24)
     page.render(140)
     // Rows: search provider, fetch provider, count, question, search billing.
@@ -2601,6 +2668,7 @@ test('Host override values are terminal-sanitized before the Configured override
     done: () => {},
   })
   try {
+    page.focused = true
     page.setMaxRows(24)
     page.render(140)
     page.handleInput('\x1b[H')
@@ -2759,6 +2827,52 @@ test('closing the page mid-write keeps the command-owned write settling without 
   assert.doesNotMatch(h.view(), /Saved/u, 'the closed page never repaints a verdict')
 })
 
+test('a Saving row refuses the parent rail switch; an explicit Back hides it and the late result never replays', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  const release = h.holdNextWrite()
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 2)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  await settlePainted(h, 'the saving phase', frame => frame.includes('Saving…'))
+  // A real pointer click on another visible category is refused while the row
+  // owns a dispatched write: the ONE workbench seat stays exactly where it is.
+  const appearance = paintedWordCell(h, 'Appearance')
+  pointerClick(h, appearance.row, appearance.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u,
+    'a saving row keeps the ONE workbench seat')
+  assert.doesNotMatch(h.view(), /Settings · Appearance/u,
+    'the parent category click is refused, not applied')
+  // The Detail's local Tab return to the list is legal; the list may NOT yield
+  // to the rail while the write is in flight.
+  await key(h, '\x1b[Z')
+  await key(h, '\x1b[Z')
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u,
+    'the saving row never yields the list to the rail')
+  // The explicit Back is the documented legal hide; the dispatched write keeps
+  // its own command-owner lifetime.
+  await key(h, ESC)
+  assert.match(h.view(), /Settings · Tools · Rows/u)
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the held write has not applied yet')
+  assert.equal(h.settledWrites().length, mark, 'nothing settled before the release')
+  release()
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', mark)
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api',
+    'the original command owner really settled the held write')
+  assert.doesNotMatch(h.view(), /Settings · Tools · Web Search \/ Fetch/u,
+    'the retired page is gone and can never paint a late verdict')
+  // A fresh page is clean: the SAME open workspace mounts it from the still
+  // selected Web row and reads the settled Host value, never a replay.
+  await key(h, ENTER)
+  await settlePainted(h, 'the fresh page after the late settlement', frame =>
+    frame.includes('Web Search Provider') && !frame.includes('Loading…'))
+  assert.match(h.view(), /Current: DeepSeek Search API/u)
+  assert.doesNotMatch(h.view(), /Saving…/u)
+})
+
 // ── PR2: the official USER-layer restore through the real page/queue ───────
 
 test('the Search Detail restores the deployment default through ONE official unset and re-evaluates Billing', async t => {
@@ -2847,12 +2961,12 @@ test('the rc.5 sibling residual is reported truthfully: the reset Verifies on th
   assert.deepEqual(h.writes, ['restore-fetch'])
   assert.equal(h.store.web.providerSelection.fetch.userSet, true, 'the official Host kept the explicit USER value')
   // The residual is stated in the Detail notes, below the candidate rows.
-  let notes = h.view()
-  for (let step = 0; step < 6 && !notes.includes('USER layer still carries'); step += 1) {
+  let notes = detailPaneText(h.vt)
+  for (let step = 0; step < 8 && !notes.includes('USER layer still carries'); step += 1) {
     await key(h, '\x1b[6~')
-    notes = h.view()
+    notes = detailPaneText(h.vt)
   }
-  assert.match(notes, /USER layer still carries this value\s+explicitly/u,
+  assert.match(notes, /USER layer still carries this value explicitly/u,
     `the page states the residual instead of claiming a removal:\n${notes}`)
 })
 
@@ -3344,6 +3458,7 @@ test('the delegated Confirm re-proves the live authority generation, not only th
     for (let index = 0; index < 40; index += 1) await Promise.resolve()
   }
   try {
+    page.focused = true
     page.setMaxRows(20)
     page.render(140)
     page.handleInput('\r') // provider Detail
@@ -3477,4 +3592,217 @@ test('a real Remote A→B replacement refuses an old pointer with no page read, 
   assert.equal(countWrites[0]?.destination, 'B')
   await key(h, '\x1b')
   assert.equal((remote.namespaces.get('web-deepseek-api')!.value as Record<string, unknown>).count, 20)
+})
+
+test('the unpainted rail/child handoff admits only the real Esc and never a second seat transfer', async t => {
+  const h = setup({ columns: 80, rows: 24 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  const readsBefore = h.readCount()
+  // From the painted child list, yield to the rail and send a second Tab BEFORE
+  // any destination frame paints. The awaiting-paint admission must drop it.
+  h.vt.sendInput('\x1b[Z')
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /\[Categories \(10\)\]/u,
+    `the rail seat is the one that paints after the unpainted handoff:\n${h.view()}`)
+  assert.match(h.view(), /Up\/Down select/u, 'the rail bar owns the physical last row')
+  assert.equal(h.readCount(), readsBefore, 'neither seat transfer starts a Host read')
+  // Reverse: from the painted rail, hand the seat to the child and press the
+  // REAL Esc before its frame paints. The logical child seat's Back ladder must
+  // still run (list root -> the real Rows origin).
+  h.vt.sendInput('\r')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Rows/u,
+    `the immediate real Esc ran the child Back ladder:\n${h.view()}`)
+  assert.equal(h.readCount(), readsBefore, 'the Back ladder never re-reads the Host')
+})
+
+test('a rejected child click never steals the rail seat; a real row click does', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await key(h, '\x1b[Z') // painted rail, the child list is the passive preview
+  assert.match(h.view(), /\[Categories \(10\)\]/u)
+  const readsBefore = h.readCount()
+  const rows = h.view().split('\n')
+  const headerRow = rows.findIndex(line => line.includes('Current / Detail'))
+  assert.ok(headerRow >= 0, `the pane header is painted:\n${h.view()}`)
+  const label = rows[headerRow]!.indexOf('Web Search / Fetch')
+  const listStart = rows[headerRow]![label - 1] === '[' ? label - 1 : label
+  const contentRow = headerRow + 1
+  // The 2-cell child gutter and the passive Detail carry no target. Neither a
+  // completed click there nor a row-to-row mismatch may steal the rail seat.
+  pointerClick(h, contentRow, listStart + 34)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /\[Categories \(10\)\]/u, 'the gutter never steals the rail seat')
+  pointerClick(h, contentRow, listStart + 34 + 2 + 10)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /\[Categories \(10\)\]/u, 'the passive Detail has no action target')
+  h.vt.sendInput(`\x1b[<0;${listStart + 2 + 1};${contentRow + 1}M`)
+  h.vt.sendInput(`\x1b[<0;${listStart + 2 + 1};${contentRow + 2}m`)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /\[Categories \(10\)\]/u, 'a row-to-row mismatch never transfers the seat')
+  // A REAL painted list-row click is the only seat transfer. The mismatch
+  // press above used the same cells, so pace past the alt-screen's double-click
+  // word-selection window first.
+  await settlePointerClick(h)
+  pointerClick(h, contentRow, listStart + 2)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /\[Web Search \/ Fetch\]/u, 'the real row click takes the child list seat')
+  assert.match(h.view(), /Open \[Enter\]/u)
+  assert.equal(h.readCount(), readsBefore, 'pointer seat transitions start no Host read')
+})
+
+test('a passive single-region wheel moves the visible list, never the hidden Detail', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 6) // the read-only Search API Override Detail
+  await key(h, ENTER)
+  assert.match(h.view(), /Current: Host YAML: not set/u)
+  // The Tools category re-click is the legal clean-read-only Detail yield: it
+  // keeps the mounted page and the retained Detail region while the rail owns
+  // the keyboard.
+  const tools = paintedWordCell(h, 'Tools')
+  pointerClick(h, tools.row, tools.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /\[Categories \(10\)\]/u, 'the clean read-only Detail yielded to the rail')
+  // At 80 columns the passive projection paints the LIST only.
+  h.vt.resize(80, 24)
+  await h.vt.waitForRender()
+  const passive = h.view()
+  assert.match(passive, /Web Search Provider/u, 'the passive pair paints the visible list')
+  assert.doesNotMatch(passive, /Current: Host YAML: not set/u, 'the hidden Detail is not painted')
+  const rows = h.view().split('\n')
+  const headerRow = rows.findIndex(line => line.includes('Current / Detail') || line.includes('Categories (10)'))
+  assert.ok(headerRow >= 0)
+  const label = headerRow >= 0 ? rows[headerRow]!.indexOf('Web Search / Fetch') : -1
+  const listStart = label >= 0 && rows[headerRow]![label - 1] === '[' ? label - 1 : Math.max(0, label)
+  const contentRow = headerRow + 1
+  h.vt.sendInput(`\x1b[<65;${listStart + 2 + 1};${contentRow + 1}M`)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /> Fetch API Override/u,
+    `the wheel moved the visible list cursor:\n${h.view()}`)
+})
+
+test('an admitted pointer handoff keeps the real Esc valid before the child frame paints', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await key(h, '\x1b[Z') // the painted rail owns the keyboard
+  assert.match(h.view(), /\[Categories \(10\)\]/u)
+  const readsBefore = h.readCount()
+  const rows = h.view().split('\n')
+  const headerRow = rows.findIndex(line => line.includes('Current / Detail'))
+  assert.ok(headerRow >= 0, `the pane header is painted:\n${h.view()}`)
+  const label = rows[headerRow]!.indexOf('Web Search / Fetch')
+  const listStart = rows[headerRow]![label - 1] === '[' ? label - 1 : label
+  const contentRow = headerRow + 1
+  // The real row click is admitted by the child; the Root commits the child
+  // seat. The REAL Esc arrives before the destination frame paints.
+  pointerClick(h, contentRow, listStart + 2)
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Rows/u,
+    `the admitted pointer handoff must return to the real origin:\n${h.view()}`)
+  assert.equal(h.readCount(), readsBefore, 'the pointer handoff and Back start no Host read')
+  assert.equal(h.writes.length, 0)
+})
+
+test('a buffered region round-trip cannot replay a stale Confirm', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 2) // the visible, genuinely changed candidate
+  assert.equal(h.writes.length, 0)
+  // Two Tabs retire and re-enter the active Detail with NO intervening paint:
+  // the earlier frame's typed decision must not be consumed by the buffered
+  // Enter.
+  h.vt.sendInput('\t')
+  h.vt.sendInput('\t')
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.equal(h.writes.length, 0, 'the stale decision writes nothing')
+  // The fresh frame republishes the decision; the next Enter confirms once.
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+  await settlePainted(h, 'the verified provider Detail', frame =>
+    frame.includes('Current: DeepSeek Search API') && frame.includes('Saved'))
+})
+
+test('an explicit Detail Back abandons the unsubmitted candidate', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 2) // DeepSeek Search API draft
+  assert.match(h.view(), /› DeepSeek Search API/u)
+  await key(h, ESC) // explicit Detail Back ends the unsubmitted choice
+  assert.match(h.view(), /Open \[Enter\]/u)
+  await key(h, '\t') // list -> Detail again
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u)
+  assert.match(h.view(), /› DeepSeek server-side search/u,
+    'the authoritative current candidate owns the cursor')
+  assert.doesNotMatch(h.view(), /› DeepSeek Search API/u, 'the abandoned draft is not revived')
+  assert.equal(h.writes.length, 0)
+})
+
+test('a buffered region round-trip cannot replay a stale credential Enter', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 8) // the credential Detail with a visible Configure action
+  assert.match(h.view(), /› Configure in Models…/u)
+  h.vt.sendInput('\t')
+  h.vt.sendInput('\t')
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u, 'the stale credential action does not navigate')
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u)
+  // The fresh frame's Enter still runs the painted action exactly once.
+  await key(h, ENTER)
+  await settlePainted(h, 'the fresh credential deeplink', frame =>
+    frame.includes('Settings · Models') && frame.includes('DEEPSEEK_API_KEY'))
+})
+
+test('a new press on a retired credential body is refused', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 8) // active credential Detail with a visible Configure target
+  assert.match(h.view(), /› Configure in Models…/u)
+  const configure = paintedWordCell(h, '› Configure in Models…')
+  // The legitimate Detail Back retires the frame; NO destination frame paints.
+  h.vt.sendInput('\x1b')
+  pointerClick(h, configure.row, configure.column + 1)
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u, 'a press on the retired credential body never navigates')
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u)
+  assert.match(h.view(), /Open \[Enter\]/u, 'the legitimate List return stays')
+})
+
+test('a new press on the retired physical Back does not close the workbench', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 8) // active credential Detail; its bar paints Back
+  assert.match(h.view(), /Back \[Esc\]/u)
+  const back = paintedWordCell(h, 'Back [Esc]')
+  // The legitimate Detail Back retires the frame; NO destination frame paints.
+  h.vt.sendInput('\x1b')
+  pointerClick(h, back.row, back.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u,
+    'a click on the retired Back does not close the workbench')
+  assert.match(h.view(), /Open \[Enter\]/u, 'the List is the legitimate seat, not the close')
+  // A FRESH painted Back still closes to the real origin.
+  await settlePointerClick(h)
+  const freshBack = paintedWordCell(h, 'Back [Esc]')
+  pointerClick(h, freshBack.row, freshBack.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Rows/u, 'a current-frame Back still works')
 })

@@ -24,6 +24,7 @@ import {
   type SettingsWorkspaceRowId,
   type SettingsWorkspaceSnapshot,
   type SettingsWorkspaceSpecialistRoute,
+  type WebWorkbenchGrant,
 } from '../../src/tui/panels/settings-workspace-panel.ts'
 import type { AboutStatusController } from '../../src/app/command/about-status.ts'
 import type { ModelsInitialView } from '../../src/tui/panels/models-workspace-page.ts'
@@ -546,9 +547,18 @@ class FakeWebSettingsPage implements EmbeddedSpecialistPage {
   disposed = false
   /** The root's narrow page-switch intent, captured by the factory. */
   navigateToModels: ((initial: ModelsInitialView) => void) | undefined
-  lines: string[] = ['WEB PAGE LIST', '> Web Search Provider', '  Web Fetch Provider', 'web page hint']
+  private grant: WebWorkbenchGrant | undefined
   render(width: number): string[] {
-    return this.lines.map(line => line.slice(0, width))
+    const rows = this.grant?.rows ?? 3
+    const lines = Array.from({ length: rows }, (_, index) => index === 0
+      ? 'WEB PAGE LIST'
+      : index === 1
+        ? '> Web Search Provider'
+        : index === 2 ? '  Web Fetch Provider' : '')
+      .map(line => line.slice(0, width))
+    // The page's own semantic hint is its LAST line, exactly like the real page.
+    lines.push('web page hint'.slice(0, width))
+    return lines
   }
   /** The two-column pane header the real page supplies. */
   paneHeader(width: number): string {
@@ -563,6 +573,10 @@ class FakeWebSettingsPage implements EmbeddedSpecialistPage {
   }
   setMaxRows(rows: number): void {
     this.grants.push(rows)
+  }
+  setWebWorkbenchGrant(grant: WebWorkbenchGrant): void {
+    this.grant = grant
+    this.grants.push(grant.rows)
   }
   invalidate(): void {}
   dispose(): void {
@@ -3641,7 +3655,9 @@ test('the Web row mounts ONE embedded page in this workspace with its own pane h
   ;(page as unknown as { done: () => void }).done()
   assert.equal(page.disposed, true)
   assert.equal(h.closes(), 0, 'the page Esc never closes the workspace')
-  assert.match(plain(h), /Settings · Tools · Web Search \/ Fetch/u, 'the owning row owns the frame again')
+  // SUX-06B: the page's own Esc returns to the REAL initiating Rows level, not
+  // to an invented intermediate sub-view.
+  assert.match(plain(h), /Settings · Tools · Rows/u, 'the initiating Rows level owns the frame again')
   assert.doesNotMatch(plain(h), /WEB PAGE LIST/u)
 })
 
@@ -3697,19 +3713,21 @@ test('pointer gestures only resolve inside the page cells and never across a res
   h.panel.handleInput('\r')
   const page = h.webPages[0]!
   const frame = plain(h).split('\n')
-  const paneHeaderRow = frame.findIndex(line => line.includes('[Web Search / Fetch]'))
-  assert.ok(paneHeaderRow >= 0, `the page pane header is painted:\n${frame.join('\n')}`)
-  const bodyRow = paneHeaderRow + 1
-  h.panel.onCellPress(4, bodyRow)
-  h.panel.onCellClick(4, bodyRow)
+  const bodyRow = frame.findIndex(line => line.includes('WEB PAGE LIST'))
+  assert.ok(bodyRow >= 0, `the page body is painted:\n${frame.join('\n')}`)
+  // The REAL child body cell: the Categories rail occupies the left column, so
+  // a cell in the rail is never the child's.
+  const bodyColumn = frame[bodyRow]!.indexOf('WEB PAGE LIST')
+  h.panel.onCellPress(bodyColumn, bodyRow)
+  h.panel.onCellClick(bodyColumn, bodyRow)
   assert.deepEqual(page.presses.map(entry => entry.type), ['press', 'click'])
-  assert.deepEqual(page.presses.map(entry => [entry.x, entry.y]), [[4, 0], [4, 0]],
+  assert.deepEqual(page.presses.map(entry => [entry.x, entry.y]), [[0, 0], [0, 0]],
     'the page-local coordinates strip the root chrome')
   // A gesture straddling a resize is refused.
   page.presses.length = 0
-  h.panel.onCellPress(4, bodyRow)
+  h.panel.onCellPress(bodyColumn, bodyRow)
   h.resize(120, 30)
-  h.panel.onCellClick(4, bodyRow)
+  h.panel.onCellClick(bodyColumn, bodyRow)
   assert.deepEqual(page.presses.map(entry => entry.type), ['press'], 'the release after a resize is refused')
   h.resize(120, 40)
   plain(h)

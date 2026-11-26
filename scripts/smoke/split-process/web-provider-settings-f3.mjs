@@ -109,9 +109,8 @@ const WEB_PAGE_BREADCRUMB = `Settings · Tools · ${WEB_PAGE_TITLE}`
 /** The page's list Action Bar wordings, longest first: a narrow grant drops
  *  whole segments, never half a word. */
 const WEB_LIST_BARS = [
-  '↑/↓ choose · Enter open · r refresh · Back [Esc]',
-  '↑/↓ · Enter open · r refresh · Back [Esc]',
-  '↑/↓ · Enter · Back [Esc]',
+  'Open [Enter] · Refresh [R] · Back [Esc]',
+  'Open [Enter] · Back [Esc]',
   'Back [Esc]',
 ]
 
@@ -200,21 +199,15 @@ async function frameOf(client) {
  */
 function pageDetailText(frame) {
   const lines = frame.split('\n')
-  // The Detail cell starts at the left edge of its own tokens; the list cell
-  // never prints `Current:`, `› `, a success word, `Reference:` or the Detail
-  // notes. Slice from the earliest such token so the oracle reads the selected
-  // Detail region, not the whole page.
-  const markers = ['Current: ', '› ', 'Saved', 'No changes', 'Reference: ',
-    'Billing is ', 'Results requested', 'Overridden by Host YAML:']
-  let start = Number.POSITIVE_INFINITY
-  for (const line of lines) {
-    for (const marker of markers) {
-      const index = line.indexOf(marker)
-      if (index >= 0) start = Math.min(start, index)
-    }
-  }
-  const body = Number.isFinite(start) ? lines.map(line => line.slice(start)).join('\n') : lines.join('\n')
-  return body.replace(/\s+/gu, ' ').trim()
+  // SUX-06B: the Workbench paints a REAL Detail column beside the list. The
+  // pane header names both columns and is aligned with them, so slice from the
+  // Detail header's own first cell. A single-region (narrow/short) frame has no
+  // second header: the Detail is then the whole body.
+  const header = lines.find(line => line.includes('Current / Detail'))
+  if (header === undefined) return frame.replace(/\s+/gu, ' ').trim()
+  const label = header.indexOf('Current / Detail')
+  const start = header[label - 1] === '[' ? label - 1 : label
+  return lines.map(line => line.slice(start)).join('\n').replace(/\s+/gu, ' ').trim()
 }
 
 /** The profile document the official Settings service persists into. It is
@@ -394,6 +387,21 @@ async function waitForWebPage(client, label, timeoutMs = 60_000) {
     `${label}: the retired rc.1 "${LEGACY_ENDPOINT_ROW}" row is still painted: ${JSON.stringify(frame)}`)
 }
 
+/** The REAL list column of the page: the left edge of its own pane header
+ *  (`[Web Search / Fetch]` when the list owns the keyboard, or the passive
+ *  label otherwise). The Categories rail is never this column. */
+function listColumnStart(frame) {
+  // The pane header line, never the `Settings · Tools · …` breadcrumb: it names
+  // the columns and is aligned with them. A single-region frame has no pane
+  // header and its one column starts at 0.
+  const header = frame.split('\n').find(line => line.includes(WEB_PAGE_TITLE)
+    && !line.includes('Settings ·')
+    && (line.includes('Current / Detail') || line.includes('Categories (')))
+  if (header === undefined) return 0
+  const label = header.indexOf(WEB_PAGE_TITLE)
+  return label > 0 && header[label - 1] === '[' ? label - 1 : label
+}
+
 /** The page's Action Bar is its LAST non-empty body line; its wording is the
  *  authoritative region oracle (list vs read-only Detail vs a Detail whose
  *  candidate is cropped). */
@@ -426,12 +434,11 @@ function hasConfirmAffordance(bar) {
 
 function regionOf(frame) {
   const bar = actionBarOf(frame)
-  // The credential Detail advertises `Enter open in Models` — check the DETAIL
-  // verbs BEFORE the list's generic `Enter open` substring.
-  if (bar.includes('Enter open in Models') || bar.includes('Enter confirm')
-    || bar.includes('Confirm [Enter]')) return 'detail'
-  if (bar.includes('Enter open')) return 'list'
-  if (bar.includes('refresh') || bar === 'Back [Esc]') return 'detail'
+  // Check the DETAIL verbs BEFORE the list's `Open [Enter]`; the credential
+  // Detail names the Models deeplink and the read-only Detail keeps Refresh.
+  if (bar.includes('Open in Models') || bar.includes('Confirm [Enter]')) return 'detail'
+  if (bar.includes('Open [Enter]')) return 'list'
+  if (bar.includes('Refresh [R]')) return 'detail'
   return 'other'
 }
 
@@ -471,12 +478,14 @@ async function selectListRow(client, index, label) {
     await assertList(`after Down ${String(step + 1)}`)
   }
   const frame = await frameOf(client)
-  // The wide layout can TRUNCATE the row label (the value/phase cell shares the
-  // line), so the cursor is proven by the longest label prefix that still fits.
+  // SUX-06B: the cursor lives in the child's REAL list column (the Categories
+  // rail is left of it); the wide layout can TRUNCATE the row label, so the
+  // cursor is proven by the longest label prefix that still fits.
+  const listStart = listColumnStart(frame)
   const rowLabel = WEB_ROW_LABELS[index]
   const prefixes = [rowLabel, rowLabel.slice(0, 14), rowLabel.slice(0, 12), rowLabel.slice(0, 10), rowLabel.slice(0, 8)]
-  const owned = frame.split('\n').some(line => line.startsWith('> ')
-    && prefixes.some(prefix => line.slice(2).startsWith(prefix)))
+  const owned = frame.split('\n').some(line => line.slice(listStart, listStart + 2) === '> '
+    && prefixes.some(prefix => line.slice(listStart + 2).startsWith(prefix)))
   assert(owned,
     `${label}: row ${String(index)} (${WEB_ROW_LABELS[index]}) never owned the list cursor: ${JSON.stringify(frame)}`)
 }

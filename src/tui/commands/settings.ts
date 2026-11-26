@@ -973,11 +973,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  ROW-scoped: the Web authority changed, so the TUI settings document is never
    *  read a second time (one guarded document read per surface). */
   let activeSettingsWorkspace: { readonly token: object; readonly refreshWebRow: () => void } | undefined
-  /** The MOUNTED Web Search / Fetch page (C2-R4). It is created by the root's
-   *  explicit activation, dies with the workspace, and is never a second
-   *  settings authority: a fact settlement repaints the root, whose frame
-   *  re-renders the page from the LATEST command-owned read. */
-  let activeWebPage: WebSettingsPage | undefined
   /** FR4: the ONE open MCP page's controller (a Settings refresh re-reads it). */
   let activeMcpController: McpServersController | undefined
 
@@ -1299,12 +1294,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             navigateToModels: initial => { navigateToModels(initial) },
             requestRender: () => { if (!app.isDisposed()) app.requestRender() },
             run: (label, task) => detach(label, task, { notify: false }),
-            done: () => {
-              if (activeWebPage === page) activeWebPage = undefined
-              done()
-            },
+            done,
           })
-          activeWebPage = page
           return page
         },
         // PR-A: the ONE `Host · Web UI` page. It paints the CURRENT Host
@@ -1465,10 +1456,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           // The policy observation subscription dies with this workspace.
           disposePolicyWatch?.()
           disposePolicyWatch = undefined
-          // C2-R4: the mounted Web page's command reference dies with this open
-          // (the panel itself disposes the instance on teardown). A late fact
-          // settlement then repaints nothing.
-          activeWebPage = undefined
           // The controller dies with the workspace: the subscription and any
           // in-flight read are released exactly once.
           aboutController?.dispose()
