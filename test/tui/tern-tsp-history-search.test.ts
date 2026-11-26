@@ -16,13 +16,14 @@
  * a frame count.
  *
  * EVIDENCE LEVEL: SDK mount + wire. STANDS-IN: the scripted pane is not a
- * physical Tern client (that lane is `scripts/tern-pane-history-search-ux.mjs`),
- * the search source is a scripted `HistorySearchSource` (the real JSONL store,
- * its scope rules and the production persistence owner are
- * `test/integration/tern-tsp-history-search-direct.test.ts`), and the
+ * physical Tern client, the search source is a scripted `HistorySearchSource`
+ * (the real JSONL store, its scope rules and the production persistence owner
+ * are `test/integration/tern-tsp-history-search-direct.test.ts`), and the
  * application above the mount is the renderer's own bound handlers (the real
  * `SurfaceRuntime` → mount → seat binding and the Session currentness authority
- * are `test/app/tern-tsp-history-search-composition.test.ts`).
+ * are `test/app/tern-tsp-history-search-composition.test.ts`). Historical
+ * real-client qualification is recorded in PR #566; new client claims require
+ * an actual client run.
  *
  * What THIS file owns and no other lane proves: the frozen seat priority and
  * key table (a consumed key never reaches the Composer reducer, `Enter` never

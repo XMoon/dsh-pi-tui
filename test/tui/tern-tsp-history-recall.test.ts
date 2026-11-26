@@ -11,11 +11,12 @@
  * reads, never on a renderer-local copy.
  *
  * EVIDENCE LEVEL: SDK mount + wire. STANDS-IN: the scripted pane is not a
- * physical Tern client (the real-client keyboard lane is
- * `scripts/tern-pane-history-recall-ux.mjs`), and the application above the
- * mount is the renderer's own bound input handlers, not the `SurfaceRuntime` —
- * the real `SubmissionController`, the real `InputHistory` and the real JSONL
- * are `test/app/tern-tsp-history-recall-composition.test.ts`.
+ * physical Tern client, and the application above the mount is the renderer's
+ * own bound input handlers, not the `SurfaceRuntime` — the real
+ * `SubmissionController`, the real `InputHistory` and the real JSONL are
+ * `test/app/tern-tsp-history-recall-composition.test.ts`. Historical
+ * real-client qualification is recorded in PR #527; new client claims require
+ * an actual client run.
  *
  * Seat priority proves ONE fact per seat here: while a higher owner holds the
  * keys, no arrow reaches the composer. Each seat's own navigation stays with its
