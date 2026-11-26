@@ -56,7 +56,7 @@ export default async function (h) {
     `requested=${JSON.stringify(size.requested)} actual=${JSON.stringify(size.viewport)}`)
   h.measure('the window size', JSON.stringify(size))
 
-  const subject = join(h.repo, 'scripts', 'tern-gui-tool-result-image-subject.mts')
+  const subject = join(h.repo, 'scripts', 'tern-pane-tool-result-image-subject.mts')
   const booted = await h.launch(subject, { ready: '[IMAGE] shot.png' })
   h.check('the production projection is painted inside a real Tern GUI pane', booted)
   if (!booted) {
@@ -82,11 +82,23 @@ export default async function (h) {
 
   h.capture('prc-gui-image-light', 'the production tool-result image in a real Tern GUI window')
 
-  // The client's OWN theme: the image must still paint.
+  // The client's OWN appearance: the LIVE-WINDOW switch, not the `theme` slot.
+  // A live window keeps its saved Appearance when only a theme slot is set, so
+  // the dark acceptance must send the `appearance:dark` action ONCE and prove
+  // the resolved appearance before capturing. The slot is still set so the
+  // named dark theme is the one the switch paints.
   const state = h.ctl('state')
   const darkTheme = Array.isArray(state?.theme_dark) && state.theme_dark.length > 0 ? state.theme_dark[0] : 'titanium'
   h.ctl('theme', 'dark', darkTheme)
-  h.measure('the dark theme', String(darkTheme))
+  h.measure('the dark theme slot', String(darkTheme))
+  h.send('plugins', 'run', 'appearance:dark')
+  const darkState = h.ctl('state')
+  h.check('the live window switched to the dark appearance', darkState?.theme === 'dark',
+    JSON.stringify({ before: state?.theme, after: darkState?.theme }))
+  h.measure('the dark appearance', JSON.stringify({
+    state: darkState?.theme ?? null,
+    dump: h.ctl('dump')?.header?.theme ?? null,
+  }))
   const dark = h.snapshot()
   const darkImage = dark.nodes.find((node) => node.tag === 'img')
   h.check('the image is still drawn in the client own dark theme', darkImage !== undefined,

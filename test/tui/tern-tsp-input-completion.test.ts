@@ -18,11 +18,11 @@
  * the command plane's intake (`test/app/**`/`test/integration/**`).
  *
  * EVIDENCE LEVEL: SDK mount + wire. STANDS-IN: the scripted pane is not a
- * physical Tern client (that lane is `scripts/tern-pane-input-completion-ux.mjs`
- * and `scripts/tern-gui-input-completion.mjs`); the application above the mount
- * is the renderer's own bound input handlers, not the `SurfaceRuntime` — the
- * real catalog provenance, the real `SubmissionController`, the real stager
- * installation and the real extension registry are
+ * physical Tern client (the historical real-client lanes were retired; this
+ * SDK-mount suite is the retained seat evidence); the application above the
+ * mount is the renderer's own bound input handlers, not the `SurfaceRuntime` —
+ * the real catalog provenance, the real `SubmissionController`, the real
+ * stager installation and the real extension registry are
  * `test/app/tern-tsp-input-completion-composition.test.ts`.
  *
  * Seat priority proves ONE fact per seat here: while a higher owner holds the
