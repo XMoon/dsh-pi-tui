@@ -707,3 +707,14 @@ test('a half-mounted Web observation is never current, even for the readable tar
   assert.equal(config.isObservationCurrent(capture, 'api'), false,
     'a missing web descriptor cannot authorize even an API-only write')
 })
+
+test('the Direct actual boundary refuses a capture whose OTHER Web section disappeared', async () => {
+  const h = host()
+  const config = new DirectWebProviderConfig(h.ctx)
+  const capture = await captureOf(config)
+  h.settings.descriptors.delete('web-deepseek-api')
+  const outcome = await config.setSearchProvider('deepseek-search-api', capture)
+  assert.equal(outcome.kind, 'rejected')
+  assert.match(outcome.reason, /is not mounted/u)
+  assert.deepEqual(h.settings.recorded, [])
+})

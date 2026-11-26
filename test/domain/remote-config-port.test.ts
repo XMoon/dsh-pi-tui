@@ -2526,18 +2526,31 @@ test('Remote Billing re-proves the web dependency in the actual queue turn', asy
     generation.source.getSnapshot()!,
   )
   await enteredGate
-  // The web dependency moves WITHOUT an invalidation: the committed mirror is
-  // still the old, ready observation. Only the queue-turn fresh describe can
-  // see this change.
-  const web = state.namespaces.get(WEB_NS)!
-  web.value = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
-  web.user = { searchProvider: 'deepseek-official' }
-  web.revision += 1
+  // Queue the Billing write behind the held predecessor.
   const billing = port.web.setSearchBilling('account', capture)
   for (let attempt = 0; attempt < 100 && writeLifetime.pendingCount() < 2; attempt += 1) await tick()
   assert.equal(writeLifetime.pendingCount(), 2,
     'the billing write was admitted to the actual queue behind the predecessor')
+  // Hold the predecessor's OWN post-write describe after it captured the OLD
+  // web dependency, then move web without an invalidation and release it. The
+  // committed mirror stays old; only the Billing queue turn's fresh describe
+  // can see the change.
+  let releaseDescribe: () => void = () => {}
+  let describeEntered: () => void = () => {}
+  const describeReleased = new Promise<void>(resolve => { releaseDescribe = resolve })
+  const describeStarted = new Promise<void>(resolve => { describeEntered = resolve })
+  state.describeGate = () => {
+    state.describeGate = undefined
+    describeEntered()
+    return describeReleased
+  }
   release()
+  await describeStarted
+  const web = state.namespaces.get(WEB_NS)!
+  web.value = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
+  web.user = { searchProvider: 'deepseek-official' }
+  web.revision += 1
+  releaseDescribe()
   await predecessor
   const outcome = await billing
   assert.equal(outcome.kind, 'conflict')
@@ -2557,4 +2570,16 @@ test('a half-mounted Remote Web observation is never current', async () => {
   await port.describe()
   assert.equal(port.web.isObservationCurrent(capture, 'api'), false,
     'a missing web namespace cannot authorize even an API-only write')
+})
+
+test('the Remote actual boundary refuses a capture whose OTHER Web section disappeared', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  state.namespaces.delete(WEB_NS)
+  await port.describe()
+  const outcome = await port.web.setSearchApiCount(20, capture)
+  assert.equal(outcome.kind, 'rejected')
+  assert.match(outcome.reason, /is not mounted/u)
+  assert.equal(state.mutateCalls.length, 0)
 })

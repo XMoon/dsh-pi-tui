@@ -2321,13 +2321,16 @@ export class DirectWebProviderConfig implements WebProviderConfig {
     }
     const web = read.descriptors.find(entry => entry.ns === WEB_PROVIDER_NS)
     const api = read.descriptors.find(entry => entry.ns === WEB_SEARCH_API_NS)
+    // The actual boundary requires BOTH sections of the captured observation,
+    // even when only one is the target. A half-mounted observation is not a
+    // write authorization (only the target revision is compared).
+    if (web === undefined || api === undefined) {
+      return { kind: 'rejected', reason: 'the official Host Web settings section is not mounted (both must be readable)' }
+    }
+    if (!validSettingsRevision(web.revision) || !validSettingsRevision(api.revision)) {
+      return { kind: 'rejected', reason: 'the official Host Web settings revision is not readable (both must be readable)' }
+    }
     const target = ns === WEB_PROVIDER_NS ? web : api
-    if (target === undefined) {
-      return { kind: 'rejected', reason: `the official Host settings section "${ns}" is not mounted` }
-    }
-    if (!validSettingsRevision(target.revision)) {
-      return { kind: 'rejected', reason: 'the official Host settings revision is not readable' }
-    }
     if (target.revision !== expectedRevision) {
       return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
     }

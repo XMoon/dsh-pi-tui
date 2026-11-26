@@ -914,17 +914,21 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       // update what the surface can truthfully show and diagnose.
       await settleWebReadAfterWrite()
       const after = webSettings
-      const actual = after !== undefined ? webDecisionActual(after, request) : webDecisionActual(base, request)
+      const actual = after !== undefined ? webDecisionActual(after, request) : undefined
       let result: WebCommitResult
       switch (outcome.kind) {
         case 'no-changes':
-          // A validated no-op is not a save. Bind its receipt to the ADMISSION
-          // observation, so a replacement after the no-op retires it.
-          result = { kind: 'no-changes', actual, authority: base.authority }
+          // A validated no-op is not a save. Its actual comes from the
+          // admission observation; the fresh read only supplies current facts.
+          result = {
+            kind: 'no-changes',
+            actual: after !== undefined ? webDecisionActual(after, request) : webDecisionActual(base, request),
+            authority: base.authority,
+          }
           break
         case 'rejected':
         case 'conflict':
-          result = { kind: 'not-saved', reason: outcome.reason, actual }
+          result = { kind: 'not-saved', reason: outcome.reason, ...actual === undefined ? {} : { actual } }
           break
         case 'outcome-unconfirmed':
           result = { kind: 'outcome-unconfirmed', reason: outcome.reason }
@@ -932,7 +936,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         case 'accepted':
           result = after === undefined
             ? { kind: 'unverified', reason: 'the Host readback after the write was unavailable' }
-            : verifyWebDecision(request, request.capture, after)
+            : !runner.config.web.isObservationCurrent(after, webDecisionTarget(request))
+              ? {
+                  kind: 'unverified',
+                  reason: 'the Host Web observation changed after the write; the saved value could not be attributed',
+                  authority: after.authority,
+                }
+              : verifyWebDecision(request, request.capture, after)
           break
       }
       // The write OWNER records the safe field/outcome/reason even if the page

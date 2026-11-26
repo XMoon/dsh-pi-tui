@@ -2626,7 +2626,17 @@ class RemoteWebProviderConfig implements WebProviderConfig {
         {
           freshObservation: true,
           beforeDispatch: () => {
-            guard(this.mirror.namespace(WEB_PROVIDER_NS), this.mirror.namespace(WEB_SEARCH_API_NS))
+            const web = this.mirror.namespace(WEB_PROVIDER_NS)
+            const api = this.mirror.namespace(WEB_SEARCH_API_NS)
+            // Both sections must exist in the SAME fresh snapshot; the target
+            // revision is the one the helper already checked.
+            if (web === undefined || api === undefined) {
+              throw new Error('the official Host Web settings section is not mounted (both must be readable)')
+            }
+            if (!validRemoteSettingsRevision(web.revision) || !validRemoteSettingsRevision(api.revision)) {
+              throw new Error('the official Host Web settings revision is not readable (both must be readable)')
+            }
+            guard(web, api)
           },
         },
       )

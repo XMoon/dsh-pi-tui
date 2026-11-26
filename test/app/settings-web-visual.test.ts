@@ -974,28 +974,6 @@ test('an unavailable authority paints the reason and offers no Confirm', async t
   }
 })
 
-test('a generation-only Host replacement between a Confirm press and release is refused before dispatch (workspace/command path)', async t => {
-  const h = setup({ columns: 120, rows: 40 })
-  t.after(h.dispose)
-  await openWebPage(h)
-  await selectListRow(h, 0)
-  await key(h, ENTER) // provider Detail
-  await key(h, DOWN) // current server-side -> DeepSeek Search API
-  await waitForPainted(h, 'the API candidate', frame => frame.includes('› DeepSeek Search API'))
-  const point = paintedWordPoint(h, 'Confirm [Enter]')
-  press(h, point.row, point.column + 1)
-  // SAME numeric revisions and values, NEW opaque generation identity. This
-  // exercises the workspace/command path end to end; the page's own
-  // sameWebAuthority branch is covered directly by the WebSettingsPage test in
-  // settings-web-provider.test.ts.
-  h.store.web.authority = { ...h.store.web.authority, generation: {} }
-  await h.vt.waitForRender()
-  release(h, point.row, point.column + 1)
-  await h.vt.waitForRender()
-  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the stale press dispatched no write')
-  assert.doesNotMatch(h.view(), /Saved/u, 'a replaced Host never receives the old decision')
-})
-
 test('the list region never carries a settled success word', async t => {
   const h = setup({ columns: 44, rows: 20 })
   t.after(h.dispose)

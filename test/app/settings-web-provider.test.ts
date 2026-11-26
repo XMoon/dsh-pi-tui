@@ -129,6 +129,10 @@ interface Harness {
      *  competing external writer / the official store's own answer); undefined =
      *  the submitted id verbatim. */
     keptProviderValue: string | undefined
+    /** Revoke currentness after the NEXT successful write (a replacement that
+     *  lands after the postterminal read's DTO was published). */
+    revokeAfterNextWrite: boolean
+    revoked: boolean
   }
   /** How many authority reads were ISSUED (the newest-read witnesses). */
   readonly readCount: () => number
@@ -218,6 +222,8 @@ function setup(options: {
     readErrorMessage: 'settings descriptor unreadable',
     writeDelayMs: 0,
     keptProviderValue: undefined as string | undefined,
+    revokeAfterNextWrite: false,
+    revoked: false,
     web: {
       searchProvider: 'searchProvider' in options ? options.searchProvider : 'deepseek-official',
       fetchProvider: options.fetchProvider ?? 'http',
@@ -293,6 +299,10 @@ function setup(options: {
       log.push(label)
       apply()
       if (bump !== undefined) bumpAuthority(bump)
+      if (store.revokeAfterNextWrite) {
+        store.revokeAfterNextWrite = false
+        store.revoked = true
+      }
       settledWrites.push(label)
       return { ok: true }
     } finally {
@@ -411,7 +421,7 @@ function setup(options: {
         available: () => store.available,
         read: readWeb,
         readFresh: readWeb,
-        isObservationCurrent: () => true,
+        isObservationCurrent: () => !store.revoked,
         setSearchProvider: async (id: string, _capture: WebProviderSettings) => {
           const selection = store.web.providerSelection.search
           if (store.web.searchProvider === id && selection.userSet && selection.userId === id) {
@@ -582,6 +592,22 @@ async function key(h: Harness, data: string): Promise<void> {
  *  the surface shows, not a timer guess; the bound is the helper's frame
  *  budget plus the authoritative Host-side counters, so a failure says whether
  *  the Host read/write even started and whether it SETTLED. */
+/** The painted (row, cell) of the LAST line containing `word`. */
+function paintedPoint(h: Harness, word: string): { readonly row: number; readonly column: number } {
+  const lines = h.vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/gu, ''))
+  const row = lines.findLastIndex(line => line.includes(word))
+  assert.ok(row >= 0, `${word} is not painted:\n${h.view()}`)
+  const column = lines[row]!.indexOf(word)
+  assert.ok(column >= 0)
+  return { row, column }
+}
+const pressPoint = (h: Harness, row: number, column: number): void => {
+  h.vt.sendInput(`\u001b[<0;${column + 1};${row + 1}M`)
+}
+const releasePoint = (h: Harness, row: number, column: number): void => {
+  h.vt.sendInput(`\u001b[<0;${column + 1};${row + 1}m`)
+}
+
 async function settlePainted(
   h: Harness,
   label: string,
@@ -3345,28 +3371,6 @@ test('the delegated Confirm re-proves the live authority generation, not only th
   }
 })
 
-test('a write settling after page disposal is diagnosed once and never replayed', async t => {
-  const h = setup()
-  t.after(h.dispose)
-  await openWebPage(h)
-  await openWebRow(h, 2) // count
-  await chooseCandidate(h, 2) // 20
-  const release = h.holdNextWrite()
-  await key(h, ENTER)
-  await settlePainted(h, 'the pending count write', frame => frame.includes('Saving…'))
-  h.dispose()
-  release()
-  for (let attempt = 0; attempt < 200 && h.diagnostics.length === 0; attempt += 1) {
-    await new Promise<void>(resolve => setImmediate(resolve))
-  }
-  assert.equal(h.diagnostics.length, 1, 'the original command owner diagnosed the late settlement once')
-  const detail = h.diagnostics[0]!.detail as { row?: string; outcome?: string }
-  assert.equal(detail.row, 'web-search-count')
-  assert.ok(detail.outcome !== undefined)
-  assert.deepEqual(h.writes.filter(label => label.startsWith('count:')), ['count:20'])
-  assert.equal(h.store.web.api.count, 20)
-})
-
 test('an invoked unknown receipt stays outcome-unconfirmed even when the write applied', async t => {
   const remote = createRemoteWebPort()
   await remote.port.describe()
@@ -3421,4 +3425,56 @@ test('a real Remote unknown receipt held across page disposal is diagnosed once 
   assert.equal(webWrites[0]?.destination, 'A')
   assert.equal((remote.namespaces.get('web')!.value as Record<string, unknown>).searchProvider,
     'deepseek-official', 'B is at base and the late result never claims a save')
+  assert.equal(remote.writeLifetime.pendingCount(), 0, 'the late write reached terminal idle')
+})
+
+test('an accepted write whose postterminal observation was revoked is unverified', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 2) // count
+  await chooseCandidate(h, 2) // 20
+  h.store.revokeAfterNextWrite = true
+  await key(h, ENTER)
+  const frame = await settlePainted(h, 'the revoked postterminal observation', f =>
+    f.includes('Could not confirm save') && !f.includes('Saving…'))
+  assert.doesNotMatch(frame, /Saved/u)
+  assert.ok(h.diagnostics.some(entry => entry.level === 'warn'
+    && (entry.detail as { outcome?: string }).outcome === 'unverified'))
+  assert.equal(h.store.web.api.count, 20, 'the accepted write applied once')
+  assert.deepEqual(h.writes.filter(label => label.startsWith('count:')), ['count:20'])
+})
+
+test('a real Remote A→B replacement refuses an old pointer with no page read, then a fresh pointer confirms B', async t => {
+  const remote = createRemoteWebPort()
+  await remote.port.describe()
+  const h = setup({ remoteConfig: remote.port })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 2) // count
+  await chooseCandidate(h, 2) // 20
+  const oldPoint = paintedPoint(h, 'Confirm [Enter]')
+  pressPoint(h, oldPoint.row, oldPoint.column + 1)
+  // B is ready in the ACTUAL mirror with the SAME numeric revisions; the page
+  // still holds A. No r/key/resize occurs between press and release.
+  remote.replaceHost()
+  await remote.port.describe()
+  releasePoint(h, oldPoint.row, oldPoint.column + 1)
+  await h.vt.waitForRender()
+  assert.equal(remote.mutateCalls.filter(call => call.ns === 'web-deepseek-api').length, 0,
+    'the old A pointer never reaches the real B mirror')
+  assert.doesNotMatch(h.view(), /Saved/u, 'A was never painted as B current Saved')
+  // Explicit r publishes B; the fresh pointer Confirm writes exactly once.
+  await key(h, 'r')
+  await settlePainted(h, 'the fresh B count Detail', f => f.includes('Current: 10') && f.includes('Confirm [Enter]'))
+  await new Promise<void>(resolve => setTimeout(resolve, 550))
+  const newPoint = paintedPoint(h, 'Confirm [Enter]')
+  pressPoint(h, newPoint.row, newPoint.column + 1)
+  releasePoint(h, newPoint.row, newPoint.column + 1)
+  await settlePainted(h, 'the fresh B count Saved', f => f.includes('Current: 20') && f.includes('Saved'))
+  const countWrites = remote.mutateCalls.filter(call => call.ns === 'web-deepseek-api')
+  assert.equal(countWrites.length, 1, 'exactly one B count write')
+  assert.equal(countWrites[0]?.destination, 'B')
+  await key(h, '\x1b')
+  assert.equal((remote.namespaces.get('web-deepseek-api')!.value as Record<string, unknown>).count, 20)
 })

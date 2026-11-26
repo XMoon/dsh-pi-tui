@@ -950,7 +950,14 @@ export async function runWebProviderSettingsF3(context) {
     await selectCandidate(clientA, COUNT_CANDIDATES.indexOf('20'), 'UI_L6 A result count', '20')
     await confirmCandidate(clientA, '20', 'UI_L6 A result count write')
     // The SAME current candidate is a validated zero-write no-op, not a save.
+    const noOpBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A result count no-op before')
     await confirmCandidate(clientA, '20', 'UI_L6 A result count no-op', 'No changes')
+    const noOpAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A result count no-op after')
+    assert(JSON.stringify(noOpAfter.mutationCounts) === JSON.stringify(noOpBefore.mutationCounts)
+      && totalMutationsOf(noOpAfter) === totalMutationsOf(noOpBefore),
+    `UI_L6 A result count no-op: the validated no-op called the official mutation ingress (${JSON.stringify(noOpBefore.mutationCounts)} -> ${JSON.stringify(noOpAfter.mutationCounts)})`)
     assertApiSection(documentPath, beforeCount, {
       count: 20,
       sendOriginalQuestion: SEED_SEND_ORIGINAL_QUESTION,
@@ -986,8 +993,10 @@ export async function runWebProviderSettingsF3(context) {
       credentialState: 'Configured',
     }
     const staleB = pageDetailText(await frameOf(clientB))
-    assert(staleB.includes(`Current: ${String(SEED_COUNT)}`),
-      `UI_L6 B: another Client's write must not silently repaint B's already-read count: ${JSON.stringify(staleB)}`)
+    assert(staleB.includes(`Last-known · read-only: ${String(SEED_COUNT)}`),
+      `UI_L6 B: a stale cached count must be painted Last-known read-only, never Current: ${JSON.stringify(staleB)}`)
+    assert(!hasConfirmAffordance(actionBarOf(await frameOf(clientB))),
+      'UI_L6 B: a stale cached count must not offer a Confirm affordance')
     clientB.send('r')
     await waitForCurrentValue(clientB, '20', 'UI_L6 B refreshed result count')
     await assertPageFacts(clientB, crossExpected, 'UI_L6 B cross-client')
