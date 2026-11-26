@@ -8582,7 +8582,18 @@ async function reclaimPublicHostWithAdmission(host, reason, options = {}) {
     appendNote('public-daemon-loser-terminated', { pid: host.pid, birth: ownership.birth, reason, signal: 'SIGTERM' })
     publicSignalAttempts += 1
     process.kill(host.pid, 'SIGTERM')
-    await waitForPublicHostTerminal(host, `reclaimPublicHost:${reason}: candidate`, 30_000)
+    try {
+      await waitForPublicHostTerminal(host, `reclaimPublicHost:${reason}: candidate`, 30_000)
+    } catch (error) {
+      // A mid-boot candidate can be slow to settle on one platform/product
+      // build. Re-prove the captured identity, then escalate exactly once.
+      const fresh = assertPublicHostOwnership(host, `reclaimPublicHost:${reason}: candidate escalation`,
+        options.expectedBirth ?? host.birth)
+      appendNote('public-daemon-loser-escalated', { pid: host.pid, birth: fresh.birth, reason, signal: 'SIGKILL' })
+      publicSignalAttempts += 1
+      process.kill(host.pid, 'SIGKILL')
+      await waitForPublicHostTerminal(host, `reclaimPublicHost:${reason}: candidate SIGKILL`, 10_000)
+    }
     const candidateRemaining = kernelGroupLiveMemberPids(processKernelReaders(), host.pid, 'public Host candidate group')
     if (candidateRemaining.length > 0) {
       throw new Error(`reclaimPublicHost:${reason}: the candidate group still has live members: ${JSON.stringify(candidateRemaining)}`)
