@@ -141,11 +141,11 @@ interface TestScope {
   setDirectory(next: { readonly available: boolean; readonly cwd?: string; readonly reason?: string }): void
 }
 
-function createScope(sessionId: string | undefined): TestScope {
+function createScope(sessionId: string | undefined, initialDirectory?: { readonly available: boolean; readonly cwd?: string; readonly reason?: string }): TestScope {
   let disposed = 0
   let subscriptions = 0
   let invalidated = false
-  let directory: { readonly available: boolean; readonly cwd?: string; readonly reason?: string } = {
+  let directory: { readonly available: boolean; readonly cwd?: string; readonly reason?: string } = initialDirectory ?? {
     available: true,
     cwd: '/host/dir',
   }
@@ -184,6 +184,7 @@ interface SeatOptions {
   /** `null` = a sessionless Remote open. */
   readonly sessionId?: string | null
   readonly composerWritable?: boolean
+  readonly directory?: { readonly available: boolean; readonly cwd?: string; readonly reason?: string }
 }
 
 interface Copied {
@@ -240,7 +241,7 @@ function makeSeat(t: { after(fn: () => unknown): void }, options: SeatOptions = 
     },
     cwd: () => cwd,
     captureScope: () => {
-      const scope = createScope(sessionId)
+      const scope = createScope(sessionId, options.directory)
       scopes.push(scope)
       return { sessionId, isCurrent: () => scope.face.isCurrent(), remote: scope.face }
     },
@@ -407,10 +408,8 @@ test('a Remote open creates ONE shared owner, reads the Session default and comm
   const opening = h.seat.renderState()
   assert.equal(opening?.remote, true)
   assert.equal(opening?.status, 'searching')
-  assert.equal(textOf(roleNode(h.seat, HISTORY_SEARCH_ROLES.more) as Node), 'More · ↓')
-  assert.equal(textOf(roleNode(h.seat, HISTORY_SEARCH_ROLES.retry) as Node), 'Retry · ↓')
-  assert.equal(disabled(roleNode(h.seat, HISTORY_SEARCH_ROLES.more)), true, 'More is disabled while searching')
-  assert.equal(disabled(roleNode(h.seat, HISTORY_SEARCH_ROLES.retry)), true, 'Retry is disabled while searching')
+  assert.equal(roleNode(h.seat, HISTORY_SEARCH_ROLES.more), undefined, 'a searching page paints no More')
+  assert.equal(roleNode(h.seat, HISTORY_SEARCH_ROLES.retry), undefined, 'a searching page paints no Retry')
 
   h.port.answerSearch(page([row(0, 'alpha one'), row(1, 'beta two')], 'cursor-1'))
   await waitUntil('the committed Remote rows', () => h.seat.renderState()?.rows.length === 2)
@@ -630,8 +629,6 @@ test('query and scope edits start fresh Remote rounds with the query preserved a
   // click handlers of the OLD painted card: serial+revision fences refuse them
   // before the shared owner sees a newer row.
   const before = h.port.searchRequests.length
-  clickStaleRole(h.seat, stale, HISTORY_SEARCH_ROLES.more)
-  clickStaleRole(h.seat, stale, HISTORY_SEARCH_ROLES.retry)
   clickStaleRole(h.seat, stale, HISTORY_SEARCH_ROLES.copy)
   h.seat.handleIntent({ kind: 'more', page: stale.page, serial: stale.serial, revision: stale.revision })
   h.seat.handleIntent({ kind: 'retry', serial: stale.serial, revision: stale.revision })
@@ -669,6 +666,21 @@ test('a sessionless Remote open starts on All and its Scope ring never offers Se
   assert.equal(h.port.lastSearchRequest().scope, 'all', 'the two-scope ring wraps All → Directory → All')
   assert.equal(h.port.searchRequests.some(request => request.scope === 'session'), false,
     'a sessionless card never sends a Session request')
+})
+
+test('a sessionless open adopts the first confirmed Directory baseline', async (t) => {
+  const h = makeSeat(t, { sessionId: null, directory: { available: false, reason: 'workspace-not-confirmed' } })
+  h.seat.open()
+  await waitUntil('the sessionless first search', () => h.port.pendingSearches() === 1)
+  h.port.answerSearch(page([row(0, 'alpha')], null))
+  await waitUntil('the sessionless page', () => h.seat.renderState()?.status === 'ready')
+  const ready = h.seat.renderState()
+  assert.ok(ready)
+  assert.equal(ready.scope, 'All', 'an unconfirmed Directory keeps the sessionless card on All')
+  h.scope().setDirectory({ available: true, cwd: '/host/dir' })
+  await waitUntil('the adopted Directory round', () => h.seat.renderState()?.scope === 'Directory')
+  assert.equal(h.port.lastSearchRequest().scope, 'directory')
+  assert.equal(h.seat.renderState()?.scope, 'Directory')
 })
 
 // ── E. Typed statuses ────────────────────────────────────────────────────────

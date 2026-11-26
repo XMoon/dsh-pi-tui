@@ -139,18 +139,23 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
     resultsBody.push(ui.text({ key: `h${serial}-empty`, role: HISTORY_SEARCH_ROLES.status, wrap: 'none', text: state.empty }))
   }
 
-  const pageActions = state.remote
-    ? ui.row(
+  const pageButtons: Node[] = []
+  if (state.remote && (state.moreEnabled || state.moreLoading)) {
+    pageButtons.push(chromeButton(state.moreKey, HISTORY_SEARCH_ROLES.more, state.moreLabel,
+      state.moreEnabled ? 'Load the next page of history' : 'Loading the next page of history',
+      state.moreEnabled, () => onIntent({ kind: 'more', page: state.page, serial, revision })))
+  }
+  if (state.remote && state.retryEnabled) {
+    pageButtons.push(chromeButton(state.retryKey, HISTORY_SEARCH_ROLES.retry, state.retryLabel,
+      'Search this scope and query again',
+      true, () => onIntent({ kind: 'retry', serial, revision })))
+  }
+  const pageActions = pageButtons.length === 0
+    ? undefined
+    : ui.row(
         { key: `h${serial}-page-actions`, role: HISTORY_SEARCH_ROLES.pageActions, gap: 'sm', align: 'center' },
-        chromeButton(state.moreKey, HISTORY_SEARCH_ROLES.more, state.moreLabel,
-          state.moreEnabled ? 'Load the next page of history'
-            : state.moreLoading ? 'Loading the next page of history' : 'No more history to load',
-          state.moreEnabled, () => onIntent({ kind: 'more', page: state.page, serial, revision })),
-        chromeButton(state.retryKey, HISTORY_SEARCH_ROLES.retry, state.retryLabel,
-          state.retryEnabled ? 'Search this scope and query again' : 'Retry is not available right now',
-          state.retryEnabled, () => onIntent({ kind: 'retry', serial, revision })),
+        ...pageButtons,
       )
-    : undefined
 
   const results = ui.col(
     { key: `h${serial}-results`, role: HISTORY_SEARCH_ROLES.results, gap: 'none' },

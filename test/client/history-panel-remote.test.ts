@@ -79,6 +79,8 @@ class FakeReadPort implements HistorySearchReadPort {
   holdRead = false
   /** The next N exact-text reads reject like a typed Host failure. */
   failReads = 0
+  /** The next N searches answer Host `loading`. */
+  loadingSearches = 0
   private pendingSearch: (() => void) | undefined
   private pendingRead: (() => void) | undefined
   private readonly texts = new Map<string, string>()
@@ -95,6 +97,10 @@ class FakeReadPort implements HistorySearchReadPort {
       await new Promise<void>((resolve) => { this.pendingSearch = resolve })
     }
     if (signal.aborted) throw new DOMException('aborted', 'AbortError')
+    if (this.loadingSearches > 0) {
+      this.loadingSearches -= 1
+      return { kind: 'loading' }
+    }
     if (this.failures > 0) {
       this.failures -= 1
       throw new RemoteHistorySearchFailedError(undefined, 'host search unavailable')
@@ -321,6 +327,11 @@ test('first page then More appends every older row once and keeps the selected i
   // instead of wrapping.
   panel.handleInput('\x1b[B')
   assert.equal(panel.selected()?.id, 'ses_a\u0000b')
+  // Down still WRAPS on the loaded tail; only PgDn asks for More.
+  panel.handleInput('\x1b[B')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000a', 'Down wraps to the first row')
+  panel.handleInput('\x1b[B')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000b')
   // Wait for the selected row's exact body to become the CURRENT painted frame:
   // the More admission re-checks the last-painted generation.
   await renderUntil(
@@ -329,7 +340,7 @@ test('first page then More appends every older row once and keeps the selected i
     lines => lines.some(line => line.includes('Preview') && line.includes('Alt+C copy')),
     'the exact body for the selected row',
   )
-  panel.handleInput('\x1b[B')
+  panel.handleInput('\x1b[6~')
   await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 4 shown')), 'the appended page')
 
   assert.equal(port.searchCalls.length, 2)
@@ -342,7 +353,7 @@ test('first page then More appends every older row once and keeps the selected i
   assert.ok(plain(panel.render(120)).some(line => line.startsWith('> ') && line.includes('beta prompt')),
     'the selected row stays painted')
   assert.equal(seat.view().hasMore, false, 'the exhausted page paints no More')
-  assert.ok(!plain(panel.render(120)).some(line => line.includes('More · ↓')),
+  assert.ok(!plain(panel.render(120)).some(line => line.includes('More · PgDn')),
     'More disappears on the last page')
 })
 
@@ -366,7 +377,7 @@ test('the painted More button loads the next page through the same seat action',
   const frame = plain(panel.render(120))
   const height = panel.render(120).length
   const footerRow = frame.findLastIndex(line => line.includes('Cancel [Esc]'))
-  const moreCol = frame[footerRow]?.indexOf('More · ↓') ?? -1
+  const moreCol = frame[footerRow]?.indexOf('More · PgDn') ?? -1
   assert.ok(footerRow >= 0 && moreCol >= 0, `the More footer span must paint:\n${frame.join('\n')}`)
   assert.ok(panel.handleMouse(pointer('press', moreCol, footerRow, 120, height)) !== undefined)
   assert.ok(panel.handleMouse(pointer('click', moreCol, footerRow, 120, height)) !== undefined)
@@ -388,9 +399,9 @@ test('a narrow Remote footer keeps More visible', async () => {
   })
   harness.panel.start()
   const lines = await renderUntil(harness.panel, 44,
-    frame => frame.some(line => line.includes('Results · 2 shown')) && frame.some(line => line.includes('More · ↓')),
+    frame => frame.some(line => line.includes('Results · 2 shown')) && frame.some(line => line.includes('More · PgDn')),
     'the narrow footer with More')
-  assert.ok(lines.some(line => line.includes('More · ↓')), lines.join('\n'))
+  assert.ok(lines.some(line => line.includes('More · PgDn')), lines.join('\n'))
   assert.ok(lines.some(line => line.includes('Esc cancel')), 'Cancel stays painted with More')
 })
 
@@ -470,7 +481,7 @@ test('a ready empty body offers no action and states why', async () => {
 
 // ── failure + Retry ─────────────────────────────────────────────────────────
 
-test('a failed Host search offers Retry from the pointer and from ArrowDown', async () => {
+test('a failed Host search offers Retry from the pointer and from PageDown', async () => {
   const harness = makeHarness({
     items: [
       { id: 'a', preview: 'alpha prompt', text: 'alpha prompt' },
@@ -486,7 +497,7 @@ test('a failed Host search offers Retry from the pointer and from ArrowDown', as
   panel.start()
   await renderUntil(panel, 120, lines => lines.some(line => line.includes('History request failed')),
     'the first failed page')
-  assert.ok(plain(panel.render(120)).some(line => line.includes('Retry · ↓')), 'the failure paints the Retry action')
+  assert.ok(plain(panel.render(120)).some(line => line.includes('Retry · PgDn')), 'the failure paints the Retry action')
   assert.equal(panel.canAccept(), false, 'a failed page accepts nothing')
 
   // Pointer Retry: press and click the SAME painted action. The second search
@@ -494,7 +505,7 @@ test('a failed Host search offers Retry from the pointer and from ArrowDown', as
   const frame = plain(panel.render(120))
   const height = panel.render(120).length
   const footerRow = frame.findLastIndex(line => line.includes('Cancel [Esc]'))
-  const retryCol = frame[footerRow]?.indexOf('Retry · ↓') ?? -1
+  const retryCol = frame[footerRow]?.indexOf('Retry · PgDn') ?? -1
   assert.ok(footerRow >= 0 && retryCol >= 0, `the Retry footer span must paint:\n${frame.join('\n')}`)
   assert.ok(panel.handleMouse(pointer('press', retryCol, footerRow, 120, height)) !== undefined)
   assert.ok(panel.handleMouse(pointer('click', retryCol, footerRow, 120, height)) !== undefined)
@@ -505,17 +516,32 @@ test('a failed Host search offers Retry from the pointer and from ArrowDown', as
   // Keyboard Retry: Down on a rowless failure page.
   const failed = plain(panel.render(120))
   assert.ok(failed.some(line => line.includes('History request failed')))
-  panel.handleInput('\x1b[B')
+  panel.handleInput('\x1b[6~')
   const recovered = await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 2 shown')),
     'the recovered first page')
-  assert.equal(port.searchCalls.length, 3, 'ArrowDown Retry started exactly one new search')
+  assert.equal(port.searchCalls.length, 3, 'PageDown Retry started exactly one new search')
   assert.ok(!recovered.some(line => line.includes('History request failed')), 'the recovered page clears the failure message')
   assert.ok(recovered.some(line => line.startsWith('> ') && line.includes('alpha prompt')))
 })
 
+test('a Host-loading page offers PageDown Retry', async () => {
+  const harness = makeHarness({ items: [{ id: 'a', preview: 'alpha', text: 'alpha' }], defaultScope: 'all' })
+  const { panel, port } = harness
+  port.loadingSearches = 1
+  panel.start()
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('History is loading on Host')),
+    'the Host-loading state')
+  assert.ok(plain(panel.render(120)).some(line => line.includes('Retry · PgDn')),
+    'the loading page paints the Retry action')
+  panel.handleInput('\x1b[6~')
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 1 shown')),
+    'the recovered page')
+  assert.equal(port.searchCalls.length, 2, 'PageDown retried the Host-loading page exactly once')
+})
+
 // ── in-flight More / stale action admission ─────────────────────────────────
 
-test('a More-loading seat disables actions; a stale More click and repeated Down start no request', async () => {
+test('a More-loading seat disables actions; a stale More click and repeated PageDown start no request', async () => {
   const harness = makeHarness({
     items: [
       { id: 'a', preview: 'alpha prompt', text: 'alpha prompt' },
@@ -545,7 +571,7 @@ test('a More-loading seat disables actions; a stale More click and repeated Down
   const frame = plain(panel.render(120))
   const height = panel.render(120).length
   const footerRow = frame.findLastIndex(line => line.includes('Cancel [Esc]'))
-  const moreCol = frame[footerRow]?.indexOf('More · ↓') ?? -1
+  const moreCol = frame[footerRow]?.indexOf('More · PgDn') ?? -1
   assert.ok(footerRow >= 0 && moreCol >= 0, `the More footer span must paint:\n${frame.join('\n')}`)
   assert.ok(panel.handleMouse(pointer('press', moreCol, footerRow, 120, height)) !== undefined)
   seat.more()
@@ -555,7 +581,7 @@ test('a More-loading seat disables actions; a stale More click and repeated Down
 
   // More is in flight: no action is advertised or admitted.
   const loading = await renderUntil(panel, 120, lines => lines.some(line => line.includes('Loading more…')), 'the more-loading state')
-  assert.ok(!loading.some(line => line.includes('More · ↓')), 'More disappears while its page is in flight')
+  assert.ok(!loading.some(line => line.includes('More · PgDn')), 'More disappears while its page is in flight')
   assert.ok(!loading.some(line => line.includes('Copy All [Alt+C]')), 'Copy is not advertised while More is in flight')
   assert.ok(!loading.some(line => line.includes('Use Selected [Enter]')), 'Restore is not advertised while More is in flight')
   assert.equal(panel.canAccept(), false, 'More-loading disables Restore')
@@ -563,8 +589,8 @@ test('a More-loading seat disables actions; a stale More click and repeated Down
   panel.handleInput('\r')
   assert.deepEqual(harness.copied, [], 'More-loading refuses Copy All')
   assert.deepEqual(harness.accepted, [], 'More-loading refuses Restore')
-  panel.handleInput('\x1b[B')
-  assert.equal(port.searchCalls.length, 2, 'repeated Down during More-loading starts no second request')
+  panel.handleInput('\x1b[6~')
+  assert.equal(port.searchCalls.length, 2, 'repeated PageDown during More-loading starts no second request')
 
   port.releaseSearch()
   const appended = await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 4 shown')), 'the appended page')
@@ -681,7 +707,7 @@ test('a failed exact-text read keeps the bounded preview and offers Retry', asyn
   const failed = await renderUntil(panel, 120, lines => lines.some(line => line.includes('History text failed')),
     'the body failure')
   assert.ok(failed.some(line => line.includes('bounded preview')), 'the bounded preview stays readable')
-  assert.ok(failed.some(line => line.includes('Retry · ↓')), 'the body failure offers Retry')
+  assert.ok(failed.some(line => line.includes('Retry · PgDn')), 'the body failure offers Retry')
   assert.equal(panel.canAccept(), false, 'a failed body accepts nothing')
   panel.handleInput('\x1bc')
   panel.handleInput('\r')
@@ -691,7 +717,7 @@ test('a failed exact-text read keeps the bounded preview and offers Retry', asyn
   const frame = plain(panel.render(120))
   const height = panel.render(120).length
   const footerRow = frame.findLastIndex(line => line.includes('Cancel [Esc]'))
-  const retryCol = frame[footerRow]?.indexOf('Retry · ↓') ?? -1
+  const retryCol = frame[footerRow]?.indexOf('Retry · PgDn') ?? -1
   assert.ok(footerRow >= 0 && retryCol >= 0, `the Retry footer span must paint:\n${frame.join('\n')}`)
   assert.ok(panel.handleMouse(pointer('press', retryCol, footerRow, 120, height)) !== undefined)
   assert.ok(panel.handleMouse(pointer('click', retryCol, footerRow, 120, height)) !== undefined)
@@ -699,11 +725,11 @@ test('a failed exact-text read keeps the bounded preview and offers Retry', asyn
     'the second failed body')
   assert.equal(port.searchCalls.length, 2, 'the pointer body Retry started exactly one new page')
 
-  // The same failure state is retryable from the keyboard.
-  panel.handleInput('\x1b[B')
+  // The same failure state is retryable from the keyboard via PiTui PgDn.
+  panel.handleInput('\x1b[6~')
   const recovered = await renderUntil(panel, 120,
     lines => lines.some(line => line.includes('Copy All [Alt+C]')), 'the recovered exact body')
-  assert.equal(port.searchCalls.length, 3, 'ArrowDown body Retry started exactly one new page')
+  assert.equal(port.searchCalls.length, 3, 'PageDown body Retry started exactly one new page')
   assert.equal(panel.selected()?.content, exactText)
   assert.ok(!recovered.some(line => line.includes('History text failed')))
 })

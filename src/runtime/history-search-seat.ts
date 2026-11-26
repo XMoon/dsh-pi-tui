@@ -247,6 +247,12 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
       generation = undefined
       cancelBody()
       body = { kind: 'none' }
+    } else if (scope === 'current' && directory.available && status === 'unavailable') {
+      // The baseline can confirm after a sessionless open already reported
+      // Directory unavailable. A later confirmation is a real source fact:
+      // restart the current page instead of leaving a dead Retry.
+      startFresh()
+      return
     }
     publish()
   }
@@ -384,6 +390,12 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
         await recoverStaleMore(round)
         return
       }
+      // A non-ready append has no operable continuation: drop the old chain
+      // uniformly so no prior rows/next cursor can be acted on.
+      rows = []
+      selectedId = undefined
+      nextCursor = null
+      generation = undefined
       status = response.kind === 'loading'
         ? 'loading-host'
         : response.kind === 'incomplete' ? 'incomplete' : 'unavailable'
@@ -615,6 +627,7 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
       const row = rows.find(candidate => candidate.id === id)
       if (row === undefined) return
       if (id === selectedId && body.kind !== 'failed') return
+      userChanged = true
       selectedId = id
       startBody(row, serial, queryRevision)
     },

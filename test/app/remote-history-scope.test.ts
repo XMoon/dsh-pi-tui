@@ -160,6 +160,21 @@ test('a stale transport token or a missing retained binding revokes the open', (
   assert.equal(stale.directory().available, false)
   stale.dispose()
 
+  let live = true
+  const midOpen = createRemoteHistoryOpenScope({
+    sessionId: 'session-a',
+    isScopeCurrent: () => true,
+    sessionFacts: activeFacts({ tokenCurrent: () => live }),
+    workspaceFacts: workspacePort(new FollowHandle()),
+    workspaceIntent: undefined,
+    diag: DIAG,
+  })
+  assert.equal(midOpen.isCurrent(), true)
+  live = false
+  assert.equal(midOpen.isCurrent(), false, 'a same-id transport replacement revokes the open')
+  assert.equal(midOpen.directory().available, false)
+  midOpen.dispose()
+
   const unretained = createRemoteHistoryOpenScope({
     sessionId: 'session-a',
     isScopeCurrent: () => true,

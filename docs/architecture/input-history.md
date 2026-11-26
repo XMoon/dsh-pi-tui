@@ -1,11 +1,11 @@
-# Input history: storage, recall, and migration
+# Input history: storage, recall, and search
 
 ## What this records
 
 Where the TUI keeps the per-directory input history that ↑/↓ recall reads,
 why the settings document was the wrong home for it, what the recall-order
-contract is, and the migration path that moved existing users' history out
-of `~/.dsh/settings.yaml`.
+contract is, and how Direct JSONL search and the Host accepted-history search
+find a submitted prompt.
 
 ## Decision: a dedicated JSONL file, not the settings document
 
@@ -398,8 +398,9 @@ Client's JSONL files are neither read nor written.
   the Server owns the ordering, the Client never re-ranks. Rows whose event-time
   directory is unknown are absent from `Directory`, never guessed from the
   open-time cwd.
-- **Paging.** One page is at most 25 rows. `More` is explicit (button or the
-  frozen `↓` key at the loaded tail), reads at most one further page, keeps the
+- **Paging.** One page is at most 25 rows. `More` is explicit (the button; the
+  PiTui `PgDn` key at the loaded tail, the TSP `↓` key at the loaded tail), reads
+  at most one further page, keeps the
   current rows/selection/scroll while in flight and appends only a
   same-generation continuation. A stale continuation discards the chain and
   may perform at most ONE automatic fresh first-page search; a second
@@ -622,7 +623,7 @@ cwd authority; a new mount starts from its own boot seed.
   (EOF-backwards chunks, cross-chunk/UTF-8-safe line assembly, revision-
   bound continuation cursors, abort). Pinned by
   `test/client/history-reverse-reader.test.ts`.
-- `src/client/history/remote-search-seat.ts` — the ONE Client-local Remote
+- `src/runtime/history-search-seat.ts` — the ONE transport-neutral Remote
   open/query/page/body owner shared by PiTui and TSP: 25-row pages, explicit
   More, one automatic stale-first-page recovery, exact hash/offset/length body
   assembly and the captured-scope currentness fence. Pinned by

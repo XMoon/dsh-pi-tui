@@ -49,6 +49,10 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
   private invalidated = false
   private unsubscribeFace: (() => void) | undefined
   private unsubscribeIntent: (() => void) | undefined
+  /** The exact transport token captured at open; re-proved on every read. */
+  private transportToken: unknown
+  private transportSessionId: string | undefined
+  private transportFacts: RemoteSessionFacts | undefined
 
   private readonly deps: RemoteHistoryScopeDeps
 
@@ -68,7 +72,13 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
   }
 
   isCurrent(): boolean {
-    return !this.disposed && !this.invalidated && this.deps.isScopeCurrent()
+    if (this.disposed || this.invalidated) return false
+    if (this.transportFacts !== undefined && this.transportSessionId !== undefined
+      && !this.transportFacts.isTransportTokenCurrent(this.transportSessionId, this.transportToken)) {
+      this.invalidate('session-transport-replaced')
+      return false
+    }
+    return this.deps.isScopeCurrent()
   }
 
   subscribe(listener: () => void): () => void {
@@ -127,6 +137,9 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
       return
     }
     const token = facts.captureTransportToken(sessionId)
+    this.transportToken = token
+    this.transportSessionId = sessionId
+    this.transportFacts = facts
     if (!facts.isTransportTokenCurrent(sessionId, token)) {
       this.invalidate('session-transport-replaced')
       return

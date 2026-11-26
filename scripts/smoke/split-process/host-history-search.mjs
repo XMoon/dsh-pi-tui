@@ -109,6 +109,36 @@ async function search(client, requestPath, request, label) {
   return probe(client, requestPath, { op: 'search', ...request }, label)
 }
 
+
+/** The UI leg: a real Ctrl+R on a packed Client reads the Host, restores the
+ *  exact draft and submits only on the SECOND Enter, while the legacy JSONL
+ *  sentinel stays byte-identical. */
+async function runUiCtrlR({ client, dshHome, sessionId, target, legacySentinel, label }) {
+  const acceptedCount = () => (hostSessionEvents(dshHome, sessionId) ?? [])
+    .filter(event => acceptedMessage([event], target) !== undefined).length
+  const before = acceptedCount()
+  client.send('\x12')
+  await client.waitForScreen('Input History', `${label} History seat`, 120_000)
+  client.send('\t')
+  await client.waitForScreen('[Current Directory]', `${label} Directory scope`, 120_000)
+  client.send('\t')
+  await client.waitForScreen('[All Directories]', `${label} All scope`, 120_000)
+  client.send(target)
+  await client.waitForScreen('Results · 1 shown', `${label} Host result`, 120_000)
+  await client.waitForScreen(target, `${label} result row`, 120_000)
+  // The exact body is loaded lazily; the action bar is only eligible after it
+  // is verified. The packed screen must not advertise it earlier.
+  client.send('\r')
+  await client.waitForScreen(`❯ ${target}`, `${label} exact draft`, 120_000)
+  assert(acceptedCount() === before,
+    `${label}: the restore submitted the history row`)
+  assertLegacyV1Untouched(legacySentinel)
+  client.send('\r')
+  await waitForAcceptedMessage(dshHome, sessionId, target, `${label} second Enter submission`, 120_000)
+  assert(acceptedCount() === before + 1,
+    `${label}: the second Enter did not produce exactly one official occurrence`)
+}
+
 /** Read every page of one Owner search in order. */
 async function readAllHistoryItems(client, requestPath, request, label) {
   const items = []
@@ -830,6 +860,18 @@ export async function runHostHistorySearch(context) {
       recoveredText.set(`${item.sessionId}/${item.messageId}`,
         await readFullText(clientB, requestPath, item, 'W05 recovery witness text'))
     }
+    // ── W06: the REAL packed Ctrl+R UI on the same Host. ────────────────────
+    const uiSeed = `hsp-ui-seed-${unique}`
+    const uiSession = await scene.openC1Session(clientB, uiSeed, 'history UI seed')
+    await waitForAcceptedMessage(dshHome, uiSession, uiSeed, 'history UI seed accepted', 120_000)
+    await runUiCtrlR({
+      client: clientB,
+      dshHome,
+      sessionId: uiSession,
+      target: unique,
+      legacySentinel,
+      label: 'W06 packed Ctrl+R',
+    })
     await scene.exitC1Client(clientB, 'history client D exit')
     clientB = undefined
     await scene.stopC1Host(host)

@@ -1702,8 +1702,8 @@ export class HistoryPanel implements Component, Focusable {
         // preview is never presented as copyable/restorable, More appears only
         // while older Host history remains and Retry only in a failure state.
         const segments: ActionBarSegment[] = []
-        if (this.remoteMoreAvailable()) segments.push({ text: 'More · ↓', priority: 110 })
-        if (this.remoteRetryAvailable()) segments.push({ text: 'Retry · ↓', priority: 110 })
+        if (this.remoteMoreAvailable()) segments.push({ text: 'More · PgDn', priority: 110 })
+        if (this.remoteRetryAvailable()) segments.push({ text: 'Retry · PgDn', priority: 110 })
         if (useEligible) segments.push({ text: `${HISTORY_CHORDS.accept.label} use`, priority: 100 })
         segments.push(
           { text: `${HISTORY_CHORDS.scope.label} scope`, priority: 65 },
@@ -1739,8 +1739,8 @@ export class HistoryPanel implements Component, Focusable {
       segments.push(segment)
     }
     if (this.remote !== undefined) {
-      if (this.remoteMoreAvailable()) add({ text: 'More · ↓', priority: 110 }, { kind: 'more', id: null })
-      if (this.remoteRetryAvailable()) add({ text: 'Retry · ↓', priority: 110 }, { kind: 'retry', id: null })
+      if (this.remoteMoreAvailable()) add({ text: 'More · PgDn', priority: 110 }, { kind: 'more', id: null })
+      if (this.remoteRetryAvailable()) add({ text: 'Retry · PgDn', priority: 110 }, { kind: 'retry', id: null })
     }
     if (useEligible && !paintedHeadingActions.has('useSelected')) {
       add({ text: `Use [${HISTORY_CHORDS.accept.label}]`, priority: 100 }, {
@@ -1854,19 +1854,16 @@ export class HistoryPanel implements Component, Focusable {
 
   private moveSelection(data: string): void {
     const count = this.state.results.length
-    if (this.remote !== undefined && matchesKey(data, 'down')) {
-      // A Remote failure state (blocking page OR selected exact-body read) has
-      // no operable page to browse: Down is the ONE keyboard Retry route,
-      // admitted by the same painted-frame/currentness predicate the Footer
-      // button uses. Up/PgUp still move the cursor.
+    if (this.remote !== undefined && matchesKey(data, 'pageDown')) {
+      // PiTui keeps its accepted PgDn semantics: PgDn is the ONE keyboard
+      // More/Retry route, admitted by the same painted-frame/currentness
+      // predicate the Footer button uses. ArrowDown still wraps normally.
       if (this.remoteRetryAvailable()) {
         this.requestRetry()
         return
       }
       // The last loaded row with older Host history (or a page already in
-      // flight): Down drives More instead of wrapping. Never wrap while older
-      // history exists — the admission may refuse a stale frame, but the key
-      // still must not move the cursor to the first row.
+      // flight): PgDn drives More instead of stepping past the page.
       if (count > 0 && this.state.selectedIndex === count - 1
         && (this.remoteMoreAvailable() || this.remoteView?.moreLoading === true)) {
         this.requestMore()
@@ -2117,7 +2114,7 @@ export class HistoryPanel implements Component, Focusable {
   /** A seat failure that leaves NO readable page: Down is its keyboard Retry. */
   private remoteBlockingFailure(): boolean {
     const status = this.remoteView?.status
-    return status === 'incomplete' || status === 'unavailable'
+    return status === 'loading-host' || status === 'incomplete' || status === 'unavailable'
       || status === 'denied' || status === 'failed' || status === 'stale'
   }
 

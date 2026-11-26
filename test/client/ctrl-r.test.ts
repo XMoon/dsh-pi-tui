@@ -207,6 +207,43 @@ test('a live blocking Question REFUSES Ctrl+R (silent no-op, question untouched)
   assert.ok(!panelVisible(vt.getViewport()), 'the refused History never appears after the settle')
 })
 
+test('a REFUSED Remote History open disposes its captured Host scope', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const { VirtualTerminal } = await import('../support/virtual-terminal.ts')
+  const { TuiApp } = await import('../../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  let disposed = 0
+  const remote = {
+    initialScope: 'all' as const,
+    directory: () => ({ available: false, reason: 'directory-unavailable' }),
+    isCurrent: () => true,
+    subscribe: () => () => {},
+    dispose: () => { disposed += 1 },
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true, remote }),
+    historySearchRead: {
+      search: async () => { throw new Error('a refused open must not search') },
+      readText: async () => { throw new Error('a refused open must not read') },
+    },
+    historySearchDiag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} },
+  })
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  const question = app.askQuestions([{ id: 'q1', question: 'block the remote history?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  app.openHistorySearch() // refused by the optional-seat gate, after capture
+  await vt.waitForRender()
+  assert.equal(disposed, 1, 'the refused open disposed its Remote capture exactly once')
+  assert.ok(!panelVisible(vt.getViewport()))
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await question, [{ id: 'q1', selected: ['Yes'] }])
+})
+
 test('Ctrl+R resolves the Current Directory at OPEN time (a session switch moves the scope)', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)

@@ -764,8 +764,15 @@ export function createTspHistorySearch(
   }
 
   /** The Scope ring THIS card offers. */
-  const scopeRing = (owner: HistorySeatState): HistoryScope[] =>
-    SCOPE_RING.filter((entry) => owner.scopeAvailable || entry.scope !== 'session').map((entry) => entry.scope)
+  const scopeRing = (owner: HistorySeatState): HistoryScope[] => {
+    const directoryAvailable = owner.remote === undefined
+      ? true
+      : owner.remoteView?.directory.available === true
+    return SCOPE_RING.filter((entry) =>
+      (entry.scope !== 'session' || owner.scopeAvailable)
+      && (entry.scope !== 'current' || directoryAvailable),
+    ).map((entry) => entry.scope)
+  }
 
   const browse = (owner: HistorySeatState, step: TspHistoryBrowseStep): void => {
     // The same operable-identity rule as a row click: while a newer round is in
@@ -962,6 +969,9 @@ export function createTspHistorySearch(
           if (body === undefined || body.row.id !== intent.selectedId || body.text === '') return
           const raw = body.text
           if (!ports.composerWritable()) return
+          // Re-prove the captured Host scope at the restore admission; a
+          // same-id transport/binding replacement must not receive the draft.
+          if (!owner.scopeCapture.isCurrent()) return
           retire()
           ports.restoreToComposer(raw)
           return

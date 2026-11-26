@@ -10180,7 +10180,16 @@ export class TuiApp {
         },
       }
     })
-    if (lease === undefined || panel === undefined) return
+    if (lease === undefined) {
+      // The optional-seat admission refused: no panel/seat owns the capture.
+      remote?.dispose()
+      return
+    }
+    if (panel === undefined) {
+      lease.close()
+      remote?.dispose()
+      return
+    }
     this.historyLease = lease
     panel.start()
   }

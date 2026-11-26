@@ -62,6 +62,7 @@ const CONTROL_KEYS = new Map([
   ['\r', 'Enter'],
   ['\n', 'Enter'],
   ['\t', 'Tab'],
+  ['\x12', 'C-r'],
   ['\x15', 'C-u'],
   ['\x13', 'C-s'],
   ['\x7f', 'BSpace'],
