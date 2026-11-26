@@ -18,7 +18,7 @@ import { test } from 'node:test'
 import {
   createRemoteHistorySeat,
   type RemoteHistorySeat,
-} from '../../src/client/history/remote-search-seat.ts'
+} from '../../src/runtime/history-search-seat.ts'
 import type { RemoteHistoryDirectoryState, RemoteHistoryOpenScope } from '../../src/client/history/remote-scope.ts'
 import type { HistorySearchReadPort } from '../../src/runtime/history-search-read-port.ts'
 import { RemoteHistorySearchFailedError } from '../../src/runtime/remote/history-search-remote.ts'

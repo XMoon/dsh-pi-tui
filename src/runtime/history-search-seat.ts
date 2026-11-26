@@ -1,19 +1,12 @@
 /**
- * The ONE Client-local Remote accepted-history seat owner.
+ * The neutral Remote accepted-history seat contract shared by the application
+ * owner and both renderers.
  *
- * It owns the per-open query/page/body chain that both renderers share:
- * - the exact open serial and query revision, so a late answer never commits;
- * - one Host search page at a time (25 rows) plus an explicit More;
- * - one lazy exact-text body read, hash/length/offset verified in bounded
- *   chunks;
- * - the one automatic fresh-first-page recovery after a stale continuation;
- * - the captured Host scope's currentness at every commit and admission.
+ * The concrete seat lives in the Remote composition layer; terminal
+ * presentation consumes only these types, so it never imports the experimental
+ * Remote composition or a Host transport.
  *
- * It never renders, never reads the clipboard, never writes the draft and never
- * owns the selected visual row/caret: PiTui and TSP keep those, and both consume
- * this one committed view instead of reimplementing the Remote protocol.
- *
- * @module @xmoon76/dsh-pi-tui/client/history/remote-search-seat
+ * @module @xmoon76/dsh-pi-tui/runtime/history-search-seat
  */
 
 import { createHash } from 'node:crypto'
@@ -25,17 +18,37 @@ import {
   type HistorySearchItem,
   type HistorySearchRequest,
   type HistorySearchResponse,
-} from '../../runtime/remote/pi-tui-history-search-contract.ts'
+} from './remote/pi-tui-history-search-contract.ts'
 import {
   RemoteHistorySearchDeniedError,
   RemoteHistorySearchFailedError,
   RemoteHistorySearchSupersededError,
-} from '../../runtime/remote/history-search-remote.ts'
-import type { HistorySearchReadPort } from '../../runtime/history-search-read-port.ts'
-import type { Diag } from '../../runtime/process/diagnostics.ts'
-import { runDetached } from '../../runtime/process/tasks.ts'
-import type { HistoryScope } from './search.ts'
-import type { RemoteHistoryDirectoryState, RemoteHistoryOpenScope } from './remote-scope.ts'
+} from './remote/history-search-remote.ts'
+import type { HistorySearchReadPort } from './history-search-read-port.ts'
+import type { Diag } from './process/diagnostics.ts'
+import { runDetached } from './process/tasks.ts'
+
+
+/** The three accepted-history scopes. */
+export type HistoryScope = 'session' | 'current' | 'all'
+
+/** The Directory availability the per-open application capture proved. */
+export interface RemoteHistoryDirectoryState {
+  readonly available: boolean
+  /** The exact Host path captured at this open; present only when available. */
+  readonly cwd?: string
+  /** A safe reason shown only while Directory is not available. */
+  readonly reason?: string
+}
+
+/** The narrow per-open capture the seat consumes; owned by the application. */
+export interface RemoteHistoryOpenScopeLike {
+  readonly initialScope: 'session' | 'all'
+  directory(): RemoteHistoryDirectoryState
+  isCurrent(): boolean
+  subscribe(listener: () => void): () => void
+  dispose(): void
+}
 
 /** One committed result row. `preview` is bounded; `text` only lives in a body. */
 export interface RemoteHistoryRow {
@@ -93,7 +106,7 @@ export interface RemoteHistorySeatOptions {
   /** The exact Session captured at open, or undefined for a sessionless seat. */
   readonly sessionId: string | undefined
   /** The per-open application-owned Host scope capture. */
-  readonly scope: RemoteHistoryOpenScope
+  readonly scope: RemoteHistoryOpenScopeLike
   /** Called when the captured scope stops being current; the host closes the seat. */
   readonly onRetire: () => void
   readonly debounceMs?: number

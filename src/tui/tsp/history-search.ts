@@ -35,7 +35,7 @@ import {
   type RemoteHistoryRow,
   type RemoteHistorySeat,
   type RemoteHistorySeatView,
-} from '../../client/history/remote-search-seat.ts'
+} from '../../runtime/history-search-seat.ts'
 import type { TspHistorySearchBinding } from '../../app/surface/runtime.ts'
 import type { HistoryOpenScope } from '../../tui-app.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
