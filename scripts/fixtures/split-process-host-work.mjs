@@ -100,6 +100,9 @@ const SCENARIOS = new Set([
   // model stays inert and the fault provider is gated by C1_SKILLS_FAULT_DIR.
   'skills-standing',
   'skills-recovery',
+  // The PR2-B Host accepted-history lane only needs an ordinary text turn; it
+  // must never reuse the Skills scenario's fault/profile semantics.
+  'history-search',
   // M6-1 F7A: register the qualification provider flows on the REAL official
   // `ctx.authorization` service. The flows commit through the official
   // `AuthorizationSession.commit` write path; this fixture is the provider
@@ -2133,7 +2136,7 @@ class C1Model extends LlmAdapter {
       return
     }
 
-    if (this.scenario === 'goal-armed' || this.scenario === 'goal-round' || this.scenario === 'maintenance' || this.scenario === 'schedule' || this.scenario === 'unowned-job') {
+    if (this.scenario === 'goal-armed' || this.scenario === 'goal-round' || this.scenario === 'maintenance' || this.scenario === 'schedule' || this.scenario === 'unowned-job' || this.scenario === 'history-search') {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: `${this.scenario} answer ${token}` }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `${this.scenario} answer ${token}` } }

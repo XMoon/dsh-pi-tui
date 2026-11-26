@@ -63,9 +63,10 @@ prevents a settings whole-file replacement from erasing another window's input.
 - `!` shell commands are stored verbatim (with the `!`), so ↑ recall
   restores them as text and Enter re-runs the shell branch.
 - The runner loads the file per session on Direct (and once at boot for the
-  launch cwd, so a fresh window recalls immediately — see below) and appends on
-  every submitted line on both backends. The Daemon/Split Client's ↑/↓ never
-  reads these files.
+  launch cwd, so a fresh window recalls immediately — see below), and only
+  Direct appends every submitted line. The Daemon/Split Client neither reads
+  nor writes these files; its ↑/↓ recall is process memory and its Ctrl+R reads
+  the Host accepted-history index.
 
 ## Ctrl+R history search
 
@@ -385,7 +386,9 @@ Client's JSONL files are neither read nor written.
   proven effective cwd). Any relevant publication permanently invalidates the
   open, including A→B→A where the final value equals the initial one; a
   same-id binding/generation replacement, a lost token, a removed binding or a
-  failed/stale/replaced cut revokes it too. A missing/stale cut refuses
+  failed/stale/replaced cut revokes it too. An ordinary Inspector `changed`
+  (running/stats/other projection publications) is not a cwd change; only the
+  exact `workingDirectory` face owns that revocation. A missing/stale cut refuses
   `Directory` while leaving `Session`/`All` usable; the capture never polls,
   compares cwd values or substitutes the Session header/status cwd or the
   Client process cwd. A sessionless Client's `All` is fenced by the same

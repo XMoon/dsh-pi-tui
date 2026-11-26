@@ -4428,7 +4428,7 @@ export function applyRunnerWithRuntime(
       historySearchSource,
       ...(remoteSources === undefined ? {} : { historySearchRead: remoteSources.historySearch }),
       ...(historySeatFactory === undefined ? {} : { historySeatFactory }),
-      historySearchDiag: diag,
+      ...(remoteSources === undefined ? {} : { historySearchDiag: diag }),
       // Feature History PR2-A: the Split Client's process recall memory. The
       // surface forwards it to the PiTui mount options; Direct passes nothing
       // and keeps its scoped kernel.

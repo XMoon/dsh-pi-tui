@@ -866,9 +866,12 @@ export class HistoryPanel implements Component, Focusable {
         const index = this.state.results.findIndex(candidate => candidate.id === hit.id)
         if (index === -1) return undefined
         this.gesture = { kind: 'result', generation: frame.generation, x: event.x, y: event.y, id: hit.id }
-        if (this.state.selectedIndex !== index) {
+        if (this.remote !== undefined) {
+          // The shared owner is the selection authority: a More/refresh fence
+          // rejects the request and the painted selection never diverges.
+          this.remote.select(hit.id)
+        } else if (this.state.selectedIndex !== index) {
           this.state.selectedIndex = index
-          this.selectRemoteBody()
           this.reanchorPreview()
           this.onResultsChanged?.()
         }
@@ -1873,25 +1876,24 @@ export class HistoryPanel implements Component, Focusable {
     }
     if (count === 0) return
     const index = this.state.selectedIndex
-    if (matchesKey(data, 'up')) this.state.selectedIndex = index === 0 ? count - 1 : index - 1
-    else if (matchesKey(data, 'down')) this.state.selectedIndex = index === count - 1 ? 0 : index + 1
+    let next: number
+    if (matchesKey(data, 'up')) next = index === 0 ? count - 1 : index - 1
+    else if (matchesKey(data, 'down')) next = index === count - 1 ? 0 : index + 1
     else {
       // The page step is the ACTUAL painted result-row count (never a hardcoded
       // six).
       const page = Math.max(1, this.plan(this.lastWidth()).listPage)
-      if (matchesKey(data, 'pageUp')) this.state.selectedIndex = Math.max(0, index - page)
-      else this.state.selectedIndex = Math.min(count - 1, index + page)
+      next = matchesKey(data, 'pageUp')
+        ? Math.max(0, index - page)
+        : Math.min(count - 1, index + page)
     }
-    this.selectRemoteBody()
+    if (this.remote !== undefined) {
+      const target = this.state.results[next]
+      if (target !== undefined) this.remote.select(target.id)
+      return
+    }
+    this.state.selectedIndex = next
     this.reanchorPreview()
-  }
-
-  /** Remote selection is a SEAT fact: moving the cursor must ask the one owner
-   *  to load the newly selected exact body. Direct keeps its local selection. */
-  private selectRemoteBody(): void {
-    if (this.remote === undefined) return
-    const selected = this.selected()
-    if (selected !== undefined) this.remote.select(selected.id)
   }
 
   private movePreview(data: string): void {
@@ -1996,11 +1998,16 @@ export class HistoryPanel implements Component, Focusable {
       if (count === 0) return undefined
       const step = delta > 0 ? 1 : -1
       const index = this.state.selectedIndex
-      this.state.selectedIndex = step < 0
+      const next = step < 0
         ? index === 0 ? count - 1 : index - 1
         : index === count - 1 ? 0 : index + 1
-      this.selectRemoteBody()
-      this.reanchorPreview()
+      if (this.remote !== undefined) {
+        const target = this.state.results[next]
+        if (target !== undefined) this.remote.select(target.id)
+      } else {
+        this.state.selectedIndex = next
+        this.reanchorPreview()
+      }
       return { handled: true, render: true }
     }
     const inPreview = frame.previewTop !== undefined && frame.previewBottom !== undefined

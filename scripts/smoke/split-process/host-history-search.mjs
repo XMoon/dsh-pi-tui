@@ -119,6 +119,7 @@ async function runUiCtrlR({ client, dshHome, sessionId, target, legacySentinel, 
     .filter(id => typeof id === 'string'))
   const acceptedCount = () => acceptedIds().size
   const before = acceptedCount()
+  const beforeIds = acceptedIds()
   client.send('\x12')
   await client.waitForScreen('Input History', `${label} History seat`, 120_000)
   client.send('\t')
@@ -144,6 +145,10 @@ async function runUiCtrlR({ client, dshHome, sessionId, target, legacySentinel, 
   }
   assert(acceptedCount() === before + 1,
     `${label}: the second Enter did not produce exactly one official occurrence`)
+  return (hostSessionEvents(dshHome, sessionId) ?? []).find((event) => {
+    const id = acceptedMessage([event], target)?.message?.id
+    return typeof id === 'string' && !beforeIds.has(id)
+  })
 }
 
 /** Read every page of one Owner search in order. */
@@ -538,6 +543,7 @@ export async function runHostHistorySearch(context) {
   const requestPath = join(workDir, 'host-history-search-request.json')
   const unique = `hsp-a-unique-pr1-${String(process.pid)}-${Date.now().toString(36)}`
   let sessionId
+  let uiSessionId
   let clientA
   let clientB
   let host
@@ -564,7 +570,7 @@ export async function runHostHistorySearch(context) {
     await seedOfficialColdSession(context.installation, dshHome, workDir, { id: emptySentinelId, cwd: sentinelCwd, texts: [] })
     legacySentinel = writeLegacyV1Sentinel(context.installation.profileDir)
 
-    const firstHost = await scene.startC1Host('skills-standing', 'history host 1', {
+    const firstHost = await scene.startC1Host('history-search', 'history host 1', {
       DSH_PI_TUI_LOG: logA,
       DSH_PI_TUI_LOG_LEVEL: 'debug',
     })
@@ -645,43 +651,21 @@ export async function runHostHistorySearch(context) {
     assert(unknownMessage.kind === 'unavailable' && unknownMessage.reason === 'not-found',
       `W01b: an unknown message did not report not-found: ${JSON.stringify(unknownMessage)}`)
 
-    // ── W07: the REAL packed Ctrl+R UI on Client A's own Host Session. ─────
-    const uiTarget = `hsp-ui-ctrlr-${String(process.pid)}-${Date.now().toString(36)}`
-    await submitPrompt(clientA, uiTarget)
-    await waitForAcceptedMessage(dshHome, sessionId, uiTarget, 'history UI seed accepted', 120_000)
-    await runUiCtrlR({
-      client: clientA,
+    // ── W07: the REAL packed Ctrl+R UI on an INDEPENDENT Client B. ─────────
+    // Client B resumes the Session Client A created; the seed occurrence is
+    // Client A's accepted line, and B's own open must find it in All.
+    const uiTarget = unique
+    uiSessionId = sessionId
+    clientB.send(`/resume ${sessionId}\r`)
+    await clientB.waitForScreen(unique, 'history client B resumed A Session', 120_000)
+    const uiAccepted = await runUiCtrlR({
+      client: clientB,
       dshHome,
-      sessionId,
+      sessionId: uiSessionId,
       target: uiTarget,
       legacySentinel,
-      label: 'W07 packed Ctrl+R',
-      // The packed c1 host-work scenario rejects this candidate's turn setup
-      // (`unsupported scenario "skills-standing"`), so the composer's pending
-      // attempt cannot accept a second submission in this lane. The real-Host
-      // in-process B02 covers the deliberate second-Enter submit; this packed
-      // leg pins the wire/UI open, All scope, exact restore, no-submit and
-      // legacy-sentinel invariants.
-      submitAfterRestore: false,
+      label: 'W07 packed Ctrl+R on independent Client B',
     })
-    // W07 restored a draft; W02 must start from an EMPTY composer. Ctrl+U
-    // clears it without a submission.
-    const composerLine = async () => {
-      const lines = await clientA.viewport()
-      return lines.filter(line => line.trimStart().startsWith('❯')).at(-1) ?? ''
-    }
-    clientA.send('\x15')
-    let clearDeadline = Date.now() + 5_000
-    while ((await composerLine()).includes(uiTarget) && Date.now() < clearDeadline) {
-      await new Promise(resolve => setTimeout(resolve, 50))
-    }
-    if ((await composerLine()).includes(uiTarget)) clientA.send('\x1b')
-    clearDeadline = Date.now() + 5_000
-    while ((await composerLine()).includes(uiTarget) && Date.now() < clearDeadline) {
-      await new Promise(resolve => setTimeout(resolve, 50))
-    }
-    assert(!(await composerLine()).includes(uiTarget),
-      'W07: the restored draft did not clear before W02')
 
     // ── W02a: the same text submitted twice keeps two message ids. ───────────
     const afterFirst = hostSessionEvents(dshHome, sessionId)?.length ?? 0
@@ -703,8 +687,8 @@ export async function runHostHistorySearch(context) {
     const duplicateAnswer = assertReady(await searchSettled(clientB, requestPath, {
       scope: 'all', query: unique, limit: 25,
     }, 'host history search W02 duplicates'), 'W02 duplicates')
-    assert(duplicateAnswer.items.length === 2, `W02: expected two occurrences, got ${JSON.stringify(duplicateAnswer.items)}`)
-    assert(new Set(duplicateAnswer.items.map(item => item.messageId)).size === 2,
+    assert(duplicateAnswer.items.length === 3, `W02: expected three occurrences, got ${JSON.stringify(duplicateAnswer.items)}`)
+    assert(new Set(duplicateAnswer.items.map(item => item.messageId)).size === 3,
       'W02: two same-text submissions collapsed to one message id')
 
     // ── W02b: a consumed user/message does not create a second occurrence. ──
@@ -718,7 +702,7 @@ export async function runHostHistorySearch(context) {
     const afterConsume = assertReady(await searchSettled(clientB, requestPath, {
       scope: 'all', query: unique, limit: 25,
     }, 'host history search W02 consume'), 'W02 consume')
-    assert(afterConsume.items.length === 2, `W02: consume changed the occurrence count: ${JSON.stringify(afterConsume.items)}`)
+    assert(afterConsume.items.length === 3, `W02: consume changed the occurrence count: ${JSON.stringify(afterConsume.items)}`)
 
     // ── S01: two keyset pages, then a stale cursor after a new mutation. ─────
     const firstPage = assertReady(await searchSettled(clientB, requestPath, {
@@ -733,7 +717,16 @@ export async function runHostHistorySearch(context) {
     assert(secondPage.items.length === 1, 'S01: the second keyset page must hold the other row')
     assert(secondPage.items[0].messageId !== firstPage.items[0].messageId,
       'S01: the two keyset pages returned the same occurrence')
-    assert(secondPage.nextCursor === null, 'S01: the final page must not carry a cursor')
+    assert(typeof secondPage.nextCursor === 'string' && secondPage.nextCursor !== '',
+      'S01: a non-final second page must carry a cursor')
+    const thirdPage = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'session', sessionId, query: unique, limit: 1, cursor: secondPage.nextCursor,
+    }, 'host history search S01 third page'), 'S01 third page')
+    assert(thirdPage.items.length === 1, 'S01: the third keyset page must hold the last row')
+    assert(thirdPage.items[0].messageId !== firstPage.items[0].messageId
+      && thirdPage.items[0].messageId !== secondPage.items[0].messageId,
+    'S01: the third keyset page repeated an occurrence')
+    assert(thirdPage.nextCursor === null, 'S01: the final page must not carry a cursor')
     const thirdText = `hsp-third-${String(Date.now().toString(36))}`
     await submitPrompt(clientA, thirdText)
     await waitForAcceptedMessage(dshHome, sessionId, thirdText, 'host history search S01 third accepted')
@@ -750,11 +743,11 @@ export async function runHostHistorySearch(context) {
     const sessionAnswer = assertReady(await searchSettled(clientB, requestPath, {
       scope: 'session', sessionId, query: unique, limit: 25,
     }, 'host history search W02 session scope'), 'W02 session')
-    assert(sessionAnswer.items.length === 2, `W02 session scope returned ${String(sessionAnswer.items.length)} items`)
+    assert(sessionAnswer.items.length === 3, `W02 session scope returned ${String(sessionAnswer.items.length)} items`)
     const directoryAnswer = assertReady(await searchSettled(clientB, requestPath, {
       scope: 'directory', cwd: header.cwd, query: unique, limit: 25,
     }, 'host history search W02 directory scope'), 'W02 directory')
-    assert(directoryAnswer.items.length === 2, `W02 directory scope returned ${String(directoryAnswer.items.length)} items`)
+    assert(directoryAnswer.items.length === 3, `W02 directory scope returned ${String(directoryAnswer.items.length)} items`)
     const wrongDirectory = assertReady(await searchSettled(clientB, requestPath, {
       scope: 'directory', cwd: join(workDir, 'wrong-directory'), query: unique, limit: 25,
     }, 'host history search W02 wrong directory'), 'W02 wrong directory')
@@ -770,7 +763,7 @@ export async function runHostHistorySearch(context) {
     await scene.stopC1Host(host)
     host = undefined
 
-    const restarted = await scene.startC1Host('skills-standing', 'history host 2', {
+    const restarted = await scene.startC1Host('history-search', 'history host 2', {
       DSH_PI_TUI_LOG: logB,
       DSH_PI_TUI_LOG_LEVEL: 'debug',
     })
@@ -786,21 +779,40 @@ export async function runHostHistorySearch(context) {
     const restartAnswer = assertReady(await searchSettled(clientB, requestPath, {
       scope: 'session', sessionId, query: unique, limit: 25,
     }, 'host history search W03 restart'), 'W03 restart')
-    assert(restartAnswer.items.length === 2, `W03: restart returned ${String(restartAnswer.items.length)} occurrences`)
+    assert(restartAnswer.items.length === 3, `W03: restart returned ${String(restartAnswer.items.length)} occurrences`)
     assert(JSON.stringify(restartAnswer.items.map(item => item.messageId).sort()) === JSON.stringify(beforeIds),
       `W03: restart changed occurrence identities: ${JSON.stringify({
         before: beforeIds,
         after: restartAnswer.items.map(item => item.messageId).sort(),
       })}`)
+    assert(uiAccepted !== undefined, 'W07: the second Enter produced no accepted occurrence event')
+    const uiAcceptedMessage = acceptedMessage([uiAccepted], uiTarget)?.message
+    assert(uiAcceptedMessage !== undefined && typeof uiAcceptedMessage.id === 'string',
+      'W07: the second Enter produced no accepted user-rpc message')
     const expectedTimes = new Map([
       [firstMessage.id, firstEvent.time],
       [secondMessage.id, secondAccepted.time],
+      [uiAcceptedMessage.id, uiAccepted.time],
     ])
     assert(restartAnswer.items.every(item => item.preview === unique && item.effectiveCwd === header.cwd
       && item.acceptedAt === expectedTimes.get(item.messageId)),
     'W03: restart changed preview, event cwd or acceptedAt')
     const restartText = await readFullText(clientB, requestPath, restartAnswer.items[0], 'W03 restart exact text')
     assert(restartText === unique, 'W03: restart changed the recoverable original text')
+
+    // The restarted Client must recover Client B's original accepted line
+    // through the real Ctrl+R UI, not only the private probe.
+    clientB.send('\x12')
+    await clientB.waitForScreen('Input History', 'W03 restart Ctrl+R seat', 120_000)
+    // The restarted Client has no live Session but a confirmed Workspace, so
+    // History opens on Directory; ONE scope tick reaches All.
+    clientB.send('\t')
+    await clientB.waitForScreen('[All Directories]', 'W03 restart All scope', 120_000)
+    clientB.send(uiTarget)
+    await clientB.waitForScreen('Results ·', 'W03 restart Host result', 120_000)
+    await clientB.waitForScreen(uiTarget, 'W03 restart original accepted row', 120_000)
+    clientB.send('\x1b')
+    await clientB.waitForScreen('❯', 'W03 restart History closed back to Composer', 30_000)
 
     // ── W04: a third real Host reuses the committed cold proofs. ───────────
     await scene.exitC1Client(clientB, 'history client B exit')
@@ -811,7 +823,7 @@ export async function runHostHistorySearch(context) {
     const countersB = await waitForBootstrapCounters(logB, 'W03 restarted host')
     assert(Number(countersB.sourceProofHit) >= 2,
       `W04: the restarted Host reused no cold sentinel proof: ${JSON.stringify(countersB)}`)
-    thirdHost = await scene.startC1Host('skills-standing', 'history host 3', {
+    thirdHost = await scene.startC1Host('history-search', 'history host 3', {
       DSH_PI_TUI_LOG: logC,
       DSH_PI_TUI_LOG_LEVEL: 'debug',
     })
@@ -838,7 +850,7 @@ export async function runHostHistorySearch(context) {
     const targetAgain = assertReady(await searchSettled(clientB, requestPath, {
       scope: 'session', sessionId, query: unique, limit: 25,
     }, 'host history search W04 target'), 'W04 target')
-    assert(targetAgain.items.length === 2 && JSON.stringify(targetAgain.items.map(item => item.messageId).sort())
+    assert(targetAgain.items.length === 3 && JSON.stringify(targetAgain.items.map(item => item.messageId).sort())
       === JSON.stringify(beforeIds), 'W04: the reused proof changed the target occurrence identities')
     const countersC = await waitForBootstrapCounters(logC, 'W04 host')
     assert(Number(countersC.sourceProofHit) >= 3,
@@ -856,7 +868,7 @@ export async function runHostHistorySearch(context) {
     // ── W05: one offline official append is the ONLY rebuilt source. ───────
     const appendedText = 'hsp-sentinel-appended'
     await appendOfficialColdEvent(context.installation, dshHome, workDir, sentinelId, { text: appendedText, seq: sentinelTexts.length })
-    fourthHost = await scene.startC1Host('skills-standing', 'history host 4', {
+    fourthHost = await scene.startC1Host('history-search', 'history host 4', {
       DSH_PI_TUI_LOG: logD,
       DSH_PI_TUI_LOG_LEVEL: 'debug',
     })
@@ -880,7 +892,7 @@ export async function runHostHistorySearch(context) {
     const stableTarget = assertReady(await searchSettled(clientB, requestPath, {
       scope: 'session', sessionId, query: unique, limit: 25,
     }, 'host history search W05 stable target'), 'W05 stable target')
-    assert(stableTarget.items.length === 2, 'W05: an unrelated stable source was not reused')
+    assert(stableTarget.items.length === 3, 'W05: an unrelated stable source was not reused')
     const countersD = await waitForBootstrapCounters(logD, 'W05 host')
     assert(Number(countersD.sourceProofHit) >= 2,
       `W05: unchanged cold sources were not reused: ${JSON.stringify(countersD)}`)
@@ -939,7 +951,7 @@ export async function runHostHistorySearch(context) {
     assert(movedFiles >= 1, 'S01 oracle: the active v2 set was not moved')
     assert(!existsSync(join(historyDir, 'v2.sqlite')), 'S01 oracle: the fresh v2 path is still present')
     const oracleLog = join(workDir, 'history-search-host-oracle.log')
-    const cwdHost = await scene.startC1Host('skills-standing', 'history cwd host', {
+    const cwdHost = await scene.startC1Host('history-search', 'history cwd host', {
       HISTORY_SEARCH_EXTRA_PROOF: cwdProof,
       HISTORY_SEARCH_CWD_TARGET: cwdTwo,
       DSH_PI_TUI_LOG: oracleLog,
@@ -1108,7 +1120,7 @@ export async function runHostHistorySearch(context) {
     const forkProofBefore = sourceProofOf(context.installation.profileDir, forkSession)
     assert(forkProofBefore !== undefined, 'W02f: the cold fork has no committed proof before restart')
     const forkRestartLog = join(workDir, 'host-history-search-fork-restart.log')
-    const forkRestart = await scene.startC1Host('skills-standing', 'history fork restart host', {
+    const forkRestart = await scene.startC1Host('history-search', 'history fork restart host', {
       DSH_PI_TUI_LOG: forkRestartLog,
       DSH_PI_TUI_LOG_LEVEL: 'debug',
     })
@@ -1171,7 +1183,7 @@ export async function runHostHistorySearch(context) {
       firstEventType: firstEvent.type,
       firstEventTime: firstEvent.time,
       cwd: header.cwd,
-      occurrences: 2,
+      occurrences: 3,
       sentinelColdTexts: sentinelTexts.length + 1,
       restarted: true,
       thirdHostAllColdHits: Number(countersC.sourceProofHit),

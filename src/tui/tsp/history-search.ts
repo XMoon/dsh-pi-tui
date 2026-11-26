@@ -474,12 +474,14 @@ export function createTspHistorySearch(
   /** The state half of every ACTING entry: this exact card, open, admitted by
    *  the mount, and still on the Session scope captured at open. A parked card
    *  answers `false`, so a Modal always owns the keys meanwhile. */
+  const remoteScopeCurrent = (owner: HistorySeatState): boolean =>
+    owner.remote === undefined || owner.scopeCapture.remote?.isCurrent() !== false
+
   const operable = (owner: HistorySeatState): boolean => {
     if (state !== owner || owner.retired) return false
     if (owner.phase !== 'open') return false
     if (!ports.admitted()) return false
-    return owner.scopeCapture.isCurrent()
-      && (owner.remote === undefined || owner.scopeCapture.remote?.isCurrent() !== false)
+    return owner.scopeCapture.isCurrent() && remoteScopeCurrent(owner)
   }
 
   const clearTimer = (owner: HistorySeatState): void => {
@@ -671,7 +673,7 @@ export function createTspHistorySearch(
       // so a fence placed before the `try` would let that frame's failure
       // escape as an unhandled rejection instead of reaching the fatal owner.
       try {
-        if (owner.scopeCapture.isCurrent() === false) {
+        if (owner.scopeCapture.isCurrent() === false || !remoteScopeCurrent(owner)) {
           // The page is refused and the round is retired, which aborts this
           // read's controller: a source that still holds the signal stops
           // scanning. (The abort is a no-op for a source that already settled,
@@ -716,7 +718,7 @@ export function createTspHistorySearch(
       // a dead scope retires the round without letting the retirement frame's
       // own failure escape.
       try {
-        if (owner.scopeCapture.isCurrent() === false) {
+        if (owner.scopeCapture.isCurrent() === false || !remoteScopeCurrent(owner)) {
           retireDiscovered()
           return
         }
@@ -928,7 +930,8 @@ export function createTspHistorySearch(
             if (live === undefined || live.retired || live.remote === undefined) return false
             if ((live.phase !== 'open' && live.phase !== 'parked')
               || live.openSerial !== serial || live.queryRevision !== revision
-              || live.selectedId !== rowId || !live.scopeCapture.isCurrent()) return false
+              || live.selectedId !== rowId || !live.scopeCapture.isCurrent()
+              || !remoteScopeCurrent(live)) return false
             const current = remoteBodyReady(live)
             return current !== undefined && current.row.id === rowId && current.text === raw
           })
@@ -975,9 +978,11 @@ export function createTspHistorySearch(
           if (!owner.scopeCapture.isCurrent()) return
           const remoteScope = owner.scopeCapture.remote
           // Keep the scope observation through the close; the post-close proof
-          // is the only currentness fact that governs the draft write.
-          retire({ preserveScope: true })
+          // is the only currentness fact that governs the draft write. The
+          // release is in the finally so a close-callback failure cannot leak
+          // the preserved observation.
           try {
+            retire({ preserveScope: true })
             if (remoteScope?.isCurrent() !== true) return
             ports.restoreToComposer(raw)
           } finally {
@@ -1021,7 +1026,7 @@ export function createTspHistorySearch(
   const handleKey = (key: Key): boolean => {
     const owner = state
     if (owner === undefined || owner.retired || owner.phase !== 'open') return false
-    if (!ports.admitted() || !owner.scopeCapture.isCurrent()) {
+    if (!ports.admitted() || !owner.scopeCapture.isCurrent() || !remoteScopeCurrent(owner)) {
       retireDiscovered()
       return false
     }
@@ -1178,7 +1183,8 @@ export function createTspHistorySearch(
     if (owner === undefined || owner.retired) return undefined
     // A parked card, or a mount that no longer admits it, paints NO card: a
     // hidden-but-clickable History is exactly the forbidden state.
-    if (owner.phase !== 'open' || !ports.admitted() || !owner.scopeCapture.isCurrent()) return undefined
+    if (owner.phase !== 'open' || !ports.admitted() || !owner.scopeCapture.isCurrent()
+      || !remoteScopeCurrent(owner)) return undefined
     // The shared Remote owner already decided query/page/body/status; this seat
     // projects that one committed view into its existing native card.
     if (owner.remote !== undefined) return remoteRenderState(owner)
@@ -1309,7 +1315,7 @@ export function createTspHistorySearch(
       // A card whose captured Session scope died owns NOTHING: not the keys,
       // not the caret, and not the Composer's disabled state. Its retirement
       // frame is owed by the next entry that touches it.
-      if (!owner.scopeCapture.isCurrent()) return false
+      if (!owner.scopeCapture.isCurrent() || !remoteScopeCurrent(owner)) return false
       return ports.admitted()
     },
     holdsSeat: () => {
@@ -1321,6 +1327,7 @@ export function createTspHistorySearch(
       return owner !== undefined && !owner.retired
         && (owner.phase === 'open' || owner.phase === 'parked')
         && owner.scopeCapture.isCurrent()
+        && remoteScopeCurrent(owner)
     },
     // Supported = this mount received the ONE History bundle and the pane
     // negotiated what the card actually paints. `binding === undefined` IS the
@@ -1417,7 +1424,7 @@ export function createTspHistorySearch(
       if (owner.phase !== 'parked') return false
       // The last blocker settled: the SAME instance comes back, unless the
       // captured Session scope died meanwhile — then it never returns.
-      if (!owner.scopeCapture.isCurrent()) {
+      if (!owner.scopeCapture.isCurrent() || !remoteScopeCurrent(owner)) {
         retire()
         return false
       }

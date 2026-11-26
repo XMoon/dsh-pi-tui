@@ -87,6 +87,7 @@ function workspacePort(
     readActivity: async () => [],
     observeActivity: () => { throw new Error('not used') },
     followWorkspaces: () => handle,
+    connectionGeneration: () => 'generation-1',
   }
   if (inspector === undefined) return { ...base, openInspector: () => readyInspector() } as unknown as SessionWorkspaceFactsPort
   if (inspector === null) return base as unknown as SessionWorkspaceFactsPort
@@ -272,6 +273,9 @@ test('an inspector invalidation revokes the captured authority', async () => {
     diag: DIAG,
   })
   await waitFor(() => scope.directory().available, 'the exact cut')
+  invalidate?.('changed')
+  assert.equal(scope.isCurrent(), true, 'a normal Inspector changed (running/stats) is not a cwd revocation')
+  assert.equal(scope.directory().available, true)
   invalidate?.('source-replaced')
   assert.equal(scope.isCurrent(), false)
   scope.dispose()
@@ -315,6 +319,19 @@ test('a sessionless capture follows the confirmed Workspace and revokes on inten
   removalHandle.push({ type: 'remove', workspaceId: 'workspace-a' })
   await waitFor(() => !removal.isCurrent(), 'removal revocation')
   removal.dispose()
+
+  const replaceHandle = new FollowHandle()
+  const replaceIntent = createWorkspaceNextIntentOwner(undefined)
+  replaceIntent.setResolvedWorkspace('workspace-a', '/repo/a')
+  const replaced = createRemoteHistoryOpenScope({
+    sessionId: undefined, isScopeCurrent: () => true, sessionFacts: undefined,
+    workspaceFacts: workspacePort(replaceHandle), workspaceIntent: replaceIntent, diag: DIAG,
+  })
+  replaceHandle.push({ type: 'baseline', items: [WORKSPACE] })
+  await waitFor(() => replaced.directory().available, 'replace baseline')
+  replaceHandle.push({ type: 'replace', items: [{ ...WORKSPACE, path: '/repo/replaced' }] })
+  await waitFor(() => !replaced.isCurrent(), 'replace path mutation')
+  replaced.dispose()
 
   const endHandle = new FollowHandle()
   const endIntent = createWorkspaceNextIntentOwner(undefined)

@@ -142,7 +142,17 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
   private observeActiveSession(sessionId: string): void {
     const facts = this.deps.sessionFacts
     if (facts === undefined) {
-      this.directoryState = { available: false, reason: 'directory-unavailable' }
+      this.invalidate('session-transport-replaced')
+      return
+    }
+    // Capture the REAL transport identity before any subscription/read. A
+    // missing generation or retained binding is not a transport authority.
+    const token = facts.captureTransportToken(sessionId)
+    this.transportToken = token
+    this.transportSessionId = sessionId
+    this.transportFacts = facts
+    if (!facts.isTransportTokenCurrent(sessionId, token)) {
+      this.invalidate('session-transport-replaced')
       return
     }
     // Subscribe BEFORE the passive read: a change after this point is a
@@ -151,15 +161,7 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
       this.invalidate('working-directory-changed')
     })
     if (this.unsubscribeFace === undefined) {
-      this.directoryState = { available: false, reason: 'session-not-retained' }
-      return
-    }
-    const token = facts.captureTransportToken(sessionId)
-    this.transportToken = token
-    this.transportSessionId = sessionId
-    this.transportFacts = facts
-    if (!facts.isTransportTokenCurrent(sessionId, token)) {
-      this.invalidate('session-transport-replaced')
+      this.invalidate('session-not-retained')
       return
     }
     const openInspector = this.deps.workspaceFacts.openInspector
@@ -169,7 +171,10 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
       return
     }
     const inspector = openInspector.call(this.deps.workspaceFacts, sessionId, (reason) => {
-      this.invalidate(reason === 'changed' ? 'working-directory-changed' : 'session-transport-replaced')
+      // Only identity/source replacement invalidates the whole open. A normal
+      // Inspector `changed` includes running/stats/session projections; the
+      // exact workingDirectory face owns cwd-change invalidation above.
+      if (reason === 'source-replaced') this.invalidate('session-transport-replaced')
     })
     this.inspector = inspector
     runDetached('history open scope inspector', async () => {
@@ -198,17 +203,23 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
 
   private observeSessionlessWorkspace(): void {
     const connectionGeneration = this.deps.workspaceFacts.connectionGeneration
-    if (connectionGeneration !== undefined) {
-      this.connectionGeneration = connectionGeneration.call(this.deps.workspaceFacts)
-      this.connectionGenerationKnown = true
-      const observe = this.deps.workspaceFacts.observeConnectionGeneration
-      if (observe !== undefined) {
-        this.unsubscribeConnection = observe.call(this.deps.workspaceFacts, () => {
-          if (this.deps.workspaceFacts.connectionGeneration?.() !== this.connectionGeneration) {
-            this.invalidate('workspace-generation-lost')
-          }
-        })
-      }
+    if (connectionGeneration === undefined) {
+      this.invalidate('workspace-generation-lost')
+      return
+    }
+    this.connectionGeneration = connectionGeneration.call(this.deps.workspaceFacts)
+    if (this.connectionGeneration === undefined) {
+      this.invalidate('workspace-generation-lost')
+      return
+    }
+    this.connectionGenerationKnown = true
+    const observe = this.deps.workspaceFacts.observeConnectionGeneration
+    if (observe !== undefined) {
+      this.unsubscribeConnection = observe.call(this.deps.workspaceFacts, () => {
+        if (this.deps.workspaceFacts.connectionGeneration?.() !== this.connectionGeneration) {
+          this.invalidate('workspace-generation-lost')
+        }
+      })
     }
     const intent = this.deps.workspaceIntent
     const follow = this.deps.workspaceFacts.followWorkspaces
@@ -249,6 +260,10 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
             const match = frame.items.find(item => item.workspaceId === workspaceId)
             if (match === undefined || !handle.isCurrent()) {
               this.invalidate('workspace-not-current')
+              return
+            }
+            if (baseline && this.directoryState.cwd !== match.path) {
+              this.invalidate('workspace-path-changed')
               return
             }
             baseline = true

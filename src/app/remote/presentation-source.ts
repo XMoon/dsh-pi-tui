@@ -278,6 +278,7 @@ export function createRemotePresentationSource(
       isTransportTokenCurrent(sessionId: string, token: unknown): boolean {
         const captured = token as RemoteTransportLifetime | undefined
         if (captured === undefined || typeof captured !== 'object') return false
+        if (captured.generation === undefined || captured.binding === undefined) return false
         if (!Object.is(captured.generation, generation.getSnapshot())) return false
         return sessions.binding(sessionId as never) === captured.binding
       },

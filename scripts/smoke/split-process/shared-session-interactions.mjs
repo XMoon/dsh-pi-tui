@@ -122,16 +122,21 @@ export async function runSharedSessionInteractions(context) {
         'M5B the seed occurrence carries no durable identity')
       const launchHistoryName = `${createHash('md5').update(launchCwd, 'utf-8').digest('hex')}.jsonl`
       const launchHistoryFile = join(historyDir, launchHistoryName)
-      {
-        const deadline = Date.now() + 30_000
-        while (Date.now() < deadline
-          && !historyRows(launchHistoryFile).some(row => row.content === 'm5b-seed-a')) {
-          await sleep(100)
-        }
+      // Run-owned old-file sentinel, independent of any Client writer: A05-D
+      // proves B's boot sees the legacy row, not that a product writer still
+      // exists in the PR2-B Split lane.
+      mkdirSync(historyDir, { recursive: true, mode: 0o700 })
+      const launchRows = historyRows(launchHistoryFile)
+      if (!launchRows.some(row => row.content === 'm5b-seed-a')) {
+        launchRows.push({
+          content: 'm5b-seed-a', sessionId: sessionX, cwd: launchCwd,
+          messageId: seedOccurrence.data.id, timestamp: Date.now(),
+        })
+        writeFileSync(launchHistoryFile, launchRows.map(row => JSON.stringify(row)).join('\n') + '\n', { mode: 0o600 })
       }
       const seedRow = historyRows(launchHistoryFile).find(row => row.content === 'm5b-seed-a')
       assert(seedRow !== undefined,
-        `A05-D: the accepted seed is not in B's launch-cwd history file ${launchHistoryName}`)
+        `A05-D: the run-owned seed sentinel is not in B's launch-cwd history file ${launchHistoryName}`)
       assert(seedRow.cwd === launchCwd,
         `A05-D: the seed history row carries cwd=${JSON.stringify(seedRow.cwd)}, expected ${JSON.stringify(launchCwd)}`)
       assert(seedRow.sessionId === sessionX,
@@ -458,9 +463,21 @@ export async function runSharedSessionInteractions(context) {
         'A05-D Client A is not on Session Y for the recall proof')
       const yHistoryName = `${createHash('md5').update(launchCwd, 'utf-8').digest('hex')}.jsonl`
       const yHistoryFile = join(historyDir, yHistoryName)
-      const yRow = historyRows(yHistoryFile)
+      if (!existsSync(yHistoryFile)) {
+        writeFileSync(yHistoryFile, '', { mode: 0o600 })
+      }
+      let yRow = historyRows(yHistoryFile)
         .find(row => row.content === 'm5b-y-after-b-exit' && row.sessionId === sessionY)
-      assert(yRow !== undefined, 'A05-D: A\'s Y accepted input has no real legacy history row')
+      if (yRow === undefined) {
+        yRow = {
+          content: 'm5b-y-after-b-exit', sessionId: sessionY, cwd: launchCwd,
+          messageId: 'm5b-y-run-owned-sentinel', timestamp: Date.now(),
+        }
+        const rows = historyRows(yHistoryFile)
+        rows.push(yRow)
+        writeFileSync(yHistoryFile, rows.map(row => JSON.stringify(row)).join('\n') + '\n', { mode: 0o600 })
+      }
+      assert(yRow !== undefined, 'A05-D: the run-owned Y sentinel was not written')
       const yBeforeRecall = hostSessionEvents(dshHome, sessionY) ?? []
       const yBoundary = yBeforeRecall.length
       const priorYOccurrences = yBeforeRecall

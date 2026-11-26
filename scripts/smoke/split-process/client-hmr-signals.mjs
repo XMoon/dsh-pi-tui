@@ -126,23 +126,23 @@ export async function runClientHmrSignals(context) {
       const initialOccurrence = durableBeforeHmr[initialOccurrenceIndex]
       assert(initialOccurrenceIndex >= 0 && initialOccurrence !== undefined,
         'T57 the initial prompt is not a durable official user occurrence')
-      // The legacy Ctrl+R writer is STILL the local-search source: the same
-      // accepted prompt must have a real history row BEFORE the disk negative.
+      // Run-owned old-file sentinel. PR2-B puts the Remote Client's Ctrl+R on
+      // the Host accepted-history read, so this lane must not wait for the
+      // retired Client-local writer. The sentinel keeps the disk negative
+      // independent of product code and is moved aside before the HMR.
       const legacyHistoryDir = join(dshHome, 'user-history')
+      mkdirSync(legacyHistoryDir, { recursive: true, mode: 0o700 })
+      writeFileSync(join(legacyHistoryDir, 't57-run-owned-sentinel.jsonl'),
+        `${JSON.stringify({ content: 't57 prompt', sessionId, cwd: workDir, timestamp: Date.now() })}\n`,
+        { mode: 0o600 })
       const legacyHistoryText = () => !existsSync(legacyHistoryDir)
         ? ''
         : readdirSync(legacyHistoryDir)
           .filter(name => name.endsWith('.jsonl'))
           .map(name => readFileSync(join(legacyHistoryDir, name), 'utf8'))
           .join('\n')
-      {
-        const deadline = Date.now() + 30_000
-        while (Date.now() < deadline && !legacyHistoryText().includes('t57 prompt')) {
-          await new Promise(resolve => setTimeout(resolve, 100))
-        }
-      }
       assert(legacyHistoryText().includes('t57 prompt'),
-        'T57 the legacy Ctrl+R writer did not record the accepted prompt')
+        'T57 the run-owned sentinel was not written')
       const legacyHistoryBackup = join(workDir, 't57-user-history-backup')
       rmSync(legacyHistoryBackup, { recursive: true, force: true })
       renameSync(legacyHistoryDir, legacyHistoryBackup)

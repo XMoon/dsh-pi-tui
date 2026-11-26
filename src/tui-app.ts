@@ -10086,7 +10086,7 @@ export class TuiApp {
   openHistorySearch(): void {
     if (this.historyPanel !== undefined) return
     if (this.historySearchSource === undefined && this.historySearchRead === undefined) return
-    if ((this.historySearchRead === undefined) !== (this.historySearchDiag === undefined)) return
+    if (this.historySearchRead !== undefined && this.historySearchDiag === undefined) return
     if (this.disposed) return
     const captureHistoryScope = this.captureHistoryScope
     if (captureHistoryScope === undefined) return
@@ -10112,11 +10112,7 @@ export class TuiApp {
       captured = captureHistoryScope()
       const remote = captured.remote
       const sessionId = captured.sessionId
-      if (remote !== undefined && (read === undefined || diag === undefined)) {
-        remote.dispose()
-        return undefined as never
-      }
-      if (remote !== undefined && read !== undefined && diag !== undefined) {
+      if (remote !== undefined) {
         const factory = this.historySeatFactory as ((options: {
           read: unknown
           diag: unknown
@@ -10124,9 +10120,12 @@ export class TuiApp {
           scope: NonNullable<HistoryOpenScope['remote']>
           onRetire: () => void
         }) => { close(options?: { readonly preserveScope?: boolean }): void }) | undefined
-        if (factory === undefined) {
+        if (read === undefined || diag === undefined || factory === undefined || source !== undefined) {
+          // A Remote capture with an incomplete Remote capability is a
+          // composition bug: refuse the tenant instead of fabricating an
+          // undefined optional-seat factory success.
           remote.dispose()
-          return undefined as never
+          throw new Error('Remote History composition is incomplete')
         }
         seat = factory({
           read,

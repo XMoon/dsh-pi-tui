@@ -769,6 +769,18 @@ test('typed Remote states paint the shared safe message and Down retries every r
 
 // ── E. Disposal ──────────────────────────────────────────────────────────────
 
+test('a dead Remote scope refuses render, actions and seat ownership', async (t) => {
+  const h = makeSeat(t)
+  h.seat.open()
+  await waitUntil('the first search', () => h.port.pendingSearches() === 1)
+  h.port.answerSearch(page([row(0, 'alpha')], null))
+  await waitUntil('the ready card', () => h.seat.renderState()?.status === 'ready')
+  h.scope().invalidate()
+  assert.equal(h.seat.renderState(), undefined, 'a dead Remote scope paints no card')
+  assert.equal(h.seat.holdsSeat(), false, 'a dead Remote scope withholds no Composer seat')
+  assert.equal(h.seat.handleKey(key('down')), false, 'a dead Remote scope consumes no key')
+})
+
 test('closing or losing the captured Host scope disposes the shared owner and commits nothing late', async (t) => {
   const h = makeSeat(t)
   h.seat.open()
