@@ -666,8 +666,22 @@ export async function runHostHistorySearch(context) {
     })
     // W07 restored a draft; W02 must start from an EMPTY composer. Ctrl+U
     // clears it without a submission.
+    const composerLine = async () => {
+      const lines = await clientA.viewport()
+      return lines.filter(line => line.trimStart().startsWith('❯')).at(-1) ?? ''
+    }
     clientA.send('\x15')
-    await new Promise(resolve => setTimeout(resolve, 200))
+    let clearDeadline = Date.now() + 5_000
+    while ((await composerLine()).includes(uiTarget) && Date.now() < clearDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    if ((await composerLine()).includes(uiTarget)) clientA.send('\x1b')
+    clearDeadline = Date.now() + 5_000
+    while ((await composerLine()).includes(uiTarget) && Date.now() < clearDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    assert(!(await composerLine()).includes(uiTarget),
+      'W07: the restored draft did not clear before W02')
 
     // ── W02a: the same text submitted twice keeps two message ids. ───────────
     const afterFirst = hostSessionEvents(dshHome, sessionId)?.length ?? 0
