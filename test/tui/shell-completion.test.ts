@@ -18,6 +18,7 @@ import { join, delimiter } from 'node:path'
 import { MentionProvider } from '../../src/tui/interaction/autocomplete/provider.ts'
 import {
   powershellCompletionContext,
+  powershellWordRange,
   shellCompletionContext,
   shellWordSuffix,
   suggestShellCompletion,
@@ -1376,12 +1377,20 @@ test('the PowerShell provider refuses mixed, comment, bare-command, git-subcomma
     { line: ' .\\script.ps1', col: ' .\\script.ps1'.length },
     // A separator/compound prefix has no bounded command/argument role.
     { line: 'Get-Content a; .\\script.ps1', col: 'Get-Content a; .\\script.ps1'.length },
+    // A caret at the raw start of an existing parameter/comment has typed
+    // nothing; it must not list the cwd or replace that suffix.
+    { line: 'Get-Content -LiteralPath marker.txt', col: 'Get-Content '.length },
+    { line: 'Get-Content # comment', col: 'Get-Content '.length },
   ]
   for (const entry of cases) {
     assert.equal(await provider.getSuggestions([entry.line], 0, entry.col, { signal: abort, force: true }), null,
       `an ambiguous PowerShell position must offer nothing: ${entry.line}`)
   }
   assert.deepEqual(requests, [], 'no Host path request may be issued for an ambiguous position')
+  assert.equal(powershellWordRange('!Get-Content -LiteralPath marker.txt', 1, '!Get-Content '.length), undefined,
+    'acceptance uses the same zero-width typed-prefix refusal')
+  assert.equal(powershellWordRange('!Get-Content # comment', 1, '!Get-Content '.length), undefined,
+    'acceptance refuses a comment suffix at the raw token start')
   // A second shell-mode line has no proven PowerShell single-line boundary.
   assert.equal(await provider.getSuggestions(['git status', 'Get-Content .\\fi'], 1, 'Get-Content .\\fi'.length, { signal: abort, force: true }), null,
     'PowerShell shell-mode completion on a later line is refused')

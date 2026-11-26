@@ -700,6 +700,12 @@ export function powershellCompletionContext(line: string, col: number): ShellCom
   if (col < prefixLength) return undefined
   const scan = scanPowerShellWord(line, prefixLength, col)
   if (scan.uncertain) return undefined
+  // A caret at the RAW START of an already-typed nonempty token has typed
+  // nothing. Treating it as an empty argument would list the cwd and replace
+  // an existing parameter/comment suffix on acceptance; refuse it. A truly
+  // empty argument (start === end === caret) and a typed mid-token prefix
+  // (start < caret) remain allowed.
+  if (scan.start === col && scan.end > col) return undefined
   const role = powerShellWordRole(line, prefixLength, scan.start)
   if (role.kind === 'unavailable') return undefined
   if (!isPowerShellPathValue(scan.value, role.kind, scan.startedQuoted)) return undefined
@@ -724,6 +730,9 @@ export function powershellCompletionContext(line: string, col: number): ShellCom
 export function powershellWordRange(line: string, prefixLength: number, col: number): { readonly start: number; readonly end: number } | undefined {
   const scan = scanPowerShellWord(line, prefixLength, col)
   if (scan.uncertain) return undefined
+  // Acceptance MUST use the same zero-width typed-prefix refusal as the
+  // request; otherwise a stale/independent item could replace the suffix.
+  if (scan.start === col && scan.end > col) return undefined
   const role = powerShellWordRole(line, prefixLength, scan.start)
   if (role.kind === 'unavailable') return undefined
   return { start: scan.start, end: scan.end }
