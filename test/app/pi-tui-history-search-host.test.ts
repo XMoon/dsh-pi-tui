@@ -6231,8 +6231,9 @@ test('a pre-upgrade v2 projection with a no-rpcId accepted input replays and min
   const probe = proofAuthority(root)
   const correlatedText = 'hsp-old-correlated'
   const uncorrelatedText = 'hsp-old-uncorrelated'
-  // Session A: a version1 proof plus the old classifier's rows. The old rpcId
-  // predicate omitted the no-rpcId accepted message entirely.
+  // Session A: a CONTROLLED version-mismatch fixture (not a real old binary
+  // run): one normally correlated accepted input, a clean checkpoint and a v1
+  // proof. This is exactly the state the old admission would have produced.
   const proofSession = proofSource(root, {
     header: testHeader('old-proof-session', '/repo/old-a'),
     events: [
@@ -6251,10 +6252,35 @@ test('a pre-upgrade v2 projection with a no-rpcId accepted input replays and min
           }],
         },
       },
+    ],
+    location: { kind: 'jsonl', path: join(root, 'sessions', 'old-proof-session.jsonl.zstd') },
+  })
+  // Session B: a REAL pre-upgrade state. The uncorrelated message arrives in
+  // both the inbox insertion and its later user/message consume; old admission
+  // increments unknownSources twice and omits it, so the checkpoint carries
+  // uncertainty=2 and can never own a proof.
+  const markerSession = proofSource(root, {
+    header: testHeader('old-marker-session', '/repo/old-b'),
+    events: [
+      {
+        type: 'agent/inbox/spliced',
+        seq: 0,
+        time: 2000,
+        data: {
+          target: 'next-turn',
+          start: 0,
+          inserted: [{
+            id: 'old-marker-correlated',
+            role: 'user',
+            content: [{ type: 'text', text: 'hsp-old-marker' }],
+            source: { kind: 'user', rpcId: 'rpc-old-marker' },
+          }],
+        },
+      },
       {
         type: 'agent/inbox/spliced',
         seq: 1,
-        time: 1001,
+        time: 2001,
         data: {
           target: 'next-turn',
           start: 1,
@@ -6266,27 +6292,18 @@ test('a pre-upgrade v2 projection with a no-rpcId accepted input replays and min
           }],
         },
       },
-    ],
-    location: { kind: 'jsonl', path: join(root, 'sessions', 'old-proof-session.jsonl.zstd') },
-  })
-  // Session B: an old positive uncertain marker with no proof at all.
-  const markerSession = proofSource(root, {
-    header: testHeader('old-marker-session', '/repo/old-b'),
-    events: [{
-      type: 'agent/inbox/spliced',
-      seq: 0,
-      time: 2000,
-      data: {
-        target: 'next-turn',
-        start: 0,
-        inserted: [{
-          id: 'old-marker-correlated',
+      {
+        type: 'user/message',
+        seq: 2,
+        time: 2002,
+        data: {
+          id: 'old-uncorrelated',
           role: 'user',
-          content: [{ type: 'text', text: 'hsp-old-marker' }],
-          source: { kind: 'user', rpcId: 'rpc-old-marker' },
-        }],
+          content: [{ type: 'text', text: uncorrelatedText }],
+          source: { kind: 'user' },
+        },
       },
-    }],
+    ],
     location: { kind: 'jsonl', path: join(root, 'sessions', 'old-marker-session.jsonl.zstd') },
   })
   seedOldV2Session(profileDir, proofSession, probe.authority, {
@@ -6308,20 +6325,25 @@ test('a pre-upgrade v2 projection with a no-rpcId accepted input replays and min
       content: 'hsp-old-marker',
       hasNonText: false,
     }],
-    uncertainSources: 1,
+    uncertainSources: 2,
   })
   rewriteProofContractVersion(profileDir, 1)
 
-  // The OLD projection really omitted the no-rpcId occurrence and carried the
-  // old version1 proof/uncertain marker.
+  // The OLD projection really omitted the no-rpcId occurrence; B carried its
+  // real positive marker and no proof, while A carried its clean v1 proof.
   {
     const index = HistorySearchIndex.open({ profileDir })
     try {
       assert.equal(index.sourceProofOf('old-proof-session')?.contractVersion, 1)
-      assert.equal(index.checkpointOf('old-marker-session')?.uncertainSources, 1)
+      assert.equal(index.checkpointOf('old-proof-session')?.uncertainSources, 0)
+      assert.equal(index.sourceProofOf('old-marker-session'), undefined)
+      assert.equal(index.checkpointOf('old-marker-session')?.uncertainSources, 2)
       assert.equal(index.search({ scope: 'all', query: uncorrelatedText, limit: 25 }).rows.length, 0,
         'the old projection must really omit the no-rpcId accepted input')
       assert.equal(index.search({ scope: 'all', query: correlatedText, limit: 25 }).rows.length, 1)
+      assert.equal(index.search({ scope: 'all', query: 'hsp-old-marker', limit: 25 }).rows.length, 1)
+      assert.equal(index.search({ scope: 'all', query: 'hsp-old-', limit: 25 }).rows.length, 2,
+        'the old projection stored only the two correlated rows')
     } finally {
       index.close()
     }
@@ -6362,9 +6384,15 @@ test('a pre-upgrade v2 projection with a no-rpcId accepted input replays and min
     assert.equal(all.kind, 'ready', JSON.stringify(all))
     if (all.kind !== 'ready') throw new Error('expected ready')
     assert.equal(all.items.length, 3, 'the replay must restore both old rows plus the omitted no-rpcId input')
+    assert.deepEqual(
+      all.items.map(candidate => candidate.messageId).sort(),
+      ['old-correlated', 'old-marker-correlated', 'old-uncorrelated'],
+      'the three accepted occurrences stay distinct',
+    )
     const item = all.items.find(candidate => candidate.preview === uncorrelatedText)
     assert.ok(item !== undefined, 'the no-rpcId occurrence must be restored')
-    assert.equal(item.effectiveCwd, '/repo/old-a')
+    assert.equal(item.sessionId, 'old-marker-session')
+    assert.equal(item.effectiveCwd, '/repo/old-b')
     const chunk = await service.readText({
       sessionId: item.sessionId,
       messageId: item.messageId,
