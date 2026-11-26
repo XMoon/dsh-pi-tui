@@ -2796,7 +2796,7 @@ test('Subagent settings stages Enabled and routes in one lease until explicit Sa
   await settle(h)
   assert.deepEqual(h.subagentSection(), { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] })
   assert.equal(h.subagentWrites().length, 1)
-  assert.match(h.view(), /Selection: Verified/u)
+  assert.match(h.view(), /Selection: Saved/u)
   await key(h, '\x1b')
   assert.match(h.view(), /Settings · Agent · Rows/u)
   h.dispose()
@@ -2847,7 +2847,7 @@ test('the embedded Subagent tenant keeps its selection and Save bar inside every
     await key(h, 's')
     await settle(h)
     assert.equal(h.subagentWrites().length, 1, `${columns}x${rows}: Save reaches the typed section once`)
-    assert.match(h.view(), /Selection: Verified/u, `${columns}x${rows}: the section readback is visible`)
+    assert.match(h.view(), /Selection: Saved/u, `${columns}x${rows}: the section readback is visible`)
     assertRowWidths(h, columns)
     h.dispose()
   }
@@ -3013,7 +3013,9 @@ test('the real Root Agent Detail tenant is entered explicitly and edits the cap 
     'one Confirm dispatches exactly ONE official field set')
   assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 3, inherited: 2 })
   assert.match(h.view(), /Current value\s+3/u, 'the authoritative readback is painted in place')
-  assert.match(h.view(), /Verified/u, 'the ONE settlement feedback is shown once')
+  assert.match(h.view(), /\bSaved\b/u, 'the ONE settlement feedback is shown once')
+  assert.doesNotMatch(h.view(), /Status\s+Saved/u, 'the numeric page never borrows the Status label')
+  assert.equal((h.view().match(/\bSaved\b/gu) ?? []).length, 1, 'the settlement line is shown once')
   assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the tenant stays mounted after success')
   assert.doesNotMatch(h.view(), /Save \[S\]|Apply \[Enter\]/u, 'no second Apply/Save key exists')
   // Back returns to the ORIGINAL Rows selection with the fresh summary.
@@ -3362,7 +3364,7 @@ test('a forced teardown while a tenant write is in flight leaves a fresh tenant 
   await highlightRow(fresh, 'Parallel tool calls')
   await key(fresh, '\r')
   await settle(fresh, 6)
-  assert.doesNotMatch(fresh.view(), /Saving…|Verified|Not saved/u, 'a fresh tenant never inherits a retired settlement')
+  assert.doesNotMatch(fresh.view(), /Saving…|\bSaved\b|Could not (?:confirm )?save|Verified|Not saved/u, 'a fresh tenant never inherits a retired settlement')
   assert.match(fresh.view(), /Current value\s+9/u)
   fresh.dispose()
 })
@@ -3433,7 +3435,7 @@ test('a second workspace cannot be leased while a tenant write is owned, and a r
   releaseWrite?.()
   await settle(h, 12)
   assert.match(h.view(), /Current value\s+9/u)
-  assert.match(h.view(), /Verified/u)
+  assert.match(h.view(), /\bSaved\b/u)
   assert.equal(h.agentLoopWrites().length, 1, 'the settlement never replays or duplicates the write')
   // After the settlement the page is clean, so a remount in the SAME app yields
   // a FRESH instance: its own read, no inherited Saving/Verified, no new write.
@@ -3443,7 +3445,7 @@ test('a second workspace cannot be leased while a tenant write is owned, and a r
   await key(h, '\r')
   await settle(h, 6)
   assert.match(h.view(), /Value:\s*9/u, 'the remounted tenant seeds its own authoritative value')
-  assert.doesNotMatch(h.view(), /Saving…|Verified/u, 'a remounted tenant never inherits a retired settlement')
+  assert.doesNotMatch(h.view(), /Saving…|\bSaved\b|Could not (?:confirm )?save|Verified|Not saved/u, 'a remounted tenant never inherits a retired settlement')
   assert.equal(h.agentLoopWrites().length, 1, 'and never replays the retired write')
   h.dispose()
 })
@@ -3664,7 +3666,7 @@ test('the Agent tenant refuses every invalid raw value with zero writes and a re
     await settle(h, 6)
     const frame = h.view()
     assert.match(frame, probe.error, `the real field error for ${JSON.stringify(probe.raw)}\n${frame}`)
-    assert.doesNotMatch(frame, /Verified|No changes|Saving…/u, `${JSON.stringify(probe.raw)} never dispatches or claims success`)
+    assert.doesNotMatch(frame, /Verified|\bSaved\b|No changes|Saving…|Could not (?:confirm )?save/u, `${JSON.stringify(probe.raw)} never dispatches or claims success`)
     // The raw text is retained (exactly what the user typed, still editable).
     assert.equal(h.agentLoopWrites().length, 0, `${JSON.stringify(probe.raw)} wrote nothing`)
   }
@@ -3677,7 +3679,7 @@ test('the Agent tenant refuses every invalid raw value with zero writes and a re
   h.dispose()
 })
 
-test('the Agent tenant paints a definite refusal as Not saved and guards a dirty parent leave', async () => {
+test('the Agent tenant paints a definite refusal as Could not save and guards a dirty parent leave', async () => {
   const h = setup({
     columns: 160,
     rows: 44,
@@ -3694,7 +3696,7 @@ test('the Agent tenant paints a definite refusal as Not saved and guards a dirty
   await settle(h, 12)
   assert.equal(h.agentLoopWrites().length, 0, 'a refused write is not recorded as applied')
   const failed = h.view()
-  assert.match(failed, /Not saved/u, 'the definite refusal is named')
+  assert.match(failed, /Could not save/u, 'the definite refusal is named')
   assert.match(failed, /the Host refused the write/u, 'the real reason is painted')
   assert.match(failed, /Requested\s+6/u, 'the requested value stays visible')
   assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 10, inherited: 2 },
@@ -3716,7 +3718,7 @@ test('the Agent tenant paints a definite refusal as Not saved and guards a dirty
   h.dispose()
 })
 
-test('an ambiguous Agent outcome is never Verified and a Refresh restores the real authority', async () => {
+test('an ambiguous Agent outcome is never Saved and a Refresh restores the real authority', async () => {
   const h = setup({
     columns: 160,
     rows: 44,
@@ -3733,9 +3735,9 @@ test('an ambiguous Agent outcome is never Verified and a Refresh restores the re
   await settle(h, 12)
   assert.equal(h.agentLoopWrites().length, 1, 'the lost-ACK request was dispatched once')
   const ambiguous = h.view()
-  assert.match(ambiguous, /Outcome unconfirmed/u, 'a lost ACK is never Verified')
-  assert.doesNotMatch(ambiguous, /Verified/u)
-  assert.match(ambiguous, /possibly saved/u, 'the page states that it may have been applied')
+  assert.match(ambiguous, /Could not confirm save/u, 'a lost ACK is never Verified')
+  assert.doesNotMatch(ambiguous, /\bSaved\b/u)
+  assert.match(ambiguous, /The change may have been saved\. Refresh and check\./u, 'the page states that it may have been applied')
   assert.match(ambiguous, /Requested\s+4/u)
   // The parent leave acknowledges a possibly-applied write; it never claims to
   // undo it and never replays the request.
@@ -3744,7 +3746,7 @@ test('an ambiguous Agent outcome is never Verified and a Refresh restores the re
   assert.match(h.view(), /Leaving does not undo it\./u)
   assert.match(h.view(), /Leave anyway \[D\]/u)
   await key(h, '\u001b')
-  assert.match(h.view(), /Outcome unconfirmed/u, 'Keep leaves the page untouched')
+  assert.match(h.view(), /Could not confirm save/u, 'Keep leaves the page untouched')
   // Refresh is an explicit CONFIRMATION in this dirty state: it discards the
   // draft and re-reads the real authority, then STAYS on the same Detail.
   await clickPainted(h, 'Refresh [R]', true)
@@ -3753,7 +3755,7 @@ test('an ambiguous Agent outcome is never Verified and a Refresh restores the re
   await clickPainted(h, 'Refresh [R]', true)
   await settle(h, 10)
   assert.match(h.view(), /Current value\s+4/u, 'the authoritative readback is now the current value')
-  assert.doesNotMatch(h.view(), /Outcome unconfirmed/u, 'the ambiguity clears only through the real read')
+  assert.doesNotMatch(h.view(), /Could not confirm save/u, 'the ambiguity clears only through the real read')
   assert.equal(h.agentLoopWrites().length, 1, 'Refresh never replays the old request')
   // A deliberate fresh Change still works against the current authority.
   await key(h, '\r')
@@ -3765,7 +3767,7 @@ test('an ambiguous Agent outcome is never Verified and a Refresh restores the re
   h.dispose()
 })
 
-test('an accepted Agent write the Host did not adopt is Unverified, never Verified', async () => {
+test('an accepted Agent write the Host did not adopt is Could not confirm save, never Saved', async () => {
   const h = setup({
     columns: 160,
     rows: 44,
@@ -3781,9 +3783,9 @@ test('an accepted Agent write the Host did not adopt is Unverified, never Verifi
   await clickPainted(h, 'Confirm [Enter]', true)
   await settle(h, 12)
   assert.equal(h.agentLoopWrites().length, 1, 'exactly one request was dispatched')
-  assert.match(h.view(), /Unverified/u, 'an accepted write whose readback disagrees is Unverified')
-  assert.doesNotMatch(h.view(), /Verified/u)
-  assert.match(h.view(), /refresh to review/u)
+  assert.match(h.view(), /Could not confirm save/u, 'an accepted write whose readback disagrees is Unverified')
+  assert.doesNotMatch(h.view(), /\bSaved\b/u)
+  assert.match(h.view(), /The change may have been saved\. Refresh and check\./u)
   assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 10, inherited: 2 },
     'the Host never adopted the value')
   await clickPainted(h, 'Refresh [R]', true)
@@ -3825,7 +3827,7 @@ test('the Agent tenant Reset journey opens Advanced first and sends the official
   assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 2, inherited: 2 },
     'the readback decides the value; Reset never promises USER deletion')
   assert.match(h.view(), /Current value\s+2/u)
-  assert.match(h.view(), /Verified/u)
+  assert.match(h.view(), /\bSaved\b/u)
   // Effective == inherited is STILL a real explicit intent: the next Confirm
   // dispatches the official unset again instead of a set(inherited).
   await key(h, '?')
@@ -3959,7 +3961,7 @@ test('the Agent tenant holds ONE admitted write through its latch and never requ
   releaseWrite?.()
   await settle(h, 12)
   assert.match(h.view(), /Current value\s+4/u)
-  assert.match(h.view(), /Verified/u)
+  assert.match(h.view(), /\bSaved\b/u)
   await key(h, '\u001b')
   await settle(h, 6)
   assert.match(h.view(), /Settings · Agent · Rows/u, 'navigation succeeds only after the settlement')
@@ -4123,7 +4125,7 @@ test('the real Root Shell group is entered explicitly and saves both caps in ONE
     inheritedTimeoutMs: 60_000,
     inheritedMaxOutputBytes: 32_000,
   })
-  assert.match(h.view(), /Status\s+Verified/u, 'the authoritative readback is stated once')
+  assert.match(h.view(), /\bSaved\b/u, 'the authoritative readback is stated once')
   assert.match(h.view(), /Settings · Tools · Shell execution/u, 'Save never leaves the group')
   assert.match(h.view(), /> Output cap per stream \(bytes\)/u, 'the field selection survives the save')
   assert.match(h.view(), /Timeout 45000 ms/u, 'the parent Row follows the verified readback')
@@ -4235,7 +4237,7 @@ test('the Root Shell Advanced stages the SELECTED field reset and ONE Save sends
     inheritedTimeoutMs: 60_000,
     inheritedMaxOutputBytes: 32_000,
   })
-  assert.match(h.view(), /Status\s+Verified/u)
+  assert.match(h.view(), /\bSaved\b/u)
   h.dispose()
 
   // An explicit Reset is an INTENT even when effective == inherited.
@@ -4388,7 +4390,8 @@ test('the Root Shell group refuses stale captures and never claims an accepted r
   await key(stale, 's')
   await settle(stale, 8)
   assert.equal(stale.shellExecutionAttempts(), 0, 'a stale captured read never dispatches')
-  assert.match(stale.view(), /Last-known|Not saved/u)
+  assert.match(stale.view(), /Last-known|Could not save/u)
+  assert.doesNotMatch(stale.view(), /\bSaved\b/u, 'a stale zero-dispatch capture never claims Saved')
   assert.match(stale.view(), /Command timeout \(ms\)\s+45000 ms/u, 'the draft is retained')
   stale.dispose()
 
@@ -4430,8 +4433,8 @@ test('the Root Shell group refuses stale captures and never claims an accepted r
   release()
   await settle(accepted, 12)
   assert.equal(accepted.shellExecutionBatches().length, 1, 'the admitted batch is dispatched exactly once')
-  assert.doesNotMatch(accepted.view(), /Status\s+Verified/u, 'another served row is never Verified')
-  assert.match(accepted.view(), /Unverified/u)
+  assert.doesNotMatch(accepted.view(), /\bSaved\b/u, 'another served row is never Verified')
+  assert.match(accepted.view(), /Could not confirm save/u)
   assert.match(accepted.view(), /Command timeout \(ms\)\s+45000 ms/u, 'the captured draft is retained')
   assert.equal(accepted.shellExecutionAttempts(), 1, 'no blind replay')
   accepted.dispose()
@@ -4447,7 +4450,7 @@ test('the Root Shell group refuses stale captures and never claims an accepted r
   await stageShellField(refused, 'Command timeout (ms)', '45000')
   await clickPainted(refused, 'Save [S]', true)
   await settle(refused, 12)
-  assert.match(refused.view(), /Not saved/u)
+  assert.match(refused.view(), /Could not save/u)
   assert.match(refused.view(), /the official validator refused the caps/u)
   assert.equal(refused.shellExecutionAttempts(), 1, 'a definite refusal is dispatched once, never retried')
   assert.match(refused.view(), /Refresh \[R\]/u, 'the refused state offers its real recovery')
@@ -4688,7 +4691,7 @@ test('the real Root Shell medium grant paints the complete canonical fact and se
   const batches = h.shellExecutionBatches()
   assert.equal(batches.length, 1, 'the medium grant sends exactly one batch')
   assert.deepEqual(batches[0]?.patch, { timeoutMs: { kind: 'set', value: 1.2345678901234568e24 } })
-  assert.match(h.view(), /Status\s+Verified/u)
+  assert.match(h.view(), /\bSaved\b/u)
   h.dispose()
 })
 
@@ -4711,7 +4714,7 @@ test('the Root Shell group keeps an unconfirmed outcome out of the current-row s
   h.vt.resize(44, 8)
   await h.vt.waitForRender()
   await settle(h, 6)
-  assert.match(h.view(), /Status\s+Outcome unconfirmed/u, 'the 44x8 frame keeps the settlement status')
+  assert.match(h.view(), /Could not confirm save/u, 'the 44x8 frame keeps the settlement status')
   assert.match(h.view(), /Last-known · Host model-tool executor/u)
   // The hidden `?` never opens Advanced in the read-only settlement state.
   const readOnlyUnknown = h.view()
@@ -4728,13 +4731,14 @@ test('the Root Shell group keeps an unconfirmed outcome out of the current-row s
   assert.match(h.view(), /Last confirmed:|Command timeout/u, 'the selected field stays reachable at 44x8')
   await key(h, '\x1b[H')
   await settle(h, 4)
-  assert.match(h.view(), /Status\s+Outcome unconfirmed/u, 'the settlement status is reachable again')
+  assert.match(h.view(), /Could not confirm save/u, 'the settlement status is reachable again')
   h.vt.resize(160, 14)
   await h.vt.waitForRender()
   await settle(h, 6)
-  assert.match(h.view(), /Status\s+Outcome unconfirmed/u, 'the settlement state leads the short frame')
-  assert.match(h.view(), /possibly saved;/u)
-  assert.match(h.view(), /before retrying\./u)
+  assert.match(h.view(), /Could not confirm save/u, 'the settlement state leads the short frame')
+  assert.match(h.view(), /The change may have been saved\. Refresh and check\./u)
+  assert.equal((h.view().match(/The change may have been saved\. Refresh and check\./gu) ?? []).length, 1,
+    'the recovery sentence is projected once')
   assert.match(h.view(), /Last-known · Host model-tool executor · POSIX Bash/u, 'the captured executor is not painted as current')
   assert.match(h.view(), /Last confirmed: 60000 ms · Unsaved/u)
   assert.doesNotMatch(h.view(), /Current: 60000/u)
@@ -4820,7 +4824,7 @@ test('the real Root Shell short grant completes the whole pointer journey', asyn
   const batches = h.shellExecutionBatches()
   assert.equal(batches.length, 1, 'the pointer journey sends exactly one batch')
   assert.deepEqual(batches[0]?.patch, { maxOutputBytes: { kind: 'reset' } }, 'the pointer Reset is the official unset')
-  assert.match(h.view(), /Status\s+Verified/u)
+  assert.match(h.view(), /\bSaved\b/u)
   await clickPainted(h, 'Back [Esc]', true)
   await settle(h, 4)
   assert.match(h.view(), /Settings · Tools · Rows/u, 'the pointer journey exits to Rows')
@@ -4959,7 +4963,7 @@ test('Session log upload paints its upload risk and offers On/Off/Reset; Reset m
   await key(h, '\r')
   await settle(h, 12)
   assert.deepEqual(h.sessionLogWrites(), [{ field: 'enabled', op: 'set', value: false }])
-  assert.match(h.view(), /Verified/u)
+  assert.match(h.view(), /\bSaved\b/u)
 
   // Reopen the same row and stage the OFFICIAL unset. The Host may read On.
   await key(h, '\x1b') // settled Detail -> Rows
@@ -4970,7 +4974,7 @@ test('Session log upload paints its upload risk and offers On/Off/Reset; Reset m
   assert.deepEqual(h.sessionLogWrites()[1], { field: 'enabled', op: 'reset' })
   assert.equal(h.hostSections().sessionLog?.enabled, true, 'the official reset readback is On again')
   const after = h.view()
-  assert.match(after, /Verified/u)
+  assert.match(after, /\bSaved\b/u)
   assert.match(after, /On/u)
   assert.doesNotMatch(after, /Off[^\n]*safe|safe[^\n]*Off/iu, 'Reset is never presented as a safety guarantee')
   h.dispose()
@@ -4987,7 +4991,7 @@ test('Session log unknown/mismatched settlements never offer a blind Retry', asy
   await key(unknown, '\r')
   await settle(unknown, 12)
   const unknownFrame = unknown.view()
-  assert.match(unknownFrame, /Outcome unconfirmed/u, 'the lost settlement is named explicitly')
+  assert.match(unknownFrame, /Could not confirm save/u, 'the lost settlement is named explicitly')
   assert.doesNotMatch(unknownFrame, /Retry save/u, 'a blind replay is not offered')
   assert.equal(unknown.sessionLogWrites().length, 0, 'the fake did not apply the unconfirmed write')
   unknown.dispose()
@@ -5003,7 +5007,7 @@ test('Session log unknown/mismatched settlements never offer a blind Retry', asy
   await key(mismatched, '\r')
   await settle(mismatched, 12)
   const mismatchedFrame = mismatched.view()
-  assert.match(mismatchedFrame, /Commit accepted · verification unavailable/u,
+  assert.match(mismatchedFrame, /Could not confirm save/u,
     'the accepted but disagreeing readback is Unverified')
   assert.doesNotMatch(mismatchedFrame, /Retry save/u)
   assert.equal(mismatched.sessionLogWrites().length, 1, 'the official write was dispatched once')
@@ -5025,7 +5029,7 @@ test('Session log unknown/mismatched settlements never offer a blind Retry', asy
   await key(refused, '\r')
   await settle(refused, 12)
   const refusedFrame = refused.view()
-  assert.match(refusedFrame, /Not saved/u)
+  assert.match(refusedFrame, /Could not save/u)
   assert.match(refusedFrame, /Retry save/u, 'a definite refusal keeps the manual retry route')
   assert.equal(refused.sessionLogWrites().length, 0)
   refused.dispose()
@@ -5043,7 +5047,7 @@ test('the Session log Confirm button is pointer-complete with the risk frame', a
   await clickPainted(h, 'Confirm')
   await settle(h, 12)
   assert.deepEqual(h.sessionLogWrites(), [{ field: 'enabled', op: 'set', value: false }])
-  assert.match(h.view(), /Verified/u)
+  assert.match(h.view(), /\bSaved\b/u)
   h.dispose()
 })
 
@@ -6554,7 +6558,8 @@ test('the profile-wide Visual tools switch confirms through its Host port, verif
   await settle(h)
   assert.deepEqual(h.visualWrites(), [false], 'the Host port receives exactly one Off write')
   assert.equal(h.visualState()?.enabled, false, 'the Host-facing state really changed')
-  assert.match(h.view(), /Status\s+Verified/)
+  assert.match(h.view(), /\bSaved\b/)
+  assert.doesNotMatch(h.view(), /Status\s+Saved/u, 'a Root scalar never borrows the Status label')
   // A SUCCESSFUL Off is "disabled", never "not applied": the runtime line
   // interprets the live registration fact against the desired configuration.
   assert.match(h.view(), /Runtime\s+Both tools disabled/)
@@ -6567,9 +6572,57 @@ test('the profile-wide Visual tools switch confirms through its Host port, verif
   await settle(h)
   assert.deepEqual(h.visualWrites(), [false, true])
   assert.equal(h.visualState()?.enabled, true)
-  assert.match(h.view(), /Status\s+Verified/)
+  assert.match(h.view(), /\bSaved\b/)
+  assert.doesNotMatch(h.view(), /Status\s+Saved/u, 'a Root scalar never borrows the Status label')
   assert.match(h.view(), /Runtime\s+Both tools registered/)
   assert.doesNotMatch(h.view(), /not applied/iu)
+  h.dispose()
+})
+
+test('a saved Root scalar demotes to Last-known when its authority goes stale', async () => {
+  const h = setup({ columns: 200, rows: 40 })
+  await h.open('Tools')
+  await key(h, '\r')
+  await key(h, '\r')
+  await key(h, '\x1b[B')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(detailPaneText(h), /\bSaved\b/, 'the verified save starts as a current Saved')
+
+  h.setReadiness('stale')
+  await key(h, 'r')
+  await settle(h)
+  const detail = detailPaneText(h)
+  assert.match(detail, /Last-known · read-only/u, 'a stale verified settlement is no longer painted as Saved')
+  assert.match(detail, /Previous save completed; refresh to review\./u, 'the history is named as history')
+  assert.doesNotMatch(detail, /\bSaved\b/u)
+  h.dispose()
+})
+
+test('a saved Root scalar never resurrects on a same-revision authority replacement', async () => {
+  const h = setup({ columns: 200, rows: 40 })
+  await h.open('Tools')
+  await key(h, '\r')
+  await key(h, '\r')
+  await key(h, '\x1b[B')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(detailPaneText(h), /\bSaved\b/, 'the verified save starts as a current Saved')
+  const savedRevision = h.visualState()?.revision
+
+  // The replacement exposes the SAME revision and value; only the authority
+  // identity moved. The old A receipt must not become B's current success.
+  h.replaceConfigAuthority({ host: 'replacement' })
+  await key(h, 'r')
+  await settle(h)
+  assert.equal(h.visualState()?.revision, savedRevision, 'the replacement deliberately keeps the same revision')
+  const detail = detailPaneText(h)
+  assert.doesNotMatch(detail, /\bSaved\b/u, 'the ready replacement does not resurrect A\'s Saved')
+  assert.doesNotMatch(detail, /Last-known · read-only|Previous save completed/u,
+    'a ready replacement retires the receipt instead of calling the new source read-only')
+  assert.match(detail, /Freshness\s+Ready/u, 'the fresh row keeps its own ready fact')
+  assert.match(detail, /Value\s+Off/u, 'the fresh row keeps its current value')
+  assert.match(h.view(), /Change…/u, 'the fresh row keeps its edit affordance')
   h.dispose()
 })
 
@@ -6618,7 +6671,7 @@ test('a stale backend keeps the last-known Visual tools value but refuses the wr
   h.dispose()
 })
 
-test('a switch the Host registry did not adopt is reported as unverified, never Verified', async () => {
+test('a switch the Host registry did not adopt is reported as Could not confirm save, never Saved', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -6632,14 +6685,14 @@ test('a switch the Host registry did not adopt is reported as unverified, never 
   await key(h, '\r')
   await settle(h)
   assert.deepEqual(h.visualWrites(), [true])
-  assert.match(h.view(), /Commit accepted · verification unavailable/)
+  assert.match(h.view(), /Could not confirm save/)
   assert.match(h.view(), /Runtime\s+Not applied — registration failed/u, 'a configured On that did not register is named as a failure')
-  assert.match(h.view(), /did not adopt/u, 'the real registry fact is stated')
-  assert.ok(!h.view().includes('Verified'), 'a persisted value the runtime did not adopt is never Verified')
+  assert.match(h.view(), /are not active/u, 'the real registry fact is stated')
+  assert.ok(!h.view().includes('Saved'), 'a persisted value the runtime did not adopt is never Verified')
   h.dispose()
 })
 
-test('B-05e2 a verified Off whose registrations remain is named as a runtime mismatch', async () => {
+test('B-05e2 a saved Off whose registrations remain is named as a runtime mismatch', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -6652,13 +6705,13 @@ test('B-05e2 a verified Off whose registrations remain is named as a runtime mis
   await key(h, '\r')
   await settle(h)
   assert.deepEqual(h.visualWrites(), [false])
-  assert.match(h.view(), /Status\s+Commit accepted · verification unavailable/)
+  assert.match(h.view(), /Could not confirm save/)
   assert.match(h.view(), /Runtime\s+Not applied — tools remain registered/u)
-  assert.doesNotMatch(h.view(), /Status\s+Verified/u)
+  assert.doesNotMatch(h.view(), /\bSaved\b/u)
   h.dispose()
 })
 
-test('a refused Visual tools write is reported as Not saved and never Verified', async () => {
+test('a refused Visual tools write is reported as Could not save and never Saved', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -6672,14 +6725,15 @@ test('a refused Visual tools write is reported as Not saved and never Verified',
   await key(h, '\r')
   await settle(h)
   assert.deepEqual(h.visualWrites(), [true])
-  assert.match(h.view(), /Not saved · settings namespace "pi-tui-visual-tools" changed since it was read/)
-  assert.ok(!h.view().includes('Verified'))
+  assert.match(h.view(), /Could not save/u)
+  assert.match(h.view(), /settings namespace "pi-tui-visual-tools" changed since it was read/u)
+  assert.ok(!h.view().includes('Saved'))
   assert.ok(!h.view().includes('Retry save'),
     'a non-verified Host decision requires a fresh Change, never a Retry save')
   h.dispose()
 })
 
-test('an external edit before Confirm is a definite Not saved, never a silent overwrite', async () => {
+test('an external edit before Confirm is a definite Could not save, never a silent overwrite', async () => {
   const h = setup({ columns: 200, rows: 40, visualToolsExternalChange: false })
   await h.open('Tools')
   await key(h, '\r')
@@ -6688,7 +6742,7 @@ test('an external edit before Confirm is a definite Not saved, never a silent ov
   await key(h, '\r')
   await settle(h)
   assert.deepEqual(h.visualWrites(), [], 'the queue-head conflict dispatched ZERO target writes')
-  assert.match(h.view(), /Not saved/, 'the pre-dispatch conflict is a definite refusal')
+  assert.match(h.view(), /Could not save/, 'the pre-dispatch conflict is a definite refusal')
   assert.ok(!h.view().includes('Verified'), 'a stale decision is never Verified')
   assert.equal(h.visualState()?.enabled, false, 'the external edit stays authoritative')
   h.dispose()
@@ -8710,7 +8764,7 @@ test('the Visual tools row keeps its focus/choice/confirm contract at medium and
   release(medium, confirmRow, cellIndexOf(medium, confirmRow, 'Confirm'))
   await settle(medium)
   assert.deepEqual(medium.visualWrites(), [false], 'the mouse Confirm dispatched exactly one Host write')
-  assert.match(medium.view(), /Status\s+Verified/)
+  assert.match(medium.view(), /\bSaved\b/)
   await key(medium, '\x1b') // retire the settled choice view -> rows
   await key(medium, '\x1b') // rows -> categories
   assert.match(medium.rowsPlain()[0]!, /Settings · Categories/)
@@ -8730,7 +8784,7 @@ test('the Visual tools row keeps its focus/choice/confirm contract at medium and
   await key(narrow, '\r') // explicit confirm
   await settle(narrow)
   assert.deepEqual(narrow.visualWrites(), [false], 'the narrow explicit confirm dispatches one Host write')
-  assert.match(narrow.view(), /Status\s+Verified/)
+  assert.match(narrow.view(), /\bSaved\b/)
   await key(narrow, '\x1b') // detail -> rows
   await key(narrow, '\x1b') // rows -> categories
   assert.ok(narrow.rowsPlain().some(line => line.includes('> Tools')), 'Esc returns to the narrow rail with Tools selected')
@@ -12295,7 +12349,7 @@ test('Enable Web writes once and shows the settled authoritative re-read', async
   await settle(h)
   assert.deepEqual(h.webEnabledWrites(), [true], 'exactly one Host toggle')
   assert.match(webUiPlain(h), /Serving\s+Enabled/u, 'the authoritative re-read settles the fact')
-  assert.match(webUiPlain(h), /Status\s+Verified/u)
+  assert.match(webUiPlain(h), /Status\s+Web enabled/u)
   assert.equal(h.webUrlReads(), 0, 'a toggle never requests the launch URL')
   h.dispose()
 })
@@ -12324,7 +12378,7 @@ test('Disable Web… requires the in-page confirmation; Cancel performs zero wri
   await settle(h)
   assert.deepEqual(h.webEnabledWrites(), [false], 'the second confirmation dispatches exactly one write')
   assert.match(webUiPlain(h), /Serving\s+Disabled/u)
-  assert.match(webUiPlain(h), /Status\s+Verified/u)
+  assert.match(webUiPlain(h), /Status\s+Web disabled/u)
   h.dispose()
 })
 
@@ -12389,7 +12443,7 @@ test('the next-start preference writes ONLY after Confirm save, through its own 
   await key(h, '\r') // Confirm save
   await settle(h)
   assert.deepEqual(h.webAutoStartWrites(), [false], 'exactly one preference write (Off)')
-  assert.match(webUiPlain(h), /Status\s+Verified/u)
+  assert.match(webUiPlain(h), /Status\s+Saved/u)
   assert.match(webUiPlain(h), /Start automatically\s+Off(?! \(default\))/u, 'the re-read value is painted')
   assert.equal(h.webEnabledWrites().length, 0, 'the preference write never toggles the running Host')
   h.dispose()
@@ -12426,7 +12480,7 @@ test('a refused preference write is reported as Not saved with the official reas
   await key(h, '\r') // Confirm save
   await settle(h)
   assert.deepEqual(h.webAutoStartWrites(), [false], 'the refused decision still reached the Host once')
-  assert.match(webUiPlain(h), /Status\s+Not saved/u, 'the conflict is attributed to THIS request')
+  assert.match(webUiPlain(h), /Status\s+Could not save/u, 'the conflict is attributed to THIS request')
   assert.match(webUiPlain(h), /changed since it was read/u, 'the official conflict reason is stated')
   h.dispose()
 })
@@ -12489,7 +12543,7 @@ test('a same-generation Config update refuses the painted confirmation with zero
   await key(h, '\r') // Confirm save
   await settle(h)
   assert.deepEqual(h.webAutoStartWrites(), [], 'the stale confirmation wrote nothing')
-  assert.match(webUiPlain(h), /Status\s+Not saved/u)
+  assert.match(webUiPlain(h), /Status\s+Could not save/u)
   assert.match(webUiFlat(h), /changed since this choice was opened/u,
     'the complete reason is readable across its wrapped Detail lines')
   assert.doesNotMatch(webUiPlain(h), /Confirm save/u)
@@ -12504,7 +12558,7 @@ test('a same-generation Config update refuses the painted confirmation with zero
   await key(h, '\r')
   await settle(h)
   assert.deepEqual(h.webAutoStartWrites(), [false])
-  assert.match(webUiPlain(h), /Status\s+Verified/u)
+  assert.match(webUiPlain(h), /Status\s+Saved/u)
   h.dispose()
 })
 
@@ -12591,7 +12645,7 @@ test('a Host rollover downgrades the next-start preference until the new Config 
   await key(h, '\r') // Confirm save
   await settle(h)
   assert.deepEqual(h.webAutoStartWrites(), [false])
-  assert.match(webUiPlain(h), /Status\s+Verified/u)
+  assert.match(webUiPlain(h), /Status\s+Saved/u)
   h.dispose()
 })
 
@@ -12614,26 +12668,26 @@ test('an official URL from a REPLACED Host never reaches the Client opener or cl
   h.dispose()
 })
 
-test('a lost toggle receipt is Outcome unconfirmed, dispatched once, never retried', async () => {
+test('a lost toggle receipt is Could not confirm change, dispatched once, never retried', async () => {
   const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'disabled' }, webToggleFailure: 'the connection dropped after dispatch' })
   await openWebUi(h)
   await key(h, '\r') // Enable Web
   await settle(h, 10)
   assert.deepEqual(h.webEnabledWrites(), [true], 'the request was really dispatched exactly once')
-  assert.match(webUiPlain(h), /Status\s+Outcome unconfirmed/u, 'a lost receipt is never claimed as Not changed')
-  assert.match(webUiPlain(h), /the connection dropped after dispatch/u)
+  assert.match(webUiPlain(h), /Status\s+Could not confirm change/u, 'a lost receipt is never claimed as Not changed')
+  assert.match(webUiPlain(h), /the connection dropped after dispatch/iu)
   await settle(h, 10)
   assert.deepEqual(h.webEnabledWrites(), [true], 'no automatic retry')
   h.dispose()
 })
 
-test('a toggle the Host did not adopt is Not saved, not Verified', async () => {
+test('a toggle the Host did not adopt is Requested state not reached, not Saved', async () => {
   const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'disabled' }, webSettledStatus: { state: 'disabled' } })
   await openWebUi(h)
   await key(h, '\r')
   await settle(h)
   assert.deepEqual(h.webEnabledWrites(), [true])
-  assert.match(webUiPlain(h), /Status\s+Not saved/u)
+  assert.match(webUiPlain(h), /Status\s+Requested state not reached/u)
   assert.match(webUiPlain(h), /the request reported success, but the Host reads Disabled/u)
   h.dispose()
 })
@@ -12901,7 +12955,7 @@ test('a 38-cell Detail completes the whole next-start preference journey by poin
   await settle(h, 10)
   assert.deepEqual(h.webAutoStartWrites(), [true], 'exactly one preference sink write')
   assert.equal(h.webEnabledWrites().length, 0, 'the preference never toggles the running Host')
-  assert.match(detailPaneText(h), /Start automatically On(?:\s|·).*?Status Verified/u,
+  assert.match(detailPaneText(h), /Start automatically On(?:\s|·).*?Status Saved/u,
     'the persisted value and its own settlement are painted')
   // The real painted Back leaves the tenant once.
   await clickPainted(h, 'Back [Esc]', true)
@@ -13165,7 +13219,7 @@ test('Enable ACP dispatches ONE Host write and paints the authoritative re-read'
   await settle(h, 10)
   assert.deepEqual(h.acpEnabledWrites(), [true], 'exactly one Host toggle')
   assert.match(acpAccessPlain(h), /Listener\s+Enabled/u, 'the authoritative re-read settles the fact')
-  assert.match(acpAccessPlain(h), /Status\s+Verified/u)
+  assert.match(acpAccessPlain(h), /Status\s+ACP enabled/u)
   h.dispose()
 })
 
@@ -13190,7 +13244,7 @@ test('Disable ACP… requires the in-page risk confirmation; Cancel performs zer
   await settle(h, 10)
   assert.deepEqual(h.acpEnabledWrites(), [false], 'only the confirmation dispatches the ONE disable')
   assert.match(acpAccessPlain(h), /Listener\s+Disabled/u)
-  assert.match(acpAccessPlain(h), /Status\s+Verified/u)
+  assert.match(acpAccessPlain(h), /Status\s+ACP disabled/u)
   h.dispose()
 })
 
@@ -13384,7 +13438,7 @@ test('a 38-cell ACP Detail completes the whole next-start preference journey by 
   await settle(h, 10)
   assert.deepEqual(h.acpAutoStartWrites(), [true], 'exactly one preference sink write')
   assert.deepEqual(h.acpEnabledWrites(), [], 'the preference never toggles the running Host')
-  assert.match(detailPaneText(h), /Start automatically On(?:\s|·).*?Status Verified/u,
+  assert.match(detailPaneText(h), /Start automatically On(?:\s|·).*?Status Saved/u,
     'the persisted value and its own settlement are painted')
   // The real painted Back leaves the tenant once.
   await clickPainted(h, 'Back [Esc]', true)
@@ -13572,7 +13626,7 @@ test('a pending ACP preference write settles honestly across A→B without a B w
   await key(h, '\r') // stage On
   await key(h, '\r') // Confirm save: the settings mutation is held after dispatch
   await settle(h)
-  assert.match(acpAccessPlain(h), /Waiting for the answer…/u)
+  assert.match(acpAccessPlain(h), /Saving…/u)
   assert.deepEqual(h.acpAutoStartWrites(), [true], 'the A decision reached the real writer once')
 
   // The Host is replaced while A is pending. The write stays owned by A; it is
@@ -13580,15 +13634,15 @@ test('a pending ACP preference write settles honestly across A→B without a B w
   h.bumpAcpGeneration()
   await settle(h, 12)
   assert.equal(h.acpAutoStartWrites().length, 1, 'A→B dispatches no second/B write')
-  assert.match(acpAccessPlain(h), /Waiting for the answer…/u, 'the pending A settlement still owns its phase')
-  assert.doesNotMatch(acpAccessPlain(h), /Status\s+Verified/u, 'no optimistic verification across the replacement')
+  assert.match(acpAccessPlain(h), /Saving…/u, 'the pending A settlement still owns its phase')
+  assert.doesNotMatch(acpAccessPlain(h), /Status\s+Saved/u, 'no optimistic verification across the replacement')
 
   h.releaseAcpConfigWrite()
   await settle(h, 12)
-  assert.match(acpAccessPlain(h), /Status\s+Outcome unconfirmed/u, 'the A settlement is reported honestly, not as Verified')
+  assert.match(acpAccessPlain(h), /Status\s+Could not confirm save/u, 'the A settlement is reported honestly, not as Verified')
   assert.equal(h.acpAutoStartWrites().length, 1, 'the unknown A outcome is never retried against B')
   assert.match(acpAccessPlain(h), /Start automatically\s+Off \(default\)/u, 'B paints its OWN current preference')
-  assert.doesNotMatch(acpAccessPlain(h), /Status\s+Verified/u)
+  assert.doesNotMatch(acpAccessPlain(h), /Status\s+Saved/u)
   await key(h, '\x1b')
   await settle(h)
   assert.match(h.view(), /Settings · Host · Rows/u, 'the settled page still leaves through the normal Back')
@@ -13644,7 +13698,7 @@ test('the Backend row writes Daemon through its own port and verifies the re-rea
     await key(h, '\r')
     await settle(h)
     assert.deepEqual(h.backendStartupWrites(), ['daemon'], 'the port receives exactly one daemon write')
-    assert.match(h.view(), /Status\s+Verified/u, 'the authoritative re-read verified the write')
+    assert.match(h.view(), /\bSaved\b/u, 'the authoritative re-read verified the write')
     assert.match(h.view(), /Daemon/u, 'the verified row reports the persisted preference')
     h.dispose()
   } finally {
@@ -13743,7 +13797,7 @@ test('a refused Backend write offers no Retry save and a fresh Change commits on
     await key(h, '\x1b[B') // Direct -> Daemon
     await key(h, '\r') // Confirm: the Host refuses
     await settle(h)
-    assert.match(h.view(), /Not saved/u, 'the refusal is attributed to THIS request')
+    assert.match(h.view(), /Could not save/u, 'the refusal is attributed to THIS request')
     assert.doesNotMatch(h.view(), /Retry save/u,
       'a non-verified Host decision requires a fresh Change, never a Retry save')
     assert.deepEqual(h.backendStartupWrites(), ['daemon'], 'exactly the refused request was dispatched')
@@ -13755,7 +13809,7 @@ test('a refused Backend write offers no Retry save and a fresh Change commits on
     await settle(h)
     assert.deepEqual(h.backendStartupWrites(), ['daemon', 'daemon'],
       'the fresh Change -> Confirm is the only second request')
-    assert.match(h.view(), /Status\s+Verified/u, 'that fresh same-generation commit verifies')
+    assert.match(h.view(), /\bSaved\b/u, 'that fresh same-generation commit verifies')
     h.dispose()
   } finally {
     if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
@@ -14101,7 +14155,7 @@ test('a silent Config authority replacement refuses the painted Web Change and a
   await key(h, '\r') // Confirm save
   await settle(h)
   assert.deepEqual(h.webAutoStartWrites(), [true], 'the fresh gesture performs the ONE real write')
-  assert.match(webUiPlain(h), /Status\s+Verified/u)
+  assert.match(webUiPlain(h), /Status\s+Saved/u)
   h.dispose()
 })
 
@@ -14131,7 +14185,7 @@ test('a silent Config authority replacement refuses the painted Root Backend Cha
     await key(h, '\r')
     await settle(h)
     assert.deepEqual(h.backendStartupWrites(), ['daemon'], 'the fresh gesture performs the ONE real write')
-    assert.match(h.view(), /Status\s+Verified/u)
+    assert.match(h.view(), /\bSaved\b/u)
     h.dispose()
   } finally {
     if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND

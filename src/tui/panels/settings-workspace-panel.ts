@@ -306,6 +306,10 @@ export interface SettingsWorkspaceCommitRequest {
 export interface SettingsWorkspaceCommitOutcome {
   readonly outcome: 'verified' | 'not-saved' | 'unverified' | 'indeterminate'
   readonly reason?: string
+  /** The value the verified readback proved, for the Host-configuration
+   *  scalars. A receipt must not bind to a different current value even on
+   *  the same authority revision. */
+  readonly verifiedValue?: string
   /**
    * M6 UX PR2: the ONE verified-transition follow-up the command layer decided
    * this Client may offer in the SAME lease. It is a pure presentation hand-off:
@@ -330,8 +334,14 @@ export interface SettingsWorkspaceCommitOutcome {
  *  token (design language §3.2 / role 9). */
 interface SettingsCommitStatus {
   readonly word: string
-  readonly reason: string
+  readonly reason?: string
   readonly tone: 'success' | 'error' | 'warning' | 'muted'
+  /** The Host-config scalars paint the short user feedback without the generic
+   *  `Status` label instead of the workspace's internal settlement words. */
+  readonly plain?: true
+  /** An accepted-but-unattributable settlement: the user must know the change
+   *  MAY be saved and refresh before deciding anything else. */
+  readonly unknown?: true
 }
 
 /** The snapshot one open/refresh reads from the live authorities. */
@@ -560,6 +570,10 @@ type SettingsWorkspaceEditPhase =
       readonly requestId: number
       readonly attempted: string
       readonly registrationToken?: number
+      /** The Host-config authority identity the write was admitted against.
+       *  A replacement that lands before the post-write refresh must not let
+       *  the old verified outcome bind to the new authority. */
+      readonly authorityGeneration?: object
     }
   | {
       readonly kind: 'settled'
@@ -569,6 +583,11 @@ type SettingsWorkspaceEditPhase =
       readonly outcome: SettingsWorkspaceCommitOutcome['outcome']
       readonly reason?: string
       readonly registrationToken?: number
+      /** The post-write Host-config observation, captured only while the
+       *  authority still matches the one the write was admitted against and
+       *  the current value is the one the readback proved. */
+      readonly observation?: { readonly generation: object; readonly revision?: number }
+      readonly verifiedValue?: string
     }
 
 type SettingsLayout = 'wide' | 'medium' | 'narrow'
@@ -3666,6 +3685,13 @@ export class SettingsWorkspacePanel implements Component {
     return { text: paint, painted }
   }
 
+  /** The three Host-config scalars share one short, user-facing feedback
+   *  vocabulary with the hosted pages. Every other row keeps the workspace's
+   *  established settlement words. */
+  private hostConfigFeedbackField(field: SettingsWorkspaceWritableField): boolean {
+    return field === 'startup-backend' || field === 'visual-tools' || field === 'session-log-upload'
+  }
+
   /** The commit status of the row's own field, as the last settlement reported
    *  it. Only the row that owns the phase shows it — never a global banner.
    *  The WORD and its tone are separate from the explanation so the pane can
@@ -3677,19 +3703,63 @@ export class SettingsWorkspacePanel implements Component {
     // the previous record's pending/settled acknowledgement.
     const sameRegistration = phase.kind === 'browsing' || phase.registrationToken === row.extensionRegistrationToken
     if (!sameRegistration) return undefined
+    const hostConfig = this.hostConfigFeedbackField(field)
     if (phase.kind === 'pending' && phase.field === field) {
-      return { word: 'Saving…', reason: 'the Host has not confirmed yet', tone: 'muted' }
+      return hostConfig
+        ? { word: 'Saving…', tone: 'muted', plain: true }
+        : { word: 'Saving…', reason: 'the Host has not confirmed yet', tone: 'muted' }
     }
     if (phase.kind !== 'settled' || phase.field !== field) return undefined
-    if (phase.outcome === 'verified') return { word: 'Verified', reason: 'the authoritative read agrees', tone: 'success' }
-    if (phase.outcome === 'not-saved') return { word: 'Not saved', reason: phase.reason ?? 'the write was refused', tone: 'error' }
+    if (phase.outcome === 'verified') {
+      const currentValue = row.edit?.options.find(option => option.current)?.value
+      const observationMatches = hostConfig
+        && phase.observation !== undefined
+        && phase.verifiedValue !== undefined
+        && currentValue === phase.verifiedValue
+        && row.edit?.generation !== undefined
+        && Object.is(phase.observation.generation, row.edit.generation)
+        && phase.observation.revision === row.edit.revision
+      if (hostConfig && row.freshness !== 'ready') {
+        // The source is genuinely stale: keep the historical acknowledgement.
+        return {
+          word: 'Last-known · read-only',
+          reason: 'Previous save completed; refresh to review.',
+          tone: 'warning',
+          plain: true,
+        }
+      }
+      if (hostConfig && !observationMatches) {
+        // The source is READY but a different observation: the old receipt is
+        // obsolete, not read-only. Retire it and let the fresh row speak.
+        return undefined
+      }
+      return hostConfig
+        ? { word: 'Saved', tone: 'success', plain: true }
+        : { word: 'Verified', reason: 'the authoritative read agrees', tone: 'success' }
+    }
+    if (phase.outcome === 'not-saved') {
+      return {
+        word: hostConfig ? 'Could not save' : 'Not saved',
+        reason: phase.reason ?? 'the write was refused',
+        tone: 'error',
+        ...(hostConfig ? { plain: true as const } : {}),
+      }
+    }
     if (phase.outcome === 'indeterminate') {
-      return { word: 'Outcome unknown', reason: phase.reason ?? 'the write could not be attributed', tone: 'warning' }
+      return {
+        word: hostConfig ? 'Could not confirm save' : 'Outcome unknown',
+        reason: phase.reason ?? 'the write could not be attributed',
+        tone: 'warning',
+        ...(hostConfig ? { plain: true as const, unknown: true as const } : {}),
+      }
     }
     return {
-      word: 'Commit accepted',
-      reason: `verification unavailable${phase.reason === undefined ? '' : ` · ${phase.reason}`}`,
+      word: hostConfig ? 'Could not confirm save' : 'Commit accepted',
+      reason: hostConfig
+        ? phase.reason ?? 'the Host accepted the write, but its value could not be checked'
+        : `verification unavailable${phase.reason === undefined ? '' : ` · ${phase.reason}`}`,
       tone: 'warning',
+      ...(hostConfig ? { plain: true as const, unknown: true as const } : {}),
     }
   }
 
@@ -3789,7 +3859,23 @@ export class SettingsWorkspacePanel implements Component {
           : status.tone === 'error' ? color.error
             : status.tone === 'warning' ? color.warning
               : color.textDim
-        statusField('Status', status.word, status.reason, paint)
+        if (status.plain === true) {
+          // The Host-config scalars paint the settlement as their own short
+          // line: no generic `Status` label and no internal outcome word.
+          for (const line of wrapTextWithAnsi(paint(escapedPhysicalLine(status.word)), Math.max(1, width))) {
+            lines.push(line)
+          }
+          if (status.reason !== undefined) {
+            const reason = escapedPhysicalLine(status.reason).trim()
+            const sentence = /[.!?]$/u.test(reason) ? reason : `${reason}.`
+            const detail = status.unknown === true
+              ? `The change may have been saved. Refresh and check. ${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}`
+              : reason
+            for (const line of wrapTextWithAnsi(color.textDim(detail), Math.max(1, width))) lines.push(line)
+          }
+        } else {
+          statusField('Status', status.word, status.reason, paint)
+        }
       }
       if (edit.options.length === 0) field('Choice', 'No candidate is available for this setting right now.')
     }
@@ -6050,6 +6136,7 @@ export class SettingsWorkspacePanel implements Component {
       requestId,
       attempted: value,
       ...registrationToken === undefined ? {} : { registrationToken },
+      ...generation === undefined ? {} : { authorityGeneration: generation },
     }
     this.choiceOffset = 0
     this.bumpRevision()
@@ -6073,7 +6160,7 @@ export class SettingsWorkspacePanel implements Component {
     if (this.disposed) return
     const phase = this.editPhase
     if (phase.kind !== 'pending' || phase.requestId !== requestId) return
-    this.settle(phase.field, phase.attempted, outcome, phase.registrationToken)
+    this.settle(phase.field, phase.attempted, outcome, phase.registrationToken, phase.authorityGeneration)
 
   }
 
@@ -6084,6 +6171,7 @@ export class SettingsWorkspacePanel implements Component {
     attempted: string,
     outcome: SettingsWorkspaceCommitOutcome,
     registrationToken?: number,
+    authorityGeneration?: object,
   ): void {
     this.editPhase = {
       kind: 'settled',
@@ -6093,6 +6181,8 @@ export class SettingsWorkspacePanel implements Component {
       outcome: outcome.outcome,
       ...outcome.reason === undefined ? {} : { reason: outcome.reason },
       ...registrationToken === undefined ? {} : { registrationToken },
+      ...authorityGeneration === undefined ? {} : { authorityGeneration },
+      ...(outcome.verifiedValue === undefined ? {} : { verifiedValue: outcome.verifiedValue }),
     }
     this.editRequestId += 1
     this.choiceOffset = 0
@@ -6113,6 +6203,27 @@ export class SettingsWorkspacePanel implements Component {
       this.serviceInstallRiskSeen = new Set<number>()
     }
     this.refresh()
+    const settled = this.editPhase
+    if (settled.kind === 'settled' && settled.field === field) {
+      const row = this.snapshot.rows.find(candidate => candidate.edit?.field === field)
+      const generation = row?.edit?.generation
+      const currentValue = row?.edit?.options.find(option => option.current)?.value
+      // Capture the post-write observation ONLY while the authority is still
+      // the one the write was admitted against AND the current value is the
+      // one the readback proved. A replacement or a concurrent value change
+      // that landed before this refresh must not inherit the receipt.
+      if (row !== undefined && generation !== undefined
+        && authorityGeneration !== undefined && Object.is(generation, authorityGeneration)
+        && outcome.verifiedValue !== undefined && currentValue === outcome.verifiedValue) {
+        this.editPhase = {
+          ...settled,
+          observation: {
+            generation,
+            ...(row.edit?.revision === undefined ? {} : { revision: row.edit.revision }),
+          },
+        }
+      }
+    }
   }
 
   /** The ONE explicit install confirmation of the follow-up. The seat locks

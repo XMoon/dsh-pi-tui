@@ -48,6 +48,9 @@ interface PageHarnessOptions {  readonly columns?: number
   readonly disconnected?: boolean
   /** Hold every status read; the case resolves each one by index. */
   readonly holdRead?: boolean
+  /** Replace the Config authority after a verified commit but before the page
+   *  binds the receipt (the held-write replacement window). */
+  readonly replacePreferenceOnCommit?: WebStartupPreferenceInput
 }
 
 interface PageHarness {
@@ -77,6 +80,8 @@ interface PageHarness {
   readonly connect: () => void
   /** Resolve (or reject) the N-th held status read. */
   readonly resolveRead: (index: number, result: WebAccessStatus | { readonly error: string }) => void
+  /** Replace the served Host state without a generation change. */
+  readonly setStatus: (status: WebAccessStatus) => void
   /** Replace the LIVE Config authority (the Remote mirror's invalidation). The
    *  Config authority identity is retained unless a Host rollover is driven. */
   readonly setAuthority: (
@@ -167,6 +172,19 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
       commitRevisions.push(revision)
       commitGenerations.push(commitGeneration)
       if (options.commitFailure !== undefined) throw new Error(options.commitFailure)
+      if (options.replacePreferenceOnCommit !== undefined) {
+        preference = options.replacePreferenceOnCommit
+        preferenceGeneration = {}
+      } else if (preference !== undefined) {
+        // The real writer updates the live Config mirror; the page must re-read
+        // it, never optimistically assume the requested value.
+        preference = {
+          ...preference,
+          autoStart: value === 'On',
+          revision: preference.revision + 1,
+          userOverridden: true,
+        }
+      }
       return { outcome: 'verified' }
     },
     currentGeneration: () => generation.value,
@@ -239,6 +257,7 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
       if (settle === undefined) throw new Error(`no held read at index ${index}`)
       settle(typeof result === 'object' && 'error' in result ? new Error(result.error) : result)
     },
+    setStatus: (next) => { status = next },
     releaseToggle: () => { heldToggle?.(); heldToggle = undefined },
     releaseUrl: () => { heldUrl?.(); heldUrl = undefined },
     key,
@@ -328,6 +347,49 @@ test('a pending runtime write leaves on Esc while its owner keeps settling, diag
   h.close()
 })
 
+test('a successful runtime enable is retired when the Host generation is replaced', async () => {
+  const h = await mount({ status: { state: 'disabled' } })
+  await h.key('\r')
+  h.releaseToggle()
+  await h.flush()
+  assert.match(h.frame(), /Status\s+Web enabled/u, 'the verified enable starts as a current success')
+
+  h.bumpGeneration()
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Status\s+Web enabled/u, 'the replacement never inherits the old success word')
+  h.close()
+})
+
+test('a successful runtime enable is retired by a different served state', async () => {
+  const h = await mount({ status: { state: 'disabled' } })
+  await h.key('\r')
+  h.releaseToggle()
+  await h.flush()
+  assert.match(h.frame(), /Status\s+Web enabled/u)
+
+  h.setStatus({ state: 'disabled' })
+  await h.key('r')
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Status\s+Web enabled/u, 'a disabled observation retires the old enabled success')
+  h.close()
+})
+
+test('a successful next-start save is retired when the preference observation changes', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  await focusPaintedRow(h, 'Start automatically')
+  await h.key('\r')
+  await h.key('\r')
+  await h.key('\r')
+  await h.flush()
+  assert.match(h.frame(), /Status\s+Saved/u, 'the verified preference starts as a current Saved')
+
+  h.setAuthority('ready', { autoStart: true, revision: 3, userOverridden: true })
+  await h.key('r')
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Status\s+Saved/u, 'a different preference observation retires the old Saved')
+  h.close()
+})
+
 test('a Host generation change revokes the actions and re-reads before any new action', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   const readsBefore = h.reads()
@@ -338,23 +400,24 @@ test('a Host generation change revokes the actions and re-reads before any new a
   h.close()
 })
 
-test('a generation change during a pending write reports Outcome unconfirmed', async () => {
+test('a generation change during a pending write reports Could not confirm change', async () => {
   const h = await mount({ status: { state: 'disabled' } })
   await h.key('\r') // Enable, held
   h.bumpGeneration()
   await h.flush()
-  assert.match(h.frame(), /Status\s+Outcome unconfirmed/u)
+  assert.match(h.frame(), /Status\s+Could not confirm change/u)
   assert.equal(h.writes().length, 0, 'the toggle had not even settled yet')
   h.close()
 })
 
-test('a lost toggle receipt is Outcome unconfirmed and is never retried', async () => {
+test('a lost toggle receipt is Could not confirm change and is never retried', async () => {
   const h = await mount({ status: { state: 'disabled' }, toggleFailure: 'the connection dropped after dispatch' })
   await h.key('\r')
   await h.flush()
   assert.deepEqual(h.writes(), [true], 'exactly one dispatch')
-  assert.match(h.frame(), /Status\s+Outcome unconfirmed/u)
+  assert.match(h.frame(), /Status\s+Could not confirm change/u)
   assert.match(h.frame(), /the Host may have applied the request/u)
+  assert.match(h.frame(), /The connection dropped after dispatch; the Host may have applied the request\. Refresh and check\./u)
   await h.flush()
   assert.deepEqual(h.writes(), [true], 'no automatic retry')
   h.close()
@@ -431,7 +494,7 @@ test('a committed preference re-reads the persisted value, never the requested o
   assert.equal(h.commitGenerations().length, 1)
   assert.ok(Object.is(h.commitGenerations()[0], h.configAuthority()),
     'the confirmation carried the SAME observation generation the choice was opened against')
-  assert.match(h.frame(), /Status\s+Verified/u)
+  assert.match(h.frame(), /Status\s+Saved/u)
   assert.equal(h.writes().length, 0, 'the preference write never toggles the running Host')
   h.close()
 })
@@ -509,6 +572,22 @@ test('a status reply from a superseded generation is never painted as current', 
   h.close()
 })
 
+test('a verified next-start receipt does not bind to a replacement during the write', async () => {
+  const h = await mount({
+    status: { state: 'enabled' },
+    replacePreferenceOnCommit: { autoStart: true, revision: 2, userOverridden: true },
+  })
+  await focusPaintedRow(h, 'Start automatically')
+  await h.key('\r')
+  await h.key('\r')
+  await h.key('\r')
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Status\s+Saved/u,
+    'the successor observation never receives A\'s verified receipt')
+  assert.match(h.frame(), /Start automatically\s+On/u, 'the successor value is painted as the current fact')
+  h.close()
+})
+
 test('a Host rollover revokes the next-start edit grant taken from the old Config mirror', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   // Stage the confirmation through the page's own ladder (zero writes so far).
@@ -551,7 +630,7 @@ test('a Host rollover revokes the next-start edit grant taken from the old Confi
   await h.flush()
   assert.deepEqual(h.commitRevisions(), [7], 'the adoption really refreshed the revision')
   assert.deepEqual(h.commits(), ['Off'])
-  assert.match(h.frame(), /Status\s+Verified/u)
+  assert.match(h.frame(), /Status\s+Saved/u)
   h.close()
 })
 
@@ -568,7 +647,7 @@ test('a same-generation Config update refuses the staged confirmation instead of
   await h.flush()
   assert.deepEqual(h.commits(), [], 'the stale confirmation dispatched no write')
   assert.deepEqual(h.commitRevisions(), [], 'no revision was ever submitted')
-  assert.match(h.frame(), /Status\s+Not saved/u)
+  assert.match(h.frame(), /Status\s+Could not save/u)
   assert.match(h.frame(), /the configuration changed since this choice was opened; review the new value and confirm again/u)
   assert.doesNotMatch(h.frame(), /Confirm save/u, 'the stale confirmation is retired')
   assert.match(h.frame(), /Start automatically\s+On · Change…/u, 'the CURRENT value is painted for review')
@@ -581,7 +660,7 @@ test('a same-generation Config update refuses the staged confirmation instead of
   await h.flush()
   assert.deepEqual(h.commitRevisions(), [2], 'the fresh decision carries the CURRENT revision')
   assert.deepEqual(h.commits(), ['Off'])
-  assert.match(h.frame(), /Status\s+Verified/u)
+  assert.match(h.frame(), /Status\s+Saved/u)
   h.close()
 })
 
@@ -592,8 +671,8 @@ test('a throwing commit is an honest unconfirmed outcome', async () => {
   await h.key('\r') // confirm step
   await h.key('\r') // Confirm save
   await h.flush()
-  assert.match(h.frame(), /Status\s+Outcome unconfirmed/u)
-  assert.match(h.frame(), /the writer crashed/u)
+  assert.match(h.frame(), /Status\s+Could not confirm save/u)
+  assert.match(h.frame(), /the writer crashed/iu)
   h.close()
 })
 

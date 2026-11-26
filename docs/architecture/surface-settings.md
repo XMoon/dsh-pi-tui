@@ -272,12 +272,42 @@ specialist-page contract below).
   generation as ONE captured decision. The L2 fence is never rebased from a
   later refresh, and the shared serialized Config queue re-proves both at its
   head before dispatch; a moved revision or a REPLACED generation — even one
-  exposing the same revision and value — is a definite `Not saved` with ZERO
-  target mutation. Only a CURRENT same-generation readback can earn `Verified`;
-  an accepted write the readback cannot attribute is unverified, never a
-  refusal. The Root's own Change entry re-proves that the row it painted still
-  addresses the same authority after its refresh; otherwise the old gesture
+  exposing the same revision and value — is a definite refusal (internally
+  `not-saved`, painted `Could not save`) with ZERO target mutation. Only a
+  CURRENT same-generation readback can earn `verified` (painted `Saved`); an
+  accepted write the readback cannot attribute is internally unverified and is
+  painted `Could not confirm save`, never a refusal. The Root's own Change entry
+  re-proves that the row it painted still addresses the same authority after
+  its refresh; otherwise the old gesture
   stays browsing and a new explicit gesture is required.
+- **Host-configuration save feedback.** The three Host-configuration scalars
+  (`Backend`, `Tools · Visual tools`, `Host · Session log upload`), the hosted
+  Agent/Shell/Subagent writers and the `Web UI`/`ACP access` pages project the
+  SAME internal settlement as one short, scope-local result: `Saving…` for a
+  pending save (the Web UI/ACP runtime phase keeps `Waiting for the answer…`
+  and their copy phase keeps `Copying the client command…`); `Saved` for a
+  verified save; `No changes` for a legitimate no-op;
+  `Could not save` plus the real reason for a proven pre-dispatch refusal or CAS
+  conflict; `Could not confirm save` plus `The change may have been saved.
+  Refresh and check.` for an accepted-but-unattributable readback or lost
+  receipt; `Web enabled`/`Web disabled` or `ACP enabled`/`ACP disabled` for a
+  verified live runtime action; `Could not confirm change` plus `Refresh and
+  check.` for an unattributable runtime request; and `Requested state not
+  reached` when the request reported success but the observed state differs.
+  These words never authorize an action: the internal four-way settlement,
+  same-generation readback, typed refusal-vs-unknown distinction, dirty/leave
+  guard, Retry policy and business writer are unchanged. A clean browse paints
+  no persistent saved/verified banner. A retained historical success never
+  claims currency. When the source is not ready, the numeric pages, the Root
+  Host-configuration scalars and the Subagent page demote it to `Last-known ·
+  read-only` with `Previous save completed; refresh to review.`; a READY
+  replacement retires the obsolete receipt without a read-only claim. A
+  known-success receipt is bound to the observation that proved it: a later
+  Host/Config observation retires it rather than repainting it as current. No
+  settlement surface presents a stale success as a current saved value.
+  The Subagent page keeps each namespace's own prefix
+  (`Limits: Saved` / `Selection: Could not confirm save`), and Copy/Open
+  receipts keep their own fixed words.
 - The document-backed rows do NOT share one apply/persist order, and the
   contract keeps their differences instead of normalizing them:
   - `Submit while busy`, `Fullscreen` and the `Agent` user-shell sandbox policy
@@ -306,7 +336,8 @@ specialist-page contract below).
     open ONE transient follow-up inside the SAME lease (`direct → daemon` offers
     the optional service install; `daemon → direct` records the process-lifetime
     exit-transition intent). The follow-up exists ONLY for a same-generation
-    `Verified` result that actually changed the value: a same-value save, a
+    `verified` result (painted `Saved`) that actually changed the value: a
+    same-value save, a
     pre-dispatch refusal, an accepted-but-unverifiable readback and an unknown
     outcome never record an intent or offer the install, and offer no `Retry
     save` — a fresh explicit `Change… → Confirm` is the only way to act again.
@@ -454,8 +485,9 @@ specialist-page contract below).
     draft. A captured-authority change rejects the whole intent; a definite
     stale sibling does not block a still-current dirty namespace, while a
     settled unconfirmed outcome offers no new Save/Retry and requires an
-    explicit Refresh. A lost settlement is `Outcome unconfirmed` and is never
-    replayed automatically; a verified result requires a current
+    explicit Refresh. A lost settlement paints `Limits: Could not confirm save`
+    and/or `Selection: Could not confirm save` with the save-feedback recovery
+    line and is never replayed automatically; a saved result requires a current
     same-generation authoritative readback, not only an ACK.
   - Dirty parent navigation is the ONE page-owned leave question: `Save` keeps
     the group, `Discard and leave` clears the local intents and re-proves the
@@ -519,20 +551,23 @@ specialist-page contract below).
   decision captures the section revision AND the opaque Host settings-authority
   generation from the SAME observation; the replacement fence travels through
   the shared serialized Config queue to the dispatch boundary, so a replaced
-  Host (even with the same revision/value) is `Not saved` with zero dispatch.
-  An accepted write is `Verified` only from a CURRENT same-generation readback
-  that carries the requested value; an accepted-but-unattributable readback is
-  unverified, never `Not saved`, and never triggers the runtime claim below.
-  Non-verified outcomes offer no `Retry save`: the user returns with a fresh
-  explicit `Change… → Confirm`. Off
+  Host (even with the same revision/value) is painted `Could not save` with zero
+  dispatch. An accepted write paints `Saved` only from a CURRENT same-generation
+  readback that carries the requested value; an accepted-but-unattributable
+  readback paints `Could not confirm save` + `The change may have been saved.
+  Refresh and check.`, never `Could not save`, and never triggers the runtime
+  claim below. Non-verified outcomes offer no `Retry save`: the user returns
+  with a fresh explicit `Change… → Confirm`. Off
   releases both built-in registrations from the global Host tool registry and
   On restores the original definitions; already-recorded results and their
   rendering, copy, search and export are unaffected. A missing, unreadable or
   non-current authority keeps the category and row visible but offers no
   candidate and refuses the write (never a fabricated default). On a Direct
-  backend `Verified` also requires the Host row's live registration fact to
-  agree; Remote has no registry read and states the runtime half as
-  unobservable instead of claiming success.
+  backend `Saved` also requires the Host row's live registration fact to agree;
+  a stored On/Off the registry did not adopt paints `Could not confirm save`
+  with the specific `Tools are not active` / `Tools are still active` reason.
+  Remote has no registry read and states the runtime half as unobservable
+  instead of claiming success.
 - `Web Search / Fetch` is an EMBEDDED SPECIALIST PAGE inside this same
   workspace lease: `Enter`/`Right` on the row (or its ONE painted
   `Configure Web…` action) mounts the page in the same body under the same
@@ -740,12 +775,16 @@ specialist-page contract below).
   SystemPrompt providers read (`ProgressUpdatesState` / `ResponseStyleState`):
   no section is re-registered, no Agent is recomposed and nothing reaches the
   Focus/Compact presentation state.
-- `Verified` requires a ready read-back with a matching value. Rejected/unknown
-  outcomes are attributed from a fresh read, never guessed. A refused write is
-  reported as `Not saved`/unknown, never as success. For the apply-first fields
-  a failed persistence never rolls the live runtime back, so the screen must
-  keep stating BOTH facts (the applied runtime value and the unchanged stored
-  one); the runtime-only fields carry no document read at all, so they never
+- A verified write settlement (`Verified`, or `Saved` for the
+  Host-configuration scalars above) requires a ready read-back with a matching
+  value. A refusal is proven by the write path; a fresh read establishes the
+  current fact, never attribution of an unknown prior write. The painted word
+  follows the Host-configuration save feedback above
+  for those scalars and each other row's existing `Status` vocabulary; a
+  refused or unattributable write is never reported as success. For the
+  apply-first fields a failed persistence never rolls the live runtime back, so
+  the screen must keep stating BOTH facts (the applied runtime value and the
+  unchanged stored one); the runtime-only fields carry no document read at all, so they never
   paint a persistence phase.
 - Theme auto is fenced on the runtime selection intent.
 - `Plugins` is a DIRECT page inside the same lease (see Plugin Manager): the
@@ -809,7 +848,7 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   revision-checked official mutation. Empty text is `Value is required.`,
   invalid text stays in the Input with the field's real error and zero write,
   and a value equal to the current effective one is a real no-op (`No changes`),
-  never a fabricated `Verified`. The official unset stays a separate explicit
+  never a fabricated `Saved`. The official unset stays a separate explicit
   intent: Advanced's `Reset to inherited…` (or `x` there) opens a confirmation
   whose necessary risk copy must have been painted before Confirm is admitted,
   and it sends the official `unset` even when the effective value already equals
@@ -835,11 +874,12 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
 - **Authority and status.** Effective/inherited/revision/generation, official
   availability and the write result stay owned by the ConfigPort and the
   existing per-open controller; the page paints the current value, the
-  requested value and `Verified` / `No changes` / `Not saved` / `Unverified` /
-  `Outcome unconfirmed` exactly as the Host settlement and same-generation
-  readback prove. `Last-known · read-only` is never called Ready, a superseded
-  capture refuses the edit until an explicit Refresh, and a Refresh discards a
-  draft only after its own confirmation.
+  requested value and the Host-configuration save feedback above (`Saved` /
+  `No changes` / `Could not save` / `Could not confirm save`) exactly as the
+  Host settlement and same-generation readback prove. `Last-known · read-only`
+  is never called Ready, a superseded capture refuses the edit until an
+  explicit Refresh, and a Refresh discards a draft only after its own
+  confirmation.
 - **Parent navigation stays guarded, not hidden.** A pending write refuses
   every parent category/row/pane/Tab/Back path; the raw Input, the Advanced
   disclosure and an active page question own their local keys. A definite dirty
@@ -875,7 +915,7 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   grant returns the action with the raw Input and prior patch intact. It dispatches the
   whole set/reset patch as ONE revision-checked official mutation on the
   captured executor row, keeps the group and its field selection, and paints
-  the Host readback as `Verified`. Empty/whitespace/invalid Input keeps the raw
+  the Host readback as `Saved`. Empty/whitespace/invalid Input keeps the raw
   text and the field's REAL issue with zero write; a normal Stage equal to the
   served value removes only that field's patch (`No changes` only when the whole
   patch is empty), and an empty text is never an implicit unset.
@@ -926,17 +966,19 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   the definite `Discard` wording.
 - **Authority and status.** Effective/inherited/revision/generation and the
   executor identity stay owned by the ConfigPort and the per-open controller;
-  the page paints the same `Verified` / `No changes` / `Not saved` /
-  `Unverified` / `Outcome unconfirmed` vocabulary and the `Last-known`/read-only
-  states as the single route. A superseded, refused or replaced capture paints
-  its heading as `Last-known · …` and a staged field's served value as
+  the page paints the same Host-configuration save feedback above (`Saved` /
+  `No changes` / `Could not save` / `Could not confirm save`) and the
+  `Last-known`/read-only states as the single route. A superseded, refused or
+  replaced capture paints its heading as `Last-known · …` and a staged field's
+  served value as
   `Last confirmed: …` (never `Current:`); the settlement state is the FIRST
   readable body row, so a short grant cannot hide it behind prose. The read-only
   state still offers its real local `Discard…` body action (a definite refusal
   is safe to abandon) while an ambiguous outcome offers none. A refresh re-reads
   the served row, clears the draft and requires a NEW explicit Edit/Stage/Save;
   it never replays the lost intent. An accepted write whose readback serves a
-  DIFFERENT executor row is `Unverified` even when the caps look identical.
+  DIFFERENT executor row is painted `Could not confirm save` (internally
+  unverified) even when the caps look identical.
 
 Numeric validation follows the owning field: the Agent field requires a safe
 positive integer (`Number.isSafeInteger(n) && n>=1`), while the Shell fields
@@ -974,12 +1016,14 @@ scientific text are legal, and the browse paints the canonical number).
   share one frame. The CAS fence captured when L2
   opened (Host generation + exact revision) is never rebased by a later
   refresh, so a changed same-Host revision or a same-revision Host replacement
-  is `Not saved` with zero dispatch. A lost settlement is `Outcome unconfirmed`
-  and a fresh readback that disagrees with an accepted write is `Unverified`;
-  neither offers a blind replay: a manual `Retry save` appears only for a
-  definite `Not saved` settlement and re-dispatches the previously confirmed
-  candidate through the current row's revision/generation write check. It does
-  not reopen the L2 confirmation.
+  is painted `Could not save` with zero dispatch. A lost settlement paints
+  `Could not confirm save` + `The change may have been saved. Refresh and
+  check.`, and a fresh readback that disagrees with an accepted write paints
+  `Could not confirm save` with the Host's real value; neither offers a blind
+  replay: a manual `Retry save` appears only for a definite `Could not save`
+  settlement and re-dispatches the previously confirmed candidate through the
+  current row's revision/generation write check. It does not reopen the L2
+  confirmation.
   A non-current or disconnected authority offers no candidate and never
   presents a stale On/Off as the current Host state. Retaining a historical row
   is a TUI presentation choice, not a requirement of the official namespace
@@ -1031,13 +1075,14 @@ Two authorities are painted as two separate reading groups and are NEVER merged:
   painted affordance and requires a fresh frame and gesture. The choice
   captures that SAME observation's revision and generation; they travel through
   the ONE serialized Config queue to its head, where a moved revision or a
-  replaced generation is `Not saved` with ZERO mutation and no CAS rebase. An
-  accepted write is `Verified` only from a CURRENT same-generation authoritative
-  read that carries the requested value; an accepted-but-unattributable readback
-  is `Unverified` (never `Not saved`), and a lost/unknown receipt is `Outcome
-  unconfirmed`. No outcome is retried automatically and the page offers no
-  `Retry save`: a new explicit `Change… → Confirm save` is the only way to act
-  again.
+  replaced generation is `Could not save` with ZERO mutation and no CAS rebase.
+  An accepted write paints `Saved` only from a CURRENT same-generation
+  authoritative read that carries the requested value; an
+  accepted-but-unattributable readback paints `Could not confirm save` (never
+  `Could not save`), and a lost/unknown receipt paints `Could not confirm save`
+  with `The change may have been saved. Refresh and check.`. No outcome is
+  retried automatically and the page offers no `Retry save`: a new explicit
+  `Change… → Confirm save` is the only way to act again.
 
 The page keeps ONE transient phase: `loading`, `ready`, `confirm-disable`,
 `choose-autostart`, `confirm-save`, `pending-runtime`, `pending-config` or
@@ -1070,7 +1115,8 @@ are gated by the SAME rule and by the complete necessary copy in that frame:
 | `confirm-disable` | the exact sentence `Stop serving the Web UI? Existing browser credentials and sessions are not revoked.` FIRST, then `Disable Web` and `Cancel` | the accept row and the `Confirm [Enter]` bar segment exist ONLY while the whole risk sentence shares the painted viewport; a short grant paints no accept word and Enter is inert, while `Cancel`/`Esc` always performs zero writes. A selected `Cancel` never advertises an Enter confirm |
 | `Next Host Start` choice | `Choose the value the next Host start applies:`, the complete `On`/`Off` candidates and the next-start-only lifetime sentence | choosing/`Select [Enter]` stages only; no write |
 | `confirm-save` | the complete `Save the next Host start preference as On/Off?`, the next-start-only lifetime sentence, `Confirm save` and `Cancel` | only `Confirm save` calls the writer and only while the question and lifetime sentence are complete in the SAME frame; `Esc` steps back with zero writes |
-| `pending-*` | `Waiting for the answer…`, no second action | the page's own `Back [Esc]` leaves while the dispatched write keeps settling in its OWN owner (never cancelled, replayed or repainted); parent clicks/Tab are refused |
+| `pending-runtime` | `Waiting for the answer…`, no second action | the page's own `Back [Esc]` leaves while the dispatched write keeps settling in its OWN owner (never cancelled, replayed or repainted); parent clicks/Tab are refused |
+| `pending-config` | `Saving…`, no second action | the page's own `Back [Esc]` leaves while the dispatched write keeps settling in its OWN owner (never cancelled, replayed or repainted); parent clicks/Tab are refused |
 
 The first focus is the enabled Host's `Open in browser`, the disabled Host's
 `Enable Web`, otherwise the editable `Start automatically` row when a
@@ -1086,22 +1132,24 @@ route until the user's own local `Cancel`; `pending-runtime`/`pending-config`
 refuse parent clicks/Tab while the explicit page `Back [Esc]` stays the
 documented exit, and the write owner still settles and diagnoses the dispatched
 request. A forced teardown retires the page directly. A settled ambiguous
-outcome keeps its truthful `Outcome unconfirmed` and normal Back never claims a
-rollback. The page's `done` is instance-fenced and always returns to the Host
+outcome keeps its truthful `Could not confirm save` and normal Back never claims
+a rollback. The page's `done` is instance-fenced and always returns to the Host
 Rows level (also for `/web`); re-entering builds a NEW page instance and starts
 exactly ONE new authoritative read.
 
-A write settlement is painted as its own `Status` word: the runtime write
-reports `Verified` only when the authoritative re-read agrees, `Not saved` when
-the request reported success but the Host reads otherwise, and `Outcome
-unconfirmed` when the receipt was lost, the Host changed during the request or
-the read-back could not be performed; it is never retried automatically and
-never attributed from a fresh read. The preference write reports the four
-existing writer outcomes (`Verified`, `Not saved`, `Unverified`, `Outcome
-unconfirmed`) on its own side, with the same-generation rule above: a
-pre-dispatch fence refusal is `Not saved`, an accepted write with a stale,
-replaced or disagreeing readback is `Unverified`, and a lost settlement is
-`Outcome unconfirmed`. The authenticated launch URL is requested only
+A write settlement is painted with the Host-configuration save feedback above.
+The runtime write paints `Web enabled`/`Web disabled` only when the
+authoritative re-read agrees, `Not changed` for a definite zero-write refusal
+before dispatch, `Requested state not reached` when the request reported success
+but the Host reads otherwise, and `Could not confirm change` + `Refresh and
+check.` when the receipt was lost, the Host changed during the request or the
+read-back could not be performed; it is never retried automatically and never
+attributed from a fresh read. The preference write paints `Saved` / `Could not
+save` / `Could not confirm save` on its own side, with the same-generation rule
+above: a pre-dispatch fence refusal is `Could not save`, an accepted write with
+a stale, replaced or disagreeing readback is `Could not confirm save`, and a
+lost settlement is also `Could not confirm save` with `The change may have been
+saved. Refresh and check.`. The authenticated launch URL is requested only
 by an explicit `Open in browser` / `Copy access link`, handed straight to the
 Client-local opener or clipboard, and never painted, stored, logged or attached
 to a diagnostic. A credential-bearing failure — the URL request, the Client
@@ -1148,8 +1196,8 @@ merged:
   preflight that already reached the target (or a changing/unavailable Host)
   dispatches ZERO writes and states `Not changed`. A dispatched request whose
   receipt/read-back is lost (transport failure, Host replacement, unreadable
-  read-back) is `Outcome unconfirmed` and is never retried; a `changing`
-  read-back is unconfirmed too. On Direct the page states
+  read-back) paints `Could not confirm change` + `Refresh and check.` and is
+  never retried; a `changing` read-back is unconfirmed too. On Direct the page states
   `Unavailable · Split Host only` and `Access Unavailable`, offers no runtime
   action and reads no fake Host.
 - `Next Host Start` is the persisted PROFILE preference
@@ -1168,22 +1216,24 @@ merged:
   ConfigPort's serialized write queue to the actual official mutation boundary:
   the adapter re-checks both at the queue head immediately before dispatch, so a
   decision made against Host A can never become a write against Host B. A moved
-  revision or a replaced generation refused before dispatch is `Not saved`, with
-  ZERO writes and without rebasing the CAS onto newer authority. When dispatch
-  is known accepted, only a CURRENT same-generation authoritative read that
-  carries the requested value earns `Verified`; an unreadable, disagreeing or
-  different-generation readback is `Unverified` because the mutation may have
-  committed — never `Not saved`. A dispatched request whose receipt is
-  lost, or whose dispatch outcome otherwise cannot be attributed, is
-  `Outcome unconfirmed` and is never retried. Every actual generation
+  revision or a replaced generation refused before dispatch paints `Could not
+  save`, with ZERO writes and without rebasing the CAS onto newer authority.
+  When dispatch is known accepted, only a CURRENT same-generation authoritative
+  read that carries the requested value paints `Saved`; an unreadable,
+  disagreeing or different-generation readback paints `Could not confirm save`
+  because the mutation may have committed — never `Could not save`. A
+  dispatched request whose receipt is lost, or whose dispatch outcome otherwise
+  cannot be attributed, is also `Could not confirm save` with `The change may
+  have been saved. Refresh and check.` and is never retried. Every actual generation
   rollover retires a staged choice that has not dispatched, even when the
   replacement exposes the same revision and value; an old-frame `Change…` press
   cannot establish a new choice against the replacement without a fresh frame
   and gesture. An already dispatched `pending-config` request keeps its
   original owner until settlement, is never cancelled or replayed by the page
   or a rollover, and the page Back may leave while that owner still settles it.
-  The writer's four outcomes (`Verified`, `Not saved`, `Unverified`, `Outcome
-  unconfirmed`) are painted as its own `Status`.
+  The writer's internal outcomes are projected through the save-feedback
+  mapping above; the painted `Status` word is `Saved`, `Could not save` or
+  `Could not confirm save`, never an internal settlement name.
 - `Client Setup` is Client-local: it states the local Unix socket /
   same-OS-user / stdio bridge facts and the ONE copyable command
   `dsh --profile <proven-profile> acp stdio`, composed from the OFFICIAL Profile
@@ -1228,7 +1278,9 @@ copy in that frame:
 | `confirm-disable` | the exact sentence `Disable the local ACP listener? All connected ACP clients will be disconnected. Host sessions, Agents and this TUI will keep running.` FIRST, then `Disable ACP` and `Cancel` | the accept row and the `Confirm [Enter]` bar segment exist ONLY while the whole risk sentence shares the painted viewport; a short grant paints no accept word and Enter is inert, while `Cancel`/`Esc` always performs zero writes. A selected `Cancel` never advertises an Enter confirm |
 | `Next Host Start` choice | the complete `On`/`Off` candidates; choosing/`Select [Enter]` stages only; no write | `Esc` steps back with zero writes |
 | `confirm-save` | the complete `Save the next Host start preference as On/Off?`, the `Applies on the next Host start; the running Host is unchanged.` lifetime sentence, `Confirm save` and `Cancel` | only `Confirm save` calls the writer and only while the question and lifetime sentence are complete in the SAME frame; `Esc` steps back with zero writes |
-| `pending-*` | `Waiting for the answer…` / `Copying the client command…`, no second action | the page's own `Back [Esc]` leaves while the dispatched write/copy keeps settling in its OWN owner (never cancelled, replayed or repainted); parent clicks/Tab are refused |
+| `pending-runtime` | `Waiting for the answer…`, no second action | the page's own `Back [Esc]` leaves while the dispatched write keeps settling in its OWN owner (never cancelled, replayed or repainted); parent clicks/Tab are refused |
+| `pending-config` | `Saving…`, no second action | the page's own `Back [Esc]` leaves while the dispatched write keeps settling in its OWN owner (never cancelled, replayed or repainted); parent clicks/Tab are refused |
+| `pending-copy` | `Copying the client command…`, no second action | the page's own `Back [Esc]` leaves while the copy keeps settling in its OWN owner; parent clicks/Tab are refused |
 
 The first focus is the enabled Host's `Copy client command` (else
 `Disable ACP…`), the disabled Host's `Enable ACP`, otherwise the Client-local
@@ -1261,14 +1313,16 @@ the dispatched request. A forced teardown retires the page directly. The page's
 `/acp`); re-entering builds a NEW page instance and starts exactly ONE new
 authoritative read.
 
-A write settlement is painted as its own `Status` word: the runtime write
-reports `Verified` only when the authoritative re-read agrees, `Not saved` when
-the request reported success but the Host reads otherwise, and `Outcome
-unconfirmed` when the receipt was lost, the Host changed during the request or
-the read-back could not be performed; it is never retried automatically and
-never attributed from a fresh read. The preference write reports the four
-existing writer outcomes on its own side. Closing an ACP View detaches it; Host
-Sessions, Agents and the TUI remain.
+A write settlement is painted with the Host-configuration save feedback above.
+The runtime write paints `ACP enabled`/`ACP disabled` only when the
+authoritative re-read agrees, `Not changed` for a definite zero-write preflight
+refusal, `Requested state not reached` when the request reported success but the
+Host reads otherwise, and `Could not confirm change` + `Refresh and check.` when
+the receipt was lost, the Host changed during the request or the read-back could
+not be performed; it is never retried automatically and never attributed from a
+fresh read. The preference write paints `Saved` / `Could not save` / `Could not
+confirm save` on its own side. Closing an ACP View detaches it; Host Sessions,
+Agents and the TUI remain.
 
 Authority: `src/tui/panels/acp-access-settings-page.ts`,
 `src/tui/commands/settings.ts` (`createAcpAccessPage`,
@@ -1298,12 +1352,13 @@ never hot-switches the running process, never spawns or stops a Host, and never
 changes the current backend. The L2 decision carries the section revision and
 the opaque Host settings-authority generation from ONE observation; the shared
 serialized Config queue re-proves both at its head, so a queued decision whose
-authority was replaced behind a predecessor is `Not saved` with ZERO dispatch
-and no CAS rebase (a same-revision/same-value replacement is still a different
-authority). Only a CURRENT same-generation readback that carries the requested
-value is `Verified`; an accepted write without that proof is unverified and
-neither records the exit-transition intent nor offers the install follow-up. The
-summary marks `(default)` only while the USER
+authority was replaced behind a predecessor is painted `Could not save` with
+ZERO dispatch and no CAS rebase (a same-revision/same-value replacement is still
+a different authority). Only a CURRENT same-generation readback that carries the
+requested value paints `Saved`; an accepted write without that proof paints
+`Could not confirm save` + `The change may have been saved. Refresh and check.`
+and neither records the exit-transition intent nor offers the install follow-up.
+The summary marks `(default)` only while the USER
 layer does not declare the value; a Profile section that is unreadable or
 carries an illegal value is `Unavailable` and cannot be edited, never silently
 shown as the shipped `direct` default. When `DSH_PI_TUI_BACKEND` is set for the

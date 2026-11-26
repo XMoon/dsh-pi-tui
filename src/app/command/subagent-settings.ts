@@ -360,14 +360,14 @@ export class SubagentSettingsController {
     const hostChanged = (limitsDirty && limits.kind === 'ready' && initialLimits.kind === 'ready' && limits.generation !== initialLimits.generation)
       || (selectionDirty && selection.kind === 'ready' && initialSelection.kind === 'ready' && selection.generation !== initialSelection.generation)
     if (hostChanged) {
-      this.notice = 'Not saved · Host authority changed; refresh to review. Unsaved changes retained.'
+      this.notice = 'Host authority changed; refresh to review. Unsaved changes retained.'
       if (limitsDirty) this.limits.status = { kind: 'not-saved', text: this.notice }
       if (selectionDirty) this.selection.status = { kind: 'not-saved', text: this.notice }
       this.changed()
       return
     }
     if (limitsDirty && selectionDirty && limits.kind === 'ready' && selection.kind === 'ready' && limits.generation !== selection.generation) {
-      this.notice = 'Not saved · the sections belong to different Host authorities; refresh to review.'
+      this.notice = 'The sections belong to different Host authorities; refresh to review.'
       this.changed()
       return
     }
@@ -397,7 +397,7 @@ export class SubagentSettingsController {
           const firstAuthorityChanged = limitsDirty && limits.kind === 'ready'
             && firstLive?.kind === 'ready' && firstLive.generation !== limits.generation
           if (live.kind !== 'ready' || live.generation !== selection.generation || firstAuthorityChanged) {
-            this.selection.status = { kind: 'not-saved', text: 'Not saved · Host authority unavailable; refresh before retrying.' }
+            this.selection.status = { kind: 'not-saved', text: 'Host authority unavailable; refresh before retrying.' }
           } else {
             this.selection.status = { kind: 'saving', text: 'Saving…' }
             this.changed()
@@ -406,7 +406,7 @@ export class SubagentSettingsController {
         }
       } catch (error) {
         if (!this.disposed && token === this.operation) {
-          const text = `Outcome unconfirmed · ${safeErrorMessage(error)}; refresh before retrying.`
+          const text = safeErrorMessage(error)
           if (hasPatch(this.limits.patch)) this.limits.status = { kind: 'outcome-unconfirmed', text }
           if (hasPatch(this.selection.patch)) this.selection.status = { kind: 'outcome-unconfirmed', text }
           this.notice = text
@@ -431,7 +431,7 @@ export class SubagentSettingsController {
   ): Promise<void> {
     if (state.refreshRequired === true || !readyCurrent(base, port.read())) {
       state.refreshRequired = true
-      state.status = { kind: 'not-saved', text: 'Not saved · settings changed; refresh to review. Unsaved changes retained.' }
+      state.status = { kind: 'not-saved', text: 'Settings changed; refresh to review. Unsaved changes retained.' }
       this.changed()
       return
     }
@@ -445,11 +445,11 @@ export class SubagentSettingsController {
       state.status = {
         kind: outcome.kind === 'outcome-unconfirmed' ? 'outcome-unconfirmed' : 'not-saved',
         text: outcome.kind === 'outcome-unconfirmed'
-          ? `Outcome unconfirmed · ${outcome.reason}; possibly saved; refresh before retrying.`
-          : `Not saved · ${outcome.reason}; refresh to review.`,
+          ? outcome.reason
+          : `${outcome.reason}; refresh to review.`,
       }
     } else if (readback.kind !== 'ready' || readback.generation !== base.generation) {
-      state.status = { kind: 'unverified', text: 'Unverified · the accepted write has no current Host readback; refresh before retrying.' }
+      state.status = { kind: 'unverified', text: 'Could not check the original Host after saving.' }
     } else {
       // Reset is verified by accepted official unset + current readback. Never
       // require USER deletion or equality to the page's previous base.
@@ -461,8 +461,8 @@ export class SubagentSettingsController {
         state.source = readback
         state.patch = {}
         state.refreshRequired = false
-        state.status = { kind: 'verified', text: 'Verified' }
-      } else state.status = { kind: 'unverified', text: 'Unverified · current Host values differ; refresh to review.' }
+        state.status = { kind: 'verified', text: 'Saved' }
+      } else state.status = { kind: 'unverified', text: 'The Host now reads different values.' }
     }
     this.changed()
   }

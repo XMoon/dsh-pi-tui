@@ -187,7 +187,7 @@ export async function runSubagentSettingsFr5A(context) {
 
     clientB.send('s')
     await waitForPattern(clientB,
-      /Limits: Verified[\s\S]*Selection: Outcome unconfirmed/u,
+      /Limits: Saved[\s\S]*Selection: Could not confirm save/u,
       'FR5-A Client B partial namespace settlement')
     assert(isDeepStrictEqual(profileUserConfig(installation.profileDir, 'subagent'), { maxDepth: 3 }),
       'the writable Limits namespace reaches the actual Host USER profile patch')
@@ -198,7 +198,7 @@ export async function runSubagentSettingsFr5A(context) {
     // the wrapped continuation below it. Normalize whitespace only inside that
     // region so the same official sentence is proven at any pane width.
     const bLines = await clientB.viewport()
-    const statusIndex = bLines.findIndex(line => line.includes('Selection: Outcome unconfirmed'))
+    const statusIndex = bLines.findIndex(line => line.includes('Selection: Could not confirm save'))
     assert(statusIndex >= 0, 'Client B paints the failed section settlement')
     const statusColumn = bLines[statusIndex].indexOf('Selection:')
     assert(statusColumn >= 0, 'Client B paints the settlement label in its Detail column')
@@ -216,7 +216,7 @@ export async function runSubagentSettingsFr5A(context) {
       'FR5-A Client A actual staged frame before its stale save')
     clientA.send('s')
     const aFrame = await waitForPattern(clientA,
-      /Last-known|Not saved · settings changed|Refresh to review/u,
+      /Last-known|Could not save|refresh to review/u,
       'FR5-A Client A stale-revision outcome')
     assert(profileUserConfig(installation.profileDir, 'subagent')?.maxDepth === 3,
       'Client A cannot replace Client B\'s actual profile value with its stale 2')
@@ -238,7 +238,7 @@ export async function runSubagentSettingsFr5A(context) {
       authenticatedClients: 2,
       limitsPartialSuccess: true,
       selectionOverlayRefusal: true,
-      staleRevisionRefused: aFrame.includes('Last-known') || aFrame.includes('Not saved'),
+      staleRevisionRefused: aFrame.includes('Last-known') || aFrame.includes('Could not save'),
       hostProfileReadback: true,
       originalSplitHostIntact: true,
     }

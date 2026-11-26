@@ -279,14 +279,37 @@ function samePreferenceObservation(
   return a.autoStart === b.autoStart && a.revision === b.revision && Object.is(a.generation, b.generation)
 }
 
-/** The frozen status word + explanation of one Config write settlement. */
+/** The frozen user feedback of one Config write settlement. A verified write is
+ *  a short `Saved`; a proven refusal keeps its reason; an accepted write the
+ *  page cannot attribute is NEVER a failure claim. */
 function configOutcomeNote(outcome: SettingsWorkspaceCommitOutcome): OutcomeNote {
   switch (outcome.outcome) {
-    case 'verified': return { word: 'Verified', tone: 'success' }
-    case 'not-saved': return { word: 'Not saved', tone: 'error', ...(outcome.reason === undefined ? {} : { detail: outcome.reason }) }
-    case 'unverified': return { word: 'Unverified', tone: 'warning', ...(outcome.reason === undefined ? {} : { detail: outcome.reason }) }
-    case 'indeterminate': return { word: 'Outcome unconfirmed', tone: 'warning', ...(outcome.reason === undefined ? {} : { detail: outcome.reason }) }
+    case 'verified': return { word: 'Saved', tone: 'success' }
+    case 'not-saved': return { word: 'Could not save', tone: 'error', ...(outcome.reason === undefined ? {} : { detail: outcome.reason }) }
+    case 'unverified':
+    case 'indeterminate': {
+      const recovery = 'The change may have been saved. Refresh and check.'
+      return {
+        word: 'Could not confirm save',
+        tone: 'warning',
+        detail: outcome.reason === undefined ? recovery : `${recovery} ${asSentence(outcome.reason)}`,
+      }
+    }
   }
+}
+
+/** A dispatched RUNTIME change whose settlement cannot be attributed. It is
+ *  never a `Saved`/`Not saved` claim: the Host may have applied it. */
+function unconfirmedChange(detail: string): OutcomeNote {
+  return { word: 'Could not confirm change', tone: 'warning', detail: `${asSentence(detail)} Refresh and check.` }
+}
+
+/** Join an external/error reason as a complete sentence before appending the
+ *  fixed recovery line, so the two never form a run-on. */
+function asSentence(text: string): string {
+  const trimmed = text.trim()
+  const ended = /[.!?]$/u.test(trimmed) ? trimmed : `${trimmed}.`
+  return ended.charAt(0).toUpperCase() + ended.slice(1)
 }
 
 function fit(text: string, width: number): string {
@@ -304,9 +327,10 @@ function statusInk(tone: 'success' | 'error' | 'warning' | 'muted', text: string
 }
 
 /** Paint one already-truncated value by its content role. */
-function valueInk(ink: 'text' | 'dim' | 'error' | 'muted', text: string): string {
+function valueInk(ink: 'text' | 'dim' | 'error' | 'warning' | 'muted', text: string): string {
   if (ink === 'dim') return color.textDim(text)
   if (ink === 'error') return color.error(text)
+  if (ink === 'warning') return color.warning(text)
   if (ink === 'muted') return color.textMuted(text)
   return color.text(text)
 }
@@ -327,6 +351,17 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
   private preferenceReadiness: 'ready' | 'stale' | 'unavailable'
   private runtimeOutcome: OutcomeNote | undefined
   private configOutcome: OutcomeNote | undefined
+  /** The preference observation that produced the current successful config
+   *  receipt. A later different observation retires it; unknown/refused
+   *  settlements deliberately have no such lifetime. */
+  private configOutcomeObservation: {
+    readonly generation: object
+    readonly revision: number
+    readonly value: boolean
+  } | undefined
+  /** The runtime observation that produced the current successful runtime
+   *  receipt. A replacement or a different served state retires it. */
+  private runtimeSuccessObservation: { readonly generation: unknown; readonly state: 'enabled' | 'disabled' } | undefined
   /** The staged next-launch candidate; presentation only, never a write. */
   private autostartCandidate: boolean | undefined
   /**
@@ -522,6 +557,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     this.host = failure !== undefined || status === undefined
       ? { kind: 'unreadable', message: failure ?? 'the Host ACP state could not be read' }
       : { kind: 'current', status, generation }
+    this.retireStaleSuccess()
     this.settleReadPhase()
   }
 
@@ -544,6 +580,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     if (this.disposed || this.host.kind === 'split-host-only') return
     this.readSerial += 1
     this.host = { kind: 'checking' }
+    this.retireStaleSuccess()
     // Every ACTUAL rollover retires a local staged preference intent, even
     // when the new Config mirror happens to expose the SAME revision: the
     // decision was made against the old Host's authority. A dispatched write
@@ -556,7 +593,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       // a preflight that never invoked the mutation wrote NOTHING.
       this.writeSerial += 1
       this.runtimeOutcome = this.runtimeStage === 'invoked'
-        ? { word: 'Outcome unconfirmed', tone: 'warning', detail: 'the Host changed while the request was running' }
+        ? unconfirmedChange('The Host changed while the request was running.')
         : { word: 'Not changed', tone: 'muted', detail: 'the Host changed before the request was sent' }
       this.runtimeStage = undefined
       this.phase = 'ready'
@@ -588,6 +625,31 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
    * one decision, so a painted `Unavailable` fact can never sit beside an
    * editable row (or a stale revision beside an edit grant).
    */
+  /** Retire a known-success receipt once its own observation is no longer
+   *  the current one. It never touches a refusal/pending/unknown result. */
+  private retireStaleSuccess(): void {
+    if (this.configOutcome?.tone === 'success') {
+      const observed = this.preference
+      const proved = this.configOutcomeObservation
+      if (proved === undefined || observed === undefined || observed.generation === undefined
+        || !Object.is(observed.generation, proved.generation)
+        || observed.revision !== proved.revision
+        || observed.autoStart !== proved.value) {
+        this.configOutcome = undefined
+        this.configOutcomeObservation = undefined
+      }
+    }
+    if (this.runtimeOutcome?.tone === 'success') {
+      const observed = this.runtimeSuccessObservation
+      if (this.host.kind !== 'current' || observed === undefined
+        || !Object.is(observed.generation, this.host.generation)
+        || observed.state !== this.host.status.state) {
+        this.runtimeOutcome = undefined
+        this.runtimeSuccessObservation = undefined
+      }
+    }
+  }
+
   private reconcilePreference(): void {
     const previousReadiness = this.preferenceReadiness
     const previous = this.preference
@@ -599,6 +661,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       // It only revokes every pointer/frame grant built from the old fact.
       this.preferenceEpoch += 1
     }
+    this.retireStaleSuccess()
     if (!this.preferenceEditable()) {
       // The authority is no longer current: revoke the staged step, zero writes.
       this.retireStagedChoice()
@@ -616,7 +679,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       this.revealSelection = true
     }
     this.configOutcome = {
-      word: 'Not saved',
+      word: 'Could not save',
       tone: 'error',
       detail: 'the configuration changed since this choice was opened; review the new value and confirm again',
     }
@@ -832,7 +895,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
    * preflight/`setEnabled` boundary decides the failure vocabulary: a Host
    * replacement BEFORE the invocation is a definitive zero-write
    * `Not changed`; once invoked, a lost receipt/read-back or a Host
-   * replacement is `Outcome unconfirmed` and is never retried.
+   * replacement is `Could not confirm change` and is never retried.
    */
   private dispatchRuntime(target: boolean): void {
     const host = this.hostCurrent()
@@ -940,7 +1003,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       this.commitRuntimeSettlement(target, generation, failure, status, readFailure, stillCurrent)
     }, (error) => {
       if (this.disposed || serial !== this.writeSerial) return
-      this.runtimeOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: safeErrorMessage(error) }
+      this.runtimeOutcome = unconfirmedChange(safeErrorMessage(error))
       this.phase = 'ready'
       this.revealSelection = true
       this.changed()
@@ -979,7 +1042,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     this.runtimeStage = undefined
     if (!stillCurrent) {
       this.host = { kind: 'checking' }
-      this.runtimeOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: 'the Host changed while the request was running; its outcome cannot be attributed' }
+      this.runtimeOutcome = unconfirmedChange('The Host changed while the request was running; its outcome cannot be attributed.')
       this.phase = 'ready'
       this.startStatusRead()
       this.changed()
@@ -988,22 +1051,23 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     if (status === undefined) {
       this.host = { kind: 'unreadable', message: readFailure ?? 'the Host ACP state could not be re-read' }
       this.runtimeOutcome = failure === undefined
-        ? { word: 'Outcome unconfirmed', tone: 'warning', detail: 'the request was sent but the Host state could not be re-read' }
-        : { word: 'Outcome unconfirmed', tone: 'warning', detail: `${failure}; the Host state could not be re-read either` }
+        ? unconfirmedChange('The request was sent, but the Host state could not be re-read.')
+        : unconfirmedChange(`${failure}; the Host state could not be re-read either.`)
     } else {
       this.host = { kind: 'current', status, generation }
       if (failure !== undefined) {
         // A thrown request may still have been applied by the Host. The fresh
         // read refreshes the fact; it never proves this request's outcome.
-        this.runtimeOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: `${failure}; the Host may have applied the request` }
+        this.runtimeOutcome = unconfirmedChange(`${failure}; the Host may have applied the request.`)
       } else if (status.state === (target ? 'enabled' : 'disabled')) {
-        this.runtimeOutcome = { word: 'Verified', tone: 'success' }
+        this.runtimeOutcome = { word: target ? 'ACP enabled' : 'ACP disabled', tone: 'success' }
+        this.runtimeSuccessObservation = { generation, state: target ? 'enabled' : 'disabled' }
       } else if (status.state === 'changing') {
-        this.runtimeOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: 'the Host is still applying the change' }
+        this.runtimeOutcome = unconfirmedChange('The Host is still applying the change.')
       } else {
         this.runtimeOutcome = {
-          word: 'Not saved',
-          tone: 'error',
+          word: 'Requested state not reached',
+          tone: 'warning',
           detail: `the request reported success, but the Host reads ${listenerWord(status).text.replace(/…$/u, '')}`,
         }
       }
@@ -1040,6 +1104,10 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     }
     const revision = fence
     const generation = generationFence.value
+    // Capture the authority the admission was proven against, not whatever
+    // the mirror reads after the write. A replacement during the write must
+    // not bind the receipt to the successor.
+    const admissionGeneration = generation
     const serial = ++this.writeSerial
     this.phase = 'pending-config'
     this.configOutcome = undefined
@@ -1060,6 +1128,26 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       // verified; the settlement is never applied optimistically.
       this.reconcilePreference()
       this.configOutcome = configOutcomeNote(outcome)
+      if (outcome.outcome === 'verified') {
+        const observed = this.preference
+        // A verified A receipt is only current while the post-write observation
+        // is still A's authority and the requested value. Otherwise the
+        // successor never inherits A's Saved.
+        if (observed?.generation !== undefined
+          && Object.is(observed.generation, admissionGeneration)
+          && observed.autoStart === candidate) {
+          this.configOutcomeObservation = {
+            generation: observed.generation,
+            revision: observed.revision,
+            value: observed.autoStart,
+          }
+        } else {
+          this.configOutcome = undefined
+          this.configOutcomeObservation = undefined
+        }
+      } else {
+        this.configOutcomeObservation = undefined
+      }
       this.autostartCandidate = undefined
       this.autostartFence = undefined
       this.autostartGenerationFence = undefined
@@ -1069,7 +1157,8 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     }, (error) => {
       if (this.disposed || serial !== this.writeSerial) return
       this.reconcilePreference()
-      this.configOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: safeErrorMessage(error) }
+      this.configOutcome = configOutcomeNote({ outcome: 'indeterminate', reason: safeErrorMessage(error) })
+      this.configOutcomeObservation = undefined
       this.autostartCandidate = undefined
       this.autostartFence = undefined
       this.autostartGenerationFence = undefined
@@ -1295,9 +1384,9 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
    *  painted whole. Every physical line becomes a `copy` group member when
    *  asked: a gated accept only exists while the WHOLE sentence shares the
    *  painted viewport. */
-  private wrapped(text: string, ink: 'text' | 'dim' | 'error', width: number, group?: 'copy'): ContentLine[] {
+  private wrapped(text: string, ink: 'text' | 'dim' | 'error' | 'warning', width: number, group?: 'copy'): ContentLine[] {
     return wrapTextWithAnsi(sanitizedPhysicalLine(text), Math.max(1, width)).map(line => ({
-      text: valueInk(ink === 'error' ? 'error' : ink === 'text' ? 'text' : 'dim', line),
+      text: valueInk(ink, line),
       ...(group === undefined ? {} : { group }),
     }))
   }
@@ -1499,14 +1588,20 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       // The runtime write's own result is painted beside the runtime facts: one
       // word carries the token, the explanation stays a separate line.
       lines.push(...this.factLines('Status', statusInk(this.runtimeOutcome.tone, this.runtimeOutcome.word), width))
-      if (this.runtimeOutcome.detail !== undefined) lines.push(...this.wrapped(this.runtimeOutcome.detail, 'dim', width))
+      if (this.runtimeOutcome.detail !== undefined) {
+        lines.push(...this.wrapped(this.runtimeOutcome.detail, this.runtimeOutcome.tone === 'error' ? 'error' : this.runtimeOutcome.tone === 'warning' ? 'warning' : 'dim', width))
+      }
     }
     if (this.phase === 'loading') {
       lines.push(...this.wrapped('Reading the Host ACP state…', 'dim', width))
       return lines
     }
-    if (this.phase === 'pending-runtime' || this.phase === 'pending-config') {
+    if (this.phase === 'pending-runtime') {
       lines.push(...this.wrapped('Waiting for the answer…', 'dim', width))
+      return lines
+    }
+    if (this.phase === 'pending-config') {
+      lines.push(...this.wrapped('Saving…', 'dim', width))
       return lines
     }
     if (this.phase === 'pending-copy') {
@@ -1540,7 +1635,8 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       if (this.configOutcome.detail !== undefined) {
         lines.push(...this.wrapped(
           this.configOutcome.detail,
-          this.configOutcome.tone === 'success' || this.configOutcome.tone === 'muted' ? 'dim' : 'error',
+          this.configOutcome.tone === 'success' || this.configOutcome.tone === 'muted' ? 'dim'
+            : this.configOutcome.tone === 'warning' ? 'warning' : 'error',
           width,
         ))
       }

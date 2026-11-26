@@ -538,16 +538,16 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   ): SettingsWorkspaceCommitOutcome => {
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
-      return { outcome: 'unverified', reason: `the write was accepted, but the configuration is ${readiness}; no same-generation readback could verify it` }
+      return { outcome: 'unverified', reason: `The configuration is ${readiness}; the save could not be checked.` }
     }
     const state = runner.config.acpStartupPreference.read()
     if (state === undefined || state.generation === undefined || !Object.is(state.generation, generation)) {
-      return { outcome: 'unverified', reason: 'the write was accepted, but no current same-generation readback could verify it' }
+      return { outcome: 'unverified', reason: 'Could not check the original Host after saving.' }
     }
     if (state.autoStart !== expected) {
       return {
         outcome: 'unverified',
-        reason: `the write was accepted, but the same-generation readback reads ${state.autoStart ? 'On' : 'Off'}`,
+        reason: `The Host now reads ${state.autoStart ? 'On' : 'Off'}.`,
       }
     }
     return { outcome: 'verified' }
@@ -2060,27 +2060,27 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const verifyCommittedVisualTools = (expected: boolean, generation: object): SettingsWorkspaceCommitOutcome => {
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
-      return { outcome: 'unverified', reason: `the write was accepted, but the configuration is ${readiness}; no same-generation readback could verify it` }
+      return { outcome: 'unverified', reason: `The configuration is ${readiness}; the save could not be checked.` }
     }
     const state = runner.config.visualTools.read()
     if (state === undefined || state.generation === undefined || !Object.is(state.generation, generation)) {
-      return { outcome: 'unverified', reason: 'the write was accepted, but no current same-generation readback could verify it' }
+      return { outcome: 'unverified', reason: 'Could not check the original Host after saving.' }
     }
     if (state.enabled !== expected) {
       return {
         outcome: 'unverified',
-        reason: `the write was accepted, but the same-generation Host setting reads ${state.enabled ? 'On' : 'Off'}`,
+        reason: `The Host now reads ${state.enabled ? 'On' : 'Off'}.`,
       }
     }
     if (state.applied !== undefined && state.applied !== expected) {
       return {
         outcome: 'unverified',
         reason: expected
-          ? 'the Host profile now stores On, but the Host tool registry did not adopt both registrations'
-          : 'the Host profile now stores Off, but the Host tool registry still reports the tools registered',
+          ? 'The Host profile now stores On, but the tools are not active.'
+          : 'The Host profile now stores Off, but the tools are still active.',
       }
     }
-    return { outcome: 'verified' }
+    return { outcome: 'verified', verifiedValue: expected ? 'On' : 'Off' }
   }
 
   /** Commit the ONE profile-wide switch through the official revision- and
@@ -2149,16 +2149,16 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const verifyCommittedWebAutostart = (expected: boolean, generation: object): SettingsWorkspaceCommitOutcome => {
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
-      return { outcome: 'unverified', reason: `the write was accepted, but the configuration is ${readiness}; no same-generation readback could verify it` }
+      return { outcome: 'unverified', reason: `The configuration is ${readiness}; the save could not be checked.` }
     }
     const state = runner.config.webStartupPreference.read()
     if (state === undefined || state.generation === undefined || !Object.is(state.generation, generation)) {
-      return { outcome: 'unverified', reason: 'the write was accepted, but no current same-generation readback could verify it' }
+      return { outcome: 'unverified', reason: 'Could not check the original Host after saving.' }
     }
     if (state.autoStart !== expected) {
       return {
         outcome: 'unverified',
-        reason: `the write was accepted, but the same-generation preference reads ${state.autoStart ? 'On' : 'Off'}`,
+        reason: `The Host now reads ${state.autoStart ? 'On' : 'Off'}.`,
       }
     }
     return { outcome: 'verified' }
@@ -2296,26 +2296,28 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     try {
       outcome = await runner.config.sessionLogUpload.mutate(patch, revision, generation)
     } catch (error) {
-      return { outcome: 'indeterminate', reason: `Outcome unconfirmed · ${safeErrorMessage(error)}; refresh before retrying` }
+      return { outcome: 'indeterminate', reason: safeErrorMessage(error) }
     }
     if (outcome.kind === 'conflict') {
-      return { outcome: 'not-saved', reason: `Not saved · ${outcome.reason}; refresh to review` }
+      return { outcome: 'not-saved', reason: `${outcome.reason}; refresh to review` }
     }
     if (outcome.kind === 'rejected') {
-      return { outcome: 'not-saved', reason: `Not saved · ${outcome.reason}` }
+      return { outcome: 'not-saved', reason: outcome.reason }
     }
     if (outcome.kind === 'outcome-unconfirmed') {
-      return { outcome: 'indeterminate', reason: `Outcome unconfirmed · ${outcome.reason}; possibly saved; refresh before retrying` }
+      return { outcome: 'indeterminate', reason: outcome.reason }
     }
     const readback = runner.config.configReadiness() === 'ready'
       ? runner.config.sessionLogUpload.read()
       : undefined
     if (readback === undefined || readback.kind !== 'ready' || readback.generation !== generation) {
-      return { outcome: 'unverified', reason: 'the accepted write has no current Host readback; refresh to review' }
+      return { outcome: 'unverified', reason: 'Could not check the original Host after saving.' }
     }
     // Reset is verified by the accepted official unset + current readback; the
     // effective value may be On again and the USER field may stay materialized.
-    if (value === 'Reset') return { outcome: 'verified' }
+    if (value === 'Reset') {
+      return { outcome: 'verified', verifiedValue: readback.effective.enabled ? 'On' : 'Off' }
+    }
     const expected = value === 'On'
     if (readback.effective.enabled !== expected) {
       // An accepted official write whose fresh readback differs cannot be
@@ -2323,10 +2325,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       // commit. It is an unverified accepted settlement, not "Not saved".
       return {
         outcome: 'unverified',
-        reason: `the accepted write has no matching current readback (reads ${readback.effective.enabled ? 'On' : 'Off'}); another writer may have changed it — refresh to review`,
+        reason: `The Host now reads ${readback.effective.enabled ? 'On' : 'Off'}; another writer may have changed it.`,
       }
     }
-    return { outcome: 'verified' }
+    return { outcome: 'verified', verifiedValue: expected ? 'On' : 'Off' }
   }
 
   /**
@@ -2423,19 +2425,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   ): SettingsWorkspaceCommitOutcome => {
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
-      return { outcome: 'unverified', reason: `the write was accepted, but the configuration is ${readiness}; no same-generation readback could verify it` }
+      return { outcome: 'unverified', reason: `The configuration is ${readiness}; the save could not be checked.` }
     }
     const state = runner.config.backendStartupPreference.read()
     if (state === undefined || state.generation === undefined || !Object.is(state.generation, generation)) {
-      return { outcome: 'unverified', reason: 'the write was accepted, but no current same-generation readback could verify it' }
+      return { outcome: 'unverified', reason: 'Could not check the original Host after saving.' }
     }
     if (state.backend !== expected) {
       return {
         outcome: 'unverified',
-        reason: `the write was accepted, but the same-generation preference reads ${state.backend}`,
+        reason: `The Host now reads ${state.backend === 'daemon' ? 'Daemon' : 'Direct'}.`,
       }
     }
-    return { outcome: 'verified' }
+    return { outcome: 'verified', verifiedValue: expected === 'daemon' ? 'Daemon' : 'Direct' }
   }
 
   /** Commit the next-launch backend through the official revision- and

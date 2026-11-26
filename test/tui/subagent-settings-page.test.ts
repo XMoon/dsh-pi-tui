@@ -336,7 +336,7 @@ test('a legal Stage equal to the served value removes only that field and paints
   const frame = page.render(80)
   assert.equal(controller.snapshot().limits.patch.maxDepth, undefined)
   assert.equal(controller.snapshot().dirty, false)
-  assert.match(strip(frame.join('\n')), /Status\s+No changes/u)
+  assert.match(strip(frame.join('\n')), /^No changes\s*$/mu)
   assert.doesNotMatch(barLine(frame), /Save \[S\]/u, 'a real no-op never offers a fabricated Save')
   assert.equal(h.writes.length, 0)
 })
@@ -784,7 +784,7 @@ test('an unknown outcome asks Leave anyway and offers neither an ordinary Discar
   activateBar(page, 'bar:save')
   await h.drainTasks()
   let frame = page.render(80)
-  assert.match(strip(frame.join('\n')), /Limits: Outcome unconfirmed/u)
+  assert.match(strip(frame.join('\n')), /Limits: Could not confirm save/u)
   assert.equal(controller.snapshot().limits.dirty, true)
   assert.equal(writes.length, 1)
   assert.doesNotMatch(barLine(frame), /Save \[S\]|Discard \[D\]/u, 'a settled unknown offers no new Save or ordinary Discard')
@@ -990,7 +990,13 @@ function numericShellRig(options: { holdMutation?: boolean; reject?: boolean; un
     { key: 'timeoutMs', label: 'Command timeout (ms)', unit: 'ms', validate: positiveFiniteText, invalidHint: 'Enter a positive finite number.' },
     { key: 'maxOutputBytes', label: 'Output cap per stream (bytes)', unit: 'bytes', validate: positiveFiniteText, invalidHint: 'Enter a positive finite number.' },
   ]
-  return { port, fields, writes, inherited, effective: () => ({ ...effective }), releaseMutation: () => { releaseMutation?.() }, mutationStarted: started }
+  return {
+    port, fields, writes, inherited,
+    effective: () => ({ ...effective }),
+    advanceRevision: () => { revision += 1 },
+    releaseMutation: () => { releaseMutation?.() },
+    mutationStarted: started,
+  }
 }
 
 function numericRig(options: { holdMutation?: boolean; reject?: boolean; unconfirmed?: boolean; effectiveTimeout?: number; onRender?: () => void } = {}) {
@@ -1023,6 +1029,7 @@ function numericRig(options: { holdMutation?: boolean; reject?: boolean; unconfi
     page, controller, writes: shell.writes, actions,
     inherited: shell.inherited,
     effective: shell.effective,
+    advanceRevision: shell.advanceRevision,
     releaseMutation: shell.releaseMutation,
     mutationStarted: shell.mutationStarted,
     drain: async () => {
@@ -1176,10 +1183,31 @@ test('a grouped Stage keeps the draft local and ONE Save dispatches the whole pa
   assert.equal(h.writes[0]?.revision, 1, 'the captured revision fences the batch')
   assert.deepEqual(h.effective(), { timeoutMs: 45_000, maxOutputBytes: 128_000 })
   plain = h.page.render(80).map(strip).join('\n')
-  assert.match(plain, /Status\s+Verified/u)
+  assert.match(plain, /^Saved\s*$/mu)
   assert.match(plain, /^> Output cap per stream \(bytes\)/mu, 'the SAME group stays mounted with its field selection')
   assert.doesNotMatch(plain, /Save \[S\]|unsaved change/u, 'a verified group advertises no second Save')
   assert.deepEqual(h.actions, [], 'Save never navigates by itself')
+  h.page.dispose()
+})
+
+test('a saved numeric group demotes to Last-known when the served row moves', async () => {
+  const h = await startedNumeric()
+  h.page.handleInput(ENTER)
+  h.page.render(80)
+  h.page.handleInput('\x15')
+  for (const character of '45000') h.page.handleInput(character)
+  h.page.render(80)
+  h.page.handleInput(ENTER) // stage only
+  h.page.render(80)
+  h.page.activateBarSpan('bar:save')
+  await h.drain()
+  assert.match(h.page.render(80).map(strip).join('\n'), /^Saved\s*$/mu, 'the verified save starts as a current Saved')
+
+  h.advanceRevision()
+  const plain = h.page.render(80).map(strip).join('\n')
+  assert.match(plain, /^Last-known · read-only\s*$/mu, 'a stale verified settlement is no longer painted as Saved')
+  assert.match(plain, /Previous save completed; refresh to review\./u, 'the history is named as history')
+  assert.doesNotMatch(plain, /^Saved\s*$/mu)
   h.page.dispose()
 })
 
@@ -1306,7 +1334,7 @@ test('the grouped Advanced stages the SELECTED field reset without a confirmatio
     maxOutputBytes: { kind: 'reset' },
   }, 'the batch carries the set and the selected-field reset together')
   assert.equal(h.writes.length, 1)
-  assert.match(h.page.render(80).map(strip).join('\n'), /Status\s+Verified/u)
+  assert.match(h.page.render(80).map(strip).join('\n'), /^Saved\s*$/mu)
   assert.deepEqual(h.effective(), { timeoutMs: 45_000, maxOutputBytes: 64_000 }, 'the Host readback decides the reset value')
   h.page.dispose()
 })
@@ -1341,7 +1369,7 @@ test('the grouped dirty leave question offers Save, Discard and leave and Keep; 
   assert.equal(h.writes.length, 1)
   assert.deepEqual(h.actions, [], 'Save from the leave question stays in the group')
   plain = h.page.render(80).map(strip).join('\n')
-  assert.match(plain, /Status\s+Verified/u)
+  assert.match(plain, /^Saved\s*$/mu)
   assert.doesNotMatch(plain, /Discard and leave/u, 'the retired question never comes back')
 
   // A fresh dirty draft leaves only through the explicit Discard and leave.
@@ -1525,7 +1553,7 @@ test('a pending grouped Save refuses duplicate Save, parent/exit and Refresh', a
   assert.match(strip(frame.at(-1) ?? ''), /Saving… · Wait \[Esc\]/u)
   h.releaseMutation()
   await h.drain()
-  assert.match(h.page.render(80).map(strip).join('\n'), /Status\s+Verified/u, 'the admitted batch still settles')
+  assert.match(h.page.render(80).map(strip).join('\n'), /^Saved\s*$/mu, 'the admitted batch still settles')
   assert.equal(h.writes.length, 1)
   h.page.dispose()
 })
@@ -1659,7 +1687,7 @@ test('44x8 keeps the second field, its Reset and the dirty leave actions reachab
   h.page.handleInput('s')
   await h.drain()
   assert.deepEqual(h.writes[0]?.patch, { maxOutputBytes: { kind: 'reset' } })
-  assert.match(h.page.render(44).map(strip).join('\n'), /Status\s+Verified/u)
+  assert.match(h.page.render(44).map(strip).join('\n'), /^Saved\s*$/mu)
   h.page.dispose()
 })
 
@@ -1831,8 +1859,8 @@ test('the single-value Agent tenant paints one value and dispatches ONE save per
   for (let turn = 0; turn < 8; turn += 1) await Promise.all(tasks.splice(0))
   assert.deepEqual(writes, [{ maxParallelToolCalls: { kind: 'set', value: 4 } }])
   assert.match(plain(), /Current value\s+4/u)
-  assert.match(plain(), /Verified/u)
-  assert.doesNotMatch(plain(), /Save \[S\]/u, 'the Verified state never advertises a second save')
+  assert.match(plain(), /^Saved\s*$/mu)
+  assert.doesNotMatch(plain(), /Save \[S\]/u, 'the Saved state never advertises a second save')
   // Equal effective text is a real no-op: zero writes, `No changes`.
   press(ENTER)
   press('\x15')
@@ -1862,6 +1890,72 @@ test('the single-value Agent tenant paints one value and dispatches ONE save per
   for (let turn = 0; turn < 8; turn += 1) await Promise.all(tasks.splice(0))
   assert.deepEqual(writes[1], { maxParallelToolCalls: { kind: 'reset' } })
   assert.match(plain(), /Current value\s+2/u, 'the Host readback decides the value')
+  page.dispose()
+})
+
+test('a saved single-value Agent settlement demotes when the served row moves', async () => {
+  interface NumericLoopSettings {
+    readonly maxParallelToolCalls: number
+  }
+  const generation = {}
+  let revision = 4
+  let effective = { maxParallelToolCalls: 10 }
+  const writes: SectionPatch<NumericLoopSettings>[] = []
+  const fields: readonly HostNumericSettingsField<NumericLoopSettings>[] = [
+    { key: 'maxParallelToolCalls', label: 'Parallel tool calls' },
+  ]
+  const tasks: Promise<void>[] = []
+  const controller = new HostNumericSettingsController<NumericLoopSettings>({
+    port: {
+      read: () => ({
+        kind: 'ready', generation, revision, effective: { ...effective },
+        inherited: { maxParallelToolCalls: 2 }, overridden: { maxParallelToolCalls: true },
+      }),
+      refresh: async () => {},
+      mutate: async patch => {
+        writes.push(patch)
+        const edit = patch.maxParallelToolCalls!
+        effective = { maxParallelToolCalls: edit.kind === 'reset' ? 2 : edit.value }
+        revision += 1
+        return { kind: 'accepted' }
+      },
+    },
+    fields,
+    requestRender: () => {},
+    runOwned: (_label, task) => { tasks.push(Promise.resolve().then(task)) },
+  })
+  const page = new HostNumericSettingsPage<NumericLoopSettings>({
+    controller,
+    fields,
+    spec: { title: 'Parallel tool calls', commitMode: 'single', sourceHeading: () => 'Host profile', help: [], scope: 'Host profile' },
+    requestRender: () => {},
+    done: () => {},
+  })
+  page.setMaxRows(10)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  const plain = (): string => page.render(80).map(strip).join('\n')
+  page.handleInput(ENTER)
+  page.render(80)
+  page.handleInput('\x15')
+  page.render(80)
+  page.handleInput('4')
+  page.render(80)
+  page.handleInput(ENTER)
+  page.render(80)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.all(tasks.splice(0))
+  assert.equal(writes.length, 1)
+  assert.match(plain(), /^Current value\s+4\s*$/mu, 'the verified save starts as a current value')
+  assert.match(plain(), /^Saved\s*$/mu, 'the verified save starts as a current Saved')
+
+  revision += 1
+  const stale = plain()
+  assert.match(stale, /^Last confirmed\s+4\s*$/mu, 'a stale value is named as the last confirmed fact')
+  assert.doesNotMatch(stale, /^Current value\s/mu)
+  assert.match(stale, /^Last-known · read-only\s*$/mu, 'a stale single-value settlement is no longer painted as Saved')
+  assert.match(stale, /Previous save completed; refresh to review\./u, 'the history is named as history')
+  assert.doesNotMatch(stale, /^Saved\s*$/mu)
+  const narrow = page.render(18).map(strip).join('\n').replace(/\s+/gu, ' ')
+  assert.match(narrow, /Last-known · read-only/u, 'the long status wraps on the real grant instead of being truncated')
   page.dispose()
 })
 
@@ -2447,7 +2541,7 @@ test('a grouped leave question publishes Save only when its necessary copy is co
   h.page.handleInput('s')
   await h.drain()
   assert.equal(h.writes.length, 1)
-  assert.match(h.page.render(80).map(strip).join('\n'), /Status\s+Verified/u)
+  assert.match(h.page.render(80).map(strip).join('\n'), /^Saved\s*$/mu)
   h.page.dispose()
 })
 
@@ -2501,8 +2595,8 @@ test('an unconfirmed grouped outcome keeps the captured row truthful and offers 
   h.page.setMaxRows(8) // the short grant must keep the settlement state first
   let frame = h.page.render(80)
   let plain = frame.map(strip).join('\n')
-  assert.match(plain, /Status\s+Outcome unconfirmed/u)
-  assert.match(plain, /possibly saved;\s+refresh before retrying/u)
+  assert.match(plain, /^Could not confirm save\s*$/mu)
+  assert.match(plain, /The change may have been saved\. Refresh and check\./u)
   assert.match(plain, /Last-known · Host model-tool executor · POSIX Bash/u, 'the old row is named last-known')
   assert.match(plain, /Last confirmed: 60000 ms · Unsaved/u, 'the captured value is not painted as Current')
   assert.doesNotMatch(plain, /Current: 60000 ms/u)
@@ -2521,7 +2615,7 @@ test('an unconfirmed grouped outcome keeps the captured row truthful and offers 
   assert.match(plain, /Last confirmed Output cap per stream \(bytes\)\s+64000 bytes/u,
     'both captured caps are disclosed, not only the dirty field')
   h.page.handleInput(LEFT) // Keep
-  assert.match(h.page.render(80).map(strip).join('\n'), /Outcome unconfirmed/u)
+  assert.match(h.page.render(80).map(strip).join('\n'), /Could not confirm save/u)
   // Refresh requires the explicit question, then re-reads the served row.
   h.page.handleInput('r')
   frame = h.page.render(80)
@@ -2562,7 +2656,7 @@ test('an ambiguous leave never wears the definite discard label and keeps its bo
   assert.match(bar, /Keep \[Esc\]/u)
   assert.match(frame.map(strip).join('\n'), /Leave anyway…/u, 'the complete real answer stays in the body')
   h.page.handleInput(LEFT) // Keep
-  assert.match(h.page.render(26).map(strip).join('\n'), /Status\s+Outcome unconfirmed/u)
+  assert.match(h.page.render(26).map(strip).join('\n'), /^Could not confirm save\s*$/mu)
   h.page.handleInput(ESC)
   frame = h.page.render(26)
   const row = numericRowIndex(frame, 'Leave anyway…')
@@ -2619,7 +2713,7 @@ test('a refused grouped Save is read-only until Refresh, and its local Discard s
   await h.drain()
   let frame = h.page.render(80)
   let plain = frame.map(strip).join('\n')
-  assert.match(plain, /Status\s+Not saved/u)
+  assert.match(plain, /^Could not save\s*$/mu)
   assert.match(plain, /refresh to review\./u)
   assert.match(plain, /Last-known · Host model-tool executor · POSIX Bash/u,
     'a refused capture is not reprinted as the current row')
@@ -2635,7 +2729,7 @@ test('a refused grouped Save is read-only until Refresh, and its local Discard s
   frame = h.page.render(80)
   plain = frame.map(strip).join('\n')
   assert.doesNotMatch(plain, /1 unsaved change/u, 'the local discard clears the draft')
-  assert.doesNotMatch(plain, /Status\s+Not saved/u)
+  assert.doesNotMatch(plain, /^Could not save\s*$/mu)
   assert.doesNotMatch(plain, /Save \[S\]|Edit \[Enter\]/u, 'the stale capture is still read-only')
   assert.equal(h.writes.length, 1, 'discarding never dispatches another write')
   h.page.handleInput('r')
@@ -2861,7 +2955,7 @@ test('a narrow ambiguous question reserves its answer before long optional route
   h.page.dispose()
 })
 
-test('a stale formerly Verified section paints Last-known, never a current Verified', async () => {
+test('a stale formerly Saved section paints Last-known, never a current Saved', async () => {
   const h = await started()
   const { page } = h
   page.focused = true
@@ -2876,12 +2970,12 @@ test('a stale formerly Verified section paints Last-known, never a current Verif
   activateBar(page, 'bar:save')
   await h.drainTasks()
   let plain = strip(page.render(80).join('\n'))
-  assert.match(plain, /Limits:\s+Verified/u)
+  assert.match(plain, /Limits:\s+Saved/u)
   h.replaceGeneration()
   plain = strip(page.render(80).join('\n'))
   assert.match(plain, /Limits:?\s+Last-known · read-only/u)
-  assert.match(plain, /Previous save verified; refresh to review\./u)
-  assert.doesNotMatch(plain, /Limits:\s+Verified/u)
+  assert.match(plain, /Previous save completed; refresh to review\./u)
+  assert.doesNotMatch(plain, /Limits:\s+Saved/u)
   h.page.dispose()
 })
 

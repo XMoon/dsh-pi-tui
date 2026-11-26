@@ -4055,13 +4055,15 @@ function scalarSnapshot(options: {
   readonly revision: number
   readonly generation: object
   readonly warning?: string
+  readonly current?: 'On' | 'Off'
 }): SettingsWorkspaceSnapshot {
+  const current = options.current ?? 'Off'
   const row: SettingsWorkspaceRow = {
     id: 'visual-tools',
     category: 'tools',
     label: 'Visual tools',
-    summary: 'Off',
-    value: 'Off',
+    summary: current,
+    value: current,
     scope: 'Host profile',
     freshness: 'ready',
     description: 'the scalar test row',
@@ -4070,11 +4072,11 @@ function scalarSnapshot(options: {
       primary: 'persisted',
       revision: options.revision,
       generation: options.generation,
-      runtime: 'configured Off',
-      persisted: 'Off',
+      runtime: `configured ${current}`,
+      persisted: current,
       options: [
-        { value: 'Off', label: 'Off', available: true, current: true },
-        { value: 'On', label: 'On', available: true, current: false },
+        { value: 'Off', label: 'Off', available: true, current: current === 'Off' },
+        { value: 'On', label: 'On', available: true, current: current === 'On' },
       ],
       ...(options.warning === undefined ? {} : { confirmationWarning: options.warning }),
     },
@@ -4090,6 +4092,46 @@ function openScalarChoice(h: ReturnType<typeof setup>): void {
   assert.match(plain(h), /Choose value/u)
 }
 
+test('a verified Host-config receipt does not bind to a replacement admitted during the write', () => {
+  let generation = {}
+  const h = setup({ columns: 120, rows: 40, snapshot: () => scalarSnapshot({ revision: 5, generation }) })
+  openScalarChoice(h)
+  h.panel.handleInput('\r') // Confirm Off: the ONE commit is now pending
+  assert.equal(h.commits(), 1, 'the write was admitted against A')
+  assert.equal(h.settlements.length, 1)
+
+  // The Host is replaced AFTER admission and BEFORE the owner settles its
+  // verified A readback. The successor exposes the SAME revision.
+  generation = {}
+  h.settlements[0]!({ outcome: 'verified', verifiedValue: 'Off' })
+  const frame = plain(h)
+  assert.doesNotMatch(frame, /\bSaved\b/u, 'a successor observation never revives A\'s Saved')
+  assert.doesNotMatch(frame, /Last-known · read-only|Previous save completed/u,
+    'a ready successor is not described as read-only')
+  assert.match(frame, /Value\s+Off/u, 'the ready successor keeps its current value')
+  assert.match(frame, /Change(?:…| \[Enter\])/u, 'the ready successor keeps its edit affordance')
+})
+
+test('a verified Host-config receipt does not bind to a concurrent same-generation value', () => {
+  let current: 'On' | 'Off' = 'Off'
+  const generation = {}
+  const h = setup({ columns: 120, rows: 40, snapshot: () => scalarSnapshot({ revision: 5, generation, current }) })
+  openScalarChoice(h)
+  h.panel.handleInput('\r') // Confirm Off: the ONE commit is now pending
+  assert.equal(h.commits(), 1)
+
+  // Another writer changes the SAME authority's current value before the
+  // owner's post-write refresh. The verified Off value is no longer current.
+  current = 'On'
+  h.settlements[0]!({ outcome: 'verified', verifiedValue: 'Off' })
+  const frame = plain(h)
+  assert.doesNotMatch(frame, /\bSaved\b/u)
+  assert.doesNotMatch(frame, /Last-known · read-only|Previous save completed/u,
+    'the ready same-authority value is not described as read-only')
+  assert.match(frame, /Value\s+On/u, 'the ready current value is painted')
+  assert.match(frame, /Change(?:…| \[Enter\])/u)
+})
+
 test('a same-Host revision change while L2 stays painted refuses Confirm with zero dispatch', () => {
   let revision = 5
   const generation = {}
@@ -4100,7 +4142,7 @@ test('a same-Host revision change while L2 stays painted refuses Confirm with ze
   plain(h)
   h.panel.handleInput('\r')
   assert.equal(h.commits(), 0, 'the rebased row never dispatches')
-  assert.match(plain(h), /Not saved/u, 'the stale fence is reported')
+  assert.match(plain(h), /Could not save/u, 'the stale fence is reported')
   assert.match(plain(h), /Host settings changed since/u)
 })
 
@@ -4113,7 +4155,7 @@ test('a replaced Host generation with the SAME revision refuses Confirm with zer
   plain(h)
   h.panel.handleInput('\r')
   assert.equal(h.commits(), 0, 'a same-revision Host replacement is not the captured fence')
-  assert.match(plain(h), /Not saved/u)
+  assert.match(plain(h), /Could not save/u)
 })
 
 test('the confirmation warning is scrollable in L2 and must be read before Confirm', () => {

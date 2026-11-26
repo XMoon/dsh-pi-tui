@@ -330,7 +330,7 @@ export class HostNumericSettingsController<T extends object> {
     const patch = { ...this.state.patch }
     const live = this.deps.port.read()
     if (this.state.refreshRequired === true || !readyCurrent(base, live, this.deps.valueIdentity)) {
-      this.state.status = { kind: 'not-saved', text: 'Not saved · Host settings changed; refresh to review. Unsaved changes retained.' }
+      this.state.status = { kind: 'not-saved', text: 'Host settings changed; refresh to review. Unsaved changes retained.' }
       this.changed()
       return
     }
@@ -354,20 +354,20 @@ export class HostNumericSettingsController<T extends object> {
           this.state.status = {
             kind: outcome.kind === 'outcome-unconfirmed' ? 'outcome-unconfirmed' : 'not-saved',
             text: outcome.kind === 'outcome-unconfirmed'
-              ? `Outcome unconfirmed · ${outcome.reason}; possibly saved; refresh before retrying.`
-              : `Not saved · ${outcome.reason}; refresh to review.`,
+              ? outcome.reason
+              : `${outcome.reason}; refresh to review.`,
           }
         } else if (readback.kind !== 'ready' || readback.generation !== base.generation) {
           this.state.refreshRequired = true
-          this.state.status = { kind: 'unverified', text: 'Unverified · the accepted write has no current Host readback; refresh before retrying.' }
+          this.state.status = { kind: 'unverified', text: 'Could not check the original Host after saving.' }
         } else if (this.deps.valueIdentity !== undefined
           && this.deps.valueIdentity(readback.effective) !== this.deps.valueIdentity(base.effective)) {
           // F-S2-01: the accepted write landed on the row this page captured, but
           // the Host now serves a DIFFERENT row (the Shell executor). Same
           // generation/revision and even identical caps cannot prove the written
-          // row; the only honest verdict is Unverified until an explicit Refresh.
+          // row; the only honest verdict is unverified until an explicit Refresh.
           this.state.refreshRequired = true
-          this.state.status = { kind: 'unverified', text: 'Unverified · the Host now serves a different row; refresh before retrying.' }
+          this.state.status = { kind: 'unverified', text: 'The Host now serves a different executor row.' }
         } else {
           const setMatches = Object.entries(patch).every(([field, entry]) => {
             const op = entry as FieldPatch<unknown>
@@ -376,11 +376,11 @@ export class HostNumericSettingsController<T extends object> {
           if (setMatches) {
             this.state = { source: readback, patch: {} }
             this.syncTexts()
-            this.state.status = { kind: 'verified', text: 'Verified' }
+            this.state.status = { kind: 'verified', text: 'Saved' }
             this.saved = true
           } else {
             this.state.refreshRequired = true
-            this.state.status = { kind: 'unverified', text: 'Unverified · current Host values differ; refresh to review.' }
+            this.state.status = { kind: 'unverified', text: 'The Host now reads different values.' }
           }
         }
       } finally {
