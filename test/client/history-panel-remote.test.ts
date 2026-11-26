@@ -152,6 +152,7 @@ class FakeOpenScope implements RemoteHistoryOpenScope {
   readonly initialScope: 'session' | 'all'
   private directoryState: RemoteHistoryDirectoryState
   private disposed = false
+  private current = true
   private readonly listeners = new Set<() => void>()
 
   constructor(initialScope: 'session' | 'all', directory: RemoteHistoryDirectoryState) {
@@ -164,7 +165,11 @@ class FakeOpenScope implements RemoteHistoryOpenScope {
   }
 
   isCurrent(): boolean {
-    return !this.disposed
+    return !this.disposed && this.current
+  }
+
+  setCurrent(current: boolean): void {
+    this.current = current
   }
 
   subscribe(listener: () => void): () => void {
@@ -243,7 +248,7 @@ function makeHarness(options: HarnessOptions): Harness {
     ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
     geometry: geometry(options.columns ?? 120, options.rows ?? 40),
     pointerEnabled: options.pointerEnabled ?? (() => false),
-    tenantIsCurrent: options.tenantIsCurrent ?? (() => true),
+    tenantIsCurrent: options.tenantIsCurrent ?? (() => seat.isCurrent()),
     ...(options.initialQuery === undefined ? {} : { initialQuery: options.initialQuery }),
     onAccept: (selection) => { accepted.push(selection) },
     onCopy: (text) => { copied.push(text) },
@@ -459,6 +464,26 @@ test('a bounded preview becomes the hash-verified exact body; Copy/Restore refus
   assert.deepEqual(harness.accepted, [{ id: 'ses_a\u0000m1', content: exactText }],
     'Restore sends exactly body.text with the row identity')
   assert.equal(harness.closed, 0, 'copy/restore admission keeps its own seat lifecycle')
+})
+
+test('a same-open transport loss refuses a painted Copy and Restore', async () => {
+  const exactText = 'exact body that must not be restored after loss'
+  const harness = makeHarness({
+    items: [{ id: 'a', preview: 'exact body…', text: exactText }],
+    defaultScope: 'all',
+    pointerEnabled: () => true,
+  })
+  const { panel, scope, copied, accepted } = harness
+  panel.start()
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Copy All [Alt+C]')),
+    'the verified exact body')
+  assert.equal(panel.canAccept(), true)
+  scope.setCurrent(false)
+  assert.equal(panel.canAccept(), false, 'the painted Restore refuses after the transport token changed')
+  panel.handleInput('\x1bc')
+  panel.handleInput('\r')
+  assert.deepEqual(copied, [], 'the painted Copy sends nothing')
+  assert.deepEqual(accepted, [], 'the painted Restore sends nothing')
 })
 
 test('a ready empty body offers no action and states why', async () => {

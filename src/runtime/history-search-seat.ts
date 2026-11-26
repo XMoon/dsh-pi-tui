@@ -120,6 +120,8 @@ export interface RemoteHistorySeat {
   more(): void
   retry(): void
   close(): void
+  /** Whether the captured Host scope is still current for a painted action. */
+  isCurrent(): boolean
   view(): RemoteHistorySeatView
   subscribe(listener: () => void): () => void
 }
@@ -626,8 +628,8 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
       if (closed || status !== 'ready') return
       const row = rows.find(candidate => candidate.id === id)
       if (row === undefined) return
-      if (id === selectedId && body.kind !== 'failed') return
       userChanged = true
+      if (id === selectedId && body.kind !== 'failed') return
       selectedId = id
       startBody(row, serial, queryRevision)
     },
@@ -652,6 +654,9 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
       scopeSub = undefined
       options.scope.dispose()
       listeners.clear()
+    },
+    isCurrent() {
+      return !closed && options.scope.isCurrent()
     },
     view() {
       return {

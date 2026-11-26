@@ -10092,7 +10092,10 @@ export class TuiApp {
     const remote = captured.remote
     const read = this.historySearchRead
     const diag = this.historySearchDiag
-    if (remote !== undefined && (read === undefined || diag === undefined)) return
+    if (remote !== undefined && (read === undefined || diag === undefined)) {
+      remote.dispose()
+      return
+    }
     const cwd = this.historySearchCwd?.() ?? this.status.cwd
     const sessionId = captured.sessionId
     let panel: HistoryPanel | undefined
@@ -10110,6 +10113,9 @@ export class TuiApp {
       && this.historyPanel === panel
       && !this.disposed
       && captured.isCurrent()
+      // The Remote capture is the exact Host transport/binding/scope proof;
+      // the SessionScopeAuthority alone cannot see a same-id replacement.
+      && (remote?.isCurrent() ?? true)
     lease = this.tryOpenOptionalSeatTenant(() => {
       if (remote !== undefined && read !== undefined && diag !== undefined) {
         seat = createRemoteHistorySeat({
@@ -10141,6 +10147,10 @@ export class TuiApp {
         onResultsChanged: () => this.requestRender(),
         onCopy: (text) => this.copyHistorySelection(created, text),
         onAccept: (selection) => {
+          // Prove the exact Remote capture BEFORE retiring it: lease.close()
+          // disposes the capture, so a literal post-close call would always be
+          // false. The Session scope is re-proved after close as before.
+          const remoteCurrent = remote?.isCurrent() ?? true
           // Retire THIS lease first (the panel is disposed and the seat
           // re-projects the live editor owner), then re-validate the CAPTURED
           // Session scope — never the now-closed panel instance. A session
@@ -10148,7 +10158,7 @@ export class TuiApp {
           // during the (potentially re-entrant) retirement must never receive a
           // prior-session prompt.
           lease?.close()
-          if (!captured.isCurrent()) return
+          if (!captured.isCurrent() || !remoteCurrent) return
           // A new optional tenant, a Question/Approval/Save blocker or a focused
           // capturing overlay that took the seat during the close is the NEWER
           // fact: the accept must not overwrite the current Editor/owner.

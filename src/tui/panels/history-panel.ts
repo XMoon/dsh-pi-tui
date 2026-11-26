@@ -2111,7 +2111,7 @@ export class HistoryPanel implements Component, Focusable {
     return view.status === 'ready' && view.body.kind === 'failed'
   }
 
-  /** A seat failure that leaves NO readable page: Down is its keyboard Retry. */
+  /** A seat failure that leaves NO readable page: PgDn is its keyboard Retry. */
   private remoteBlockingFailure(): boolean {
     const status = this.remoteView?.status
     return status === 'loading-host' || status === 'incomplete' || status === 'unavailable'
