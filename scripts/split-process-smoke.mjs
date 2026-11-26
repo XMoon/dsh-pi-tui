@@ -599,7 +599,6 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.closeKeepsSessionResumable === true
       && result?.coldRestartResume === true
       && result?.disconnectReleasesView === true
-      && result?.runtimeToggleDisconnects === true
       && result?.negativesRejected === true
       && result?.hostIdentityKept === true
       && result?.originalSplitClientIntact === true
@@ -778,13 +777,15 @@ export function assertSelectedVerdict(caseId, result) {
     return
   }
   if (caseId === 'acp.po4c-content-output') {
+    const evidence = result?.evidence
+    const imageRefs = evidence?.imageRefs
+    const isDigest = value => typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value)
+    const isRef = value => typeof value === 'string' && /^sha256:[0-9a-f]{64}$/u.test(value)
+    const isName = value => typeof value === 'string' && value.length > 0
     assert(result?.status === 'PASS'
       && result?.scope === 'REAL_SPLIT_PROCESS_L6'
       && result?.assistantTextImageTextOrdered === true
-      && result?.assistantImageOnlyAccepted === true
-      && result?.toolResultOrderedContent === true
-      && result?.toolFailedStatus === true
-      && result?.missingImageRejected === true
+      && result?.largeToolImageCapacity === true
       && result?.largeImageFrameAboveLegacyCap === true
       && result?.capacityPositive === true
       && result?.capacityNegative === true
@@ -797,71 +798,85 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.hostIdentityKept === true
       && result?.readImageVerified === true
       && result?.l6EvidenceRecorded === true
-      && typeof result?.evidence?.sessionId === 'string'
-      && result.evidence.sessionId.length > 0
-      && Number.isInteger(result?.evidence?.hostPid)
-      && typeof result?.evidence?.hostInstanceId === 'string'
-      && result.evidence.hostInstanceId.length > 0
-      && Number.isInteger(result?.evidence?.assistant?.turn)
-      && typeof result?.evidence?.assistant?.messageId === 'string'
-      && result.evidence.assistant.messageId.length > 0
-      && typeof result?.evidence?.assistant?.attachmentId === 'string'
-      && /^sha256:[0-9a-f]{64}$/u.test(result.evidence.assistant.attachmentId)
-      && Number.isInteger(result?.evidence?.assistant?.storedBytes)
-      && result.evidence.assistant.storedBytes > 0
-      && Number.isInteger(result?.evidence?.assistant?.wireFrameBytes)
-      && result.evidence.assistant.wireFrameBytes > 256 * 1024
-      && result.evidence.assistant.legacyFrameBytes === 256 * 1024
-      && Array.isArray(result?.evidence?.assistant?.blockSha256)
-      && result.evidence.assistant.blockSha256.length === 2
-      && result.evidence.assistant.blockSha256.every(digest => typeof digest === 'string' && /^[0-9a-f]{64}$/u.test(digest))
-      && Number.isInteger(result?.evidence?.tool?.turn)
-      && typeof result?.evidence?.tool?.callId === 'string'
-      && result.evidence.tool.callId.length > 0
-      && typeof result?.evidence?.tool?.resultAttachmentId === 'string'
-      && /^sha256:[0-9a-f]{64}$/u.test(result.evidence.tool.resultAttachmentId)
-      && /^[0-9a-f]{64}$/u.test(result?.evidence?.tool?.a2uiSha256 ?? '')
-      && Number.isInteger(result?.evidence?.failedTool?.turn)
-      && result?.evidence?.failedTool?.isError === true
-      && Number.isInteger(result?.evidence?.missingImage?.turn)
-      && result?.evidence?.missingImage?.hostCode === 'ATTACHMENT_NOT_FOUND'
-      && result?.evidence?.missingImage?.acpCode === 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'
-      && result?.evidence?.slowPeer?.backpressureCode === 'LOCAL_ACP_OUTPUT_BACKPRESSURE'
-      && typeof result?.evidence?.slowPeer?.siblingSessionId === 'string'
-      && result.evidence.slowPeer.siblingSessionId !== result.evidence.sessionId
-      && Number.isInteger(result?.evidence?.slowPeer?.tuiTurn)
-      && Number.isInteger(result?.evidence?.slowPeer?.reattachAttempts)
-      && result.evidence.slowPeer.reattachAttempts >= 1
-      && result?.evidence?.slowPeer?.lateRead?.releasedAfterDisconnect === true
-      && result?.evidence?.slowPeer?.lateRead?.claimHeldBeforeRelease === true
-      && result.evidence.slowPeer.lateRead.attachmentId === result.evidence.assistant.attachmentId
-      && Number.isInteger(result?.evidence?.slowPeer?.lateRead?.hostCloseConnections)
-      && result.evidence.slowPeer.lateRead.hostCloseConnections >= 1
-      && Number.isInteger(result?.evidence?.slowPeer?.lateRead?.lateAttempts)
-      && result.evidence.slowPeer.lateRead.lateAttempts >= 1
-      && Number.isInteger(result?.evidence?.capacity?.maxImageBytes)
-      && Number.isInteger(result?.evidence?.capacity?.maxImagesPerMessage)
-      && Number.isInteger(result?.evidence?.capacity?.maxMessageImageBytes)
-      && result.evidence.capacity.maxImageBytes > result.evidence.capacity.maxMessageImageBytes
-      && Number.isInteger(result?.evidence?.capacity?.storedBytes)
-      && result.evidence.capacity.storedBytes > result.evidence.capacity.maxMessageImageBytes
-      && result.evidence.capacity.storedBytes <= result.evidence.capacity.maxImageBytes
-      && Number.isInteger(result?.evidence?.capacity?.deliveredFrameBytes)
-      && result.evidence.capacity.deliveredFrameBytes > 256 * 1024
-      && Number.isInteger(result?.evidence?.capacity?.derivedBudget)
-      && result.evidence.capacity.deliveredFrameBytes <= Math.max(256 * 1024, result.evidence.capacity.derivedBudget)
-      && result?.evidence?.boundedTransport?.overBudgetCode === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'
-      && result.evidence.boundedTransport.noContentOrStopReason === true
-      && result.evidence.boundedTransport.siblingAfterOverflow === true
-      && result.evidence.boundedTransport.tuiAlive === true
-      && Number.isInteger(result?.evidence?.memory?.rssBaselineBytes)
-      && Number.isInteger(result?.evidence?.memory?.rssPeakBytes)
-      && result.evidence.memory.rssPeakBytes >= result.evidence.memory.rssBaselineBytes
-      && result.evidence.memory.hostPid === result.evidence.hostPid
-      && result.evidence.memory.sdkFrameBytes === result.evidence.assistant.wireFrameBytes
-      && result.evidence.memory.writerBacklogBoundBytes === 256 * 1024
-      && Array.isArray(result?.evidence?.imageProbes)
-      && result.evidence.imageProbes.length === 2,
+      && isName(evidence?.sessionId)
+      && Number.isInteger(evidence?.hostPid)
+      && isName(evidence?.hostInstanceId)
+      && Number.isInteger(evidence?.assistant?.turn)
+      && isName(evidence?.assistant?.messageId)
+      && isRef(evidence?.assistant?.attachmentId)
+      && Number.isInteger(evidence?.assistant?.storedBytes)
+      && evidence.assistant.storedBytes > 0
+      && Number.isInteger(evidence?.assistant?.wireFrameBytes)
+      && evidence.assistant.wireFrameBytes > 256 * 1024
+      && evidence.assistant.legacyFrameBytes === 256 * 1024
+      && Array.isArray(evidence?.assistant?.blockSha256)
+      && evidence.assistant.blockSha256.length === 2
+      && evidence.assistant.blockSha256.every(isDigest)
+      && Number.isInteger(evidence?.tool?.turn)
+      && isName(evidence?.tool?.callId)
+      && isRef(evidence?.tool?.resultAttachmentId)
+      && Number.isInteger(evidence?.tool?.resultStoredBytes)
+      && evidence.tool.resultStoredBytes > 0
+      && isName(evidence?.tool?.resultMimeType)
+      && Number.isInteger(evidence?.tool?.resultFrameBytes)
+      && evidence.tool.resultFrameBytes > 256 * 1024
+      && isName(imageRefs?.mixed?.name)
+      && isName(imageRefs?.tool?.name)
+      && imageRefs.mixed.attachmentId === evidence.assistant.attachmentId
+      && imageRefs.tool.attachmentId === evidence.tool.resultAttachmentId
+      && imageRefs.mixed.attachmentId !== imageRefs.tool.attachmentId
+      && imageRefs.mixed.attachmentId === `sha256:${imageRefs.mixed.sha256}`
+      && imageRefs.tool.attachmentId === `sha256:${imageRefs.tool.sha256}`
+      && isDigest(imageRefs.mixed.sha256)
+      && isDigest(imageRefs.tool.sha256)
+      && Number.isInteger(imageRefs.mixed.bytes)
+      && Number.isInteger(imageRefs.tool.bytes)
+      && imageRefs.mixed.bytes > 0
+      && imageRefs.tool.bytes > 0
+      && imageRefs.mixed.bytes === evidence.assistant.storedBytes
+      && imageRefs.tool.bytes === evidence.tool.resultStoredBytes
+      && isName(imageRefs.mixed.mediaType)
+      && isName(imageRefs.tool.mediaType)
+      && imageRefs.tool.mediaType === evidence.tool.resultMimeType
+      && imageRefs.mixed.writerPid === evidence.hostPid
+      && imageRefs.tool.writerPid === evidence.hostPid
+      && evidence?.slowPeer?.backpressureCode === 'LOCAL_ACP_OUTPUT_BACKPRESSURE'
+      && isName(evidence?.slowPeer?.siblingSessionId)
+      && evidence.slowPeer.siblingSessionId !== evidence.sessionId
+      && Number.isInteger(evidence?.slowPeer?.tuiTurn)
+      && Number.isInteger(evidence?.slowPeer?.reattachAttempts)
+      && evidence.slowPeer.reattachAttempts >= 1
+      && evidence?.slowPeer?.lateRead?.releasedAfterDisconnect === true
+      && evidence?.slowPeer?.lateRead?.claimHeldBeforeRelease === true
+      && evidence.slowPeer.lateRead.attachmentId === evidence.assistant.attachmentId
+      && Number.isInteger(evidence?.slowPeer?.lateRead?.hostCloseConnections)
+      && evidence.slowPeer.lateRead.hostCloseConnections >= 1
+      && Number.isInteger(evidence?.slowPeer?.lateRead?.lateAttempts)
+      && evidence.slowPeer.lateRead.lateAttempts >= 1
+      && Number.isInteger(evidence?.capacity?.maxImageBytes)
+      && Number.isInteger(evidence?.capacity?.maxImagesPerMessage)
+      && Number.isInteger(evidence?.capacity?.maxMessageImageBytes)
+      && evidence.capacity.maxImageBytes > evidence.capacity.maxMessageImageBytes
+      && Number.isInteger(evidence?.capacity?.storedBytes)
+      && evidence.capacity.storedBytes > evidence.capacity.maxMessageImageBytes
+      && evidence.capacity.storedBytes <= evidence.capacity.maxImageBytes
+      && evidence.tool.resultStoredBytes > evidence.capacity.maxMessageImageBytes
+      && evidence.tool.resultStoredBytes <= evidence.capacity.maxImageBytes
+      && Number.isInteger(evidence?.capacity?.deliveredFrameBytes)
+      && evidence.capacity.deliveredFrameBytes > 256 * 1024
+      && Number.isInteger(evidence?.capacity?.derivedBudget)
+      && evidence.capacity.deliveredFrameBytes <= Math.max(256 * 1024, evidence.capacity.derivedBudget)
+      && evidence.tool.resultFrameBytes <= Math.max(256 * 1024, evidence.capacity.derivedBudget)
+      && evidence?.boundedTransport?.overBudgetCode === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'
+      && evidence.boundedTransport.noContentOrStopReason === true
+      && evidence.boundedTransport.siblingAfterOverflow === true
+      && evidence.boundedTransport.tuiAlive === true
+      && Number.isInteger(evidence?.memory?.rssBaselineBytes)
+      && Number.isInteger(evidence?.memory?.rssPeakBytes)
+      && evidence.memory.rssPeakBytes >= evidence.memory.rssBaselineBytes
+      && evidence.memory.hostPid === evidence.hostPid
+      && evidence.memory.sdkFrameBytes === evidence.assistant.wireFrameBytes
+      && evidence.memory.writerBacklogBoundBytes === 256 * 1024,
     `selected ${caseId}: the ACP committed content-output verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }

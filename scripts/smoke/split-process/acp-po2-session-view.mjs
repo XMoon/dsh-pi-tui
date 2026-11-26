@@ -7,10 +7,12 @@
  * that an ACP connection can borrow a live Host Session that a REAL TUI Client
  * also references (without replacing or re-mounting the Host), that a second
  * connection cannot attach the same Session, that `session/close` detaches only
- * the caller's View (the TUI turn still settles), that `session/new` creates a
- * real Host Workspace + Session, that a physical socket teardown and a runtime
- * ACP Off both release the View, and that every still-unsupported or invalid
- * request stays fail-closed with its stable business code.
+ * the caller's View (the TUI turn still settles), that the physical socket
+ * teardown releases the View, that `session/new` creates a real Host Workspace
+ * + Session, that a COLD Host restart resumes the persisted Sessions, and that
+ * every still-unsupported or invalid request stays fail-closed with its stable
+ * business code. The runtime Off/On multi-View behavior is owned by the B2
+ * multi-Session case.
  *
  * Every fact comes from REAL processes and a REAL socket; a partial or NOT_RUN
  * sub-scenario returns a non-PASS verdict that fails the selected case. The
@@ -236,15 +238,6 @@ function sendRequest(client, id, method, params) {
   return client.request(id, method, params)
 }
 
-async function waitUntil(predicate, label, timeoutMs = 20_000) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (predicate()) return
-    await sleep(25)
-  }
-  throw new SplitSmokeAssertionError(`acp-po2: timed out waiting for ${label}`)
-}
-
 /** The Linux abstract seat name one Host scope claims for this profile. */
 function seatName(scopeId) {
   return `\0dsh-pi-tui-h-${String(scopeId).slice(0, 40)}`
@@ -260,14 +253,18 @@ function isObjectResult(message) {
     && Object.keys(message.result).length === 0
 }
 
-/** A session/resume success may carry the optional `configOptions` payload. */
+/**
+ * A session/resume success: no error and a real non-array object result.
+ * ACP v1 legal fields such as `modes`/`configOptions` are protocol output, not a
+ * business payload allowlist; this predicate never enumerates them.
+ */
 function isAttachResult(message) {
   if (message === undefined || message.error !== undefined) return false
   const result = message.result
-  if (result === undefined || typeof result !== 'object' || result === null) return false
-  const keys = Object.keys(result)
-  if (keys.some(key => key !== 'configOptions')) return false
-  return result.configOptions === undefined || Array.isArray(result.configOptions)
+  return result !== undefined
+    && typeof result === 'object'
+    && result !== null
+    && !Array.isArray(result)
 }
 
 /**
@@ -475,14 +472,13 @@ export async function runAcpPo2SessionView(context) {
     conn2.close()
     await conn2.closed
 
-    // ── E) `session/close(A)` twice on the same connection is idempotent; the
+    // ── E) `session/close(A)` detaches only this connection's View (repeated
+    //      and unknown close are owned by the B2 multi-Session case); the
     //      REAL TUI then completes one real Turn on A with a deterministic
     //      answer; Host identity + Agent-row fiber UID are unchanged; a NEW ACP
     //      connection resumes A again.
     const close1 = await sendRequest(conn1, 3, 'session/close', { sessionId: sessionA })
-    assert(isObjectResult(close1), `E: the first session/close must return {} (got ${JSON.stringify(close1?.error ?? close1?.result)})`)
-    const close2 = await sendRequest(conn1, 4, 'session/close', { sessionId: sessionA })
-    assert(isObjectResult(close2), `E: a repeated session/close must return {} (got ${JSON.stringify(close2?.error ?? close2?.result)})`)
+    assert(isObjectResult(close1), `E: session/close must return {} (got ${JSON.stringify(close1?.error ?? close1?.result)})`)
     conn1.close()
     await conn1.closed
 
@@ -549,20 +545,13 @@ export async function runAcpPo2SessionView(context) {
     assert((tuiA.records.filter(record => record.m4b2s === 'surface-status').at(-1))?.openSessionId === sessionA,
       'G: the real TUI lost Session A after the ACP teardown')
 
-    // ── H) Runtime ACP Off disconnects every ACP peer and retires the socket;
-    //      ACP On re-binds and a new connection resumes A again; the Host stays.
-    assertAccess(await acpAccess(peer, 'H off', false), 'disabled', 'H off')
-    await waitUntil(() => !exists(socketPath), 'H: acp.sock to retire after runtime Off')
+    // Close the two Views this case still holds (A and B) before the cold Host
+    // restart, so no active claim leaks past the process that owned it. The
+    // runtime Off/On multi-View behavior is owned by the B2 multi-Session case.
+    resumeG.client.close()
     await resumeG.client.closed
+    connResumeB.close()
     await connResumeB.closed
-    await assertSameHost(identityBeforeC, 'H Host after runtime Off')
-    assertAccess(await acpAccess(peer, 'H on', true), 'enabled', 'H on')
-    await waitUntil(() => exists(socketPath), 'H: acp.sock to re-bind after runtime On')
-    const { client: conn5 } = await openInitialized(scopeDir, 'H re-enabled connection')
-    const resumeH = await sendRequest(conn5, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
-    assert(isAttachResult(resumeH),
-      `H: a new connection must resume A after re-bind (got ${JSON.stringify(resumeH?.error ?? resumeH?.result)})`)
-    await assertSameHost(identityBeforeC, 'H Host after re-bind')
 
     // ── H2) COLD resume across a REAL Host restart: stop the Host, keep the
     //       persisted Sessions, boot a NEW Host on the SAME profile, re-enable
@@ -944,7 +933,6 @@ export async function runAcpPo2SessionView(context) {
       closeKeepsSessionResumable: true,
       coldRestartResume: true,
       disconnectReleasesView: true,
-      runtimeToggleDisconnects: true,
       negativesRejected: true,
       hostIdentityKept: true,
       originalSplitClientIntact: true,

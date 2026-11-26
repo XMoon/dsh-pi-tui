@@ -279,27 +279,39 @@ export async function runAcpPo1bOptInControl(context) {
   }
 
   try {
-    // ── a) DEFAULT OFF: Ready with NO socket, ordinary transport intact ──────
+    // ── a) DEFAULT OFF: Ready with NO socket, one real Split TUI and the
+    //      ordinary private Peer control are live against the SAME Host. ─────
     const { host: host1, ready: ready1 } = await startReadyHost('acp-po1b default-off host')
     const scopeId = ready1.localHost.scopeId
     assert(findScopeDirBySocket(dshHome) === undefined,
       'a default-off: no acp.sock may be bound anywhere under the profile')
     assert(!exists(socketPathFor(scopeId)),
       'a default-off: the Ready Host must not have bound acp.sock in its own scope')
+    const peer = await startPeer('acp-po1b runtime peer')
+    assertAccess(await acpAccess(peer, 'a getStatus', undefined), 'disabled', 'a getStatus')
+    // PO-5D: the REAL public `daemon status` observes the same live controller.
+    const statusDisabledBefore = daemonStatus('a status disabled')
+    assert(statusDisabledBefore.acp === 'disabled',
+      `a: a disabled listener must report acp=disabled: ${JSON.stringify(statusDisabledBefore)}`)
+    assert(statusDisabledBefore['acp-socket'] === undefined,
+      'a: a disabled listener must print no endpoint')
     const tui = new SurfaceEntryProcess(entries.client, { ...base, workDir })
     clients.push(tui)
-    const tuiReady = await tui.waitFor(record => record.m4a0 === 'ready', 'acp-po1b default-off TUI ready', 180_000)
+    const tuiReady = await tui.waitFor(record => record.m4a0 === 'ready', 'acp-po1b rented TUI ready', 180_000)
     assert(tuiReady.surfaceMounted === true && tuiReady.transport === 'connected',
       'a default-off: the real Split TUI did not mount its surface with ACP off')
-    tui.send('/exit\r')
-    try { await tui.waitForExit(60_000) } catch { await tui.dispose() }
-    trace('acp-po1b/default-off', { socketBound: false, tuiReady: true })
+    trace('acp-po1b/default-off', {
+      socketBound: false,
+      tuiReady: true,
+      hostPid: ready1.localHost.hostPid,
+      instanceId: ready1.localHost.instanceId,
+      scopeId,
+    })
 
-    // ── b0) REAL TUI Settings → Host → ACP access (end-to-end) ──────────────
-    // PR-B: the ONE ACP surface on PiTui is the `Host → ACP access` page. Drive
-    // the live `/settings` workspace over the real keyboard and prove the
-    // non-writing first frame, the REAL owned 0600 socket, the two-step Disable
-    // risk confirmation and the persisted next-start preference.
+    // ── b0) ONE real /acp TUI journey: a disabled Host's painted Enable action
+    //      binds the real listener, a staged Disable + Cancel keeps the live
+    //      state, the explicit second confirmation retires it on the SAME Host,
+    //      and the next-start preference is written once through the page. ───
     const frameOf = async target => (await target.viewport()).join('\n')
     /** Wait for a painted pattern (the page's own settled facts are asynchronous). */
     const waitFrame = async (target, pattern, label, timeoutMs = 60_000) => {
@@ -345,117 +357,129 @@ export async function runAcpPo1bOptInControl(context) {
       }
       assert(pattern.test(await frameOf(target)), `${label}: the row was never selected:\n${(await frameOf(target)).slice(-2500)}`)
     }
-    const openHostRows = async (target, label) => {
-      target.send('/settings\r')
-      await target.waitForScreen('Settings ·', `${label}: /settings open`, 60_000)
-      for (let step = 0; step < 16; step += 1) {
-        if (/^\s*> Host\b/mu.test(await frameOf(target))) break
-        target.send('\x1b[B')
+    /**
+     * The accept row and its bar segment exist only while the risk copy shares
+     * this frame. If the current grant hides it, walk the ONE real Detail column
+     * with the page's own scroll keys instead of confirming a blanked control.
+     */
+    const waitConfirmAffordance = async (target, label, timeoutMs = 30_000) => {
+      const deadline = Date.now() + timeoutMs
+      let step = 0
+      while (Date.now() < deadline) {
+        if (/Confirm \[Enter\]/u.test(await frameOf(target))) return
+        target.send(step % 2 === 0 ? '\x1b[H' : '\x1b[6~')
+        step += 1
         await sleep(160)
       }
-      assert(/^\s*> Host\b/mu.test(await frameOf(target)), `${label}: the Host category was never selected`)
-      target.send('\r')
-      await target.waitForScreen('Backend', `${label}: Host rows`, 30_000)
+      assert(false, `${label}: the painted Confirm [Enter] affordance never appeared:\n${(await frameOf(target)).slice(-2500)}`)
     }
-    const openAcpAccessPage = async (target, label) => {
-      await selectRow(target, /^> ACP access(?:\s|$)/mu, `${label}: ACP access row selection`)
-      target.send('\r')
-      await waitFrame(target, /Scope: local Split Host ACP listener/u, `${label}: ACP access page`)
+    const sameSocketIdentity = identity => {
+      if (!exists(socketPathFor(scopeId))) return false
+      const stat = lstatSync(socketPathFor(scopeId))
+      return stat.isSocket() && stat.dev === identity.dev && stat.ino === identity.ino
     }
-    await seatFree(`\0dsh-pi-tui-c-${String(scopeId).slice(0, 40)}`, 20_000)
-    const tuiSettings = new SurfaceEntryProcess(entries.client, { ...base, workDir })
-    clients.push(tuiSettings)
-    const tuiSettingsReady = await tuiSettings.waitFor(record => record.m4a0 === 'ready', 'acp-po1b settings TUI ready', 180_000)
-    assert(tuiSettingsReady.surfaceMounted === true && tuiSettingsReady.transport === 'connected',
-      'b0: the real Split TUI did not mount for the Settings confirm path')
-    const tuiSocket = socketPathFor(scopeId)
-    const hostBeforeSettings = await hostStatus(host1)
-    await openHostRows(tuiSettings, 'b0')
-    await openAcpAccessPage(tuiSettings, 'b0')
-    // NON-WRITING FIRST FRAME: the page states the real Disabled listener, the
-    // proven Profile's exact client command, and binds nothing.
-    const firstFrame = await waitFrame(tuiSettings, /Listener\s+Disabled/u, 'b0: settled disabled listener')
+    const hostBeforeTui = await hostStatus(host1)
+    tui.send('/acp\r')
+    await tui.waitForScreen('Settings · Host · ACP access', 'b0: /acp typed deep link', 60_000)
+    const firstFrame = await waitFrame(tui, /Listener\s+Disabled/u, 'b0: settled disabled listener')
     assert(/^> Enable ACP(?:\s|$)/mu.test(firstFrame),
-      `b0: a disabled Host must focus its ONE runtime action:\n${firstFrame}`)
-    assert(firstFrame.includes('dsh --profile pi-tui acp stdio'),
-      `b0: the page must paint the official Profile client command:\n${firstFrame}`)
-    assert(!exists(tuiSocket), 'b0: merely opening the ACP access page must not bind acp.sock')
-    // ENABLE through the real page (the disabled Host's first focus).
-    tuiSettings.send('\r')
-    await tuiSettings.waitForScreen('Verified', 'b0 enable: Verified', 60_000)
-    assert(exists(tuiSocket), 'b0: the REAL TUI page Confirm must bind acp.sock on the running Host')
-    const tuiSocketInfo = lstatSync(tuiSocket)
-    assert(tuiSocketInfo.isSocket() && (tuiSocketInfo.mode & 0o777) === 0o600,
-      'b0: the page-enabled socket must be a 0600 socket')
-    const tuiHostAfterEnable = await hostStatus(host1)
-    // DISABLE: the first action only enters the risk confirmation. Esc/Cancel
-    // performs ZERO writes and keeps the live socket; only the second explicit
-    // confirmation dispatches the ONE Host disable.
-    await selectRow(tuiSettings, /^> Disable ACP…(?:\s|$)/mu, 'b0 disable: staged action')
-    tuiSettings.send('\r')
-    await waitRiskSentence(tuiSettings, 'b0 disable: risk confirmation')
-    tuiSettings.send('\x1b')
-    const afterCancel = await waitFrame(tuiSettings, /^> Disable ACP…(?:\s|$)/mu, 'b0 disable: cancelled back to ready')
+      `b0: a disabled Host must focus its ONE real runtime action:\n${firstFrame}`)
+    assert(!exists(socketPathFor(scopeId)), 'b0: merely opening /acp must not bind acp.sock')
+    const prefBeforeTui = await acpPreference(peer, 'b0 preference read before journey', undefined)
+    assert(prefBeforeTui.ok === true && prefBeforeTui.autoStart === false,
+      `b0: opening /acp must not change the persisted preference: ${JSON.stringify(prefBeforeTui)}`)
+    // ENABLE through the real painted action. The verdict is the REAL Host
+    // readback, socket and raw protocol answer — never a specific page word.
+    tui.send('\r')
+    await waitUntil(() => exists(socketPathFor(scopeId)), 'b0: page Enable to bind acp.sock', 60_000)
+    await awaitRuntimeState(peer, 'enabled', 'b0 after the page Enable')
+    const pageSocketInfo = lstatSync(socketPathFor(scopeId))
+    assert(pageSocketInfo.isSocket() && (pageSocketInfo.mode & 0o777) === 0o600
+      && pageSocketInfo.uid === process.getuid(),
+    'b0: the page-enabled socket must be a 0600 socket owned by this uid')
+    const held = await openAcpClient(scopeDirOf(scopeId))
+    const heldInit = await held.initialize(1)
+    assert(heldInit?.result?.protocolVersion === 1, 'b0: the page-enabled socket must answer a raw ACP initialize')
+    let heldClosed = false
+    held.closed.then(() => { heldClosed = true })
+    const heldStat = lstatSync(socketPathFor(scopeId))
+    const heldSocketIdentity = { dev: heldStat.dev, ino: heldStat.ino }
+    await waitFrame(tui, /Listener\s+Enabled/u, 'b0: settled enabled listener')
+    // DISABLE stage → complete risk copy + painted Confirm affordance → Cancel.
+    // Only observable live facts decide: the held peer stays connected, the SAME
+    // socket inode survives, and the Host reports enabled. The L2/VT owner test
+    // keeps the precise zero-dispatch proof.
+    await selectRow(tui, /^> Disable ACP…(?:\s|$)/mu, 'b0 disable: staged action')
+    tui.send('\r')
+    await waitRiskSentence(tui, 'b0 disable: risk confirmation')
+    await waitConfirmAffordance(tui, 'b0 disable: risk confirmation')
+    tui.send('\x1b')
+    const afterCancel = await waitFrame(tui, /^> Disable ACP…(?:\s|$)/mu, 'b0 disable: cancelled back to ready')
     assert(/Listener\s+Enabled/u.test(afterCancel), 'b0: Cancel must keep the listener enabled')
-    assert(exists(tuiSocket), 'b0: the staged (cancelled) Disable must not touch the live socket')
-    tuiSettings.send('\r')
-    await waitRiskSentence(tuiSettings, 'b0 disable: risk confirmation again')
-    tuiSettings.send('\r') // the SECOND explicit confirmation
-    await tuiSettings.waitForScreen('Verified', 'b0 disable: Verified', 60_000)
-    await waitUntil(() => !exists(tuiSocket), 'b0: acp.sock to retire after the confirmed page disable')
-    const tuiHostAfterDisable = await hostStatus(host1)
-    assert(tuiHostAfterDisable.pid === hostBeforeSettings.pid
-      && tuiHostAfterDisable.pid === tuiHostAfterEnable.pid
-      && tuiHostAfterDisable.localHost.instanceId === hostBeforeSettings.localHost.instanceId,
-      'b0: the real TUI page toggle must not replace the Host')
-    // NEXT HOST START: the SAME page edits the persisted preference; it must
-    // never bind the running Host's socket.
-    await selectRow(tuiSettings, /^> Start automatically(?:\s|$)/mu, 'b0 autostart: row')
-    tuiSettings.send('\r')
-    await tuiSettings.waitForScreen('Choose the value the next Host start applies:', 'b0 autostart: choice', 30_000)
-    tuiSettings.send('\r') // stage the opposite candidate (On)
-    await tuiSettings.waitForScreen('Save the next Host start preference as On?', 'b0 autostart: confirm step', 30_000)
-    tuiSettings.send('\r')
-    await tuiSettings.waitForScreen('Verified', 'b0 autostart On: Verified', 60_000)
-    await waitFrame(tuiSettings, /Start automatically\s+On · Change…/u, 'b0 autostart On: persisted re-read')
-    assert(!exists(tuiSocket), 'b0: saving autoStart On must never bind the current Host socket')
-    await selectRow(tuiSettings, /^> Start automatically(?:\s|$)/mu, 'b0 autostart: restore row')
-    tuiSettings.send('\r')
-    await tuiSettings.waitForScreen('Choose the value the next Host start applies:', 'b0 autostart: restore choice', 30_000)
-    await selectRow(tuiSettings, /^> Off(?:\s|$)/mu, 'b0 autostart: Off candidate')
-    tuiSettings.send('\r')
-    await tuiSettings.waitForScreen('Save the next Host start preference as Off?', 'b0 autostart: restore confirm step', 30_000)
-    tuiSettings.send('\r')
-    await tuiSettings.waitForScreen('Verified', 'b0 autostart Off: Verified', 60_000)
-    await waitFrame(tuiSettings, /Start automatically\s+Off(?: \(default\))? · Change…/u, 'b0 autostart Off: persisted re-read')
-    // Leave the page and the workspace through the REAL Esc ladder, then exit.
-    for (let step = 0; step < 4 && (await frameOf(tuiSettings)).includes('Settings ·'); step += 1) {
-      tuiSettings.send('\x1b')
-      await sleep(220)
-    }
-    assert(!(await frameOf(tuiSettings)).includes('Settings ·'), 'b0: the Settings workspace must close with the real Esc ladder')
-    tuiSettings.send('/exit\r')
-    try { await tuiSettings.waitForExit(60_000) } catch { await tuiSettings.dispose() }
-    trace('acp-po1b/tui-settings-confirm', {
+    assert(heldClosed === false, 'b0: Cancel must not close the held ACP peer')
+    assert(sameSocketIdentity(heldSocketIdentity), 'b0: Cancel must keep the SAME live socket inode')
+    assertAccess(await acpAccess(peer, 'b0 status after cancel', undefined), 'enabled', 'b0 status after cancel')
+    // A real request/response round-trip on the held peer proves it stayed
+    // connected; a second initialize is refused by contract but still answers.
+    const secondInitialize = await held.initialize(2)
+    assert(secondInitialize?.error !== undefined,
+      'b0: the held ACP peer must still answer a real request after Cancel')
+    // The SECOND explicit confirmation retires the listener and disconnects the
+    // held peer on the SAME Host.
+    tui.send('\r')
+    await waitRiskSentence(tui, 'b0 disable: risk confirmation again')
+    await waitConfirmAffordance(tui, 'b0 disable: risk confirmation again')
+    tui.send('\r')
+    await held.closed
+    await waitUntil(() => !exists(socketPathFor(scopeId)), 'b0: confirmed page disable retires acp.sock')
+    await awaitRuntimeState(peer, 'disabled', 'b0 after the confirmed page disable')
+    const hostAfterDisable = await hostStatus(host1)
+    assert(hostAfterDisable.pid === hostBeforeTui.pid
+      && hostAfterDisable.localHost.instanceId === hostBeforeTui.localHost.instanceId,
+    'b0: the real TUI page toggle must not replace the Host')
+    await waitFrame(tui, /Listener\s+Disabled/u, 'b0: settled disabled listener after the confirm')
+    // NEXT HOST START: the SAME page edits the persisted preference Off→On
+    // once; the visible choice and confirm are required (never a blind Enter).
+    await selectRow(tui, /^> Start automatically(?:\s|$)/mu, 'b0 autostart: row')
+    tui.send('\r')
+    await tui.waitForScreen('Choose the value the next Host start applies:', 'b0 autostart: choice', 30_000)
+    await selectRow(tui, /^> On(?:\s|$)/mu, 'b0 autostart: On candidate')
+    tui.send('\r')
+    await tui.waitForScreen('Save the next Host start preference as On?', 'b0 autostart: confirm step', 30_000)
+    await waitFrame(tui, /Confirm save \[Enter\]/u, 'b0 autostart: painted Confirm save affordance')
+    profileTouched = true
+    tui.send('\r')
+    await waitFrame(tui, /Start automatically\s+On · Change…/u, 'b0 autostart On: persisted re-read')
+    const readBackOn = await acpPreference(peer, 'b0 preference read back On', undefined)
+    assert(readBackOn.ok === true && readBackOn.autoStart === true,
+      `b0: the page-written On preference must read back On: ${JSON.stringify(readBackOn)}`)
+    assert(!exists(socketPathFor(scopeId)), 'b0: saving autoStart On must never bind the current Host socket')
+    assertAccess(await acpAccess(peer, 'b0 runtime after preference', undefined), 'disabled', 'b0 runtime after preference')
+    const hostAfterPreference = await hostStatus(host1)
+    assert(hostAfterPreference.pid === hostBeforeTui.pid
+      && hostAfterPreference.localHost.instanceId === hostBeforeTui.localHost.instanceId,
+    'b0: saving the next-start preference must not replace the Host')
+    trace('acp-po1b/tui-journey', {
       pageFirstFrameNonWriting: true,
-      commandPainted: true,
+      slashAcpControl: true,
       enabledViaTui: true,
-      cancelledDisableZeroWrite: true,
+      cancelledDisableKeptLiveState: true,
       disabledViaTui: true,
       socket0600: true,
       sameHost: true,
       autoStartViaTui: true,
     })
+    // Leave the workspace through the REAL Esc ladder, then exit naturally.
+    for (let step = 0; step < 4 && (await frameOf(tui)).includes('Settings ·'); step += 1) {
+      tui.send('\x1b')
+      await sleep(220)
+    }
+    assert(!(await frameOf(tui)).includes('Settings ·'), 'b0: the Settings workspace must close with the real Esc ladder')
+    tui.send('/exit\r')
+    await tui.waitForExit(60_000)
 
-    // ── b) RUNTIME TOGGLE through the private Peer control ───────────────────
-    const peer = await startPeer('acp-po1b runtime peer')
-    assertAccess(await acpAccess(peer, 'b getStatus', undefined), 'disabled', 'b getStatus')
-    // PO-5D: the REAL public `daemon status` observes the same live controller.
-    const statusDisabledBefore = daemonStatus('b status disabled')
-    assert(statusDisabledBefore.acp === 'disabled',
-      `b: a disabled listener must report acp=disabled: ${JSON.stringify(statusDisabledBefore)}`)
-    assert(statusDisabledBefore['acp-socket'] === undefined,
-      'b: a disabled listener must print no endpoint')
+    // ── b) ONE independent runtime toggle through the private Peer control:
+    //      status/socket/owner-admission/same-Host evidence only. ──────────────
     assertAccess(await acpAccess(peer, 'b enable', true), 'enabled', 'b enable')
     const socketPath = socketPathFor(scopeId)
     assert(exists(socketPath), 'b: enabling the local ACP access must bind acp.sock')
@@ -501,63 +525,6 @@ export async function runAcpPo1bOptInControl(context) {
     assert(afterDisable.pid === hostPidBefore && afterDisable.localHost.instanceId === instanceBefore,
       'b: disabling the listener must not replace the Host')
 
-    assertAccess(await acpAccess(peer, 'b re-enable', true), 'enabled', 'b re-enable')
-    const reinit = await rawInitialize(scopeId, 2)
-    assert(reinit?.result?.protocolVersion === 1, 'b: the re-enabled socket must answer initialize again')
-    const afterReEnable = await hostStatus(host1)
-    assert(afterReEnable.pid === hostPidBefore && afterReEnable.localHost.instanceId === instanceBefore,
-      'b: re-enabling the listener must not replace the Host')
-    // Plan §4.5: after re-enabling, the ORIGINAL Split Client/Host must still be
-    // usable. Boot a fresh REAL Split TUI against the same Host while ACP is on.
-    await seatFree(`\0dsh-pi-tui-c-${String(scopeId).slice(0, 40)}`, 20_000)
-    const tui2 = new SurfaceEntryProcess(entries.client, { ...base, workDir })
-    clients.push(tui2)
-    const tui2Ready = await tui2.waitFor(record => record.m4a0 === 'ready', 'acp-po1b re-enable TUI ready', 180_000)
-    assert(tui2Ready.surfaceMounted === true && tui2Ready.transport === 'connected',
-      'b: after re-enabling ACP the original Split TUI must still mount its surface')
-    // PO-5E / PR-B: the public `/acp` entry on this REAL Split Client is the
-    // SAME `Settings · Host · ACP access` typed deep link. ONE explicit Disable
-    // confirmation must reach the SAME Host controller, disconnect a REAL
-    // connected ACP peer and retire the socket while the Host/TUI keep running.
-    tui2.send('/acp\r')
-    await tui2.waitForScreen('Settings · Host · ACP access', 'acp command: typed deep link', 60_000)
-    await waitFrame(tui2, /Listener\s+Enabled/u, 'acp command: settled enabled listener')
-    // A REAL ACP peer is connected and initialized BEFORE the disable request;
-    // its closure is the observable disconnect fact.
-    const slashPeer = await openAcpClient(scopeDirOf(scopeId))
-    const slashInit = await slashPeer.initialize(1)
-    assert(slashInit?.result?.protocolVersion === 1, 'acp command: the held peer must initialize')
-    await selectRow(tui2, /^> Disable ACP…(?:\s|$)/mu, 'acp command: disable action')
-    tui2.send('\r')
-    await waitRiskSentence(tui2, 'acp command: risk confirmation')
-    tui2.send('\r') // the ONE explicit confirmation
-    await tui2.waitForScreen('Verified', 'acp command: authoritative read-back', 60_000)
-    await waitUntil(() => !exists(socketPath), 'b: the /acp disable retires acp.sock')
-    await slashPeer.closed
-    const afterAcpPage = await hostStatus(host1)
-    assert(afterAcpPage.pid === hostPidBefore && afterAcpPage.localHost.instanceId === instanceBefore,
-      'b: the /acp page must control the SAME Host')
-    // Esc returns to the Host Rows; closing the page never re-enables or undoes
-    // the accepted Host disable.
-    tui2.send('\x1b')
-    await tui2.waitForScreen('Backend', 'acp command: back to the Host rows', 30_000)
-    await sleep(300)
-    assert(!exists(socketPath), 'b: closing the /acp page must never undo the accepted Host write')
-    trace('acp-po1b/slash-command', {
-      typedDeepLink: true,
-      heldPeerDisconnected: true,
-      confirmedDisable: true,
-      authoritativeReadBack: true,
-      sameHost: true,
-      backToHostRows: true,
-      closeDoesNotUndo: true,
-    })
-    // Leave the listener ENABLED for the preference scenario (it was enabled
-    // when this block started).
-    assertAccess(await acpAccess(peer, 'b restore enable after /acp', true), 'enabled', 'b restore enable')
-    await rawInitialize(scopeId, 3)
-    tui2.send('/exit\r')
-    try { await tui2.waitForExit(60_000) } catch { await tui2.dispose() }
     trace('acp-po1b/runtime-toggle', {
       disabledAtStart: true,
       enabledSocket0600: true,
@@ -568,15 +535,9 @@ export async function runAcpPo1bOptInControl(context) {
     })
 
     // ── c) PREFERENCE PERSISTENCE is a DIFFERENT authority ───────────────────
-    // Runtime is ENABLED from (b); disable it so persisting On can be proven NOT
-    // to start the running listener.
-    assertAccess(await acpAccess(peer, 'c disable for preference test', false), 'disabled', 'c disable')
-    const wroteTrue = await acpPreference(peer, 'c preference write true', true)
-    assert(wroteTrue.ok === true && wroteTrue.autoStart === true && wroteTrue.readBack === true,
-      `c: the On preference write did not read back On: ${JSON.stringify(wroteTrue)}`)
-    profileTouched = true
-    await awaitRuntimeState(peer, 'disabled', 'c runtime after preference write')
-    trace('acp-po1b/preference-independent', { readBack: true, runtimeUnchanged: true })
+    // The TUI journey above already left runtime Off and the persisted next-
+    // start preference On; no second same-intent Peer save is performed here.
+    assertAccess(await acpAccess(peer, 'c status before cold restart', undefined), 'disabled', 'c status before cold restart')
     assert((await peer.shutdown()).code === 0, 'c: the runtime peer did not stop')
     await stopHost(host1, 'c first host')
 

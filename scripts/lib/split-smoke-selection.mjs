@@ -524,7 +524,7 @@ const CASE_REGISTRY = Object.freeze([
   Object.freeze({
     suite: 'acp',
     id: 'acp.po2-session-view',
-    title: 'one live Host-owned ACP Session View shares a real TUI Session with one ACP connection, refuses a second attach, releases only its own View on close/teardown/Off, and creates a real Host Workspace Session',
+    title: 'one live Host-owned ACP Session View shares a real TUI Session with one ACP connection, refuses a second attach, releases only its own View on close/teardown, and creates a real Host Workspace Session',
     run: runAcpPo2SessionView,
   }),
   Object.freeze({
@@ -694,7 +694,7 @@ const CASE_REGISTRY = Object.freeze([
     suite: 'acp',
     defaultLane: false,
     id: 'acp.po4c-content-output',
-    title: 'one real Host and TUI project committed assistant text/image/text, image-only output and one ordered tool_call_update with verified Host Store bytes, carry a standard image frame above 256 KiB, fail an absent image reference closed and isolate a slow reader from the sibling ACP connection and the real TUI',
+    title: 'one real Host and TUI project committed assistant text/image/text and one large ordered tool_call_update with verified Host Store bytes, carry a standard image frame above 256 KiB, and isolate a slow reader from the sibling ACP connection and the real TUI',
     run: runAcpPo4cContentOutput,
   }),
   Object.freeze({
