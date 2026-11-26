@@ -6841,7 +6841,6 @@ function livePublicHostPids() {
   const home = scene.installation.dshHome
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   const nodeName = scene.installation.dshInvocation[0].split('/').at(-1)
-  const knownHostPids = new Set(publicHosts.map(host => host.pid))
   const pids = []
   for (const pid of listing.pids) {
     if (pid === process.pid) continue
@@ -6851,10 +6850,10 @@ function livePublicHostPids() {
       throw new Error(`PUBLIC_COLD_SCAN_UNKNOWN: PID ${String(pid)} is unreadable (${light.code})`)
     }
     if (uid !== undefined && light.uid !== uid) continue
-    // A captured Host may run under a Node worker-thread comm (for example
-    // "MainThread"); its exact pid/birth is already in the ledger. Only that
-    // known PID bypasses the advisory name filter; unknown PIDs stay strict.
-    if (!knownHostPids.has(pid) && light.name !== nodeName && light.name !== 'node') continue
+    // Linux comm is mutable and cannot prove a non-target executable. The
+    // qualified Darwin path keeps its existing advisory prefilter; Linux is
+    // classified by the actual detached leader + argv entry + capture below.
+    if (process.platform === 'darwin' && light.name !== nodeName && light.name !== 'node') continue
     const identity = obs.observe(pid)
     if (identity.kind === 'gone') continue
     if (identity.kind !== 'alive') {
