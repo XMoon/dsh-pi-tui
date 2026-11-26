@@ -194,7 +194,9 @@ async function frameOf(client) {
  * list cell and the Detail cell RIGHT-ALIGNED on the same physical rows, so a
  * fixed column does not exist: the Detail's own tokens (`Current: `, `› `, the
  * verdicts) are unambiguous within the page region and are matched WHEREVER
- * their whole cell landed. The list cell never prints `Current: `.
+ * their whole cell landed. The list cell never prints `Current: `, and it also
+ * suppresses the success words (`Saved`/`No changes`), so a whole-page success
+ * match can only describe the selected Detail.
  */
 function pageDetailText(frame) {
   return frame.split('\n').join('\n').replace(/\s+/gu, ' ').trim()
@@ -503,10 +505,11 @@ async function selectCandidate(client, index, label, candidateLabel) {
     `${label}: the Detail cursor never reached ${JSON.stringify(candidateLabel)}: ${JSON.stringify(frame.split('\n'))}`)
 }
 
-/** Wait for the SELECTED Detail's own settled verdict. A whole-frame `Saved`
- *  search could match another row's retained receipt; the Detail text is the
- *  scope of this confirm, and a legitimate zero-write confirm paints
- *  `No changes` instead of `Saved`. */
+/** Wait for the selected Detail's settled success word. The page deliberately
+ *  suppresses `Saved`/`No changes` on the list rows, so these words can only
+ *  come from the selected Detail; `settings-web-visual.test.ts` locks that
+ *  invariant. A legitimate zero-write confirm paints `No changes` instead of
+ *  `Saved`. */
 async function waitForDetailVerdict(client, label, timeoutMs = 20_000) {
   let detail = ''
   try {

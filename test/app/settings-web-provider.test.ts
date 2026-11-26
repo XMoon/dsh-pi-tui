@@ -3229,3 +3229,62 @@ test('an accepted Remote write whose post-receipt Host was replaced is unverifie
   assert.equal((remote.namespaces.get('web')!.value as Record<string, unknown>).searchProvider, 'deepseek-search-api',
     'B really holds the requested value; the UI simply does not attribute it')
 })
+
+test('the delegated Confirm re-proves the live authority generation, not only the painted revision', async () => {
+  let facts: WebSettingsFacts = {
+    kind: 'ready',
+    settings: {
+      searchProvider: 'deepseek-official',
+      fetchProvider: 'http',
+      providerSelection: providerLayers({ searchUser: { id: 'deepseek-official' }, fetchBase: 'http' }),
+      api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+      advanced: {},
+      credential: { configured: true, source: 'file' },
+      authority: { generation: {}, webRevision: 4, apiRevision: 8 },
+    },
+  }
+  const commits: string[] = []
+  const page = new WebSettingsPage({
+    readFacts: () => facts,
+    writableRefusal: () => undefined,
+    credentialAvailable: () => true,
+    commit: async request => {
+      commits.push(`${request.rowId}:${request.kind}`)
+      return { kind: 'verified', actual: '10' }
+    },
+    refresh: () => {},
+    navigateToModels: () => {},
+    requestRender: () => {},
+    run: (_label, task) => { void task() },
+    done: () => {},
+  })
+  const drain = async (): Promise<void> => {
+    for (let index = 0; index < 40; index += 1) await Promise.resolve()
+  }
+  try {
+    page.setMaxRows(20)
+    page.render(140)
+    page.handleInput('\r') // provider Detail
+    page.render(140)
+    page.handleInput('\x1b[B') // current server-side -> DeepSeek Search API
+    page.render(140)
+    // Positive control: the same frame's delegated span dispatches.
+    page.activateBarSpan('web:confirm')
+    await drain()
+    assert.equal(commits.length, 1)
+    // A generation-only replacement (SAME revisions/values) without repainting:
+    // the painted decision's capture no longer belongs to the live authority.
+    facts = {
+      kind: 'ready',
+      settings: {
+        ...facts.settings,
+        authority: { ...facts.settings.authority, generation: {} },
+      },
+    }
+    page.activateBarSpan('web:confirm')
+    await drain()
+    assert.equal(commits.length, 1, 'the generation-only replacement refuses the delegated dispatch')
+  } finally {
+    page.dispose()
+  }
+})
