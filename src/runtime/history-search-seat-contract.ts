@@ -49,10 +49,17 @@ export type RemoteHistoryBodyView =
   | { readonly kind: 'ready'; readonly row: RemoteHistoryRow; readonly text: string; readonly hasNonText: boolean }
   | { readonly kind: 'failed'; readonly row: RemoteHistoryRow; readonly preview: string; readonly message: string }
 
+/** Bounded first-cold-round progress, derived from verified safe integers. */
+export interface RemoteHistoryProgress {
+  readonly settled: number
+  readonly total: number
+}
+
 export type RemoteHistorySeatStatus =
   | 'idle'
   | 'searching'
   | 'loading-host'
+  | 'partial'
   | 'incomplete'
   | 'unavailable'
   | 'denied'
@@ -64,11 +71,16 @@ export type RemoteHistorySeatStatus =
 export interface RemoteHistorySeatView {
   readonly serial: number
   readonly queryRevision: number
+  /** Monotonic material-page identity (rows/order/content or selection shape).
+   *  Progress-only publishes do not advance it. */
+  readonly pageRevision: number
   readonly scope: HistoryScope
   readonly query: string
   readonly status: RemoteHistorySeatStatus
   /** Safe status text; never a Host error detail or a content byte. */
   readonly message: string
+  /** Present only for a partial first page; absent for ready/loading/failure. */
+  readonly progress: RemoteHistoryProgress | undefined
   readonly rows: readonly RemoteHistoryRow[]
   readonly selectedId: string | undefined
   readonly hasMore: boolean

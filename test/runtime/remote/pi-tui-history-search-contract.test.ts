@@ -160,6 +160,39 @@ test('a ready search answer needs exact fields and a bounded preview', () => {
   assert.throws(() => parseHistorySearchResponse({ kind: 'ok', items: [] }), /unknown kind/u)
 })
 
+test('a partial answer is a strict cursor-free arm with bounded progress', () => {
+  const item = {
+    sessionId: 's1',
+    messageId: 'm1',
+    firstEventSeq: 2,
+    acceptedAt: 1000,
+    effectiveCwd: null,
+    preview: 'hello',
+    contentLength: 5,
+    contentSha256: 'a'.repeat(64),
+    hasNonText: false,
+  }
+  assert.deepEqual(parseHistorySearchResponse({
+    kind: 'partial', items: [item], progress: { settled: 1, total: 2 },
+  }), {
+    kind: 'partial', items: [item], progress: { settled: 1, total: 2 },
+  })
+  // A legal empty first page still states that at least one ID is queryable.
+  assert.deepEqual(parseHistorySearchResponse({
+    kind: 'partial', items: [], progress: { settled: 2, total: 2 },
+  }), { kind: 'partial', items: [], progress: { settled: 2, total: 2 } })
+  assert.throws(() => parseHistorySearchResponse({ kind: 'partial', items: [], progress: { settled: 0, total: 2 } }), /progress/u)
+  assert.throws(() => parseHistorySearchResponse({ kind: 'partial', items: [], progress: { settled: 3, total: 2 } }), /progress/u)
+  assert.throws(() => parseHistorySearchResponse({ kind: 'partial', items: [], progress: { settled: 1, total: 0 } }), /progress/u)
+  assert.throws(() => parseHistorySearchResponse({ kind: 'partial', items: [], progress: { settled: 1, total: 2, extra: 1 } }), /unexpected field/u)
+  assert.throws(() => parseHistorySearchResponse({ kind: 'partial', items: [], progress: { settled: 1, total: 2 }, cursor: 'c' }), /unexpected field/u)
+  assert.throws(() => parseHistorySearchResponse({ kind: 'partial', items: [], progress: { settled: 1, total: 2 }, generation: 'g' }), /unexpected field/u)
+  assert.throws(() => parseHistorySearchResponse({ kind: 'partial', items: [{ ...item, extra: 1 }], progress: { settled: 1, total: 2 } }), /unexpected field/u)
+  assert.throws(() => parseHistorySearchResponse({
+    kind: 'partial', items: [{ ...item, preview: 'x'.repeat(HISTORY_SEARCH_PREVIEW_MAX_CHARS + 1) }], progress: { settled: 1, total: 2 },
+  }), /preview/u)
+})
+
 test('the non-ready search vocabulary is closed and exact', () => {
   assert.deepEqual(parseHistorySearchResponse({ kind: 'loading' }), { kind: 'loading' })
   assert.deepEqual(parseHistorySearchResponse({ kind: 'incomplete', reason: 'source-uncertain' }),

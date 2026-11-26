@@ -711,7 +711,7 @@ test('typed Remote states paint the shared safe message and Down retries every r
 
   h.port.answerSearch({ kind: 'loading' })
   await waitUntil('the Host loading state', () => h.seat.renderState()?.status === 'loading-host')
-  assert.equal(h.seat.renderState()?.header, 'History is loading on Host')
+  assert.equal(h.seat.renderState()?.header, 'Loading history…')
   assert.equal(h.seat.renderState()?.retryEnabled, true)
   let before = requestCount()
   h.seat.handleKey(key('down'))
@@ -818,4 +818,104 @@ test('closing or losing the captured Host scope disposes the shared owner and co
   assert.deepEqual(h.copies, [])
   assert.deepEqual(h.restored, [])
   assert.equal(h.sourceCalls(), 0)
+})
+
+
+// ── F. Progressive first cold round ─────────────────────────────────────────
+
+test('a partial first page paints progress, enables exact actions and never offers More', async (t) => {
+  const h = makeSeat(t)
+  h.seat.open()
+  await waitUntil('the first search', () => h.port.pendingSearches() === 1)
+  const first = row(0, 'alpha exact')
+  const second = row(1, 'beta exact')
+  h.port.answerSearch({ kind: 'partial', items: [first, second], progress: { settled: 1, total: 3 } })
+  await waitUntil('the partial page', () => h.seat.renderState()?.status === 'partial')
+  const partial = h.seat.renderState()
+  assert.ok(partial)
+  assert.equal(partial.header, 'Results · 2 shown · Indexing 1/3 (33%)')
+  const narrow = nodesOf(historySearchView({ state: partial, onIntent: () => {}, wide: false }))
+    .find(node => node.props['role'] === HISTORY_SEARCH_ROLES.resultsHead
+      || node.props['role'] === HISTORY_SEARCH_ROLES.resultsHeadProgress)
+  assert.equal(narrow?.props['text'], 'Indexing 1/3 (33%)', 'the narrow card leads with the indexing word')
+  assert.equal(partial.moreEnabled, false, 'partial has no More')
+  assert.equal(partial.actionsEnabled, false, 'the exact body is not ready yet')
+  assert.equal(roleNode(h.seat, HISTORY_SEARCH_ROLES.more), undefined, 'partial paints no More control')
+  await waitUntil('the selected body read', () => h.port.pendingReads() === 1)
+  h.port.answerRead(body('alpha exact'))
+  await waitUntil('the exact partial body', () => h.seat.renderState()?.actionsEnabled === true)
+  const ready = h.seat.renderState()
+  assert.ok(ready)
+  assert.equal(ready.copyKey, partial.copyKey, 'a body-only update keeps the same action identity')
+  h.seat.handleIntent({
+    kind: 'copy', selectedId: ready.selectedId, serial: ready.serial, revision: ready.revision, pageRevision: ready.pageRevision,
+  })
+  assert.equal(h.copies.length, 1)
+  assert.equal(h.copies[0]?.raw, 'alpha exact', 'partial Copy uses the verified exact body')
+  const beforeSearch = h.port.searchRequests.length
+  h.seat.handleKey(key('down'))
+  await waitUntil('the partial selection move', () => h.seat.renderState()?.selectedId === second.sessionId + '\u0000' + second.messageId)
+  assert.equal(h.port.searchRequests.length, beforeSearch, 'a partial selection move starts no page load')
+  h.seat.handleKey(key('down'))
+  await settle(60)
+  assert.equal(h.port.searchRequests.length, beforeSearch, 'Down at the partial tail never requests More')
+})
+
+test('a material partial reorder advances the action identity and refuses the stale painted Copy', async (t) => {
+  const h = makeSeat(t)
+  h.seat.open()
+  await waitUntil('the first search', () => h.port.pendingSearches() === 1)
+  const first = row(0, 'alpha exact')
+  const second = row(1, 'beta exact')
+  h.port.answerSearch({ kind: 'partial', items: [first, second], progress: { settled: 1, total: 3 } })
+  await waitUntil('the partial page', () => h.seat.renderState()?.status === 'partial')
+  await waitUntil('the selected body read', () => h.port.pendingReads() === 1)
+  h.port.answerRead(body('alpha exact'))
+  await waitUntil('the exact partial body', () => h.seat.renderState()?.actionsEnabled === true)
+  const painted = h.seat.renderState()
+  assert.ok(painted)
+
+  // The seat's one warmup tick asks for the next first page.
+  await waitUntil('the progress refresh', () => h.port.pendingSearches() === 1, 3_000)
+  h.port.answerSearch({
+    kind: 'partial',
+    items: [first, second],
+    progress: { settled: 2, total: 3 },
+  })
+  await waitUntil('the progress-only update', () => h.seat.renderState()?.header.includes('2/3') === true)
+  const progressOnly = h.seat.renderState()
+  assert.ok(progressOnly)
+  assert.equal(progressOnly.pageRevision, painted.pageRevision, 'progress-only does not advance the page identity')
+  assert.equal(progressOnly.copyKey, painted.copyKey, 'progress-only keeps the same action key')
+
+  await waitUntil('the second progress refresh', () => h.port.pendingSearches() === 1, 3_000)
+  h.port.answerSearch({
+    kind: 'partial',
+    items: [second, first],
+    progress: { settled: 3, total: 3 },
+  })
+  await waitUntil('the reordered partial', () => h.seat.renderState()?.header.includes('3/3') === true)
+  const reordered = h.seat.renderState()
+  assert.ok(reordered)
+  assert.ok(reordered.pageRevision > painted.pageRevision, 'a material reorder advances the page identity')
+  assert.notEqual(reordered.copyKey, painted.copyKey)
+  assert.equal(reordered.selectedId, painted.selectedId, 'the same row identity keeps selection')
+  assert.equal(reordered.actionsEnabled, true, 'the verified body survives the reorder')
+  const copiesBefore = h.copies.length
+  h.seat.handleIntent({
+    kind: 'copy',
+    selectedId: painted.selectedId,
+    serial: painted.serial,
+    revision: painted.revision,
+    pageRevision: painted.pageRevision,
+  })
+  assert.equal(h.copies.length, copiesBefore, 'the pre-reorder action intent is refused')
+  h.seat.handleIntent({
+    kind: 'copy',
+    selectedId: reordered.selectedId,
+    serial: reordered.serial,
+    revision: reordered.revision,
+    pageRevision: reordered.pageRevision,
+  })
+  assert.equal(h.copies.length, copiesBefore + 1, 'the current action intent acts on the exact row')
 })

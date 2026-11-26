@@ -48,6 +48,7 @@ import {
   historyCheckpointHash,
   sessionEventHash,
   sessionHeaderHash,
+  type HistoryOccurrenceInput,
 } from '../../src/app/host/features/history-search-index.ts'
 import {
   sourceProofBasis,
@@ -6035,7 +6036,12 @@ function seedColdProof(
   profileDir: string,
   source: MutableOfficialSource,
   authority: HistoryRevisionAuthority,
-  options: { readonly nextSeq?: number; readonly mint?: boolean; readonly basisAuthority?: HistoryRevisionAuthority } = {},
+  options: {
+    readonly nextSeq?: number
+    readonly mint?: boolean
+    readonly basisAuthority?: HistoryRevisionAuthority
+    readonly occurrences?: readonly HistoryOccurrenceInput[]
+  } = {},
 ): void {
   const sessionId = String(source.header.id)
   const index = HistorySearchIndex.open({ profileDir })
@@ -6053,7 +6059,7 @@ function seedColdProof(
       lastEventHash: nextSeq === 0 ? null : sessionEventHash(source.events[nextSeq - 1]!),
       sourceState: 'persisted',
       uncertainSourcesDelta: 0,
-      occurrences: [],
+      occurrences: options.occurrences ?? [],
     })
     if (options.mint === false) return
     const checkpoint = index.checkpointOf(sessionId)
@@ -6377,7 +6383,15 @@ test('a pre-upgrade v2 projection with a no-rpcId accepted input replays and min
     while (!latched && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
     assert.equal(latched, true, 'the version1 proof must not hit: the official source must be reopened')
     const early = await service.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
-    assert.ok(early.kind === 'loading' || early.kind === 'incomplete', `the first round is unproven: ${JSON.stringify(early)}`)
+    // The old marker Session's proof is still being replays; once its terminal
+    // settles the healthy first round may answer a partial page, but it must
+    // never claim full coverage or ready.
+    assert.ok(early.kind === 'partial' || early.kind === 'loading' || early.kind === 'incomplete',
+      `the first round is unproven: ${JSON.stringify(early)}`)
+    if (early.kind === 'partial') {
+      assert.equal(early.progress.total, 2)
+      assert.ok(early.progress.settled >= 1 && early.progress.settled < early.progress.total)
+    }
     release()
     await waitDirectReady(service, 20_000)
     const all = await service.search({ scope: 'all', query: 'hsp-old-', limit: 25 }, new AbortController().signal)
@@ -6444,10 +6458,25 @@ test('an early hit cannot publish ready while a later Session official read is s
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-history-proof-latch-root-')
   const profileDir = life.tempDir('dsh-history-proof-latch-profile-')
-  const hitSource = proofSource(root)
+  // The recent-first cold order must visit the hit source before the latched
+  // replay source; creation time is the deterministic scheduling fact here.
+  const hitSource = proofSource(root, {
+    header: testHeader('proof-session', '/repo/proof', { createdAt: 1_721_232_000_010 }),
+  })
   const replaySource = proofSource(root, { header: testHeader('late-session', '/repo/late') })
   const probe = proofAuthority(root)
-  seedColdProof(profileDir, hitSource, probe.authority)
+  const hitRows: readonly HistoryOccurrenceInput[] = [
+    { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/proof', content: 'mutable first', hasNonText: false },
+    { messageId: 'msg-2', firstEventSeq: 2, acceptedAt: 1002, effectiveCwd: '/repo/proof-two', content: 'mutable second', hasNonText: false },
+  ]
+  const lateRows: readonly HistoryOccurrenceInput[] = [
+    { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/late', content: 'mutable first', hasNonText: false },
+    { messageId: 'msg-2', firstEventSeq: 2, acceptedAt: 1002, effectiveCwd: '/repo/late-two', content: 'mutable second', hasNonText: false },
+  ]
+  seedColdProof(profileDir, hitSource, probe.authority, { occurrences: hitRows })
+  // A clean committed row from the previous incarnation exists for the
+  // latched source too; it must stay unreadable until this round's terminal.
+  seedColdProof(profileDir, replaySource, probe.authority, { mint: false, occurrences: lateRows })
   const { deps, calls } = mutableDeps(hitSource, [replaySource])
   const basePersistence = deps.sessionPersistence()!
   let latched = false
@@ -6471,15 +6500,125 @@ test('an early hit cannot publish ready while a later Session official read is s
     const deadline = Date.now() + 15_000
     while (!latched && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
     assert.equal(latched, true, 'the later Session read must be latched')
-    const early = await service.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
-    assert.equal(early.kind, 'loading', `an early hit must not publish ready: ${JSON.stringify(early)}`)
+    const early = await service.search({ scope: 'all', query: 'mutable', limit: 25 }, new AbortController().signal)
+    assert.equal(early.kind, 'partial', `an early hit must not publish ready: ${JSON.stringify(early)}`)
+    if (early.kind !== 'partial') throw new Error('expected partial')
+    assert.deepEqual(early.progress, { settled: 1, total: 2 })
+    assert.deepEqual(early.items.map(item => item.sessionId), ['proof-session', 'proof-session'])
+    assert.equal(early.items.length, 2, 'only the proved terminal ID contributes rows')
+    // Exact text is served from the same permit.
+    const exact = await service.readText({
+      sessionId: early.items[0]!.sessionId,
+      messageId: early.items[0]!.messageId,
+      contentSha256: early.items[0]!.contentSha256,
+      offset: 0,
+      limit: 4096,
+    }, new AbortController().signal)
+    assert.equal(exact.kind, 'ready')
+    // The latched, previously clean row is NOT readable before its terminal.
+    const lateBefore = await service.readText({
+      sessionId: 'late-session',
+      messageId: 'msg-1',
+      contentSha256: sha256('mutable first'),
+      offset: 0,
+      limit: 4096,
+    }, new AbortController().signal)
+    assert.equal(lateBefore.kind, 'loading')
+    // A cursor can never continue a partial page.
+    const stale = await service.search({
+      scope: 'all', query: '', limit: 1, cursor: 'not-a-real-cursor',
+    }, new AbortController().signal)
+    assert.deepEqual(stale, { kind: 'stale', reason: 'cursor-stale' })
+    // A committed dirty row drops out of the same progress/permit set.
+    indexOfService(service).markSession({ sessionId: 'proof-session', dirty: true })
+    const dirty = await service.search({ scope: 'all', query: 'mutable', limit: 25 }, new AbortController().signal)
+    assert.equal(dirty.kind, 'loading')
+    indexOfService(service).markSession({ sessionId: 'proof-session', dirty: false })
     assert.equal(calls.openCalls(), 0, 'the latched read must be the only open and it has not started')
     release()
     await waitDirectReady(service)
     assert.equal(calls.openCalls(), 1)
     const late = await service.search({ scope: 'session', sessionId: 'late-session', query: 'mutable', limit: 10 }, new AbortController().signal)
     assert.equal(late.kind, 'ready')
-    assert.ok(late.kind === 'ready' && late.items.length >= 2)
+    assert.ok(late.kind === 'ready' && late.items.length === 2)
+  } finally {
+    release()
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+
+test('a real source-read failure during the first cold round stops partial publication', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-fault-root-')
+  const profileDir = life.tempDir('dsh-history-fault-profile-')
+  const hitSource = proofSource(root, {
+    header: testHeader('proof-session', '/repo/proof', { createdAt: 1_721_232_000_010 }),
+  })
+  const brokenSource = proofSource(root, {
+    header: testHeader('broken-session', '/repo/broken'),
+    location: { kind: 'jsonl', path: join(root, 'sessions', 'broken-session.jsonl.zstd') },
+    revisionToken: 'rev-broken',
+  })
+  const probe = proofAuthority(root)
+  seedColdProof(profileDir, hitSource, probe.authority, {
+    occurrences: [
+      { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/proof', content: 'mutable first', hasNonText: false },
+      { messageId: 'msg-2', firstEventSeq: 2, acceptedAt: 1002, effectiveCwd: '/repo/proof-two', content: 'mutable second', hasNonText: false },
+    ],
+  })
+  const { deps } = mutableDeps(hitSource, [brokenSource])
+  const base = deps.sessionPersistence()!
+  let latched = false
+  let release = (): void => {}
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const gated: HistorySearchPersistenceLike = {
+    identity: base.identity,
+    list: options => base.list(options),
+    stat: (id, options) => base.stat(id, options),
+    open: async (id, access, options) => {
+      if (String(id) === 'broken-session') {
+        latched = true
+        await gate
+        throw new Error('the official source could not be read')
+      }
+      return base.open(id, access, options)
+    },
+  }
+  const ctx = new Context()
+  const service = directService(ctx, {
+    ...deps,
+    sessionPersistence: () => gated,
+    revisionAuthority: async () => probe.authority,
+  }, profileDir)
+  try {
+    const deadline = Date.now() + 15_000
+    while (!latched && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(latched, true)
+    const partial = await service.search({ scope: 'all', query: 'mutable', limit: 25 }, new AbortController().signal)
+    assert.equal(partial.kind, 'partial', 'a healthy ID can be partial before the fault is observed')
+    if (partial.kind !== 'partial') throw new Error('expected partial')
+    assert.equal(partial.progress.settled, 1)
+    release()
+    const started = Date.now()
+    let answer: HistorySearchResponse | undefined
+    while (Date.now() - started < 15_000) {
+      answer = await service.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
+      if (answer.kind === 'incomplete') break
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(answer?.kind, 'incomplete', JSON.stringify(answer))
+    const after = await service.search({ scope: 'all', query: 'mutable', limit: 25 }, new AbortController().signal)
+    assert.equal(after.kind, 'incomplete', 'a real source failure must not keep publishing a partial page')
+    const body = await service.readText({
+      sessionId: 'proof-session',
+      messageId: 'msg-1',
+      contentSha256: sha256('mutable first'),
+      offset: 0,
+      limit: 4096,
+    }, new AbortController().signal)
+    assert.equal(body.kind, 'incomplete')
   } finally {
     release()
     await service.dispose()
@@ -7163,14 +7302,21 @@ test('a restored cold Session with preexisting history cannot keep the early pro
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-history-restored-root-')
   const profileDir = life.tempDir('dsh-history-restored-profile-')
-  const early = proofSource(root)
+  const early = proofSource(root, {
+    header: testHeader('proof-session', '/repo/proof', { createdAt: 1_721_232_000_010 }),
+  })
   const late = proofSource(root, {
     header: testHeader('proof-late', '/repo/late'),
     location: { kind: 'jsonl', path: join(root, 'sessions', 'proof-late.jsonl.zstd') },
     revisionToken: 'rev-late',
   })
   const probe = proofAuthority(root)
-  seedColdProof(profileDir, early, probe.authority)
+  seedColdProof(profileDir, early, probe.authority, {
+    occurrences: [
+      { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/proof', content: 'mutable first', hasNonText: false },
+      { messageId: 'msg-2', firstEventSeq: 2, acceptedAt: 1002, effectiveCwd: '/repo/proof-two', content: 'mutable second', hasNonText: false },
+    ],
+  })
   const { deps, calls } = mutableDeps(early, [late])
   const basePersistence = deps.sessionPersistence()!
   const lateName = String(late.header.id)
@@ -7215,6 +7361,13 @@ test('a restored cold Session with preexisting history cannot keep the early pro
     // held so the restored registration can land after the hit but before the
     // round's final identity audit.
     await latchedSignal
+    // The proof hit settles before the latched official read: the healthy first
+    // round offers its exact rows while the second ID is still unproved.
+    const partial = await service.search({ scope: 'all', query: 'mutable', limit: 25 }, new AbortController().signal)
+    assert.equal(partial.kind, 'partial', JSON.stringify(partial))
+    if (partial.kind !== 'partial') throw new Error('expected partial')
+    assert.deepEqual(partial.progress, { settled: 1, total: 2 })
+    assert.deepEqual(partial.items.map(item => item.messageId), ['msg-2', 'msg-1'])
     const acceptedThird = {
       type: 'agent/inbox/spliced',
       seq: 3,
@@ -7234,6 +7387,14 @@ test('a restored cold Session with preexisting history cannot keep the early pro
     restored = true
     ctx.emit('session/created', earlyLive as never)
     assert.notEqual(internals.state.kind, 'ready', 'a restored Session must not publish the old ready epoch')
+    // The restored identity revokes the exact-ID permit in the same stack: the
+    // formerly partial row is no longer readable/queryable until its repair.
+    const hidden = await service.search({ scope: 'all', query: 'mutable', limit: 25 }, new AbortController().signal)
+    assert.equal(hidden.kind, 'loading', 'a replaced/restored identity hides the old partial row')
+    const hiddenRead = await service.readText({
+      sessionId: earlyId, messageId: 'msg-1', contentSha256: sha256('mutable first'), offset: 0, limit: 4096,
+    }, new AbortController().signal)
+    assert.equal(hiddenRead.kind, 'loading')
     // Let the existing per-ID repair prove the restored identity before the
     // late read releases; it must derive the new history without an event.
     const deadline = Date.now() + 15_000
@@ -7243,6 +7404,11 @@ test('a restored cold Session with preexisting history cannot keep the early pro
     }
     assert.equal(internals.pointCounters.replayCompleted, 1,
       'the restored identity should be proved by exactly one per-ID repair')
+    const reproved = await service.search({ scope: 'all', query: 'restored preexisting third', limit: 5 }, new AbortController().signal)
+    assert.equal(reproved.kind, 'partial', 'the repaired ID re-enters the partial permit before the round completes')
+    if (reproved.kind !== 'partial') throw new Error('expected partial')
+    assert.deepEqual(reproved.progress, { settled: 1, total: 2 })
+    assert.equal(reproved.items.length, 1)
     release()
     await waitDirectReady(service)
     const answer = await service.search(

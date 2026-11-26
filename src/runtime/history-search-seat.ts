@@ -32,6 +32,7 @@ import type {
   RemoteHistoryBodyView,
   RemoteHistoryDirectoryState,
   RemoteHistoryOpenScopeLike,
+  RemoteHistoryProgress,
   RemoteHistoryRow,
   RemoteHistorySeat,
   RemoteHistorySeatStatus,
@@ -52,6 +53,8 @@ export interface RemoteHistorySeatOptions {
   /** Called when the captured scope stops being current; the host closes the seat. */
   readonly onRetire: () => void
   readonly debounceMs?: number
+  /** The settled→next first-page refresh delay (tests inject a short clock). */
+  readonly refreshMs?: number
 }
 
 export type {
@@ -59,6 +62,7 @@ export type {
   RemoteHistoryBodyView,
   RemoteHistoryDirectoryState,
   RemoteHistoryOpenScopeLike,
+  RemoteHistoryProgress,
   RemoteHistoryRow,
   RemoteHistorySeat,
   RemoteHistorySeatStatus,
@@ -66,6 +70,9 @@ export type {
 } from './history-search-seat-contract.ts'
 
 const DEFAULT_DEBOUNCE_MS = 75
+
+/** The one settled→next first-page refresh interval for a warmup seat. */
+export const HISTORY_SEARCH_REFRESH_MS = 1000
 
 const INCOMPLETE_LABEL = {
   'source-uncertain': 'source uncertain',
@@ -89,6 +96,18 @@ function rowOf(item: HistorySearchItem): RemoteHistoryRow {
   }
 }
 
+/** The complete visible row identity used to keep a selection across a refresh. */
+function sameRowIdentity(left: RemoteHistoryRow, right: RemoteHistoryRow): boolean {
+  return left.id === right.id
+    && left.firstEventSeq === right.firstEventSeq
+    && left.acceptedAt === right.acceptedAt
+    && left.effectiveCwd === right.effectiveCwd
+    && left.contentLength === right.contentLength
+    && left.contentSha256 === right.contentSha256
+    && left.hasNonText === right.hasNonText
+    && left.preview === right.preview
+}
+
 function isAbort(error: unknown): boolean {
   return typeof error === 'object' && error !== null
     && (error as { readonly name?: unknown }).name === 'AbortError'
@@ -107,6 +126,7 @@ const BODY_FAILURE_LABEL: Readonly<Record<string, string>> = {
 
 export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): RemoteHistorySeat {
   const debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS
+  const refreshMs = options.refreshMs ?? HISTORY_SEARCH_REFRESH_MS
   const listeners = new Set<() => void>()
   let serial = 0
   let queryRevision = 0
@@ -119,6 +139,8 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
   let nextCursor: string | null = null
   let generation: string | undefined
   let moreLoading = false
+  let progress: RemoteHistoryProgress | undefined
+  let pageRevision = 0
   let body: RemoteHistoryBodyView = { kind: 'none' }
   let directory = options.scope.directory()
   let searchAbort: AbortController | undefined
@@ -186,6 +208,7 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
       selectedId = undefined
       nextCursor = null
       generation = undefined
+      progress = undefined
       cancelBody()
       body = { kind: 'none' }
     } else if (scope === 'current' && directory.available && status === 'unavailable') {
@@ -224,36 +247,128 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
     selectedId = undefined
     nextCursor = null
     generation = undefined
+    progress = undefined
     moreLoading = false
     cancelBody()
     body = { kind: 'none' }
     publish()
   }
 
-  const commitFirstPage = (response: Extract<HistorySearchResponse, { kind: 'ready' }>, round: Round): void => {
+  type Round = { readonly serial: number; readonly revision: number }
+
+  const selectForPage = (
+    previousRows: readonly RemoteHistoryRow[],
+    incoming: readonly RemoteHistoryRow[],
+    preserveSelection: boolean,
+  ): RemoteHistoryRow | undefined => {
+    const previous = preserveSelection && selectedId !== undefined
+      ? previousRows.find(row => row.id === selectedId)
+      : undefined
+    const kept = previous === undefined
+      ? undefined
+      : incoming.find(row => sameRowIdentity(row, previous))
+    return kept ?? incoming[0]
+  }
+
+  /**
+   * Keep the exact body/read state only for the SAME complete row identity.
+   * A progress-only publish therefore never re-reads the body or drops a ready
+   * text; a changed hash/rank/missing row starts exactly one new body read.
+   */
+  const keepOrStartBody = (next: RemoteHistoryRow, preserveSelection: boolean): void => {
+    const existing = body
+    if (preserveSelection && existing.kind !== 'none' && sameRowIdentity(existing.row, next)) {
+      if (existing.kind === 'ready' || existing.kind === 'loading' || existing.kind === 'failed') {
+        body = { ...existing, row: next }
+        return
+      }
+    }
+    startBody(next, serial, queryRevision)
+  }
+
+  const sameRowList = (left: readonly RemoteHistoryRow[], right: readonly RemoteHistoryRow[]): boolean => {
+    if (left.length !== right.length) return false
+    return left.every((row, index) => {
+      const other = right[index]
+      return other !== undefined && sameRowIdentity(row, other)
+    })
+  }
+
+  const commitPage = (page: {
+    readonly rows: readonly RemoteHistoryRow[]
+    readonly status: RemoteHistorySeatStatus
+    readonly message: string
+    readonly nextCursor: string | null
+    readonly generation: string | undefined
+    readonly progress: RemoteHistoryProgress | undefined
+    readonly refresh: boolean
+  }, round: Round, preserveSelection: boolean): void => {
     if (closed || round.serial !== serial || round.revision !== queryRevision) return
     if (!options.scope.isCurrent()) {
       retire()
       return
     }
-    generation = response.generation
-    rows = response.items.map(rowOf)
-    nextCursor = response.nextCursor
-    selectedId = rows[0]?.id
-    body = selectedId === undefined ? { kind: 'none' } : { kind: 'preview', row: rows[0] as RemoteHistoryRow }
-    status = 'ready'
-    message = rows.length === 0 ? 'No matches' : `Results · ${String(rows.length)} shown`
+    const previousRows = rows
+    if (!sameRowList(previousRows, page.rows)) pageRevision += 1
+    rows = [...page.rows]
+    status = page.status
+    message = page.message
+    nextCursor = page.nextCursor
+    generation = page.generation
+    progress = page.progress
     moreLoading = false
-    publish()
-    if (selectedId !== undefined) {
-      const selected = rows[0] as RemoteHistoryRow
-      startBody(selected, serial, queryRevision)
+    const selected = selectForPage(previousRows, rows, preserveSelection)
+    if (selected === undefined) {
+      selectedId = undefined
+      cancelBody()
+      body = { kind: 'none' }
+    } else {
+      selectedId = selected.id
+      keepOrStartBody(selected, preserveSelection)
     }
+    publish()
+    if (page.refresh) scheduleRefresh(round)
   }
 
-  type Round = { readonly serial: number; readonly revision: number }
+  const commitFirstPage = (
+    response: Extract<HistorySearchResponse, { kind: 'ready' }>,
+    round: Round,
+    refresh: boolean,
+  ): void => {
+    const incoming = response.items.map(rowOf)
+    commitPage({
+      rows: incoming,
+      status: 'ready',
+      message: incoming.length === 0 ? 'No matches' : `Results · ${String(incoming.length)} shown`,
+      nextCursor: response.nextCursor,
+      generation: response.generation,
+      progress: undefined,
+      refresh: false,
+    }, round, refresh)
+  }
 
-  const runSearch = (round: Round, cursor: string | undefined, append: boolean): void => {
+  const commitPartial = (
+    response: Extract<HistorySearchResponse, { kind: 'partial' }>,
+    round: Round,
+    refresh: boolean,
+  ): void => {
+    const incoming = response.items.map(rowOf)
+    const { settled, total } = response.progress
+    const percent = Math.floor((settled * 100) / total)
+    commitPage({
+      rows: incoming,
+      status: 'partial',
+      message: incoming.length === 0
+        ? 'No matches yet — indexing…'
+        : `Results · ${String(incoming.length)} shown · Indexing ${String(settled)}/${String(total)} (${String(percent)}%)`,
+      nextCursor: null,
+      generation: undefined,
+      progress: { settled, total },
+      refresh: true,
+    }, round, refresh)
+  }
+
+  const runSearch = (round: Round, cursor: string | undefined, append: boolean, refresh = false): void => {
     if (closed || round.serial !== serial || round.revision !== queryRevision) return
     const request = requestOf(cursor)
     if (request === undefined) {
@@ -272,7 +387,7 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
           retire()
           return
         }
-        await commitResponse(response, round, append, cursor)
+        await commitResponse(response, round, append, cursor, refresh)
       } catch (error) {
         if (closed || round.serial !== serial || round.revision !== queryRevision || isAbort(error)) return
         if (error instanceof RemoteHistorySearchSupersededError) {
@@ -294,11 +409,31 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
     }, { diag: options.diag })
   }
 
+  /**
+   * One settled→next first-page refresh. The timer is the seat's existing owner
+   * (the debounce slot), never a second interval: any new user query/scope,
+   * Retry, close or teardown clears it through cancelSearch().
+   */
+  const scheduleRefresh = (round: Round): void => {
+    if (closed || timer !== undefined) return
+    if (status !== 'partial' && status !== 'loading-host') return
+    if (round.serial !== serial || round.revision !== queryRevision) return
+    timer = setTimeout(() => {
+      timer = undefined
+      if (closed || round.serial !== serial || round.revision !== queryRevision) return
+      if (status !== 'partial' && status !== 'loading-host') return
+      if (searchAbort !== undefined) return
+      runSearch({ serial, revision: queryRevision }, undefined, false, true)
+    }, refreshMs)
+    ;(timer as { unref?: () => void }).unref?.()
+  }
+
   const commitResponse = async (
     response: HistorySearchResponse,
     round: Round,
     append: boolean,
     cursor: string | undefined,
+    refresh: boolean,
   ): Promise<void> => {
     if (response.kind === 'ready') {
       if (append) {
@@ -322,12 +457,14 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
         publish()
         return
       }
-      commitFirstPage(response, round)
+      commitFirstPage(response, round, refresh)
       return
     }
     if (append) {
       moreLoading = false
-      if (response.kind === 'stale') {
+      if (response.kind === 'stale' || response.kind === 'partial') {
+        // A continuation never carries a partial page; treat it like a lost
+        // cursor and recover the first page once.
         await recoverStaleMore(round)
         return
       }
@@ -352,8 +489,13 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
       publish()
       return
     }
+    if (response.kind === 'partial') {
+      commitPartial(response, round, refresh)
+      return
+    }
     if (response.kind === 'loading') {
-      finishWithStatus('loading-host', 'History is loading on Host')
+      finishWithStatus('loading-host', 'Loading history…')
+      scheduleRefresh(round)
       return
     }
     if (response.kind === 'incomplete') {
@@ -400,6 +542,7 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
     selectedId = undefined
     nextCursor = null
     generation = undefined
+    progress = undefined
     body = { kind: 'none' }
   }
 
@@ -568,7 +711,7 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
       startFresh()
     },
     select(id) {
-      if (closed || status !== 'ready' || moreLoading) return
+      if (closed || (status !== 'ready' && status !== 'partial') || moreLoading) return
       const row = rows.find(candidate => candidate.id === id)
       if (row === undefined) return
       userChanged = true
@@ -602,10 +745,12 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
       return {
         serial,
         queryRevision,
+        pageRevision,
         scope,
         query,
         status,
         message,
+        progress,
         rows: [...rows],
         selectedId,
         hasMore: nextCursor !== null,

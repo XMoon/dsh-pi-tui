@@ -987,19 +987,20 @@ export class HistorySearchIndex {
     readonly sessionId?: string
     readonly cwd?: string
     readonly query: string
-  }): { readonly conditions: string[]; readonly parameters: Array<string | number> } {
+  }, tableAlias = ''): { readonly conditions: string[]; readonly parameters: Array<string | number> } {
+    const column = (name: string): string => tableAlias === '' ? name : `${tableAlias}.${name}`
     const conditions: string[] = []
     const parameters: Array<string | number> = []
     const needle = request.query.toLowerCase()
     if (needle !== '') {
-      conditions.push('instr(normalized_content, ?) > 0')
+      conditions.push(`instr(${column('normalized_content')}, ?) > 0`)
       parameters.push(needle)
     }
     if (request.scope === 'session') {
-      conditions.push('session_id = ?')
+      conditions.push(`${column('session_id')} = ?`)
       parameters.push(request.sessionId as string)
     } else if (request.scope === 'directory') {
-      conditions.push('effective_cwd = ?')
+      conditions.push(`${column('effective_cwd')} = ?`)
       parameters.push(request.cwd as string)
     }
     return { conditions, parameters }
@@ -1087,6 +1088,64 @@ export class HistorySearchIndex {
       rows: rows.slice(0, request.limit).map(searchRowOfRaw),
       hasMore: rows.length > request.limit,
     }
+  }
+
+  /**
+   * ONE synchronous first-cold-round page over the round's eligible Session
+   * subset. The clean checkpoint filter and the scope/match predicate run in
+   * SQL BEFORE ORDER/LIMIT, and `settledCount` uses the SAME bound candidate set
+   * at the same read boundary. The subset is one JSON array parameter (never a
+   * per-ID bind or string interpolation); an empty subset never falls back to
+   * an unfiltered search.
+   */
+  partialSearch(
+    request: HistoryIndexSearchRequest & { readonly sessionIds: readonly string[] },
+  ): { readonly rows: readonly HistorySearchRow[]; readonly settledCount: number } {
+    this.assertOpen()
+    if (request.sessionIds.length === 0) return { rows: [], settledCount: 0 }
+    const sessionIds = JSON.stringify(request.sessionIds)
+    const filters = this.searchFilters(request, 'o')
+    const where = filters.conditions.length === 0 ? '' : `AND ${filters.conditions.join(' AND ')}`
+    const settledCount = (this.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM history_sessions s
+       WHERE s.session_id IN (SELECT value FROM json_each(?))
+         AND s.dirty = 0
+         AND s.uncertain_sources = 0`,
+    ).get(sessionIds) as { readonly count: number }).count
+    const rows = this.db.prepare(
+      `SELECT CAST(o.row_id AS TEXT) AS row_id,
+              o.session_id, o.message_id, o.first_seq, o.accepted_ms, o.effective_cwd,
+              o.preview, o.content_length, o.content_sha256, o.has_non_text
+       FROM history_occurrences o
+       JOIN history_sessions s ON s.session_id = o.session_id
+       WHERE o.session_id IN (SELECT value FROM json_each(?))
+         AND s.dirty = 0
+         AND s.uncertain_sources = 0
+         ${where}
+       ORDER BY o.accepted_ms DESC, o.session_id ASC, o.first_seq DESC, o.message_id ASC
+       LIMIT ?`,
+    ).all(sessionIds, ...filters.parameters, request.limit) as unknown as RawSearchRow[]
+    return { rows: rows.map(searchRowOfRaw), settledCount }
+  }
+
+  /**
+   * Latest cached accepted time per candidate Session. This is a scheduling
+   * hint only: it may come from rows the current round has not proven yet and
+   * must never be used as a search/read eligibility fact.
+   */
+  latestAcceptedMs(sessionIds: readonly string[]): Map<string, number> {
+    this.assertOpen()
+    const hints = new Map<string, number>()
+    if (sessionIds.length === 0) return hints
+    const rows = this.db.prepare(
+      `SELECT session_id, MAX(accepted_ms) AS accepted_ms
+       FROM history_occurrences
+       WHERE session_id IN (SELECT value FROM json_each(?))
+       GROUP BY session_id`,
+    ).all(JSON.stringify(sessionIds)) as Array<{ readonly session_id: string; readonly accepted_ms: number }>
+    for (const row of rows) hints.set(row.session_id, row.accepted_ms)
+    return hints
   }
 
   occurrence(sessionId: string, messageId: string): HistoryOccurrenceRow | undefined {

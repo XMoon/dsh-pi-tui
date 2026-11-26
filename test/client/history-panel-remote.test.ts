@@ -81,6 +81,8 @@ class FakeReadPort implements HistorySearchReadPort {
   failReads = 0
   /** The next N searches answer Host `loading`. */
   loadingSearches = 0
+  /** Scripted responses consumed before the generated paged answer. */
+  readonly responses: HistorySearchResponse[] = []
   private pendingSearch: (() => void) | undefined
   private pendingRead: (() => void) | undefined
   private readonly texts = new Map<string, string>()
@@ -105,6 +107,8 @@ class FakeReadPort implements HistorySearchReadPort {
       this.failures -= 1
       throw new RemoteHistorySearchFailedError(undefined, 'host search unavailable')
     }
+    const scripted = this.responses.shift()
+    if (scripted !== undefined) return scripted
     const offset = request.cursor === undefined ? 0 : Number(request.cursor.slice('cursor-'.length))
     const next = offset + this.pageSize
     return {
@@ -211,6 +215,7 @@ interface HarnessOptions {
   columns?: number
   rows?: number
   initialQuery?: string
+  refreshMs?: number
 }
 
 function makeHarness(options: HarnessOptions): Harness {
@@ -228,6 +233,7 @@ function makeHarness(options: HarnessOptions): Harness {
     scope,
     onRetire: () => {},
     debounceMs: 1,
+    refreshMs: options.refreshMs ?? 50,
   })
   const copied: string[] = []
   const accepted: Array<{ id: string; content: string }> = []
@@ -568,7 +574,7 @@ test('a Host-loading page offers PageDown Retry', async () => {
   const { panel, port } = harness
   port.loadingSearches = 1
   panel.start()
-  await renderUntil(panel, 120, lines => lines.some(line => line.includes('History is loading on Host')),
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Loading history…')),
     'the Host-loading state')
   assert.ok(plain(panel.render(120)).some(line => line.includes('Retry · PgDn')),
     'the loading page paints the Retry action')
@@ -789,4 +795,83 @@ test('the panel requires exactly one of a Direct source and a Remote seat', () =
     onAccept: () => {},
     onClose: () => {},
   }), /exactly one of source\/remote/u)
+})
+
+
+test('a first cold partial paints progress, keeps the selected body and clears on ready', async () => {
+  const harness = makeHarness({
+    items: [
+      { id: 'a', preview: 'alpha prompt', text: 'alpha prompt' },
+      { id: 'b', preview: 'beta prompt', text: 'beta prompt' },
+    ],
+    defaultScope: 'all',
+    pointerEnabled: () => true,
+    columns: 120,
+    rows: 40,
+  })
+  const { panel, port } = harness
+  const a = item('a', 'alpha prompt', 'alpha prompt')
+  const b = item('b', 'beta prompt', 'beta prompt')
+  port.responses.push({ kind: 'partial', items: [a, b], progress: { settled: 1, total: 3 } })
+  port.responses.push({ kind: 'partial', items: [b, a], progress: { settled: 2, total: 3 } })
+  port.responses.push({ kind: 'ready', generation: 'g1', items: [b, a], nextCursor: null })
+  panel.start()
+  const partial = await renderUntil(panel, 120,
+    lines => lines.some(line => line.includes('Results · 2 shown · Indexing 1/3 (33%)')), 'the partial page')
+  assert.ok(!partial.some(line => line.includes('More · PgDn')), 'a partial page never offers More')
+  const narrow = plain(panel.render(44))
+  assert.ok(narrow.some(line => line.includes('Indexing 1/3 (33%)')),
+    `the narrow partial keeps the indexing word:\n${narrow.join('\n')}`)
+  const bodyReads = port.readCalls.length
+  const selected = panel.selected()?.id
+  assert.ok(selected !== undefined)
+  const reordered = await renderUntil(panel, 120,
+    lines => lines.some(line => line.includes('Indexing 2/3 (66%)')), 'the reordered partial page')
+  assert.equal(panel.selected()?.id, selected, 'the same complete row identity keeps the selection')
+  assert.equal(port.readCalls.length, bodyReads, 'a progress-only refresh never re-reads the exact body')
+  assert.ok(reordered.some(line => line.includes('beta prompt')) && reordered.some(line => line.includes('alpha prompt')))
+  const ready = await renderUntil(panel, 120,
+    lines => lines.some(line => line.includes('Results · 2 shown')) && !lines.some(line => line.includes('Indexing')), 'the ready page')
+  assert.ok(!ready.some(line => line.includes('More · PgDn')), 'the exhausted ready page has no More')
+  const callsAtReady = port.searchCalls.length
+  await new Promise(resolve => setTimeout(resolve, 80))
+  assert.equal(port.searchCalls.length, callsAtReady, 'ready stops the warmup refresh')
+})
+
+test('a partial empty page is distinct from ready empty and auto-refresh paints it without input', async () => {
+  const harness = makeHarness({ items: [], defaultScope: 'all' })
+  const { panel, port } = harness
+  port.responses.push({ kind: 'partial', items: [], progress: { settled: 1, total: 2 } })
+  port.responses.push({ kind: 'ready', generation: 'g1', items: [], nextCursor: null })
+  panel.start()
+  const partial = await renderUntil(panel, 120,
+    lines => lines.some(line => line.includes('No matches yet — indexing…')), 'the partial empty page')
+  assert.ok(partial.some(line => line.includes('No matches yet — indexing… (1/2)')), partial.join('\n'))
+  const ready = await renderUntil(panel, 120,
+    lines => lines.some(line => line.includes('No matches')) && !lines.some(line => line.includes('indexing')), 'the ready empty page')
+  assert.ok(!ready.some(line => line.includes('No matches yet')), 'ready empty is not the partial empty state')
+})
+
+
+test('a short partial frame keeps a visible indexing fact and the required row/actions', async () => {
+  for (const [columns, rows] of [[80, 10], [44, 20]] as const) {
+    const harness = makeHarness({
+      items: [
+        { id: 'a', preview: 'alpha prompt', text: 'alpha prompt' },
+        { id: 'b', preview: 'beta prompt', text: 'beta prompt' },
+      ],
+      defaultScope: 'all',
+      columns,
+      rows,
+    })
+    const { panel, port } = harness
+    port.responses.push({ kind: 'partial', items: [item('a', 'alpha prompt', 'alpha prompt'), item('b', 'beta prompt', 'beta prompt')], progress: { settled: 1, total: 3 } })
+    panel.start()
+    const frame = await renderUntil(panel, columns,
+      lines => lines.some(line => line.includes('alpha prompt')), `the ${columns}x${rows} partial frame`)
+    const text = frame.join('\n')
+    assert.ok(text.includes('Indexing'), `the short frame must keep an indexing word:\n${text}`)
+    assert.ok(text.includes('Alt+C copy') || text.includes('Copy All'), `the short frame keeps a required action:\n${text}`)
+    assert.ok(text.includes('alpha prompt'), `the short frame keeps at least one result:\n${text}`)
+  }
 })

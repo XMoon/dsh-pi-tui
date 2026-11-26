@@ -49,6 +49,7 @@ import {
   parseHistorySearchRequest,
   type HistoryReadTextResponse,
   type HistorySearchIncompleteReason,
+  type HistorySearchRequest,
   type HistorySearchResponse,
   type HistorySearchUnavailableReason,
 } from '../../../runtime/remote/pi-tui-history-search-contract.ts'
@@ -258,6 +259,17 @@ type SourceProofMissClass =
   | 'checkpoint-mismatch'
   | 'obligation-or-fault'
 
+/** One round-local per-ID terminal: the exact source identity and its read evidence class. */
+interface HistoryRoundSettlement {
+  readonly liveObject: object | undefined
+  /**
+   * True only for an actual complete authoritative replay (or a qualified
+   * durable source-proof hit) that this round fenced. Coverage-only evidence
+   * (prefix proof, no-read seed, disposal prefix) never grants a read permit.
+   */
+  readonly readable: boolean
+}
+
 /** ONE round-local completeness/ownership record (see the owning field). */
 interface HistoryCoverageRound {
   /** The actual official service binding sampled when this round began. */
@@ -266,7 +278,7 @@ interface HistoryCoverageRound {
   proofAuthority?: HistoryRevisionAuthority
   readonly expected: Set<string> | undefined
   /** Exact per-ID source identity proved by this round's terminal work. */
-  readonly settled: Map<string, { readonly liveObject: object | undefined }>
+  readonly settled: Map<string, HistoryRoundSettlement>
   deletionsSettled: boolean
   invalidating: boolean
   /** The full official-ID traversal of THIS round has finished. */
@@ -577,6 +589,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private priorProofReuseAllowed = true
   /** A pass or repair failed to read the official source; a later full pass clears it. */
   private sourceFaulted = false
+  /**
+   * A true fault observed while the first cold round is still running. It keeps
+   * the public state incomplete instead of being washed back to `loading`, and
+   * therefore stops partial publication until the round really completes.
+   */
+  private bootFaultReason: HistorySearchIncompleteReason | undefined
   private pendingEventCount = 0
   private pendingBytes = 0
   private verificationTimer: ReturnType<typeof setTimeout> | undefined
@@ -666,14 +684,25 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     // that landed while this read waited must downgrade the visible epoch, never
     // let this read answer from the previous source generation.
     this.observeCoverageBasis()
-    const stateAnswer = this.stateAnswer()
-    if (stateAnswer !== undefined) return stateAnswer
-    const index = this.requireIndex()
     const scopeId = exact.scope === 'session'
       ? exact.sessionId
       : exact.scope === 'directory'
         ? normalizeHistoryCwd(exact.cwd)
         : null
+    const stateAnswer = this.stateAnswer()
+    if (stateAnswer !== undefined) {
+      if (stateAnswer.kind !== 'loading') return stateAnswer
+      // A HEALthy first cold round may answer a partial first page. A cursor
+      // has no partial chain, so a cold partial request carrying one is stale;
+      // the ordinary loading answer stays loading.
+      const partial = this.partialAnswer(exact, scopeId)
+      if (partial === undefined) return stateAnswer
+      if (exact.cursor !== undefined) return { kind: 'stale', reason: 'cursor-stale' }
+      runSignal.throwIfAborted()
+      this.assertSameLiveInvocation(invocation)
+      return partial
+    }
+    const index = this.requireIndex()
     const requestHash = historySearchRequestHash(exact.scope, exact.query, scopeId)
     let after: HistorySearchAfter | undefined
     if (exact.cursor !== undefined) {
@@ -754,7 +783,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     // let this read answer from the previous source generation.
     this.observeCoverageBasis()
     const stateAnswer = this.stateAnswer()
-    if (stateAnswer !== undefined) return stateAnswer
+    if (stateAnswer !== undefined) {
+      // During a healthy first cold round an exact ID that satisfies the same
+      // partial permit may serve its original text. Any other ID keeps the
+      // truthful loading answer instead of probing an unproven old row.
+      if (stateAnswer.kind !== 'loading' || !this.partialIdQueryable(exact.sessionId)) return stateAnswer
+    }
     const index = this.requireIndex()
     const row = index.occurrence(exact.sessionId, exact.messageId)
     if (row === undefined) return { kind: 'unavailable', reason: 'not-found' }
@@ -1163,7 +1197,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
           return
         }
         this.rememberVerifiedRevision(sessionId, record, persistence)
-        this.settleRoundSession(sessionId, record.liveObject, round)
+        this.settleRoundSession(sessionId, record.liveObject, round, true)
       })
       if (receipt === 'failed') {
         counters.sourceProofFailed += 1
@@ -1240,7 +1274,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // folded and must not be skipped: report the source as uncertain and
       // rebuild this Session from the official source.
       this.diag.warn('history search observed a malformed live event', { category: 'source-uncertain' })
-      this.markReconcileNeeded('source-uncertain')
+      this.markReconcileNeeded('source-uncertain', true)
       this.scheduleSessionRepair(sessionId, 'rebuild')
       return
     }
@@ -1270,7 +1304,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // official source instead of silently keeping either body.
         this.discardPendingSession(sessionId)
         this.diag.warn('history search observed a conflicting live sequence', { category: 'reconciling' })
-        this.markReconcileNeeded('reconciling')
+        this.markReconcileNeeded('reconciling', true)
         this.scheduleSessionRepair(sessionId, 'rebuild')
         return
       }
@@ -1353,7 +1387,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         if (this.pendingEventCount <= HISTORY_SEARCH_MAX_PENDING_EVENTS && this.pendingBytes <= HISTORY_SEARCH_MAX_PENDING_BYTES) break
       }
     }
-    this.markReconcileNeeded('resource-limit')
+    this.markReconcileNeeded('resource-limit', true)
     this.diag.warn('history search live buffer reached its bound', {
       sessions: ordinary.length,
       heldEvicted: evicted.length,
@@ -1502,24 +1536,30 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.observeSourceServicesPresent()
       if (kind === 'disposal') {
         if (this.index.checkpointOf(sessionId) === undefined) return
+        // A disposal is conservatively unreadable until a later complete replay
+        // or Ready; the existing prefix proof only covers old rows.
+        this.revokeRoundReadEvidence(sessionId)
         await this.verifySessionAgainstPersistence(sessionId)
         this.recordCompletedDisposal()
         return
       }
       const live = sessions.get(sessionId)
       if (live !== undefined) {
-        await this.rebuildLiveSession(sessionId, persistence, sessions, query, this.pointCounters)
+        const outcome = await this.rebuildLiveSession(sessionId, persistence, sessions, query, this.pointCounters)
+        if (outcome !== 'complete') this.revokeRoundReadEvidence(sessionId)
         return
       }
       // A rebuild obligation is NOT a disposal prefix proof: read and replay
       // the complete official durable source, including accepted events beyond
       // the old checkpoint. A prefix proof would clear `dirty` while omitting
       // exactly those events.
-      await this.rebuildFromPersistence(sessionId, persistence, sessions, query, this.pointCounters)
+      const outcome = await this.rebuildFromPersistence(sessionId, persistence, sessions, query, this.pointCounters)
+      if (outcome !== 'complete') this.revokeRoundReadEvidence(sessionId)
     } catch (error) {
       if (this.lifecycle.signal.aborted || this.disposed) return
       this.sourceFaulted = true
-      this.markReconcileNeeded('source-read-failed')
+      this.markReconcileNeeded('source-read-failed', true)
+      this.revokeRoundReadEvidence(sessionId)
       await this.markSessionDirty(sessionId)
       throw error
     } finally {
@@ -1555,7 +1595,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // again: a refresh that only re-reads must not promote an unsafe derived
         // store (for example a tampered sidecar) back to `ready`.
         this.indexFaulted = true
-        this.markReconcileNeeded('source-read-failed')
+        this.markReconcileNeeded('source-read-failed', true)
         return 'failed' as const
       },
     )
@@ -1657,6 +1697,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // A gap/burst prefix is not a rollback: the accepted batch is the only
       // copy until the official source advances, so retain it as held.
       this.index.markSession({ sessionId, dirty: true })
+      // An explicit gap/conflict in committed live input is a true fault, not
+      // ordinary warmup lag: stop partial publication until the source settles.
+      this.markReconcileNeeded('reconciling', true)
       if (error instanceof HistorySearchGapError) {
         this.restoreHeldBatch(sessionId, batch)
         this.reconcilePending.add(sessionId)
@@ -1805,7 +1848,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.rememberVerifiedRevision(sessionId, source.record, witness.persistence)
     }
     this.reconcilePending.delete(sessionId)
-    this.settleRoundSession(sessionId, witness.liveObject)
+    this.settleRoundSession(sessionId, witness.liveObject, this.coverageRound, true)
   }
 
   /**
@@ -2072,7 +2115,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     } catch (error) {
       if (!this.lifecycle.signal.aborted && !this.disposed) {
         this.sourceFaulted = true
-        this.markReconcileNeeded('source-read-failed')
+        this.markReconcileNeeded('source-read-failed', true)
         this.diag.warn('history search bootstrap failed', { category: error instanceof Error ? error.name : 'unknown' })
       }
     } finally {
@@ -2090,6 +2133,26 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.logWriterAggregate('cold_start', writerBefore)
       this.scheduleVerification()
     }
+  }
+
+  /**
+   * The ONE cold-start traversal order: live Sessions first, then the newer of
+   * the official header createdAt and the cached accepted-time hint (DESC),
+   * with an exact code-unit Session-id tie-break. The hint only schedules; it is
+   * never a search/read eligibility fact. Periodic rounds keep roster order.
+   */
+  private coldRosterOrder(official: ReadonlyMap<string, OfficialSession>): Array<[string, OfficialSession]> {
+    const hints = this.index?.latestAcceptedMs([...official.keys()]) ?? new Map<string, number>()
+    const scoreOf = (sessionId: string, record: OfficialSession): number => {
+      const hint = hints.get(sessionId)
+      return hint === undefined ? record.header.createdAt : Math.max(record.header.createdAt, hint)
+    }
+    return [...official.entries()].sort((left, right) => {
+      if (left[1].live !== right[1].live) return left[1].live ? -1 : 1
+      const scoreDelta = scoreOf(right[0], right[1]) - scoreOf(left[0], left[1])
+      if (scoreDelta !== 0) return scoreDelta
+      return left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0
+    })
   }
 
   private async coldStart(
@@ -2119,7 +2182,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       return false
     }
     deletionRound.deletionsSettled = deletion === 'complete'
-    for (const [sessionId, record] of official) {
+    for (const [sessionId, record] of this.coldRosterOrder(official)) {
       counters.sessionsVisited += 1
       signal.throwIfAborted()
       // A checkpoint read from disk belongs to a PREVIOUS process. Its revision
@@ -2157,6 +2220,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
             { rebuild: true, requiredHandoff: true },
           )
         }
+        if (replayOutcome !== 'complete') this.revokeRoundReadEvidence(sessionId)
         drained = await this.enqueueWrite(() => {
           this.drainPendingSession(sessionId)
         })
@@ -2183,8 +2247,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         continue
       }
       counters.sessionsVisited += 1
-      const outcome = await this.withFullSessionOwnership(sessionId, () =>
-        this.rebuildLiveSession(sessionId, persistence, sessions, query, counters))
+      const outcome = await this.withFullSessionOwnership(sessionId, async () => {
+        const rebuilt = await this.rebuildLiveSession(sessionId, persistence, sessions, query, counters)
+        if (rebuilt !== 'complete') this.revokeRoundReadEvidence(sessionId)
+        return rebuilt
+      })
       if (outcome === 'failed') return false
     }
     // ONE final exact-roster identity audit after every await. The round-local
@@ -2734,6 +2801,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       }
     } catch (error) {
       this.index.markSession({ sessionId, dirty: true })
+      // An explicit gap/conflict in committed live input is a true fault, not
+      // ordinary warmup lag: stop partial publication until the source settles.
+      this.markReconcileNeeded('reconciling', true)
       if (error instanceof HistorySearchGapError) {
         this.restoreHeldBatch(sessionId, batch)
         this.reconcilePending.add(sessionId)
@@ -2832,8 +2902,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // Full and point work never independently own the same id: an active
         // repair is awaited, then this round claims the id in the single-flight
         // map. A repair requested during the claim is coalesced to the release.
-        const result = await this.withFullSessionOwnership(sessionId, () =>
-          this.reconcileOfficialSession(sessionId, record, persistence, sessions, query, counters, authority))
+        const result = await this.withFullSessionOwnership(sessionId, async () => {
+          const reconciled = await this.reconcileOfficialSession(
+            sessionId, record, persistence, sessions, query, counters, authority,
+          )
+          if (reconciled !== 'complete') this.revokeRoundReadEvidence(sessionId)
+          return reconciled
+        })
         if (result === 'failed') {
           outcome = 'incomplete'
           return
@@ -2893,7 +2968,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     } catch (error) {
       if (!this.lifecycle.signal.aborted && !this.disposed) {
         this.sourceFaulted = true
-        this.markReconcileNeeded('source-read-failed')
+        this.markReconcileNeeded('source-read-failed', true)
         this.diag.warn('history search verification failed', { category: error instanceof Error ? error.name : 'unknown' })
       }
       throw error
@@ -2932,7 +3007,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       if (proof === 'insufficient' || proof === 'unreadable') {
         this.reconcilePending.add(sessionId)
         await this.markSessionDirty(sessionId)
-        this.markReconcileNeeded(proof === 'unreadable' ? 'source-read-failed' : 'reconciling')
+        this.markReconcileNeeded(proof === 'unreadable' ? 'source-read-failed' : 'reconciling', proof === 'unreadable')
         return 'stale'
       }
       if (proof === 'rollback') {
@@ -3284,17 +3359,17 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         if (snapshot === undefined) {
           counters.statNotFound += 1
           // Not durable: keep the speculative rows and report the honest state.
-          this.markReconcileNeeded('source-uncertain')
+          this.markReconcileNeeded('source-uncertain', true)
           await this.markWitnessDirty(witness)
           return
         }
         if (checkpoint.headerHash !== sessionHeaderHash(snapshot.header)) {
-          this.markReconcileNeeded('reconciling')
+          this.markReconcileNeeded('reconciling', true)
           await this.markWitnessDirty(witness)
           return
         }
         if (snapshot.eventCount !== undefined && snapshot.eventCount < checkpoint.nextSeq) {
-          this.markReconcileNeeded('reconciling')
+          this.markReconcileNeeded('reconciling', true)
           await this.markWitnessDirty(witness)
           return
         }
@@ -3309,14 +3384,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         if (this.disposed || this.lifecycle.signal.aborted) return
         if (proof === 'unreadable') {
           this.diag.warn('history search disposed-session proof failed', { category: 'unreadable-source' })
-          this.markReconcileNeeded('source-read-failed')
+          this.markReconcileNeeded('source-read-failed', true)
           await this.markWitnessDirty(witness)
           return
         }
         if (proof !== 'proven') {
           // Short/unreadable prefix is append lag, not a rollback: keep the rows
           // and the provisional checkpoint and retry through the normal pass.
-          this.markReconcileNeeded('reconciling')
+          // An explicit rollback (a differing header/tail) is a real conflict.
+          this.markReconcileNeeded('reconciling', proof === 'rollback')
           await this.markWitnessDirty(witness)
           return
         }
@@ -3484,7 +3560,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.coverageRound = {
       basis,
       expected: this.coverage === 'proven' ? undefined : new Set(official.keys()),
-      settled: new Map<string, { readonly liveObject: object | undefined }>(),
+      settled: new Map<string, HistoryRoundSettlement>(),
       deletionsSettled: false,
       // An unresolved destructive obligation survives a new round; only a
       // complete same-round proof may release it.
@@ -3538,7 +3614,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     for (const [sessionId, record] of official) {
       if (round.settled.has(sessionId)) continue
       if (sessions.get(sessionId) === record.liveObject) {
-        round.settled.set(sessionId, { liveObject: record.liveObject })
+        round.settled.set(sessionId, { liveObject: record.liveObject, readable: false })
       }
     }
   }
@@ -3562,6 +3638,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     sessionId: string,
     liveObject: object | undefined,
     round: HistoryCoverageRound | undefined = this.coverageRound,
+    readable = false,
   ): void {
     if (round === undefined) return
     // Unproven coverage is an exact fixed-roster predicate: a post-roster birth
@@ -3569,7 +3646,19 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     // the cardinality set. Proven rounds have no expected set and admit their
     // terminal identities (including the audit seed).
     if (round.expected !== undefined && !round.expected.has(sessionId)) return
-    round.settled.set(sessionId, { liveObject })
+    round.settled.set(sessionId, { liveObject, readable })
+  }
+
+  /**
+   * Withdraw one ID's read permit before its owned claim is released. Coverage
+   * ownership is untouched: only the new partial evidence is withdrawn, and a
+   * later complete replay/hit (or Ready) may re-grant it.
+   */
+  private revokeRoundReadEvidence(sessionId: string): void {
+    const round = this.coverageRound
+    const settled = round?.settled.get(sessionId)
+    if (round === undefined || settled === undefined || !settled.readable) return
+    round.settled.set(sessionId, { liveObject: settled.liveObject, readable: false })
   }
 
   private finishCoverageRound(): void {
@@ -3593,6 +3682,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (this.reconcilePending.size > 0 || this.pending.size > 0 || this.droppedAccepted.size > 0) return
     if (this.sessionRepairFlights.size > 0) return
     this.sourceFaulted = false
+    this.bootFaultReason = undefined
     this.coverageRound = undefined
     this.coverage = 'proven'
     this.refreshCompleteness()
@@ -3605,8 +3695,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     return 'incomplete'
   }
 
-  /** Truthful immediate downgrade; never overrides a definite `unavailable`. */
-  private markReconcileNeeded(reason: HistorySearchIncompleteReason = 'reconciling'): void {
+  /**
+   * Truthful immediate downgrade; never overrides a definite `unavailable`.
+   * `fault` marks a real observed failure (not ordinary warmup lag): during the
+   * first cold round it must leave `loading` and stop partial publication
+   * instead of being re-washed to loading by the next completeness refresh.
+   */
+  private markReconcileNeeded(reason: HistorySearchIncompleteReason = 'reconciling', fault = false): void {
     if (this.index !== undefined && this.requiredServicesMissing()) {
       this.markSourceServicesMissing()
       return
@@ -3614,6 +3709,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (this.state.kind === 'unavailable') {
       if (this.index === undefined || this.state.reason !== 'service-missing') return
       if (this.requiredServicesMissing()) return
+    }
+    if (fault) {
+      if (this.coverage === 'booting') this.bootFaultReason ??= reason
+      this.state = { kind: 'incomplete', reason: this.bootFaultReason ?? reason }
+      return
+    }
+    if (this.coverage === 'booting' && this.bootFaultReason !== undefined) {
+      this.state = { kind: 'incomplete', reason: this.bootFaultReason }
+      return
     }
     if (this.state.kind === 'loading' && this.coverage === 'booting') return
     this.state = { kind: 'incomplete', reason }
@@ -3645,6 +3749,20 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.state = { kind: 'incomplete', reason: 'reconciling' }
     }
     if (this.coverage === 'booting') {
+      // A real fault observed during the first round is sticky until that round
+      // really completes; ordinary unvisited/repair work is not a fault.
+      if (this.bootFaultReason !== undefined) {
+        this.state = { kind: 'incomplete', reason: this.bootFaultReason }
+        return
+      }
+      if (this.sourceFaulted || this.indexFaulted) {
+        this.state = { kind: 'incomplete', reason: 'source-read-failed' }
+        return
+      }
+      if (this.droppedAccepted.size > 0) {
+        this.state = { kind: 'incomplete', reason: 'resource-limit' }
+        return
+      }
       this.state = { kind: 'loading' }
       return
     }
@@ -3701,6 +3819,115 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
     if (this.state.kind === 'loading' || this.state.kind === 'incomplete') {
       this.state = { kind: 'ready' }
+    }
+  }
+
+  // ── first cold round partial availability ────────────────────────────────
+
+  /**
+   * The ONE healthy first cold round that may publish partial results. A true
+   * source/index fault or an unresolved overflow has already moved the public
+   * state off `loading`, so the state check is the health gate. The round's
+   * ordinary `invalidating` flag is expected during warmup and is not a veto.
+   */
+  private partialRound(): HistoryCoverageRound | undefined {
+    if (this.coverage !== 'booting') return undefined
+    if (this.index === undefined) return undefined
+    if (this.state.kind !== 'loading') return undefined
+    if (this.sourceFaulted || this.indexFaulted || this.droppedAccepted.size > 0) return undefined
+    const round = this.coverageRound
+    if (round === undefined || round.expected === undefined || round.expected.size === 0) return undefined
+    if (!round.deletionsSettled) return undefined
+    if (!this.roundSourceCurrent(round)) return undefined
+    return round
+  }
+
+  /** The exact per-ID §3.3 read permit, from facts already owned in memory. */
+  private partialSettlementQueryable(
+    sessionId: string,
+    settlement: HistoryRoundSettlement,
+    round: HistoryCoverageRound,
+    sessions: HistorySearchSessionsLike,
+  ): boolean {
+    if (!settlement.readable) return false
+    if (!round.expected?.has(sessionId)) return false
+    if (
+      this.pending.has(sessionId)
+      || this.heldPending.has(sessionId)
+      || this.droppedAccepted.has(sessionId)
+      || this.reconcilePending.has(sessionId)
+      || this.activeCandidates.has(sessionId)
+      || this.sessionRepairFlights.has(sessionId)
+      || this.disposalRequests.has(sessionId)
+      || this.rebuildRequests.has(sessionId)
+    ) {
+      return false
+    }
+    return sessions.get(sessionId) === settlement.liveObject
+  }
+
+  /** Every currently queryable expected ID; the read permit set is never persisted. */
+  private partialEligibleIds(round: HistoryCoverageRound): string[] {
+    const sessions = this.deps.sessions()
+    if (sessions === undefined) return []
+    const ids: string[] = []
+    for (const [sessionId, settlement] of round.settled) {
+      if (this.partialSettlementQueryable(sessionId, settlement, round, sessions)) ids.push(sessionId)
+    }
+    return ids
+  }
+
+  /** The readText half of the SAME permit: eligibility plus its clean checkpoint. */
+  private partialIdQueryable(sessionId: string): boolean {
+    const round = this.partialRound()
+    if (round === undefined) return false
+    const settlement = round.settled.get(sessionId)
+    if (settlement === undefined) return false
+    const sessions = this.deps.sessions()
+    if (sessions === undefined) return false
+    if (!this.partialSettlementQueryable(sessionId, settlement, round, sessions)) return false
+    const checkpoint = this.index?.checkpointOf(sessionId)
+    return checkpoint !== undefined && !checkpoint.dirty && checkpoint.uncertainSources === 0
+  }
+
+  /**
+   * ONE synchronous partial page. The clean-row filter, scope/match predicate,
+   * ORDER and LIMIT all run in SQL; `settledCount` is computed at the same read
+   * boundary from the same eligible set. Fewer than one queryable ID is loading.
+   */
+  private partialAnswer(
+    exact: HistorySearchRequest,
+    scopeId: string | null,
+  ): Extract<HistorySearchResponse, { kind: 'partial' }> | undefined {
+    const round = this.partialRound()
+    if (round === undefined) return undefined
+    const total = round.expected?.size
+    if (total === undefined) return undefined
+    const sessionIds = this.partialEligibleIds(round)
+    if (sessionIds.length === 0) return undefined
+    const page = this.requireIndex().partialSearch({
+      scope: exact.scope,
+      ...(exact.scope === 'session' ? { sessionId: exact.sessionId } : {}),
+      ...(exact.scope === 'directory' ? { cwd: scopeId as string } : {}),
+      query: exact.query,
+      limit: exact.limit,
+      sessionIds,
+    })
+    if (page.settledCount < 1) return undefined
+    return {
+      kind: 'partial',
+      items: page.rows.map(row => ({
+        sessionId: row.sessionId,
+        messageId: row.messageId,
+        firstEventSeq: row.firstEventSeq,
+        acceptedAt: row.acceptedAt,
+        effectiveCwd: row.effectiveCwd,
+        preview: row.preview,
+        contentLength: row.contentLength,
+        contentSha256: row.contentSha256,
+        hasNonText: row.hasNonText,
+      })),
+      progress: { settled: page.settledCount, total },
     }
   }
 

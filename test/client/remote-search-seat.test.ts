@@ -109,6 +109,7 @@ function seatOf(read: FakeRead, scope: FakeScope, overrides: {
   sessionId?: string | undefined
   onRetire?: () => void
   debounceMs?: number
+  refreshMs?: number
 } = {}): RemoteHistorySeat {
   return createRemoteHistorySeat({
     read,
@@ -117,6 +118,7 @@ function seatOf(read: FakeRead, scope: FakeScope, overrides: {
     scope: scope.scope,
     onRetire: overrides.onRetire ?? (() => {}),
     debounceMs: overrides.debounceMs ?? 1,
+    refreshMs: overrides.refreshMs ?? 50,
   })
 }
 
@@ -379,5 +381,153 @@ test('a row selection is refused while More is in flight', async () => {
   assert.ok(first !== undefined && second !== undefined)
   seat.select(second)
   assert.equal(seat.view().selectedId, first, 'More pending keeps the current selection')
+  seat.close()
+})
+
+
+test('loading→partial→ready keeps the selected exact body and stops on ready', async () => {
+  const read = new FakeRead()
+  const texts = new Map<string, string>()
+  const rows = (order: readonly number[]) => order.map((index) => {
+    const text = `text-${String(index)}`
+    texts.set(`ses_a?message-${String(index)}`, text)
+    return item(index, text)
+  })
+  read.body = (request) => {
+    const text = texts.get(`ses_a?${request.messageId}`) ?? ''
+    return { kind: 'ready', chunk: text, nextOffset: null, contentLength: text.length }
+  }
+  const first = rows([1, 2])
+  const reordered = [first[1]!, first[0]!]
+  const ready = [first[1]!, first[0]!, item(3, 'text-3')]
+  read.responses.push({ kind: 'loading' })
+  read.responses.push({ kind: 'partial', items: first, progress: { settled: 1, total: 3 } })
+  read.responses.push({ kind: 'partial', items: reordered, progress: { settled: 2, total: 3 } })
+  read.responses.push({ kind: 'ready', generation: 'g1', items: ready, nextCursor: null })
+  const scope = makeScope('session', { available: true, cwd: '/repo/host' })
+  const seat = seatOf(read, scope)
+  seat.open('session', 'text')
+  await waitFor(() => seat.view().status === 'partial' && seat.view().body.kind === 'ready', 'first partial body')
+  const selected = seat.view().selectedId
+  assert.equal(selected, first[0]!.sessionId + '\u0000' + first[0]!.messageId)
+  assert.deepEqual(seat.view().progress, { settled: 1, total: 3 })
+  assert.equal(seat.view().hasMore, false, 'a partial page never advertises More')
+  assert.equal(read.calls.length, 2, 'the first page was followed by exactly one auto refresh')
+  const bodyReads = read.readCalls.length
+  const pageBefore = seat.view().pageRevision
+
+  await waitFor(() => seat.view().progress?.settled === 2, 'expanded partial')
+  assert.deepEqual(seat.view().rows.map(row => row.id), reordered.map(row => row.sessionId + '\u0000' + row.messageId))
+  assert.equal(seat.view().selectedId, selected, 'the same complete row identity keeps the selection')
+  assert.equal(seat.view().body.kind, 'ready', 'a progress-only refresh keeps the verified body')
+  assert.equal(read.readCalls.length, bodyReads, 'a progress-only refresh never re-reads the body')
+  assert.ok(seat.view().pageRevision > pageBefore, 'a material reorder advances the action identity')
+
+  await waitFor(() => seat.view().status === 'ready', 'ready')
+  assert.equal(seat.view().selectedId, selected, 'ready keeps the same row identity')
+  assert.equal(seat.view().body.kind, 'ready')
+  assert.equal(seat.view().progress, undefined)
+  const callsAtReady = read.calls.length
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(read.calls.length, callsAtReady, 'ready stops the warmup refresh')
+  seat.close()
+})
+
+test('a partial refresh that returns an error or loses currentness stops and refuses stale state', async () => {
+  const read = new FakeRead()
+  const a = item(1, 'alpha')
+  read.responses.push({ kind: 'partial', items: [a], progress: { settled: 1, total: 2 } })
+  read.responses.push(() => Promise.reject(new RemoteHistorySearchFailedError('gateway/internal', 'boom')))
+  const scope = makeScope('session', { available: true, cwd: '/repo/host' })
+  const seat = seatOf(read, scope)
+  seat.open('session', 'alpha')
+  await waitFor(() => seat.view().status === 'partial', 'partial')
+  await waitFor(() => seat.view().status === 'failed', 'refresh failure')
+  assert.equal(seat.view().rows.length, 0, 'a non-partial refresh withdraws the old rows')
+  assert.equal(seat.view().selectedId, undefined)
+  const callsAtFailure = read.calls.length
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(read.calls.length, callsAtFailure, 'a failure stops the warmup refresh')
+  seat.close()
+
+  const deniedRead = new FakeRead()
+  deniedRead.responses.push({ kind: 'partial', items: [item(2, 'beta')], progress: { settled: 1, total: 2 } })
+  deniedRead.responses.push(() => Promise.reject(new RemoteHistorySearchDeniedError('no')))
+  const deniedScope = makeScope('session', { available: true, cwd: '/repo/host' })
+  const denied = seatOf(deniedRead, deniedScope)
+  denied.open('session', 'beta')
+  await waitFor(() => denied.view().status === 'partial', 'denied partial')
+  await waitFor(() => denied.view().status === 'denied', 'denied refresh')
+  const deniedCalls = deniedRead.calls.length
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(deniedRead.calls.length, deniedCalls, 'denied stops the warmup refresh')
+  denied.close()
+})
+
+test('a stale partial answer cannot commit after a query change', async () => {
+  const read = new FakeRead()
+  const a1 = item(1, 'alpha')
+  const a2 = { ...a1, preview: 'alpha changed', contentSha256: sha('alpha changed'), contentLength: 'alpha changed'.length }
+  const b = item(2, 'beta')
+  const texts = new Map<string, string>([
+    [`ses_a?message-1`, 'alpha'],
+    [`ses_a?message-2`, 'beta'],
+  ])
+  read.body = (request) => {
+    const text = texts.get(`ses_a?${request.messageId}`) ?? ''
+    return { kind: 'ready', chunk: text, nextOffset: null, contentLength: text.length }
+  }
+  read.responses.push({ kind: 'partial', items: [a1], progress: { settled: 1, total: 2 } })
+  // The auto-refresh response is held so the user query can supersede it.
+  let releaseSlow: ((value: HistorySearchResponse) => void) | undefined
+  read.responses.push(() => new Promise<HistorySearchResponse>((resolve) => { releaseSlow = resolve }))
+  read.responses.push({ kind: 'ready', generation: 'g2', items: [b], nextCursor: null })
+  const scope = makeScope('session', { available: true, cwd: '/repo/host' })
+  const seat = seatOf(read, scope)
+  seat.open('session', 'gamma')
+  await waitFor(() => seat.view().status === 'partial', 'initial partial')
+  await waitFor(() => read.calls.length === 2, 'held refresh dispatched')
+  seat.setQuery('new')
+  releaseSlow?.({ kind: 'partial', items: [a2], progress: { settled: 2, total: 2 } })
+  await waitFor(() => seat.view().status === 'ready' && seat.view().query === 'new', 'the newer query')
+  assert.equal(seat.view().rows[0]?.id, b.sessionId + '\u0000' + b.messageId, 'the stale partial never commits')
+  assert.equal(read.calls.at(-1)?.query, 'new')
+  seat.close()
+})
+
+
+test('a same-id changed row identity restarts its body and a removed selection clears it', async () => {
+  const read = new FakeRead()
+  const a1 = item(1, 'alpha')
+  const b = item(2, 'beta')
+  const a2 = { ...a1, preview: 'alpha changed', contentSha256: sha('alpha changed'), contentLength: 'alpha changed'.length }
+  const texts = new Map<string, string>([
+    ['ses_a?message-1', 'alpha'],
+    ['ses_a?message-2', 'beta'],
+  ])
+  read.body = (request) => {
+    const text = texts.get(`ses_a?${request.messageId}`) ?? ''
+    return { kind: 'ready', chunk: text, nextOffset: null, contentLength: text.length }
+  }
+  read.responses.push({ kind: 'partial', items: [a1, b], progress: { settled: 1, total: 3 } })
+  read.responses.push({ kind: 'partial', items: [a2], progress: { settled: 2, total: 3 } })
+  read.responses.push({ kind: 'partial', items: [], progress: { settled: 2, total: 3 } })
+  const scope = makeScope('session', { available: true, cwd: '/repo/host' })
+  const seat = seatOf(read, scope)
+  seat.open('session', 'alpha')
+  await waitFor(() => seat.view().status === 'partial' && seat.view().body.kind === 'ready', 'first body')
+  const selected = seat.view().selectedId
+  const readsBefore = read.readCalls.length
+  texts.set('ses_a?message-1', 'alpha changed')
+  await waitFor(() => seat.view().rows.length === 1 && seat.view().progress?.settled === 2, 'changed identity')
+  assert.equal(seat.view().selectedId, selected, 'the id survived')
+  assert.equal(seat.view().body.kind, 'ready')
+  const changedBody = seat.view().body
+  assert.equal(changedBody.kind === 'ready' ? changedBody.text : '', 'alpha changed',
+    'the changed hash body was re-read instead of reusing stale text')
+  assert.ok(read.readCalls.length > readsBefore, 'the changed identity issued one new exact read')
+  await waitFor(() => seat.view().rows.length === 0 && seat.view().selectedId === undefined, 'removed selection')
+  assert.equal(seat.view().body.kind, 'none')
+  assert.equal(seat.view().hasMore, false)
   seat.close()
 })

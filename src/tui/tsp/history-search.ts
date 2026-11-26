@@ -49,6 +49,7 @@ export type TspHistorySearchPhase = 'closed' | 'open' | 'parked'
 export type TspHistorySearchStatus =
   | 'searching'
   | 'loading-host'
+  | 'partial'
   | 'incomplete'
   | 'unavailable'
   | 'denied'
@@ -68,27 +69,27 @@ export type TspHistoryBrowseStep = 'up' | 'down' | 'page-up' | 'page-down'
  *  across a re-render can only act on the rows the user actually saw; the
  *  identity it names is then re-checked against the settled rows of THIS frame. */
 export type TspHistorySearchIntent =
-  | { readonly kind: 'focus-query'; readonly serial: number; readonly revision: number }
-  | { readonly kind: 'query'; readonly query: string; readonly cursor: number; readonly serial: number; readonly revision: number }
-  | { readonly kind: 'scope'; readonly delta: -1 | 1; readonly serial: number; readonly revision: number }
-  | { readonly kind: 'select'; readonly rowId: string; readonly serial: number; readonly revision: number }
-  | { readonly kind: 'browse'; readonly step: TspHistoryBrowseStep; readonly serial: number; readonly revision: number }
-  | { readonly kind: 'preview-scroll'; readonly to: ScrollTo; readonly serial: number; readonly revision: number }
-  | { readonly kind: 'expand'; readonly serial: number; readonly revision: number }
-  | { readonly kind: 'retry'; readonly serial: number; readonly revision: number }
+  | { readonly kind: 'focus-query'; readonly serial: number; readonly revision: number; readonly pageRevision?: number }
+  | { readonly kind: 'query'; readonly query: string; readonly cursor: number; readonly serial: number; readonly revision: number; readonly pageRevision?: number }
+  | { readonly kind: 'scope'; readonly delta: -1 | 1; readonly serial: number; readonly revision: number; readonly pageRevision?: number }
+  | { readonly kind: 'select'; readonly rowId: string; readonly serial: number; readonly revision: number; readonly pageRevision?: number }
+  | { readonly kind: 'browse'; readonly step: TspHistoryBrowseStep; readonly serial: number; readonly revision: number; readonly pageRevision?: number }
+  | { readonly kind: 'preview-scroll'; readonly to: ScrollTo; readonly serial: number; readonly revision: number; readonly pageRevision?: number }
+  | { readonly kind: 'expand'; readonly serial: number; readonly revision: number; readonly pageRevision?: number }
+  | { readonly kind: 'retry'; readonly serial: number; readonly revision: number; readonly pageRevision?: number }
   /** Load the next Remote page. `page` is the number of rows the cell was
    *  painted against, so a click that arrives after an append (which does not
    *  bump the query revision) cannot request the NEXT page from a frame the user
    *  never saw. */
-  | { readonly kind: 'more'; readonly page: number; readonly serial: number; readonly revision: number }
+  | { readonly kind: 'more'; readonly page: number; readonly serial: number; readonly revision: number; readonly pageRevision?: number }
   /** `selectedId` is the row the CELL WAS PAINTED FOR. Moving the highlight
    *  does not bump `queryRevision`, so serial+revision alone cannot tell a
    *  lagging click which selection the user was looking at; without this the
    *  stale button would act on the NEWER selection. Raw row identity never
    *  reaches a node key or attribute — it travels only inside this intent. */
-  | { readonly kind: 'copy'; readonly selectedId: string | undefined; readonly serial: number; readonly revision: number }
-  | { readonly kind: 'restore'; readonly selectedId: string | undefined; readonly serial: number; readonly revision: number }
-  | { readonly kind: 'close'; readonly serial: number; readonly revision: number }
+  | { readonly kind: 'copy'; readonly selectedId: string | undefined; readonly serial: number; readonly revision: number; readonly pageRevision?: number }
+  | { readonly kind: 'restore'; readonly selectedId: string | undefined; readonly serial: number; readonly revision: number; readonly pageRevision?: number }
+  | { readonly kind: 'close'; readonly serial: number; readonly revision: number; readonly pageRevision?: number }
 
 /** The painted row of the results list: one sanitized summary plus the short
  *  time/directory marks. The raw `content` NEVER enters a painted cell — the
@@ -120,6 +121,8 @@ export interface TspHistorySearchPreview {
 export interface TspHistorySearchRenderState {
   readonly serial: number
   readonly revision: number
+  /** The shared owner's material page identity; progress-only stays stable. */
+  readonly pageRevision: number
   readonly scope: TspHistoryScopeLabel
   readonly scopeKey: string
   readonly expandKey: string
@@ -135,6 +138,8 @@ export interface TspHistorySearchRenderState {
   readonly resultsKey: string
   readonly previewKey: string
   readonly header: string
+  /** The same status in the narrow-pane compact form (wide header otherwise). */
+  readonly headerCompact: string
   readonly rows: readonly TspHistorySearchRow[]
   readonly empty: string | undefined
   readonly failure: string | undefined
@@ -460,7 +465,7 @@ export function createTspHistorySearch(
    *  id of an older frame is simply not in the current view. No raw source file
    *  path and no result identity ever reaches an HTML key. */
   const actionKeyOf = (owner: HistorySeatState, token: string): string =>
-    `h${owner.openSerial}-r${owner.queryRevision}-${token}`
+    `h${owner.openSerial}-r${owner.queryRevision}-p${owner.remoteView?.pageRevision ?? 0}-${token}`
 
   /** An action cell whose meaning depends on WHICH row is highlighted: the
    *  selected row's position joins the key, so a repaint that moved the
@@ -549,13 +554,13 @@ export function createTspHistorySearch(
   const remoteRetryEnabled = (view: RemoteHistorySeatView): boolean =>
     !view.moreLoading
     && (REMOTE_RETRY_STATUSES.has(view.status)
-      || (view.status === 'ready' && view.body.kind === 'failed'))
+      || ((view.status === 'ready' || view.status === 'partial') && view.body.kind === 'failed'))
 
   /** The one exact body this card may copy or restore: committed, ready and
    *  still the row the painted action belongs to. */
   const remoteBodyReady = (owner: HistorySeatState): Extract<RemoteHistoryBodyView, { readonly kind: 'ready' }> | undefined => {
     const view = owner.remoteView
-    if (view === undefined || view.status !== 'ready' || view.moreLoading) return undefined
+    if (view === undefined || (view.status !== 'ready' && view.status !== 'partial') || view.moreLoading) return undefined
     const body = view.body
     if (body.kind !== 'ready') return undefined
     if (body.row.id !== view.selectedId) return undefined
@@ -626,10 +631,10 @@ export function createTspHistorySearch(
       remoteRetry(owner)
       return
     }
-    if (view.status !== 'ready') return
+    if (view.status !== 'ready' && view.status !== 'partial') return
     const rows = view.rows
     if (step === 'down' && view.selectedId === rows.at(-1)?.id) {
-      remoteMore(owner)
+      if (view.status === 'ready') remoteMore(owner)
       return
     }
     if (rows.length === 0) return
@@ -825,6 +830,8 @@ export function createTspHistorySearch(
     const owner = state
     if (owner === undefined || owner.retired) return
     if (intent.serial !== owner.openSerial || intent.revision !== owner.queryRevision) return
+    if (intent.pageRevision !== undefined
+      && intent.pageRevision !== (owner.remoteView?.pageRevision ?? 0)) return
     if (!operable(owner)) return
     switch (intent.kind) {
       case 'focus-query': {
@@ -865,7 +872,7 @@ export function createTspHistorySearch(
         // already typed past.
         if (owner.remote !== undefined) {
           const view = owner.remoteView
-          if (view === undefined || view.status !== 'ready') return
+          if (view === undefined || (view.status !== 'ready' && view.status !== 'partial')) return
           if (!view.rows.some((row) => row.id === intent.rowId)) return
           // The shared seat decides whether the same row is a body retry; a
           // select of the same still-ready row is its own no-op.
@@ -1038,17 +1045,18 @@ export function createTspHistorySearch(
   const keyIntent = (owner: HistorySeatState, key: Key): TspHistorySearchIntent | undefined => {
     const serial = owner.openSerial
     const revision = owner.queryRevision
-    if (key.name === 'escape') return { kind: 'close', serial, revision }
+    const pageRevision = owner.remoteView?.pageRevision ?? 0
+    if (key.name === 'escape') return { kind: 'close', serial, revision, pageRevision }
     // `Ctrl+C` INSIDE History is this seat's own cancel: closing the card never
     // interrupts the Agent (the mount routes it here, before its cancel owner).
     if (key.ctrl === true && key.name === 'c' && !key.alt && !key.meta && !key.shift) {
-      return { kind: 'close', serial, revision }
+      return { kind: 'close', serial, revision, pageRevision }
     }
     if (key.ctrl === true && key.name === 'r' && !key.alt && !key.meta) {
-      return { kind: 'focus-query', serial, revision }
+      return { kind: 'focus-query', serial, revision, pageRevision }
     }
     if (key.alt === true && key.ctrl !== true && key.meta !== true) {
-      if (key.name === 'c' && !key.shift) return { kind: 'copy', selectedId: owner.selectedId, serial, revision }
+      if (key.name === 'c' && !key.shift) return { kind: 'copy', selectedId: owner.selectedId, serial, revision, pageRevision }
       const previewStep: ScrollTo | undefined = key.name === 'up' ? 'line-up'
         : key.name === 'down' ? 'line-down'
           : key.name === 'page_up' ? 'page-up'
@@ -1056,20 +1064,20 @@ export function createTspHistorySearch(
               : key.name === 'home' ? 'start'
                 : key.name === 'end' ? 'end'
                   : undefined
-      if (previewStep !== undefined) return { kind: 'preview-scroll', to: previewStep, serial, revision }
+      if (previewStep !== undefined) return { kind: 'preview-scroll', to: previewStep, serial, revision, pageRevision }
       return undefined
     }
     if (key.ctrl === true || key.meta === true) return undefined
-    if (key.name === 'tab') return { kind: 'scope', delta: key.shift === true ? -1 : 1, serial, revision }
-    if (key.name === 'f2') return { kind: 'expand', serial, revision }
-    if (key.name === 'enter') return { kind: 'restore', selectedId: owner.selectedId, serial, revision }
-    if (key.name === 'up') return { kind: 'browse', step: 'up', serial, revision }
-    if (key.name === 'down') return { kind: 'browse', step: 'down', serial, revision }
-    if (key.name === 'page_up') return { kind: 'browse', step: 'page-up', serial, revision }
-    if (key.name === 'page_down') return { kind: 'browse', step: 'page-down', serial, revision }
+    if (key.name === 'tab') return { kind: 'scope', delta: key.shift === true ? -1 : 1, serial, revision, pageRevision }
+    if (key.name === 'f2') return { kind: 'expand', serial, revision, pageRevision }
+    if (key.name === 'enter') return { kind: 'restore', selectedId: owner.selectedId, serial, revision, pageRevision }
+    if (key.name === 'up') return { kind: 'browse', step: 'up', serial, revision, pageRevision }
+    if (key.name === 'down') return { kind: 'browse', step: 'down', serial, revision, pageRevision }
+    if (key.name === 'page_up') return { kind: 'browse', step: 'page-up', serial, revision, pageRevision }
+    if (key.name === 'page_down') return { kind: 'browse', step: 'page-down', serial, revision, pageRevision }
     if (key.shift === true) return undefined
     const edited = editQuery(owner.query, owner.queryCursor, key)
-    if (edited !== undefined) return { kind: 'query', query: edited.query, cursor: edited.cursor, serial, revision }
+    if (edited !== undefined) return { kind: 'query', query: edited.query, cursor: edited.cursor, serial, revision, pageRevision }
     return undefined
   }
 
@@ -1126,9 +1134,21 @@ export function createTspHistorySearch(
         ? `Results · ${String(view.rows.length)} shown · Loading more…`
         : sanitizedPhysicalLine(view.message === '' ? `Results · ${String(view.rows.length)} shown` : view.message)
       : sanitizedPhysicalLine(view.message === '' ? 'Searching…' : view.message)
+    // The narrow form leads with the indexing word so the client's own clipping
+    // can never leave an apparently complete `Results · N shown` page.
+    const headerCompact = view.status === 'partial' && view.progress !== undefined
+      ? (() => {
+          const { settled, total } = view.progress
+          const percent = total === 0 ? 0 : Math.floor((settled * 100) / total)
+          return view.rows.length === 0
+            ? 'No matches yet — indexing…'
+            : `Indexing ${String(settled)}/${String(total)} (${String(percent)}%)`
+        })()
+      : header
     return {
       serial: owner.openSerial,
       revision: owner.queryRevision,
+      pageRevision: view.pageRevision,
       scope: SCOPE_LABELS[view.scope],
       scopeKey: actionKeyOf(owner, 'scope'),
       expandKey: actionKeyOf(owner, 'expand'),
@@ -1142,6 +1162,7 @@ export function createTspHistorySearch(
       resultsKey: containerKeyOf(owner.openSerial, 'results-scroll'),
       previewKey: containerKeyOf(owner.openSerial, 'preview-scroll'),
       header,
+      headerCompact,
       rows: painted,
       empty: undefined,
       failure: undefined,
@@ -1224,6 +1245,7 @@ export function createTspHistorySearch(
     return {
       serial: owner.openSerial,
       revision: owner.queryRevision,
+      pageRevision: 0,
       scope: SCOPE_LABELS[owner.scope],
       scopeKey: actionKeyOf(owner, 'scope'),
       expandKey: actionKeyOf(owner, 'expand'),
@@ -1237,6 +1259,7 @@ export function createTspHistorySearch(
       resultsKey: containerKeyOf(owner.openSerial, 'results-scroll'),
       previewKey: containerKeyOf(owner.openSerial, 'preview-scroll'),
       header,
+      headerCompact: header,
       rows: painted,
       empty,
       failure: owner.status === 'failed' ? HISTORY_SEARCH_FAILURE : undefined,

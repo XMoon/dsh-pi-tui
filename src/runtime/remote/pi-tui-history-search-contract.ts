@@ -37,6 +37,7 @@ export type {
   HistoryReadTextResponse,
   HistorySearchIncompleteReason,
   HistorySearchItem,
+  HistorySearchProgress,
   HistorySearchRequest,
   HistorySearchResponse,
   HistorySearchScope,
@@ -267,6 +268,24 @@ export function parseHistorySearchResponse(value: unknown): HistorySearchRespons
       generation: nonEmptyString(record.generation, `${ANSWER_LABEL} generation`),
       items: record.items.map(parseHistorySearchItem),
       nextCursor: record.nextCursor,
+    }
+  }
+  if (record.kind === 'partial') {
+    exactKeys(record, ['kind', 'items', 'progress'], ANSWER_LABEL)
+    requiredKeys(record, ['kind', 'items', 'progress'], ANSWER_LABEL)
+    if (!Array.isArray(record.items)) throw new TypeError(`${ANSWER_LABEL}: items must be an array`)
+    const progress = recordOf(record.progress, `${ANSWER_LABEL} progress`)
+    exactKeys(progress, ['settled', 'total'], `${ANSWER_LABEL} progress`)
+    requiredKeys(progress, ['settled', 'total'], `${ANSWER_LABEL} progress`)
+    const settled = nonNegativeInteger(progress.settled, `${ANSWER_LABEL} progress settled`)
+    const total = nonNegativeInteger(progress.total, `${ANSWER_LABEL} progress total`)
+    if (total < 1 || settled < 1 || settled > total) {
+      throw new TypeError(`${ANSWER_LABEL}: progress must satisfy 1 <= settled <= total`)
+    }
+    return {
+      kind: 'partial',
+      items: record.items.map(parseHistorySearchItem),
+      progress: { settled, total },
     }
   }
   if (record.kind === 'loading') {

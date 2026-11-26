@@ -49,6 +49,9 @@ export const HISTORY_SEARCH_ROLES = {
   body: 'dsh.history.body',
   results: 'dsh.history.results',
   resultsHead: 'dsh.history.results-head',
+  /** The same heading row while a first-cold partial page is painted. It is not
+   *  hidden by the short-pane compression, so the indexing fact stays visible. */
+  resultsHeadProgress: 'dsh.history.results-head-progress',
   resultsScroll: 'dsh.history.results-scroll',
   row: 'dsh.history.row',
   rowText: 'dsh.history.row-text',
@@ -88,6 +91,7 @@ function resultRow(
   onIntent: (intent: TspHistorySearchIntent) => void,
   revision: number,
   serial: number,
+  pageRevision: number,
 ): Node {
   const marks = [row.time, row.directory].filter((mark) => mark !== '')
   const title = marks.length === 0 ? row.summary : `${row.summary} · ${marks.join(' · ')}`
@@ -97,7 +101,7 @@ function resultRow(
     title,
     aria: title,
     ...(row.selected ? { attrs: { 'data-selected': 'true' } as Readonly<Record<string, string>> } : {}),
-    onClick: () => onIntent({ kind: 'select', rowId: row.id, serial, revision }),
+    onClick: () => onIntent({ kind: 'select', rowId: row.id, serial, revision, pageRevision }),
   },
     html.span({ role: HISTORY_SEARCH_ROLES.rowText }, `${row.selected ? '›' : ' '}${row.summary}`),
     ...(marks.length === 0
@@ -132,9 +136,10 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
   const { state, onIntent } = input
   const revision = state.revision
   const serial = state.serial
+  const pageRevision = state.pageRevision
 
   const resultsBody: Node[] = []
-  for (const row of state.rows) resultsBody.push(resultRow(row, onIntent, revision, serial))
+  for (const row of state.rows) resultsBody.push(resultRow(row, onIntent, revision, serial, pageRevision))
   if (state.empty !== undefined) {
     resultsBody.push(ui.text({ key: `h${serial}-empty`, role: HISTORY_SEARCH_ROLES.status, wrap: 'none', text: state.empty }))
   }
@@ -143,12 +148,12 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
   if (state.remote && (state.moreEnabled || state.moreLoading)) {
     pageButtons.push(chromeButton(state.moreKey, HISTORY_SEARCH_ROLES.more, state.moreLabel,
       state.moreEnabled ? 'Load the next page of history' : 'Loading the next page of history',
-      state.moreEnabled, () => onIntent({ kind: 'more', page: state.page, serial, revision })))
+      state.moreEnabled, () => onIntent({ kind: 'more', page: state.page, serial, revision, pageRevision })))
   }
   if (state.remote && state.retryEnabled) {
     pageButtons.push(chromeButton(state.retryKey, HISTORY_SEARCH_ROLES.retry, state.retryLabel,
       'Search this scope and query again',
-      true, () => onIntent({ kind: 'retry', serial, revision })))
+      true, () => onIntent({ kind: 'retry', serial, revision, pageRevision })))
   }
   const pageActions = pageButtons.length === 0
     ? undefined
@@ -159,7 +164,12 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
 
   const results = ui.col(
     { key: `h${serial}-results`, role: HISTORY_SEARCH_ROLES.results, gap: 'none' },
-    ui.text({ key: `h${serial}-results-head`, role: HISTORY_SEARCH_ROLES.resultsHead, wrap: 'none', text: state.header }),
+    ui.text({
+      key: `h${serial}-results-head`,
+      role: state.status === 'partial' ? HISTORY_SEARCH_ROLES.resultsHeadProgress : HISTORY_SEARCH_ROLES.resultsHead,
+      wrap: 'none',
+      text: input.wide ? state.header : state.headerCompact,
+    }),
     ui.scroll(
       { key: state.resultsKey, role: HISTORY_SEARCH_ROLES.resultsScroll, variant: 'bar', gap: 'none' },
       ...resultsBody,
@@ -238,12 +248,12 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
       ui.row(
         { key: `h${serial}-head-end`, role: HISTORY_SEARCH_ROLES.headEnd, gap: 'sm', align: 'center' },
         chromeButton(state.scopeKey, HISTORY_SEARCH_ROLES.scope, `Scope: ${state.scope} ⌄`, 'Cycle the search scope', true,
-          () => onIntent({ kind: 'scope', delta: 1, serial, revision })),
+          () => onIntent({ kind: 'scope', delta: 1, serial, revision, pageRevision })),
         chromeButton(state.expandKey, HISTORY_SEARCH_ROLES.expand, state.expanded ? 'Collapse' : 'Expand',
           state.expanded ? 'Collapse the history card' : 'Expand the history card', true,
-          () => onIntent({ kind: 'expand', serial, revision })),
+          () => onIntent({ kind: 'expand', serial, revision, pageRevision })),
         chromeButton(state.closeKey, HISTORY_SEARCH_ROLES.close, '×', 'Close history search', true,
-          () => onIntent({ kind: 'close', serial, revision })),
+          () => onIntent({ kind: 'close', serial, revision, pageRevision })),
       ),
     ),
     ui.input({
@@ -256,7 +266,7 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
       // A pointer click on an unfocused field is a `focus` event, not a key. The
       // SDK dispatches it from the view it last rendered, so a stale frame's
       // click resolves to nothing in the seat.
-      onFocus: () => onIntent({ kind: 'focus-query', serial, revision }),
+      onFocus: () => onIntent({ kind: 'focus-query', serial, revision, pageRevision }),
     }),
     body,
     ui.row(
@@ -265,7 +275,7 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
       ...(state.failure === undefined
         ? []
         : [chromeButton(state.retryKey, HISTORY_SEARCH_ROLES.retry, state.retryLabel,
-            'Search this scope and query again', true, () => onIntent({ kind: 'retry', serial, revision }))]),
+            'Search this scope and query again', true, () => onIntent({ kind: 'retry', serial, revision, pageRevision }))]),
       ui.row(
         { key: `h${serial}-actions-end`, role: HISTORY_SEARCH_ROLES.actionsEnd, gap: 'sm', align: 'center' },
         chromeButton(state.copyKey, HISTORY_SEARCH_ROLES.copy, state.copyLabel,
@@ -274,11 +284,11 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
           // carries that position, so a click that arrives after the highlight
           // moved is refused by the client's own stale-frame rule instead of
           // borrowing the newer selection's business action.
-          state.actionsEnabled, () => onIntent({ kind: 'copy', selectedId: state.selectedId, serial, revision })),
+          state.actionsEnabled, () => onIntent({ kind: 'copy', selectedId: state.selectedId, serial, revision, pageRevision })),
         chromeButton(state.restoreKey, HISTORY_SEARCH_ROLES.restore, state.restoreLabel,
           state.actionsEnabled ? 'Restore the selected entry into the composer; it never sends it'
             : 'Select a settled history entry to restore it',
-          state.actionsEnabled, () => onIntent({ kind: 'restore', selectedId: state.selectedId, serial, revision }))),
+          state.actionsEnabled, () => onIntent({ kind: 'restore', selectedId: state.selectedId, serial, revision, pageRevision }))),
     ),
   )
 }
@@ -431,10 +441,12 @@ export const HISTORY_SEARCH_STYLES = `
     flex: 1 1 0;
   }
   [data-role='dsh.history.results-head'],
+  [data-role='dsh.history.results-head-progress'],
   [data-role='dsh.history.preview-head'] {
     flex-shrink: 0;
   }
   [data-role='dsh.history.results-head'],
+  [data-role='dsh.history.results-head-progress'],
   [data-role='dsh.history.preview-head'] {
     color: var(--t3);
     font-family: var(--sans);
@@ -542,6 +554,7 @@ export const HISTORY_SEARCH_STYLES = `
     [data-role='dsh.history.hint'] { display: none; }
     [data-role='dsh.history.results-head'],
     [data-role='dsh.history.preview-head'] { display: none; }
+    [data-role='dsh.history.results-head-progress'] { display: block; padding: 0; font-size: 10px; }
     /* At a short pane the expansion may only take what the pane can spare:
        measured on the real client at 900x360, a 62vh budget grew the card by
        50px and left 12.8px of the 33px composer visible. The dock keeps the

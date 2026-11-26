@@ -220,6 +220,56 @@ while the card owns the seat).
   negotiate the kinds and features this card really paints state that History
   search is unavailable instead of painting a reduced secondary UI.
 
+### Remote accepted-history search (Daemon Host)
+
+On the split-process Daemon backend, `Ctrl+R` consumes the Host-owned accepted
+history projection instead of the per-cwd file source. The Host contract is
+[host-client.md](./host-client.md#host-accepted-input-history-search-host-owned);
+this section owns the Client-visible behaviour shared by the PiTui panel and the
+TSP native card.
+
+- **One shared seat, two renderers.** The existing open/query/page/body owner
+  is the only query authority; each renderer paints its committed view and
+  keeps its existing row budget, keys and pointer routes. Neither renderer
+  polls or reads the Host directly.
+- **Statuses.** `loading` is the truthful first-cold-round warmup, `partial` is
+  the same healthy round offering only already-verified IDs, and `ready` is
+  the original complete result with the normal cursor/More. `incomplete`,
+  `unavailable`, `denied`, `failed`, `stale` and `too-long` remain blocking;
+  they never become an empty partial page. A partial page never carries a
+  cursor and never offers More.
+- **Progress.** A partial view states the verified count against the fixed
+  expected roster (`Indexing settled/total (n%)`) in the existing Results/status
+  row; the percentage is derived from safe integers, never a time estimate.
+  The count may decrease when a source is revoked. `settled === total` remains
+  visually partial until `ready`. A partial empty page says
+  `No matches yet — indexing…`; the ready empty state keeps `No matches`.
+- **Refresh.** After a committed `loading` or `partial` first page, the same
+  live open schedules ONE first-page refresh 1000 ms later. It is the existing
+  seat timer/cancellation lifecycle (no interval, no renderer/Host poll, no
+  stacked request). Typing, a scope change, manual Retry or close cancels it;
+  `ready`, denial, transport failure, real `incomplete`/`unavailable`/`stale`
+  and scope retirement stop it. A refresh never enters the full-screen
+  `searching` state, never clears a still-valid first page before its current
+  answer, and never appends.
+- **Selection and body.** A refresh replaces the first page atomically. The
+  selected row survives only while its COMPLETE row identity (id, event seq,
+  accepted time, cwd, length, hash, non-text flag, preview) still exists;
+  otherwise the old exact body/actions are withdrawn and one new exact read
+  starts for the new first row (or none). A progress-only update keeps the
+  selection, the verified exact text, the list/Preview scroll anchors and the
+  query caret, and re-reads nothing.
+- **Actions.** Copy/Restore require the same hash-verified exact body as
+  `ready`; an empty body is not actionable and a failed body keeps its reason
+  with no automatic retry. A material page/reorder change retires older painted
+  action identities, so a press or intent from the previous frame cannot act
+  on the row that moved into its cells. The exact body remains the accepted
+  snapshot already verified at read time; it adds no per-Copy Host RPC.
+- **Errors.** A first-page `loading`/failure answer withdraws the previous
+  rows, body, cursor and action eligibility instead of presenting stale
+  partial data as current; a real fault stops automatic refresh and the
+  ordinary Retry/reopen path remains the user's recovery.
+
 ### The session-scope persist gate (deferred start)
 
 The `session` scope is only as good as the `sessionId` on each row. The
