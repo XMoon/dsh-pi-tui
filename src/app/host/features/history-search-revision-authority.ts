@@ -28,7 +28,11 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { symbols } from '@deepseek-ai/cordis'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
-import { stableJson, type HistorySourceProofBasis } from './history-search-index.ts'
+import {
+  HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION,
+  stableJson,
+  type HistorySourceProofBasis,
+} from './history-search-index.ts'
 
 /** Cordis `FiberState.ACTIVE` (the enum is a const enum with no runtime value). */
 const FIBER_ACTIVE = 2
@@ -433,7 +437,7 @@ async function capture(
   // version conservatively misses and rebuilds once.
   const scopeKey = sha256(Buffer.from(stableJson([
     'pitui-history-pinned-revision',
-    1,
+    HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION,
     realProfileDir,
     normalizedRoot,
     canonicalRoot,

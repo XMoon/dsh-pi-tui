@@ -27,13 +27,13 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { normalize } from 'node:path'
 import { symbols } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import { assertSessionHeadersCompatible } from '@deepseek-ai/dsh-session-query'
 import { TypertRemoteService, type RemoteInvocation } from '@deepseek-ai/dsh-typert-protocol'
 import {
   HostAdmissionFold,
+  normalizeHistoryCwd,
   type HostAdmissionEventLike,
   type HostAdmissionOccurrence,
 } from '../../../domain/history/host-admission.ts'
@@ -458,12 +458,6 @@ function loggerDiag(ctx: Context, debugSink: boolean): Diag {
     error: emit('error'),
     dispose: () => sink?.dispose(),
   }
-}
-
-/** Normalize one event-time cwd for storage/aggregation (never realpath). */
-export function normalizeHistoryCwd(cwd: string | null | undefined): string | null {
-  if (typeof cwd !== 'string' || cwd === '') return null
-  return normalize(cwd)
 }
 
 /** Byte weight of one live event, counting REAL UTF-8 bytes. */
@@ -1949,10 +1943,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       }
       expectedSeq += 1
     }
-    const initialCwd = input.effectiveCwd ?? input.headerCwd
     const fold = new HostAdmissionFold({
       sessionId: input.sessionId,
-      ...(initialCwd === null ? {} : { headerCwd: initialCwd }),
+      initialCwd: input.effectiveCwd,
       inheritedEventCount: input.inheritedEventCount,
       startSeq: input.baseNextSeq - 1,
     })
@@ -1963,15 +1956,18 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       messageId: occurrence.messageId,
       firstEventSeq: occurrence.firstEventSeq,
       acceptedAt: occurrence.acceptedAt,
-      effectiveCwd: normalizeHistoryCwd(occurrence.cwd),
+      effectiveCwd: occurrence.cwd,
       content: occurrence.content,
       hasNonText: occurrence.hasNonText,
     }))
-    const effectiveCwd = normalizeHistoryCwd(fold.currentCwd)
+    const effectiveCwd = fold.currentCwd
     const lastEventHash = lastEvent === undefined ? null : sessionEventHash(lastEvent)
     const nextSeq = expectedSeq
-    const uncertainSourcesDelta = delta.unknownSourceCount + delta.invalidCwdCount
-    const previousUncertainSources = witness?.expected?.uncertainSources ?? 0
+    // The new admission derives no optional-metadata uncertainty: every
+    // occurrence it projects is either failed closed or fully readable. The
+    // physical column stays for old-v2 recovery; a retained old marker is
+    // carried forward unchanged and only an authoritative rebuild clears it.
+    const retainedUncertainSources = witness?.expected?.uncertainSources ?? 0
     index.commitBatch({
       sessionId: input.sessionId,
       headerHash: input.headerHash,
@@ -1982,12 +1978,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       effectiveCwd,
       lastEventHash,
       sourceState: input.sourceState,
-      uncertainSourcesDelta,
+      uncertainSourcesDelta: 0,
       occurrences,
     })
     if (witness !== undefined) {
       // The maintenance chain's next async read must compare against the
-      // checkpoint THIS commit produced, including its exact uncertain count.
+      // checkpoint THIS commit produced, including its exact retained count.
       witness.expected = {
         sessionId: input.sessionId,
         headerCwd: normalizeHistoryCwd(input.headerCwd),
@@ -1997,7 +1993,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         lastEventHash,
         headerHash: input.headerHash,
         sourceState: input.sourceState,
-        uncertainSources: previousUncertainSources + uncertainSourcesDelta,
+        uncertainSources: retainedUncertainSources,
         dirty: false,
       }
     }
@@ -2523,7 +2519,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const headerCwd = normalizeHistoryCwd(handle.header.cwd)
     const checkpoint = witness.expected
     let nextSeq = checkpoint?.nextSeq ?? 0
-    let effectiveCwd = checkpoint?.effectiveCwd ?? headerCwd
+    // Only a MISSING checkpoint initializes from the header. A continuing
+    // checkpoint's `null` is the explicit unknown directory fact and must never
+    // be resurrected from the header.
+    let effectiveCwd = checkpoint === undefined ? headerCwd : checkpoint.effectiveCwd
     let lastEventHash = checkpoint?.lastEventHash ?? null
     if (checkpoint !== undefined && checkpoint.inheritedCut !== inherited) {
       const reset = await this.resetWitness(witness)
@@ -2599,7 +2598,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
     const checkpoint = witness.expected
     let nextSeq = checkpoint?.nextSeq ?? 0
-    let effectiveCwd = checkpoint?.effectiveCwd ?? headerCwd
+    // Only a MISSING checkpoint initializes from the header; a continuing
+    // checkpoint's `null` is the explicit unknown directory fact.
+    let effectiveCwd = checkpoint === undefined ? headerCwd : checkpoint.effectiveCwd
     let lastEventHash = checkpoint?.lastEventHash ?? null
     if (checkpoint !== undefined && (checkpoint.inheritedCut !== inherited || checkpoint.headerHash !== headerHash)) {
       const reset = await this.resetWitness(witness)

@@ -43,6 +43,7 @@ import {
   type HistorySearchResponse,
 } from '../../src/runtime/remote/pi-tui-history-search-contract.ts'
 import {
+  HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION,
   HistorySearchIndex,
   historyCheckpointHash,
   sessionEventHash,
@@ -55,14 +56,15 @@ import {
 import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
 import {
   HISTORY_SEARCH_MAX_PENDING_EVENTS,
+  HISTORY_SEARCH_READ_BATCH,
   PiTuiHistorySearchHostService,
-  normalizeHistoryCwd,
   type HistorySearchLiveSessionLike,
   type HistorySearchPersistenceLike,
   type HistorySearchProfileContextLike,
   type HistorySearchQueryLike,
   type HistorySearchSessionsLike,
 } from '../../src/app/host/features/history-search.ts'
+import { normalizeHistoryCwd } from '../../src/domain/history/host-admission.ts'
 
 type Host = Awaited<ReturnType<typeof createRemoteApplicationHostFixture>>
 
@@ -592,6 +594,230 @@ test('a fork child inherits the parent prefix but only its own new prompt counts
     assert.equal(childAnswer.items.length, 1, 'the child new prompt must create exactly one occurrence')
   } finally {
     await wire.dispose()
+  }
+})
+
+test('a real Agent followup without rpcId is ONE accepted occurrence and non-user sources stay excluded', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-uncorrelated')
+  try {
+    const sessionId = 'history-uncorrelated'
+    const agent = await wire.host.harness.create(
+      SessionId(sessionId),
+      { provider: 'smoke', model: 'smoke' },
+      { cwd: wire.host.anchorDir },
+    )
+    const correlatedText = 'hsp-uncorrelated-correlated'
+    await prompt(wire, sessionId, 'req-uncorrelated-correlated', correlatedText)
+
+    // The official Agent followup accepts a createUserMessage with only
+    // `source: {kind:'user'}`: no request correlation exists anywhere in this
+    // producer path.
+    const directText = 'hsp-uncorrelated-direct'
+    const direct = createUserMessage({ content: [{ type: 'text', text: directText }], source: { kind: 'user' } })
+    assert.equal('rpcId' in (direct.source as object), false, 'the real followup producer must carry no rpcId')
+    agent.followup(direct)
+    await agent.whenIdle()
+    const directAnswer = await waitForSettled(
+      wire,
+      { scope: 'session', sessionId, query: directText, limit: 25 },
+      'no-rpcId occurrence',
+    )
+    assert.equal(directAnswer.kind, 'ready', JSON.stringify(directAnswer))
+    if (directAnswer.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(directAnswer.items.length, 1, 'the no-rpcId occurrence must be indexed exactly once')
+    const item = directAnswer.items[0]!
+    assert.equal(item.sessionId, sessionId)
+    assert.equal(item.messageId, direct.id)
+    assert.equal(item.preview, directText)
+    assert.equal(item.effectiveCwd, wire.host.anchorDir)
+    const chunk = await wire.readText({
+      sessionId: item.sessionId,
+      messageId: item.messageId,
+      contentSha256: item.contentSha256,
+      offset: 0,
+      limit: 4096,
+    })
+    assert.equal(chunk.kind, 'ready', JSON.stringify(chunk))
+    if (chunk.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(chunk.chunk, directText)
+
+    // Prove the DURABLE official events carry the no-rpcId shape: the same-id
+    // user/message consume keeps it ONE occurrence, never a second row.
+    const events = agent.session.snapshotEvents() as readonly {
+      readonly type: string
+      readonly data: { readonly id?: unknown; readonly inserted?: readonly { readonly id?: unknown; readonly source?: { readonly kind?: unknown; readonly rpcId?: unknown } }[] }
+    }[]
+    const inboxed = events
+      .filter(event => event.type === 'agent/inbox/spliced' && Array.isArray(event.data.inserted))
+      .flatMap(event => event.data.inserted!)
+      .find(message => message.id === direct.id)
+    assert.ok(inboxed !== undefined, 'the official inbox insertion must carry the followup message')
+    assert.equal(inboxed.source?.kind, 'user')
+    assert.equal(inboxed.source?.rpcId, undefined, 'the durable inbox message must carry no rpcId')
+    const consumed = events.find(event => event.type === 'user/message' && event.data.id === direct.id)
+    assert.ok(consumed !== undefined, 'the followup message must be consumed as a real user/message')
+    const replayed = await wire.search({ scope: 'session', sessionId, query: directText, limit: 25 })
+    assert.equal(replayed.kind, 'ready')
+    if (replayed.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(replayed.items.length, 1, 'the same-id consume must not create a second occurrence')
+    const correlated = await wire.search({ scope: 'session', sessionId, query: correlatedText, limit: 25 })
+    assert.equal(correlated.kind, 'ready')
+    if (correlated.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(correlated.items.length, 1, 'the normal correlated prompt stays accepted')
+
+    // Every scope reaches both real inputs; a non-user producer notice never
+    // enters the corpus even though it shares the same Session log.
+    const noticeText = 'hsp-uncorrelated-notice'
+    agent.session.append([['user/message', {
+      id: 'hsp-uncorrelated-notice',
+      role: 'user',
+      content: [{ type: 'text', text: noticeText }],
+      source: { kind: 'plan-mode' },
+    } as never, { surfaceOp: 'append' }]])
+    await waitForReady(wire, 'uncorrelated ready')
+    const notice = await wire.search({ scope: 'all', query: noticeText, limit: 25 })
+    assert.equal(notice.kind, 'ready')
+    if (notice.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(notice.items.length, 0, 'a non-user source must never be admitted')
+    const all = await wire.search({ scope: 'all', query: 'hsp-uncorrelated-', limit: 25 })
+    assert.equal(all.kind, 'ready')
+    if (all.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(all.items.length, 2)
+    const directory = await wire.search({ scope: 'directory', cwd: wire.host.anchorDir, query: 'hsp-uncorrelated-', limit: 25 })
+    assert.equal(directory.kind, 'ready')
+    if (directory.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(directory.items.length, 2)
+  } finally {
+    await wire.dispose()
+  }
+})
+
+/**
+ * One accepted-input corpus whose explicit unknown directory sits exactly on an
+ * official read-batch boundary: the first occurrence keeps the header cwd, the
+ * second (first event of the NEXT batch) is explicitly unknown, and a later
+ * valid change restores the directory for the third.
+ */
+function crossingUnknownCwdEvents(headerCwd: string): MutableOfficialSource['events'] {
+  const message = (id: string, text: string) => ({
+    id,
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  })
+  const inserted = (seq: number, value: ReturnType<typeof message>) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 1000 + seq,
+    data: { target: 'next-turn', start: seq, inserted: [value] },
+  })
+  const emptyInsertion = (seq: number) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 1000 + seq,
+    data: { target: 'next-turn', start: seq, inserted: [] },
+  })
+  const events: MutableOfficialSource['events'] = [inserted(0, message('h2-first', 'hsp-h2-first'))]
+  const boundary = HISTORY_SEARCH_READ_BATCH
+  for (let seq = 1; seq < boundary - 1; seq += 1) events.push(emptyInsertion(seq))
+  events.push({ type: 'working-directory/change', seq: boundary - 1, time: 1000 + boundary, data: { cwd: '' } })
+  events.push(inserted(boundary, message('h2-unknown', 'hsp-h2-unknown')))
+  for (let seq = boundary + 1; seq < boundary + 40; seq += 1) events.push(emptyInsertion(seq))
+  events.push({ type: 'working-directory/change', seq: boundary + 40, time: 1000 + boundary + 40, data: { cwd: `${headerCwd}-b` } })
+  events.push(inserted(boundary + 41, message('h2-second', 'hsp-h2-second')))
+  return events
+}
+
+/** The complete all/session/directory/readText contract of the null-cwd corpus. */
+async function assertUnknownCwdCorpus(
+  service: PiTuiHistorySearchHostService,
+  sessionId: string,
+  headerCwd: string,
+): Promise<void> {
+  const signal = new AbortController().signal
+  const all = await service.search({ scope: 'all', query: 'hsp-h2-', limit: 25 }, signal)
+  assert.equal(all.kind, 'ready', JSON.stringify(all))
+  if (all.kind !== 'ready') throw new Error('expected ready')
+  assert.equal(all.items.length, 3)
+  const byText = (text: string) => all.items.find(item => item.preview === text)
+  assert.equal(byText('hsp-h2-first')?.effectiveCwd, headerCwd)
+  assert.equal(byText('hsp-h2-unknown')?.effectiveCwd, null, 'the unknown segment must stay unknown, never the header')
+  assert.equal(byText('hsp-h2-second')?.effectiveCwd, `${headerCwd}-b`)
+  const session = await service.search({ scope: 'session', sessionId, query: 'hsp-h2-', limit: 25 }, signal)
+  assert.equal(session.kind, 'ready')
+  if (session.kind !== 'ready') throw new Error('expected ready')
+  assert.equal(session.items.length, 3)
+  const directoryA = await service.search({ scope: 'directory', cwd: headerCwd, query: 'hsp-h2-', limit: 25 }, signal)
+  assert.equal(directoryA.kind, 'ready')
+  if (directoryA.kind !== 'ready') throw new Error('expected ready')
+  assert.deepEqual(directoryA.items.map(item => item.preview), ['hsp-h2-first'],
+    'the unknown segment must not be attributed to the previous directory')
+  const directoryB = await service.search({ scope: 'directory', cwd: `${headerCwd}-b`, query: 'hsp-h2-', limit: 25 }, signal)
+  assert.equal(directoryB.kind, 'ready')
+  if (directoryB.kind !== 'ready') throw new Error('expected ready')
+  assert.deepEqual(directoryB.items.map(item => item.preview), ['hsp-h2-second'],
+    'the restored directory must match only its own segment')
+  const unknownRow = byText('hsp-h2-unknown')
+  assert.ok(unknownRow !== undefined)
+  const chunk = await service.readText({
+    sessionId,
+    messageId: unknownRow.messageId,
+    contentSha256: unknownRow.contentSha256,
+    offset: 0,
+    limit: 4096,
+  }, signal)
+  assert.equal(chunk.kind, 'ready', JSON.stringify(chunk))
+  if (chunk.kind !== 'ready') throw new Error('expected ready')
+  assert.equal(chunk.chunk, 'hsp-h2-unknown')
+}
+
+test('an explicit unknown directory crosses official read batches without resurrecting the header', async (t) => {
+  const life = testLifecycle(t)
+  // (a) A complete cold official-handle read (batched replayHandle commits).
+  const coldProfile = life.tempDir('dsh-history-search-null-cwd-cold-')
+  const cold: MutableOfficialSource = {
+    present: true,
+    header: testHeader('h2-cold', '/repo/h2-a'),
+    events: crossingUnknownCwdEvents('/repo/h2-a'),
+    revision: 1,
+  }
+  const coldDeps = mutableDeps(cold)
+  const coldCtx = new Context()
+  const coldService = directService(coldCtx, coldDeps.deps, coldProfile)
+  try {
+    await waitDirectReady(coldService, 20_000)
+    await assertUnknownCwdCorpus(coldService, 'h2-cold', '/repo/h2-a')
+  } finally {
+    await coldService.dispose()
+    await coldCtx.fiber.dispose()
+  }
+
+  // (b) A live Session settled at seq 0 first, so the same corpus arrives
+  // through the ordinary pending continuation (commitLiveBatch), not a re-read.
+  const liveProfile = life.tempDir('dsh-history-search-null-cwd-live-')
+  const live: MutableOfficialSource = {
+    present: true,
+    header: testHeader('h2-live', '/repo/h2-a'),
+    events: [],
+    revision: 1,
+    live: true,
+  }
+  const liveDeps = mutableDeps(live)
+  const liveCtx = new Context()
+  const liveService = directService(liveCtx, liveDeps.deps, liveProfile)
+  try {
+    await waitDirectReady(liveService, 20_000)
+    const observeBefore = liveDeps.calls.observeCalls()
+    const internals = liveService as unknown as { observeLiveEvent(session: unknown, event: unknown): void }
+    const liveSession = liveSessionOf(live)
+    for (const event of crossingUnknownCwdEvents('/repo/h2-a')) internals.observeLiveEvent(liveSession, event)
+    await waitDirectReady(liveService, 20_000)
+    assert.equal(liveDeps.calls.observeCalls(), observeBefore,
+      'the pending continuation must commit from the live buffer, not re-read the official source')
+    await assertUnknownCwdCorpus(liveService, 'h2-live', '/repo/h2-a')
+  } finally {
+    await liveService.dispose()
+    await liveCtx.fiber.dispose()
   }
 })
 
@@ -5911,7 +6137,7 @@ test('an exact qualified cold proof is reused with zero official reads, and ever
       label: 'an older proof contract',
       seed: (dir, candidate, authority) => {
         seedColdProof(dir, candidate, authority)
-        rewriteProofContractVersion(dir, 2)
+        rewriteProofContractVersion(dir, 1)
       },
     },
     { label: 'a live registration', mutate: candidate => { candidate.live = true } },
@@ -5944,6 +6170,273 @@ test('an exact qualified cold proof is reused with zero official reads, and ever
       await caseService.dispose()
       await caseCtx.fiber.dispose()
     }
+  }
+})
+
+/**
+ * Seed the derived checkpoint (and optional proof) a PRE-UPGRADE v2 index left
+ * behind: the caller supplies the old classifier's rows explicitly, so the
+ * fixture really reproduces the old projection instead of asking the new fold.
+ */
+function seedOldV2Session(
+  profileDir: string,
+  source: MutableOfficialSource,
+  authority: HistoryRevisionAuthority | undefined,
+  options: {
+    readonly occurrences: readonly {
+      readonly messageId: string
+      readonly firstEventSeq: number
+      readonly acceptedAt: number
+      readonly effectiveCwd: string | null
+      readonly content: string
+      readonly hasNonText: boolean
+    }[]
+    readonly uncertainSources?: number
+  },
+): void {
+  const sessionId = String(source.header.id)
+  const index = HistorySearchIndex.open({ profileDir })
+  try {
+    const nextSeq = source.events.length
+    const headerCwd = normalizeHistoryCwd(source.header.cwd)
+    index.commitBatch({
+      sessionId,
+      headerHash: sessionHeaderHash(source.header),
+      inheritedCut: 0,
+      baseNextSeq: 0,
+      nextSeq,
+      headerCwd,
+      effectiveCwd: headerCwd,
+      lastEventHash: nextSeq === 0 ? null : sessionEventHash(source.events[nextSeq - 1]!),
+      sourceState: 'persisted',
+      uncertainSourcesDelta: options.uncertainSources ?? 0,
+      occurrences: options.occurrences,
+    })
+    if (authority !== undefined) {
+      const checkpoint = index.checkpointOf(sessionId)
+      assert.ok(checkpoint !== undefined)
+      const basis = sourceProofBasis(authority, proofSnapshot(source))
+      assert.ok(basis !== undefined, 'the seeded old Session must be proof-eligible')
+      index.commitSourceProof(checkpoint, basis)
+    }
+  } finally {
+    index.close()
+  }
+}
+
+test('a pre-upgrade v2 projection with a no-rpcId accepted input replays and mints the new contract', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-old-v2-root-')
+  const profileDir = life.tempDir('dsh-history-old-v2-profile-')
+  const probe = proofAuthority(root)
+  const correlatedText = 'hsp-old-correlated'
+  const uncorrelatedText = 'hsp-old-uncorrelated'
+  // Session A: a CONTROLLED version-mismatch fixture (not a real old binary
+  // run): one normally correlated accepted input, a clean checkpoint and a v1
+  // proof. This is exactly the state the old admission would have produced.
+  const proofSession = proofSource(root, {
+    header: testHeader('old-proof-session', '/repo/old-a'),
+    events: [
+      {
+        type: 'agent/inbox/spliced',
+        seq: 0,
+        time: 1000,
+        data: {
+          target: 'next-turn',
+          start: 0,
+          inserted: [{
+            id: 'old-correlated',
+            role: 'user',
+            content: [{ type: 'text', text: correlatedText }],
+            source: { kind: 'user', rpcId: 'rpc-old-correlated' },
+          }],
+        },
+      },
+    ],
+    location: { kind: 'jsonl', path: join(root, 'sessions', 'old-proof-session.jsonl.zstd') },
+  })
+  // Session B: a REAL pre-upgrade state. The uncorrelated message arrives in
+  // both the inbox insertion and its later user/message consume; old admission
+  // increments unknownSources twice and omits it, so the checkpoint carries
+  // uncertainty=2 and can never own a proof.
+  const markerSession = proofSource(root, {
+    header: testHeader('old-marker-session', '/repo/old-b'),
+    events: [
+      {
+        type: 'agent/inbox/spliced',
+        seq: 0,
+        time: 2000,
+        data: {
+          target: 'next-turn',
+          start: 0,
+          inserted: [{
+            id: 'old-marker-correlated',
+            role: 'user',
+            content: [{ type: 'text', text: 'hsp-old-marker' }],
+            source: { kind: 'user', rpcId: 'rpc-old-marker' },
+          }],
+        },
+      },
+      {
+        type: 'agent/inbox/spliced',
+        seq: 1,
+        time: 2001,
+        data: {
+          target: 'next-turn',
+          start: 1,
+          inserted: [{
+            id: 'old-uncorrelated',
+            role: 'user',
+            content: [{ type: 'text', text: uncorrelatedText }],
+            source: { kind: 'user' },
+          }],
+        },
+      },
+      {
+        type: 'user/message',
+        seq: 2,
+        time: 2002,
+        data: {
+          id: 'old-uncorrelated',
+          role: 'user',
+          content: [{ type: 'text', text: uncorrelatedText }],
+          source: { kind: 'user' },
+        },
+      },
+    ],
+    location: { kind: 'jsonl', path: join(root, 'sessions', 'old-marker-session.jsonl.zstd') },
+  })
+  seedOldV2Session(profileDir, proofSession, probe.authority, {
+    occurrences: [{
+      messageId: 'old-correlated',
+      firstEventSeq: 0,
+      acceptedAt: 1000,
+      effectiveCwd: '/repo/old-a',
+      content: correlatedText,
+      hasNonText: false,
+    }],
+  })
+  seedOldV2Session(profileDir, markerSession, undefined, {
+    occurrences: [{
+      messageId: 'old-marker-correlated',
+      firstEventSeq: 0,
+      acceptedAt: 2000,
+      effectiveCwd: '/repo/old-b',
+      content: 'hsp-old-marker',
+      hasNonText: false,
+    }],
+    uncertainSources: 2,
+  })
+  rewriteProofContractVersion(profileDir, 1)
+
+  // The OLD projection really omitted the no-rpcId occurrence; B carried its
+  // real positive marker and no proof, while A carried its clean v1 proof.
+  {
+    const index = HistorySearchIndex.open({ profileDir })
+    try {
+      assert.equal(index.sourceProofOf('old-proof-session')?.contractVersion, 1)
+      assert.equal(index.checkpointOf('old-proof-session')?.uncertainSources, 0)
+      assert.equal(index.sourceProofOf('old-marker-session'), undefined)
+      assert.equal(index.checkpointOf('old-marker-session')?.uncertainSources, 2)
+      assert.equal(index.search({ scope: 'all', query: uncorrelatedText, limit: 25 }).rows.length, 0,
+        'the old projection must really omit the no-rpcId accepted input')
+      assert.equal(index.search({ scope: 'all', query: correlatedText, limit: 25 }).rows.length, 1)
+      assert.equal(index.search({ scope: 'all', query: 'hsp-old-marker', limit: 25 }).rows.length, 1)
+      assert.equal(index.search({ scope: 'all', query: 'hsp-old-', limit: 25 }).rows.length, 2,
+        'the old projection stored only the two correlated rows')
+    } finally {
+      index.close()
+    }
+  }
+
+  const { deps, calls } = mutableDeps(proofSession, [markerSession])
+  const basePersistence = deps.sessionPersistence()!
+  let latched = false
+  let release = (): void => {}
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const gated: HistorySearchPersistenceLike = {
+    identity: basePersistence.identity,
+    list: options => basePersistence.list(options),
+    stat: (id, options) => basePersistence.stat(id, options),
+    open: async (id, access, options) => {
+      if (String(id) === 'old-proof-session') {
+        latched = true
+        await gate
+      }
+      return basePersistence.open(id, access, options)
+    },
+  }
+  const ctx = new Context()
+  let service = directService(ctx, {
+    ...deps,
+    sessionPersistence: () => gated,
+    revisionAuthority: async () => probe.authority,
+  }, profileDir)
+  try {
+    const deadline = Date.now() + 20_000
+    while (!latched && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(latched, true, 'the version1 proof must not hit: the official source must be reopened')
+    const early = await service.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
+    assert.ok(early.kind === 'loading' || early.kind === 'incomplete', `the first round is unproven: ${JSON.stringify(early)}`)
+    release()
+    await waitDirectReady(service, 20_000)
+    const all = await service.search({ scope: 'all', query: 'hsp-old-', limit: 25 }, new AbortController().signal)
+    assert.equal(all.kind, 'ready', JSON.stringify(all))
+    if (all.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(all.items.length, 3, 'the replay must restore both old rows plus the omitted no-rpcId input')
+    assert.deepEqual(
+      all.items.map(candidate => candidate.messageId).sort(),
+      ['old-correlated', 'old-marker-correlated', 'old-uncorrelated'],
+      'the three accepted occurrences stay distinct',
+    )
+    const item = all.items.find(candidate => candidate.preview === uncorrelatedText)
+    assert.ok(item !== undefined, 'the no-rpcId occurrence must be restored')
+    assert.equal(item.sessionId, 'old-marker-session')
+    assert.equal(item.effectiveCwd, '/repo/old-b')
+    const chunk = await service.readText({
+      sessionId: item.sessionId,
+      messageId: item.messageId,
+      contentSha256: item.contentSha256,
+      offset: 0,
+      limit: 4096,
+    }, new AbortController().signal)
+    assert.equal(chunk.kind, 'ready', JSON.stringify(chunk))
+    if (chunk.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(chunk.chunk, uncorrelatedText)
+    const index = indexOfService(service)
+    assert.equal(index.sourceProofOf('old-proof-session')?.contractVersion, HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION)
+    assert.equal(index.sourceProofOf('old-marker-session')?.contractVersion, HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION)
+    assert.equal(index.checkpointOf('old-marker-session')?.uncertainSources, 0, 'the authoritative rebuild clears the old marker')
+    assert.equal(index.checkpointOf('old-proof-session')?.uncertainSources, 0)
+
+    const openBeforeRestart = calls.openCalls()
+    const statBeforeRestart = calls.statCalls()
+    const readBeforeRestart = calls.readCalls()
+    await service.dispose()
+    const restartedCtx = new Context()
+    service = directService(restartedCtx, { ...deps, revisionAuthority: async () => probe.authority }, profileDir)
+    try {
+      await waitDirectReady(service, 20_000)
+      assert.equal(calls.openCalls(), openBeforeRestart, 'the second start must reuse the new proof, not reopen the source')
+      assert.equal(calls.statCalls(), statBeforeRestart, 'the second start must not stat a proven source')
+      assert.equal(calls.readCalls(), readBeforeRestart, 'the second start must not read a proven source')
+      const restored = await service.search({ scope: 'all', query: uncorrelatedText, limit: 25 }, new AbortController().signal)
+      assert.equal(restored.kind, 'ready')
+      if (restored.kind !== 'ready') throw new Error('expected ready')
+      assert.equal(restored.items.length, 1, 'the proven projection keeps the restored no-rpcId occurrence')
+      // The stable periodic round keeps the same no-read fast path.
+      await verifyFullPass(service)
+      assert.equal(calls.openCalls(), openBeforeRestart, 'a stable periodic round must not replay a proven source')
+      assert.equal(calls.statCalls(), statBeforeRestart)
+      assert.equal(calls.readCalls(), readBeforeRestart)
+    } finally {
+      await service.dispose()
+      await restartedCtx.fiber.dispose()
+    }
+  } finally {
+    release()
+    await service.dispose()
+    await ctx.fiber.dispose()
   }
 })
 
@@ -6012,7 +6505,7 @@ test('a complete qualified cold replay mints the durable proof and a restarted s
     assert.ok(proof !== undefined, 'a complete qualified cold replay must mint its proof')
     assert.equal(proof.checkpointHash, historyCheckpointHash(checkpoint))
     assert.equal(proof.sourceRevision, 'rev-1')
-    assert.equal(proof.contractVersion, 1)
+    assert.equal(proof.contractVersion, HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION)
     assert.ok(calls.openCalls() > 0 && calls.readCalls() > 0)
     const openBefore = calls.openCalls()
     const statBefore = calls.statCalls()
