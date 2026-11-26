@@ -4,7 +4,7 @@
  * renderer opt-in: even when the SDK later declines and PiTui fallback mounts,
  * the boot is still a TSP attempt and must not publish a program-resume record.
  *
- * @module @xmoon76/dsh-pi-tui/app/bootstrap/program-resume-admission
+ * @module @xmoon76/dsh-pi-tui/app/program-resume-admission
  */
 
 import { tspRequested } from './renderer-opt-in.ts'

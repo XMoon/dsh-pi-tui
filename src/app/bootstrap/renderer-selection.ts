@@ -15,7 +15,6 @@ import type { DisplayState } from '../../domain/display/preset.ts'
 import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import type { SurfaceRendererMount } from '../surface/runtime.ts'
 
-/** What the selection needs from the composition root. */
 /** The opt-in predicate is shared with application owners outside the
  *  composition zone; re-exported here for the selection's existing importers. */
 import { tspRequested } from '../renderer-opt-in.ts'
