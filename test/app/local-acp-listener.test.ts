@@ -17,15 +17,17 @@ import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { closeSync, openSync } from 'node:fs'
-import { connect, createServer } from 'node:net'
+import { connect, createServer, type Socket } from 'node:net'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
-import type { SessionConfigOption } from '@agentclientprotocol/sdk'
+import { agent, methods, ndJsonStream, PROTOCOL_VERSION, type SessionConfigOption } from '@agentclientprotocol/sdk'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { type LocalScope } from '../../src/app/remote-process/local-scope.ts'
 import {
   createBoundedInput,
+  createBoundedOutput,
+  createReplyDebtStream,
   darwinAcpSocketPaths,
   deriveImageInputBounds,
   LocalAcpError,
@@ -79,13 +81,21 @@ const QUIET_DIAG: Diag = {
 }
 
 /** A diag that records warn codes so a bound-breach test can name the exact cap. */
-function recordingDiag(): { diag: Diag; warnings: Array<{ code?: string }> } {
-  const warnings: Array<{ code?: string }> = []
+function recordingDiag(): {
+  diag: Diag
+  warnings: Array<{ code?: string; reason?: string; limit?: number; observedCount?: number }>
+} {
+  const warnings: Array<{ code?: string; reason?: string; limit?: number; observedCount?: number }> = []
   const diag: Diag = {
     debug: () => {},
     info: () => {},
     warn: (_message: string, fields?: Record<string, unknown>) => {
-      warnings.push({ code: typeof fields?.code === 'string' ? fields.code : undefined })
+      warnings.push({
+        code: typeof fields?.code === 'string' ? fields.code : undefined,
+        reason: typeof fields?.reason === 'string' ? fields.reason : undefined,
+        limit: typeof fields?.limit === 'number' ? fields.limit : undefined,
+        observedCount: typeof fields?.observedCount === 'number' ? fields.observedCount : undefined,
+      })
     },
     error: () => {},
     dispose: () => {},
@@ -609,10 +619,22 @@ test('a connection above maxConnections receives a bounded capacity error and is
   }
 })
 
-test('a connection whose peer stops reading is closed by its own output bound and never affects a sibling', async t => {
+test('a connection whose peer stops reading is closed by its own reply-debt bound and never affects a sibling', async t => {
   const { scope } = newScope(t)
   const recorded = recordingDiag()
-  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: recorded.diag })
+  const rows: AcpSessionReadRow[] = Array.from({ length: 60 }, (_, index) => ({
+    sessionId: `debt-session-${String(index)}`,
+    cwd: '/host/proj',
+    title: 'x'.repeat(3_000),
+    updatedAt: index,
+  }))
+  const fake = makeFakeAccess({ sessionRead: true, sessionRows: rows })
+  const listener = await startLocalAcpListener({
+    scope,
+    maxConnections: 4,
+    diag: recorded.diag,
+    sessionAccess: fake.access,
+  })
   t.after(() => listener.close())
 
   const victim = await RawClient.open(listener.socketPath)
@@ -622,27 +644,224 @@ test('a connection whose peer stops reading is closed by its own output bound an
     await victim.next()
     initialize(healthy, 1)
     await healthy.next()
-    // The victim stops reading entirely; the server's per-connection output
-    // bound must close it while the sibling stays healthy.
+    // The victim stops reading entirely. The first response write waits for
+    // drain; the following request-producing records therefore accumulate as
+    // reply debt. The 41st record is refused before its handler is dispatched.
     victim.pause()
-    // Flood small Session rejections in small batches (keeping outstanding
-    // requests under the 8 cap) so the bound that trips is the output backlog,
-    // not the pending-request cap.
-    for (let index = 0; index < 6_000; index += 1) {
+    // The large bounded roster page fills the kernel send queue; keep the
+    // finite request stream under the control-lane's four concurrent handlers
+    // so these are real list responses, not the tiny lane-refusal frames.
+    for (let index = 0; index < 100; index += 1) {
       victim.send({ jsonrpc: '2.0', id: 1_000 + index, method: 'session/list', params: {} })
-      if (index % 4 === 3) await new Promise<void>(resolveTick => setImmediate(resolveTick))
+      if (index % 4 !== 3) continue
+      await new Promise<void>(resolveTick => setImmediate(resolveTick))
+      if (recorded.warnings.some(warning => warning.code === 'LOCAL_ACP_OUTPUT_BACKPRESSURE')) break
     }
-    await withTimeout(victim.closed, 20_000, 'the slow consumer connection must close on its output bound')
-    assert.ok(recorded.warnings.some(warning => warning.code === 'LOCAL_ACP_OUTPUT_BACKPRESSURE'),
-      `the slow-consumer connection must close on LOCAL_ACP_OUTPUT_BACKPRESSURE; saw ${JSON.stringify(recorded.warnings.map(w => w.code))}`)
+    let pressure = recorded.warnings.find(warning => warning.code === 'LOCAL_ACP_OUTPUT_BACKPRESSURE')
+    for (let attempt = 0; attempt < 1_000 && pressure === undefined; attempt += 1) {
+      await new Promise<void>(resolveTick => setImmediate(resolveTick))
+      pressure = recorded.warnings.find(warning => warning.code === 'LOCAL_ACP_OUTPUT_BACKPRESSURE')
+    }
+    assert.ok(pressure !== undefined,
+      `the slow-consumer connection must close on LOCAL_ACP_OUTPUT_BACKPRESSURE; saw ${JSON.stringify(recorded.warnings)}`)
+    assert.equal(pressure.reason, 'reply-debt-limit')
+    assert.equal(pressure.limit, 40)
+    assert.equal(pressure.observedCount, 40)
+    victim.resume()
+    await withTimeout(victim.closed, 20_000, 'the slow consumer connection must close on its reply-debt bound')
     // The sibling connection is untouched and still answers.
     healthy.send({ jsonrpc: '2.0', id: 2, method: 'session/list', params: {} })
-    const response = (await healthy.next()) as { id: number; error?: { code: number } }
+    const response = (await healthy.next()) as { id: number; result?: { sessions?: unknown[] } }
     assert.equal(response.id, 2)
-    assert.equal(response.error?.code, -32042)
+    assert.equal(response.result?.sessions?.length, 50, 'the sibling still receives the real bounded roster page')
   } finally {
     victim.close()
     healthy.close()
+  }
+})
+
+test('a healthy paused reader never trips the output bound: all frames wait, then arrive in order', async t => {
+  const { scope } = newScope(t)
+  const accepted = Promise.withResolvers<Socket>()
+  const server = await bindRawServerAtPublicPath(scope, socket => {
+    socket.on('error', () => {})
+    accepted.resolve(socket)
+  })
+  const client = connect(publicSocketPath(scope))
+  client.on('error', () => {})
+  const received: Buffer[] = []
+  let receivedBytes = 0
+  client.on('data', (chunk: Buffer) => {
+    received.push(chunk)
+    receivedBytes += chunk.byteLength
+  })
+  t.after(async () => {
+    client.destroy()
+    await server.close()
+  })
+  await withTimeout(new Promise<void>((resolveConnect, rejectConnect) => {
+    client.once('connect', resolveConnect)
+    client.once('error', rejectConnect)
+  }), 5_000, 'raw healthy reader connects')
+  client.pause()
+  const serverSocket = await withTimeout(accepted.promise, 5_000, 'raw output server accepts')
+  const failCodes: string[] = []
+  const writer = createBoundedOutput(serverSocket, code => failCodes.push(code), 2 * 1024 * 1024).getWriter()
+  // One legal frame above the legacy 256 KiB frame cap plus a finite burst of
+  // sub-cap frames. The real paused Unix-socket peer is the pressure gate.
+  const chunks = [
+    Buffer.alloc(300 * 1024, 0x62),
+    ...Array.from({ length: 127 }, () => Buffer.alloc(100 * 1024, 0x61)),
+    Buffer.from('tail\n'),
+  ]
+  const expectedBytes = chunks.reduce((total, chunk) => total + chunk.byteLength, 0)
+  let settled = 0
+  const writes = chunks.map(chunk => writer.write(chunk).then(() => { settled += 1 }))
+  let pressured = false
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    if (serverSocket.writableNeedDrain || serverSocket.writableLength > 256 * 1024) {
+      pressured = true
+      break
+    }
+    await new Promise<void>(resolveTick => setImmediate(resolveTick))
+  }
+  assert.equal(pressured, true, 'the real paused reader must produce kernel backpressure before resume')
+  assert.ok(settled < writes.length, 'at least one current write must still be pending under pressure')
+  assert.deepEqual(failCodes, [], 'a healthy but temporarily slow reader must not be failed')
+  client.resume()
+  await withTimeout(Promise.all(writes), 20_000, 'the bounded writer drains every frame after resume')
+  await writer.close()
+  for (let attempt = 0; attempt < 2_000 && receivedBytes < expectedBytes; attempt += 1) {
+    await new Promise<void>(resolveTick => setImmediate(resolveTick))
+  }
+  assert.equal(receivedBytes, expectedBytes, 'every byte arrives after the reader resumes')
+  assert.deepEqual(Buffer.concat(received), Buffer.concat(chunks), 'frame bytes and order are preserved')
+  assert.deepEqual(failCodes, [], 'the connection is never failed on a healthy drain')
+  client.end()
+})
+
+test('the public SDK Stream reply-debt owner admits 40 and refuses the 41st before dispatch', async t => {
+  let inputController: ReadableStreamDefaultController<Uint8Array> | undefined
+  const input = new ReadableStream<Uint8Array>({
+    start(controller) { inputController = controller },
+  })
+  const frames: Array<{ frame: { id?: unknown; method?: unknown; error?: { code?: number }; result?: unknown } }> = []
+  let hold = false
+  let completedWrites = 0
+  const gate = Promise.withResolvers<void>()
+  const output = new WritableStream<Uint8Array>({
+    async write(chunk) {
+      for (const line of Buffer.from(chunk).toString('utf8').split('\n')) {
+        if (line.trim() === '') continue
+        frames.push({ frame: JSON.parse(line) as { id?: unknown; method?: unknown } })
+      }
+      if (hold && frames.at(-1)?.frame.id !== undefined && typeof frames.at(-1)?.frame.id === 'number'
+        && (frames.at(-1)?.frame.id as number) >= 1) {
+        await gate.promise
+      }
+      completedWrites += 1
+    },
+  })
+  const app = agent({ name: 'reply-debt-owner' })
+  app.onRequest(methods.agent.initialize, async () => ({
+    protocolVersion: PROTOCOL_VERSION,
+    agentInfo: { name: 'reply-debt-owner', version: '0' },
+    agentCapabilities: {},
+    authMethods: [],
+  }))
+  app.onRequest('test/echo', params => params, async () => ({ ok: true }))
+  let reverseResult: unknown
+  app.onRequest('test/reverse', params => params, async ({ client }) => {
+    reverseResult = await client.request(methods.client.session.requestPermission, {
+      sessionId: 'debt-session',
+      toolCall: { toolCallId: 'debt-tool' },
+      options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+    })
+    return { ok: true }
+  })
+  let handlers = 0
+  const forty = Promise.withResolvers<void>()
+  app.onRequest('test/many', params => params, async () => {
+    handlers += 1
+    if (handlers === 40) forty.resolve()
+    return { ok: true }
+  })
+  let closed = false
+  const failures: Array<{ code: string; detail?: { reason?: string; limit?: number; observedCount?: number } }> = []
+  const stream = createReplyDebtStream(ndJsonStream(output, input), {
+    isClosed: () => closed,
+    fail: (code, detail) => {
+      failures.push({ code, detail })
+      closed = true
+    },
+  })
+  const connection = app.connect(stream)
+  connection.closed.then(() => { closed = true }, () => { closed = true })
+  const send = (message: unknown): void => {
+    assert.ok(inputController !== undefined)
+    inputController.enqueue(new TextEncoder().encode(`${JSON.stringify(message)}\n`))
+  }
+  const waitFor = async (predicate: () => boolean, label: string): Promise<void> => {
+    for (let attempt = 0; attempt < 1_000; attempt += 1) {
+      if (predicate()) return
+      await new Promise<void>(resolveTick => setImmediate(resolveTick))
+    }
+    throw new Error(`withTimeout: ${label}`)
+  }
+  try {
+    send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } })
+    await waitFor(() => frames.some(({ frame }) => frame.id === 0), 'initialize response frame')
+    await waitFor(() => completedWrites >= 1, 'initialize response write settles')
+    // A successful response settles its debt and permits a later admission.
+    send({ jsonrpc: '2.0', id: 1, method: 'test/echo', params: {} })
+    await waitFor(() => frames.some(({ frame }) => frame.id === 1), 'echo response frame')
+    await waitFor(() => completedWrites >= 2, 'echo response write settles')
+
+    // A reverse permission request and its response are not request-producing
+    // inbound records: they neither consume nor release a reply credit.
+    send({ jsonrpc: '2.0', id: 2, method: 'test/reverse', params: {} })
+    await waitFor(() => frames.some(({ frame }) => frame.method === methods.client.session.requestPermission),
+      'reverse permission request')
+    const reverseFrame = frames.find(({ frame }) => frame.method === methods.client.session.requestPermission)
+    assert.ok(reverseFrame?.frame.id !== undefined)
+    send({
+      jsonrpc: '2.0',
+      id: reverseFrame.frame.id,
+      result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+    })
+    await waitFor(() => frames.some(({ frame }) => frame.id === 2), 'reverse business response')
+    assert.deepEqual(reverseResult, { outcome: { outcome: 'selected', optionId: 'allow' } })
+
+    // A direct parser error is written by ndJsonStream itself, bypassing the
+    // decoded adapter; it must not release or consume a credit.
+    assert.ok(inputController !== undefined)
+    inputController.enqueue(new TextEncoder().encode('{not-json\n'))
+    send({ jsonrpc: '2.0', id: 3, method: 'test/echo', params: {} })
+    await waitFor(() => frames.some(({ frame }) => frame.id === 3), 'echo after direct parser error')
+    send({ jsonrpc: '2.0', id: 4, method: 'test/unknown', params: {} })
+    await waitFor(() => frames.some(({ frame }) => frame.id === 4), 'unknown method response')
+    assert.equal(frames.find(({ frame }) => frame.id === 4)?.frame.error?.code, -32601)
+    assert.equal(failures.length, 0)
+
+    hold = true
+    for (let id = 100; id < 140; id += 1) {
+      send({ jsonrpc: '2.0', id, method: 'test/many', params: {} })
+    }
+    await withTimeout(forty.promise, 5_000, '40 response-producing records are admitted')
+    assert.equal(handlers, 40)
+    send({ jsonrpc: '2.0', id: 140, method: 'test/many', params: {} })
+    await waitFor(() => failures.length > 0, '41st record is refused')
+    assert.equal(failures[0]?.code, 'LOCAL_ACP_OUTPUT_BACKPRESSURE')
+    assert.equal(failures[0]?.detail?.reason, 'reply-debt-limit')
+    assert.equal(failures[0]?.detail?.limit, 40)
+    assert.equal(failures[0]?.detail?.observedCount, 40)
+    assert.equal(handlers, 40, 'the refused record must never reach a handler')
+    await withTimeout(connection.closed, 5_000, 'debt refusal closes the SDK connection')
+    assert.equal(frames.some(({ frame }) => frame.id === 140), false, 'the refused record has no response')
+  } finally {
+    gate.resolve()
+    try { connection.close() } catch {}
+    try { inputController?.close() } catch {}
   }
 })
 
