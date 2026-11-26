@@ -187,13 +187,13 @@ test('the run seam reaches the existing control plane with the bound Profile and
   mkdirSync(profile.dir, { recursive: true })
   mkdirSync(join(root, 'anchor'), { recursive: true })
   writeFileSync(join(root, 'anchor', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
-  const run = profileDaemonAdminRun(profile, { platform: 'win32' })
+  const run = profileDaemonAdminRun(profile, { platform: 'aix' })
   const result = await run('install')
   assert.equal(result.code, 3, 'the stable unsupported-platform class is preserved')
   assert.match(result.stderr, /UNSUPPORTED_PLATFORM/u, 'the stable reason reaches the caller unchanged')
 })
 
-test('the run seam does NOT pass an already-aborted caller signal as its own cancellation', async t => {
+test('the run seam keeps an unsupported platform refusal without taking a caller signal', async t => {
   const life = testLifecycle(t)
   const root = life.tempDir('m62c-abort-')
   const profile = {
@@ -209,7 +209,7 @@ test('the run seam does NOT pass an already-aborted caller signal as its own can
   writeFileSync(join(root, 'anchor', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
   // The controller owns the admin lifetime: the surface abort signal must not
   // cancel an already-committed Host stop, so the run seam takes no signal.
-  const run = profileDaemonAdminRun(profile, { platform: 'win32' })
+  const run = profileDaemonAdminRun(profile, { platform: 'aix' })
   const result = await run('stop')
   assert.equal(result.code, 3)
   assert.match(result.stderr, /UNSUPPORTED_PLATFORM/u)

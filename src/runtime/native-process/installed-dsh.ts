@@ -22,6 +22,7 @@
  */
 
 import { readFileSync, realpathSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { basename, dirname, join, sep } from 'node:path'
 
 /** One installed `@deepseek-ai/dsh` manifest, or undefined when the path is
@@ -133,4 +134,41 @@ export function assertDeclaredPeerDependency(manifest: Record<string, unknown>, 
   if (typeof declared !== 'string' || declared === '') {
     throw new Error(`installed DSH module: ${label} does not declare ${name} as a peer`)
   }
+}
+
+/**
+ * Resolve the Koffi entry owned by the running DSH installation:
+ * DSH anchor -> `@deepseek-ai/dsh-subprocess-local` manifest -> that package's
+ * own `koffi` dependency. The TUI never resolves Koffi from its own package, a
+ * profile, or an ambient module path.
+ *
+ * The owner's declared dependency selects the implementation; this code does
+ * not pin or compare a Koffi version, because the running DSH installation owns
+ * that choice and an upgrade must not be rejected only for a different version
+ * number. The ABI/struct-size checks in the platform bridge decide actual
+ * compatibility.
+ */
+export function resolveDshKoffi(anchor: string): string {
+  const manifest = installedDshManifest(anchor)
+  if (manifest === undefined) {
+    throw new Error('native process identity: the DSH anchor is not an installed @deepseek-ai/dsh manifest')
+  }
+  const dshDir = dirname(manifest)
+  const subprocessManifest = realpathSync(
+    createRequire(manifest).resolve('@deepseek-ai/dsh-subprocess-local/package.json'),
+  )
+  const subprocessDir = dirname(subprocessManifest)
+  assertInstallClosure(dshDir, subprocessDir, '@deepseek-ai/dsh-subprocess-local')
+  const subprocess = readManifestObject(subprocessManifest)
+  if (subprocess?.name !== '@deepseek-ai/dsh-subprocess-local') {
+    throw new Error('native process identity: the resolved subprocess manifest is not @deepseek-ai/dsh-subprocess-local')
+  }
+  assertDeclaredDependency(subprocess, 'koffi', '@deepseek-ai/dsh-subprocess-local')
+  const koffiEntry = realpathSync(createRequire(subprocessManifest).resolve('koffi'))
+  assertInstallClosure(subprocessDir, dirname(koffiEntry), 'koffi')
+  const koffi = readManifestObject(join(dirname(koffiEntry), 'package.json'))
+  if (koffi?.name !== 'koffi') {
+    throw new Error('native process identity: the resolved koffi is not the koffi package')
+  }
+  return koffiEntry
 }

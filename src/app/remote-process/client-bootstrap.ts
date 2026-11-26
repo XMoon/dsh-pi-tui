@@ -85,7 +85,7 @@ export interface LocalClientStartupFacts {
  *  discriminates the ONE kernel identity material; no field is borrowed from
  *  the other platform's representation. */
 interface LocalClientHostFactsShared {
-  readonly schema: 1 | 2
+  readonly schema: 1 | 2 | 3
   readonly scopeId: string
   readonly instanceId: string
   readonly hostPid: number
@@ -99,6 +99,7 @@ interface LocalClientHostFactsShared {
 export type LocalClientHostFacts =
   | (LocalClientHostFactsShared & { readonly schema: 1; readonly hostStarttime: string })
   | (LocalClientHostFactsShared & { readonly schema: 2; readonly hostKernelIdentity: import('../../runtime/native-process/identity.ts').DarwinKernelProcessIdentity })
+  | (LocalClientHostFactsShared & { readonly schema: 3; readonly hostKernelIdentity: import('../../runtime/native-process/identity.ts').Win32KernelProcessIdentity })
 
 /** A status snapshot built from the official Connection at call time. */
 export interface LocalClientStatus {
@@ -303,7 +304,9 @@ function hostFacts(record: LocalInstanceRecord): LocalClientHostFacts {
   }
   return record.schema === 1
     ? { ...shared, schema: 1, hostStarttime: record.hostStarttime }
-    : { ...shared, schema: 2, hostKernelIdentity: record.hostKernelIdentity }
+    : record.schema === 2
+      ? { ...shared, schema: 2, hostKernelIdentity: record.hostKernelIdentity }
+      : { ...shared, schema: 3, hostKernelIdentity: record.hostKernelIdentity }
 }
 
 /** The exact Host startup facts object (never the Host-only readiness seam). */

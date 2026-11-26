@@ -1252,11 +1252,27 @@ test('a user-linked unit with Profile metadata is followed for status', async t 
   assert.match(result.stdout, /^user-manager=available$/mu)
 })
 
-test('an unsupported platform exits 3 before touching the filesystem', async t => {
+test('a genuinely unsupported platform exits 3 before touching the filesystem', async t => {
   const fx = fixture(t)
-  const result = await runDaemonControl({ verb: 'status' }, fx.profile, { platform: 'win32' })
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, { platform: 'aix' })
   assertCode(result, 3, /UNSUPPORTED_PLATFORM/u)
   assert.equal(existsSync(fx.scope.dir), false, 'an unsupported platform must not create the scope')
+})
+
+test('win32 install and uninstall refuse before scope or manager IO', async t => {
+  const fx = fixture(t)
+  const calls: string[][] = []
+  const deps: DaemonControlDeps = {
+    platform: 'win32',
+    systemctl: async args => { calls.push([...args]); return exited(0) },
+  }
+  for (const verb of ['install', 'uninstall'] as const) {
+    const result = await runDaemonControl({ verb }, fx.profile, deps)
+    assertCode(result, 3, /UNSUPPORTED_PLATFORM/u)
+    assert.equal(result.stdout, '')
+  }
+  assert.deepEqual(calls, [], 'a Windows install/uninstall must never probe a POSIX manager')
+  assert.equal(existsSync(fx.scope.dir), false, 'a refused Windows install/uninstall must not create the scope')
 })
 
 // ── darwin (macOS): process-only management ─────────────────────────────────

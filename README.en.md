@@ -101,9 +101,9 @@ You can also save `Daemon` under `/settings → Host → Backend` for the **next
 
 These are default mappings and common entries; `/keybindings` shows the **effective** keys after customizations. Type `/` to search and select commands and available Skills; use `/skill <name> [args]` to invoke a Skill explicitly (including when a same-named command would otherwise win), while bare `/skill` only prints its usage. `/transcript` currently uses the official Direct Markdown export; `/export` creates a separate ZIP archive saved on the Client filesystem. `PI_IMAGE_PROTOCOL=none` disables pixel previews, not attachments.
 
-## Daemon quick start (Linux / macOS)
+## Daemon quick start (Linux / macOS; Windows is headless management)
 
-A system service is not required to start a standalone Host. Try one launch:
+A system service is not required to start a standalone Host. Try one launch (the interactive Daemon Client is Linux/macOS only):
 
 ~~~sh
 DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui
@@ -117,9 +117,11 @@ dsh --profile pi-tui daemon logs --lines 200
 dsh --profile pi-tui daemon start
 dsh --profile pi-tui daemon stop
 dsh --profile pi-tui daemon restart
-dsh --profile pi-tui daemon install
-dsh --profile pi-tui daemon uninstall
+dsh --profile pi-tui daemon install   # Linux / macOS only
+dsh --profile pi-tui daemon uninstall # Linux / macOS only
 ~~~
+
+On Windows this release supports the independent headless Host through `status`, `start`, `stop`, `restart`, `logs` and the official Web frontend. The interactive Daemon Client, `install`/`uninstall` and ACP remain unavailable (later stages / PR4). Windows `status` reports `manager=process`, `unit=none` and never invokes systemd/launchd; `stop` enters the official shutdown through that instance's native stop Event.
 
 `daemon install` only creates/verifies the optional Profile-scoped OS user service definition; it does **not** start, enable or migrate the Host. `daemon stop` and `restart` can interrupt in-flight Turns/Jobs across connected Clients. A manager reporting “running” is not proof of authenticated Host readiness.
 

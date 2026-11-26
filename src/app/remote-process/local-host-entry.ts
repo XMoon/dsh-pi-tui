@@ -49,6 +49,7 @@ import {
   type LocalScope,
   type ProcessSeat,
 } from './local-scope.ts'
+import { createWin32StopWaiter, type Win32StopWaiter } from '../../runtime/native-process/win32.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import type { ProfileConfigEditorLike } from '../config/profile-preferences-migration.ts'
 import type { SettingsFormsLike } from '../../runtime/config-port.ts'
@@ -1744,6 +1745,19 @@ function remoteErrorSessionId(error: unknown): string | undefined {
  * serialized promise chain so at most one transition runs at a time.
  */
 export function createAcpController(options: AcpControlControllerOptions): AcpControlController {
+  if (process.platform === 'win32') {
+    // PR2 keeps the ACP ingress truthfully unavailable on Windows. The same
+    // controller interface answers unavailable for both reads and mutations;
+    // no socket, pipe or second listener is created.
+    const unavailable = (): AcpAccessStatus => ({ state: 'unavailable', reason: 'ACP is not available on Windows before PR4' })
+    return {
+      getStatus: async () => unavailable(),
+      setEnabled: async () => unavailable(),
+      quiesce: () => {},
+      close: async () => {},
+      cleanupSync: () => {},
+    }
+  }
   const { scope, maxConnections, diag, sessionAccess } = options
   // ONE View/claim registry for this controller's whole lifetime: an Off ->
   // On rebind must not lose a retired-turn approval fence (or any claim), or
@@ -1983,6 +1997,7 @@ async function publishLocalHost(
   scope: LocalScope,
   hostIdentity: HostProcessIdentity,
   seat: ProcessSeat,
+  instanceId: string,
   acpController: AcpControlController,
 ): Promise<PublishedLocalHost> {
   const connection = context.get('connection') as unknown as HostConnectionService | undefined
@@ -2009,7 +2024,6 @@ async function publishLocalHost(
   // before exposing any token material.
   await waitForRefusal(`${origin}/connect`)
 
-  const instanceId = randomUUID()
   const shared = {
     scopeId: scope.scopeId,
     profileRealpath: scope.profileRealpath,
@@ -2245,6 +2259,8 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
   let registration: PublishedLocalHost | undefined
   let liveness: HostActivityObserver | undefined
   let acpController: AcpControlController | undefined
+  let nativeStopWaiter: Win32StopWaiter | undefined
+  const instanceId = randomUUID()
   try {
     const scratchDir = mkdtempSync(join(scope.dir, 'host-scratch-'))
     scratchOwner.scratchDir = scratchDir
@@ -2392,6 +2408,11 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
             errors.push({ step: 'shutdown', error })
           }
           if (owner !== undefined) cleanupOwnedFiles(scope, owner.identity.instanceId)
+          try {
+            await nativeStopWaiter?.close()
+          } catch (error) {
+            errors.push({ step: 'native-stop-waiter-close', error })
+          }
           if (errors.length > 0) {
             const first = errors[0]
             const primary = first.error instanceof Error ? first.error : new Error(String(first.error))
@@ -2434,7 +2455,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         return stopping
       }
       let pendingStop: number | undefined
-      const requestStop = (code: number, signal: 'SIGTERM' | 'SIGINT'): void => {
+      const requestStop = (code: number, signal: 'SIGTERM' | 'SIGINT' | 'EVENT'): void => {
         const owner = published
         if (pendingStop !== undefined) {
           // The admission listeners stay installed for the whole process
@@ -2500,12 +2521,14 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       // The official Workspace/Session/Agent registries stay the sole authority;
       // only their callable methods are forwarded. A failure to read them is a
       // Host composition failure (the readiness audit already required them).
-      const sessionAccess = createHostAcpSessionAccess(
-        handle.ctx,
-        dsh.parseCommand,
-        dsh.compactionEngineClass,
-        dsh.planModeClass,
-      )
+      const sessionAccess = process.platform === 'win32'
+        ? undefined
+        : createHostAcpSessionAccess(
+          handle.ctx,
+          dsh.parseCommand,
+          dsh.compactionEngineClass,
+          dsh.planModeClass,
+        )
       acpController = createAcpController({ scope, maxConnections, diag: createEntryDiag('host'), sessionAccess })
       scratchOwner.acpController = acpController
       // Register the entry-owned controller as the root Host `piTuiAcpOwner`
@@ -2536,7 +2559,15 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         return
       }
 
-      const publishedHost = await publishLocalHost(handle.ctx, scope, hostProcessIdentity, seat, acpController)
+      if (process.platform === 'win32') {
+        nativeStopWaiter = createWin32StopWaiter(scope.scopeId, instanceId)
+        const waiter = nativeStopWaiter
+        runDetached('local host: native stop event', async () => {
+          await waiter.stopped
+          requestStop(0, 'EVENT')
+        }, { diag: createEntryDiag('host') })
+      }
+      const publishedHost = await publishLocalHost(handle.ctx, scope, hostProcessIdentity, seat, instanceId, acpController)
       published = publishedHost
       registration = publishedHost
       // The exit backstop removes only this instance's files; SIGKILL leaves
@@ -2647,6 +2678,19 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
           phase: 'after-boot',
           pid: process.pid,
           step: 'liveness-close',
+          error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        })
+      }
+      try {
+        await nativeStopWaiter?.close()
+      } catch (cleanupError) {
+        priorCleanupFailure ??= cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        writeEntryRecord({
+          m4a0: 'cleanup-failure',
+          processRole: 'host',
+          phase: 'after-boot',
+          pid: process.pid,
+          step: 'native-stop-waiter-close',
           error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
         })
       }

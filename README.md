@@ -101,9 +101,9 @@ Daemon 的选择也可以在 `/settings → Host → Backend` 保存，**下一�
 
 这里列出的是默认键位和常见入口；自定义后以 `/keybindings` 显示的**实际生效键位**为准。输入 `/` 可搜索并选择命令与可用的 Skills；需要显式调用某个 Skill（包括与同名命令冲突时）使用 `/skill <name> [args]`，裸 `/skill` 只显示用法。`/transcript` 当前的官方 Markdown 导出路径属于 Direct；`/export` 是独立的 ZIP 归档，产物落在 Client 本地目录。`PI_IMAGE_PROTOCOL=none` 只禁止像素预览，不影响附件发送。
 
-## Daemon 快速上手（Linux / macOS）
+## Daemon 快速上手（Linux / macOS；Windows 为 headless 管理）
 
-不安装系统服务也可以启动独立 Host。一次性体验：
+不安装系统服务也可以启动独立 Host。一次性体验（交互式 Daemon Client 仅 Linux/macOS）：
 
 ~~~sh
 DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui
@@ -117,9 +117,11 @@ dsh --profile pi-tui daemon logs --lines 200
 dsh --profile pi-tui daemon start
 dsh --profile pi-tui daemon stop
 dsh --profile pi-tui daemon restart
-dsh --profile pi-tui daemon install
-dsh --profile pi-tui daemon uninstall
+dsh --profile pi-tui daemon install   # 仅 Linux / macOS
+dsh --profile pi-tui daemon uninstall # 仅 Linux / macOS
 ~~~
+
+Windows 当前只支持独立 headless Host 的 `status`、`start`、`stop`、`restart`、`logs` 与官方 Web；交互式 Daemon Client、`install`/`uninstall` 和 ACP 仍不可用（分别属于后续阶段或 PR4）。Windows 的 `status` 报告 `manager=process`、`unit=none`，不调用 systemd/launchd；`stop` 通过该实例的原生 stop Event 进入官方 shutdown。
 
 `daemon install` 仅选择性地创建/验证当前 Profile 的用户服务定义，**不会**自动启动、启用或迁移 Host。`daemon stop` / `restart` 可能中断所有连接 Client 的进行中 Turn/Job；manager 显示运行中不代表 Host 已 Ready，须以认证身份确认。
 

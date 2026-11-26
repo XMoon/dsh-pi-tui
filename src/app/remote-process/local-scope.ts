@@ -17,6 +17,13 @@
 
 import { createHash } from 'node:crypto'
 import { readKernelProcess, readProcessStarttime } from '../../runtime/native-process/identity.ts'
+import {
+  acquireWin32KernelSeat,
+  ensureWin32PrivateDirectory,
+  isWin32LocalFixedNtfs,
+  win32CurrentTokenSid,
+  win32SeatName,
+} from '../../runtime/native-process/win32.ts'
 import { runSyncDisposalStepsWithPrimary } from '../../runtime/process/disposal.ts'
 import { closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { createServer } from 'node:net'
@@ -111,11 +118,10 @@ export interface LocalScope {
   readonly profileRealpath: string
   /** Private 0700 run directory. */
   readonly dir: string
-  /** Linux abstract Host claim name. */
-  readonly hostSocketName: string
-  /** Linux abstract qualification-only Client seat name; `surface` and `peer`
-   *  Clients never bind it. */
-  readonly clientSeatSocketName: string
+  /** Linux abstract Host claim name (absent on Windows, which uses a named mutex). */
+  readonly hostSocketName?: string
+  /** Linux abstract qualification-only Client seat name (absent on Windows). */
+  readonly clientSeatSocketName?: string
   /**
    * Installed-build fingerprint described below. The Host publishes and the
    * authenticated identity echoes it; Client admission does not compare it.
@@ -691,6 +697,65 @@ export function computeBuildId(packageRoot: string, dshVersion: string): string 
   return hash.digest('hex')
 }
 
+/** Canonicalize one official Windows directory to the local fixed-NTFS domain. */
+function canonicalWin32Directory(pathValue: string, label: string): string {
+  let real: string
+  try {
+    real = realpathSync.native(pathValue)
+  } catch (error) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${label} is not a readable directory`, error)
+  }
+  if (!/^[A-Za-z]:\\/u.test(real)) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${label} must be a local drive path`)
+  }
+  // Canonicalize only the drive prefix: the rest keeps the case the filesystem
+  // returned, so a case-sensitive directory is never merged with another.
+  const canonical = real.slice(0, 1).toUpperCase() + real.slice(1)
+  if (!isWin32LocalFixedNtfs(canonical)) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${label} must be on a local fixed NTFS volume`)
+  }
+  if (!statSync(canonical).isDirectory()) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${label} must be a directory`)
+  }
+  return canonical
+}
+
+/** The read-only Win32 scope: SID + canonical profile path, fixed hash domain. */
+function inspectWin32ProfileScope(facts: InstalledProfileFacts): LocalScope {
+  const dshHome = canonicalWin32Directory(facts.dshHome, 'DSH home')
+  const profileRealpath = canonicalWin32Directory(facts.profileDir, 'profile directory')
+  const sid = win32CurrentTokenSid()
+  if (sid === undefined) {
+    throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', 'local scope: the current token SID is unavailable')
+  }
+  const bundleVersion = readBundleVersion(facts.packageRoot)
+  const scopeId = createHash('sha256')
+    .update(`dsh-pi-tui/local-scope/win32/1\0${sid}\0${profileRealpath}`)
+    .digest('hex')
+  return Object.freeze({
+    scopeId,
+    dshHome,
+    profileRealpath,
+    dir: join(dshHome, RUN_ROOT_NAME, SCOPE_ROOT_NAME, scopeId),
+    buildId: computeBuildId(facts.packageRoot, facts.dshVersion),
+    bundleVersion,
+    dshVersion: facts.dshVersion,
+  })
+}
+
+/** Create and prove the Win32 private run chain with protected owner-only DACLs. */
+function ensureWin32ScopeDirectory(dshHome: string, scopeId: string): string {
+  const dir = join(dshHome, RUN_ROOT_NAME, SCOPE_ROOT_NAME, scopeId)
+  for (const path of [join(dshHome, RUN_ROOT_NAME), join(dshHome, RUN_ROOT_NAME, SCOPE_ROOT_NAME), dir]) {
+    try {
+      ensureWin32PrivateDirectory(path)
+    } catch (error) {
+      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: ${path} is not a private product directory`, error)
+    }
+  }
+  return dir
+}
+
 /**
  * Compute the READ-ONLY identity of one installed profile scope. The caller
  * supplies the official DSH home/profile resolution results; this module never
@@ -701,6 +766,7 @@ export function computeBuildId(packageRoot: string, dshVersion: string): string 
  * the exact same computation with the one directory-creation step.
  */
 export function inspectInstalledProfileScope(facts: InstalledProfileFacts): LocalScope {
+  if (process.platform === 'win32') return inspectWin32ProfileScope(facts)
   const uid = assertSupportedPosixScopePlatform()
   const dshHome = process.platform === 'darwin'
     ? canonicalOwnedDirectory(facts.dshHome, uid, 'DSH home')
@@ -738,6 +804,9 @@ export function inspectInstalledProfileScope(facts: InstalledProfileFacts): Loca
  */
 export function scopeFromInstalledProfile(facts: InstalledProfileFacts): LocalScope {
   const inspected = inspectInstalledProfileScope(facts)
+  if (process.platform === 'win32') {
+    return Object.freeze({ ...inspected, dir: ensureWin32ScopeDirectory(inspected.dshHome, inspected.scopeId) })
+  }
   const uid = assertSupportedPosixScopePlatform()
   const dir = ensureScopeDirectory(inspected.dshHome, inspected.scopeId, uid)
   return Object.freeze({ ...inspected, dir })
@@ -781,6 +850,11 @@ export function readLinuxStarttime(pid: number = process.pid): string {
  */
 export function readProcessStartDiagnostic(pid: number = process.pid): string | undefined {
   if (process.platform === 'linux') return readProcessStarttime(pid)
+  if (process.platform === 'win32') {
+    const observed = readKernelProcess(pid)
+    if (observed.kind !== 'alive' || observed.identity.platform !== 'win32') return undefined
+    return `${observed.identity.ownerSid}:${observed.identity.creationFiletime}`
+  }
   if (process.platform === 'darwin') {
     const observed = readKernelProcess(pid)
     if (observed.kind !== 'alive' || observed.identity.platform !== 'darwin') return undefined
@@ -891,13 +965,16 @@ export interface ProfileKernelSeatOptions {
 
 export async function bindProfileKernelSeat(
   scope: LocalScope,
-  kind: 'host' | 'qualification-client',
+  kind: ProcessSeatKind,
   conflictCode: ProcessSeatConflictCode,
   options: ProfileKernelSeatOptions = {},
 ): Promise<ProcessSeat> {
   if (process.platform === 'linux') {
+    if (kind === 'admin') {
+      throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'local scope: the Linux admin seat uses bindProcessSeat')
+    }
     return bindKernelSeat(
-      { claim: 'linux-abstract', name: kind === 'host' ? scope.hostSocketName : scope.clientSeatSocketName },
+      { claim: 'linux-abstract', name: kind === 'host' ? scope.hostSocketName! : scope.clientSeatSocketName! },
       conflictCode,
     )
   }
@@ -906,6 +983,20 @@ export async function bindProfileKernelSeat(
       ? darwinHostProfileSeatDir(scope.scopeId, options.accountHome)
       : scope.dir
     return bindKernelSeat({ claim: 'darwin-file', dir, scopeId: scope.scopeId, kind }, conflictCode)
+  }
+  if (process.platform === 'win32') {
+    if (kind === 'qualification-client') {
+      throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'local scope: the Windows qualification Client seat is not part of PR2')
+    }
+    try {
+      return await acquireWin32KernelSeat(win32SeatName(scope.scopeId, kind), conflictCode)
+    } catch (error) {
+      const code = (error as { readonly code?: unknown }).code
+      if (code === conflictCode) {
+        throw new LocalScopeError(conflictCode, `local scope: the ${kind} seat of this profile is already held by another live process`, error)
+      }
+      throw new LocalScopeError('SCOPE_DIRECTORY_UNSAFE', `local scope: the ${kind} seat could not be acquired`, error)
+    }
   }
   throw new LocalScopeError(
     'B1_PLATFORM_UNSUPPORTED',

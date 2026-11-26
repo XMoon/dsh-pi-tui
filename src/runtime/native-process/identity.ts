@@ -26,6 +26,7 @@
  */
 
 import { readdirSync, readFileSync } from 'node:fs'
+import { readWin32KernelProcessObservation } from './win32.ts'
 import {
   listDarwinProcessGroupPids,
   readDarwinBootSessionUuid,
@@ -76,8 +77,19 @@ export interface DarwinKernelProcessIdentity {
   readonly state: number
 }
 
+/** One Windows process identity: pid reuse is proven by the token SID and the
+ * exact process creation FILETIME (the unsigned 64-bit value as decimal). */
+export interface Win32KernelProcessIdentity {
+  readonly platform: 'win32'
+  readonly pid: number
+  /** The SID of the process token's real user (TokenUser), canonical form. */
+  readonly ownerSid: string
+  /** `GetProcessTimes` creation FILETIME as an exact unsigned 64-bit decimal. */
+  readonly creationFiletime: string
+}
+
 /** A versioned process identity for the current platform. */
-export type KernelProcessIdentity = LinuxKernelProcessIdentity | DarwinKernelProcessIdentity
+export type KernelProcessIdentity = LinuxKernelProcessIdentity | DarwinKernelProcessIdentity | Win32KernelProcessIdentity
 
 /** One kernel observation: a verified identity, a definitive absence, or an
  * unverifiable failure that must be treated as "cannot prove". */
@@ -235,6 +247,7 @@ function readDarwinKernelProcess(pid: number): KernelObservation {
 export function readKernelProcess(pid: number): KernelObservation {
   if (process.platform === 'linux') return readLinuxKernelProcess(pid)
   if (process.platform === 'darwin') return readDarwinKernelProcess(pid)
+  if (process.platform === 'win32') return readWin32KernelProcessObservation(pid)
   return { kind: 'unknown', code: 'NATIVE_UNAVAILABLE' }
 }
 
@@ -260,6 +273,11 @@ export function sameKernelProcess(expected: KernelProcessIdentity, observed: Ker
       ? 'same'
       : 'different'
   }
+  if (expected.platform === 'win32' && actual.platform === 'win32') {
+    return actual.ownerSid === expected.ownerSid && actual.creationFiletime === expected.creationFiletime
+      ? 'same'
+      : 'different'
+  }
   return 'different'
 }
 
@@ -267,6 +285,7 @@ export function sameKernelProcess(expected: KernelProcessIdentity, observed: Ker
  * session the owner created for it (`setsid`: sid === pgid). A member that
  * changed its group/session no longer proves ownership of the captured group. */
 function isOwnedGroupMember(identity: KernelProcessIdentity, pgid: number): boolean {
+  if (identity.platform === 'win32') return false
   return identity.pgid === pgid && identity.sid === pgid
 }
 

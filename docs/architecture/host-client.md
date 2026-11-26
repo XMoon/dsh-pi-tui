@@ -233,19 +233,24 @@ node through the official revision-checked Settings mutation.
 
 The internal split-process entry is one Host process plus zero or more Client
 processes from ONE installed npm package. The Host lifetime is independent of
-Client attachment and may continue with zero active Clients. The local
-Host/Client link is supported on Linux and macOS. The kernel admission
+Client attachment and may continue with zero active Clients. The local Host
+transport is supported on Linux and macOS for interactive Clients; Windows
+supports the same independent headless Host and management plane in PR2, while
+the interactive Client remains unavailable until PR3. The kernel admission
 authority is platform-owned: Linux uses abstract AF_UNIX sockets for the Host
 Singleton and the qualification-only Client seat; macOS uses `O_EXLOCK`-held
-seat files, re-proved by inode and directory identity before Ready. The macOS
-Host seat lives under the OS account home, while the qualification-only Client
-seat stays in the private scope directory. A real `surface` Client
+seat files, re-proved by inode and directory identity before Ready; Windows uses
+purpose-derived `Global\` named mutexes with protected owner-only DACLs. The
+macOS Host seat lives under the OS account home, while the qualification-only
+Client seat stays in the private scope directory. A real `surface` Client
 automatically discovers or starts the local Host, then completes the internal
 `/connect` Cookie exchange and authenticated identity verification. No manual
 connect command, address or token input is required. Any other platform fails
 before writing runtime files with `B1_PLATFORM_UNSUPPORTED`. No PID file,
 `O_EXCL` marker, registry record or `hasLiveClient()` result may stand in for
-the kernel seat where one is required.
+the kernel seat where one is required. Windows `daemon install`/`uninstall` are
+unsupported because no Windows service manager owns the Host; ACP ingress is
+truthfully unavailable until PR4.
 
 - **Scope.** The official `resolveDshHome()` / `resolveProfileDir()` results
   canonicalized through `realpath` plus the current UID decide the scope. The
@@ -254,17 +259,22 @@ the kernel seat where one is required.
   existing 0755/0775 directory, legal directory symlink or another owner) is
   used as-is and never chmodded or rejected by a UID/mode gate. On macOS the
   per-DSH-home run directory is created and proved 0700; the Darwin Host seat
-  uses the account-home root described below. `scopeId` is sha256 over the
-  fixed domain
-  `dsh-pi-tui/local-scope/1`, the decimal UID and the canonical profile path;
-  that domain is part of the published scope algorithm and evolves separately
-  from the wire protocol below. The same canonical profile directory shares one
-  scope across workspaces and package builds; the Client cwd is not a scope
-  input.
+  uses the account-home root described below. On Windows the official home and
+  profile must resolve to a local fixed NTFS path; the drive prefix is
+  canonicalized but the remaining filesystem case is preserved, and the
+  product-created run chain uses native protected owner-only DACLs. `scopeId` is
+  sha256 over the fixed domain `dsh-pi-tui/local-scope/1`, the decimal UID and
+  the canonical profile path on POSIX, and over
+  `dsh-pi-tui/local-scope/win32/1`, the canonical token SID and the canonical
+  profile path on Windows; that domain is part of the published scope algorithm
+  and evolves separately from the wire protocol below. The same canonical
+  profile directory shares one scope across workspaces and package builds; the
+  Client cwd is not a scope input.
 - **Single Host seat, qualification-only Client seat.** The Host holds one
   platform kernel claim from before the profile Context exists until process
   termination: one abstract socket on Linux, one `O_EXLOCK` file descriptor on
-  macOS. On macOS the Host seat file is
+  macOS, one purpose-derived `Global\` named mutex with a protected owner-only
+  DACL on Windows. On macOS the Host seat file is
   `<real account home>/.dsh-pi-tui/run/<scopeId>/seat-host-<scopeId>.lock`
   (file mode 0600; the `run` and per-scope directories are created and proved
   0700). The account home is the real `os.userInfo().homedir` for the effective
@@ -283,7 +293,9 @@ the kernel seat where one is required.
   Context, webserver, Agent or Session. Only the frozen `qualification` Client
   binds the second, qualification-only claim for its lifetime; a second
   qualification Client fails `CLIENT_ALREADY_ACTIVE` before spawning or touching
-  a Host. A real `surface` Client — and the non-TUI `peer` — binds no
+  a Host. On Windows PR2 creates no qualification/Client seat because no Windows
+  Client entry is admitted yet; the Host and the short-lived admin seat are the
+  only mutex users. A real `surface` Client — and the non-TUI `peer` — binds no
   profile-global seat; it is admitted automatically by the authenticated
   `/connect` + identity chain described below. Zero or more independent Surface
   Clients, each with its own PTY, Cordis Client Context, official transport,
@@ -295,10 +307,12 @@ the kernel seat where one is required.
   containing the scope, canonical profile path, `instanceId`, Host PID,
   loopback origin, the local protocol identity, installed bundle/DSH versions
   and the installed-build fingerprint. Its identity material is versioned by
-  schema: Linux schema 1 carries the `/proc/<pid>/stat` starttime, while macOS
-  schema 2 carries the complete PR-1 Darwin kernel identity (boot session,
-  unique process id, process UUID and start timestamp as exact decimal
-  strings). Readiness requires the official `dsh-client-connection` `/connect`
+  schema: Linux schema 1 carries the `/proc/<pid>/stat` starttime, macOS schema 2
+  carries the complete PR-1 Darwin kernel identity (boot session, unique process
+  id, process UUID and start timestamp as exact decimal strings), and Windows
+  schema 3 carries the token user SID plus the process creation FILETIME as an
+  exact unsigned 64-bit decimal string. Readiness requires the official
+  `dsh-client-connection` `/connect`
   launch-token exchange (signed
   Cookie) and the owner-only authenticated identity Fetch route
   `/api/pi-tui.local-host`, with every identity field strictly equal to the
@@ -309,11 +323,14 @@ the kernel seat where one is required.
   Host that publishes a protocol or installed build other than its own is
   `HOST_BUILD_INCOMPATIBLE`; a mismatched authenticated identity is
   `HOST_IDENTITY_MISMATCH`; none replaces or kills the live Host.
-- **Native process identity uses the installed DSH Koffi owner.** The macOS
-  kernel identity bridge lazily loads Koffi from the current running DSH
-  installation: the verified DSH anchor resolves
+- **Native process identity uses the installed DSH Koffi owner.** The Darwin
+  and Windows kernel identity bridges lazily load Koffi from the current running
+  DSH installation: the verified DSH anchor resolves
   `@deepseek-ai/dsh-subprocess-local` and that package's own declared `koffi`
-  dependency. A Direct CLI's own `argv[1]` installation identity takes
+  dependency. Windows additionally opens processes with
+  `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`, reads
+  `GetProcessTimes`/the token user SID, and keeps the exact handle for a stop;
+  an access-denied/unknown read is never treated as gone. A Direct CLI's own `argv[1]` installation identity takes
   precedence over any inherited Split anchor; the environment anchor is used
   only by the Split Host/Client entries themselves. Koffi is not a production
   dependency or independently versioned runtime of this bundle. The bridge must not hard-code a Koffi version, select
@@ -360,8 +377,9 @@ the kernel seat where one is required.
   attached Surface Client, and none calls a Host shutdown. A Host starts on
   demand for one profile scope and then remains
   resident independent of Client attachment or idle time: only an explicit
-  official stop (the Host entry admits `SIGTERM`/`SIGINT` into its one
-  `runProfile` shutdown owner) or a real process/system failure ends it. There
+  official stop (the Host entry admits `SIGTERM`/`SIGINT` on POSIX, or its
+  per-instance native stop Event on Windows, into its one `runProfile` shutdown
+  owner) or a real process/system failure ends it. There
   is no automatic idle expiry or orphan-interaction timeout, and a pending
   Question/Approval remains with the official Host authority until a legal
   answer, business settlement, explicit stop or process failure. The Host's
