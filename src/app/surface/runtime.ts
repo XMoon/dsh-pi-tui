@@ -802,6 +802,8 @@ export interface SurfaceRendererMount {
 export interface SurfaceMountDeps {
   /** The application input contract (session/submission/command owners). */
   readonly events: TuiAppEvents
+  /** Read-only physical terminal ownership observation (see TuiAppOptions). */
+  readonly onTerminalOwnership?: (owned: boolean) => void
   /**
    * The ONE application intake owner of a terminal bracketed pasted image
    * file path. The PiTui branch injects it into `TuiApp` directly; the TSP
@@ -3418,6 +3420,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   }
 
   const buildOptions = (deps: SurfaceMountDeps, imageLoader: ImageLoader, svgRasterLoader: SvgRasterLoader | undefined): TuiAppOptions => ({
+    ...(deps.onTerminalOwnership === undefined ? {} : { onTerminalOwnership: deps.onTerminalOwnership }),
     // Ctrl+R input-history search: the runner owns the IO (the file-backed
     // source + the known-cwd identity map), the surface owns the panel
     // lifecycle (plan §27 — TuiApp never touches the filesystem).

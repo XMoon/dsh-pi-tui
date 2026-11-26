@@ -72,6 +72,22 @@ function mountStartup(t: TestContext, args: string[] = []): Context {
 // startup-local comparator is exercised through its only surviving consumer,
 // the matrix selection, at the exact prerelease/range boundaries.
 
+test('the startup row withdraws both OSC 7577 ambient fields as its first step', t => {
+  const previousToken = process.env.OSC7577_TOKEN
+  const previousHandoff = process.env.SPLIT_PROCESS_OSC7577_V1
+  process.env.OSC7577_TOKEN = 'dummy-token-replace-me'
+  process.env.SPLIT_PROCESS_OSC7577_V1 = '{"version":1}'
+  t.after(() => {
+    if (previousToken === undefined) delete process.env.OSC7577_TOKEN
+    else process.env.OSC7577_TOKEN = previousToken
+    if (previousHandoff === undefined) delete process.env.SPLIT_PROCESS_OSC7577_V1
+    else process.env.SPLIT_PROCESS_OSC7577_V1 = previousHandoff
+  })
+  mountStartup(t)
+  assert.equal(process.env.OSC7577_TOKEN, undefined)
+  assert.equal(process.env.SPLIT_PROCESS_OSC7577_V1, undefined)
+})
+
 test('harnessCompatEntryFor selects the range whose inclusive min the version reaches', () => {
   assert.equal(harnessCompatEntryFor('0.1.0-rc.8')?.min, '0.1.0-rc.8', 'an inclusive lower bound belongs to its own range')
   assert.equal(harnessCompatEntryFor('0.1.1-rc.1')?.min, '0.1.1-rc.1')

@@ -2219,6 +2219,7 @@ function releaseLifecycle(options: { readonly rendererReleaseFails?: boolean } =
     disposeLocalShell: () => {},
     disposePastedImageIntake: () => {},
     disposeHerdrReporter: () => {},
+    disposeProgramResume: () => {},
     disposeRemoteProgressGeneration: () => {},
     retireOwnedSession: async () => ({}) as never,
     disposeSelectedTransport: async () => {},

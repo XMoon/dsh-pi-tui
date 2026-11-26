@@ -101,6 +101,13 @@ export interface SurfaceLifecycleDeps {
    */
   readonly disposeHerdrReporter: () => void
   /**
+   * OSC 7577: stop this surface's reporter without writing a clear. The
+   * explicit human-exit clear is owned by the exit-intent commit callback;
+   * generic disposal serves signals, PTY loss, fatal, HMR and Client reexec,
+   * so it MUST NOT withdraw the terminal record.
+   */
+  readonly disposeProgramResume: () => void
+  /**
    * H1: release the official Connection-generation subscription that
    * re-establishes the ONE Remote progress watch after a transport rollover.
    * It is an independent ordered teardown step: a throwing real unsubscribe
@@ -168,6 +175,7 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     disposeLocalShell,
     disposePastedImageIntake,
     disposeHerdrReporter,
+    disposeProgramResume,
     disposeRemoteProgressGeneration,
     retireOwnedSession,
     disposeSelectedTransport,
@@ -293,6 +301,7 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       // leave the ordered `release-agent` to the reporter's own short-lived CLI
       // queue (it never blocks the surface teardown).
       () => disposeHerdrReporter(),
+      () => disposeProgramResume(),
       () => disposeRemoteProgressGeneration(),
       // The mounted TuiApp, the plugin keybinding sync, the theme-unload hook
       // and the extension surface bridge are released by their surface owner

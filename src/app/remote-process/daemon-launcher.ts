@@ -28,6 +28,8 @@ import { installedPackageRootFromEntry, readInstalledDshVersion } from './local-
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { createEntryDiag } from './entry-control.ts'
 import type { TuiAcpControlStartup, TuiAcpStdioStartup, TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues, TuiWebControlStartup } from '../../startup.ts'
+import { encodeProgramResumeHandoff, PROGRAM_RESUME_HANDOFF_ENV, PROGRAM_RESUME_TOKEN_ENV, scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
+import { daemonProgramResumeCapability, type ProgramResumeCapability, type ProgramResumeLaunchEnvironment } from '../../client/program-resume/target.ts'
 
 /**
  * The read-only ACP stdio launch target, structurally identical to the
@@ -58,6 +60,8 @@ interface ProfileContextLike {
   readonly home: string
   readonly installAnchor: string
   readonly cwd: string
+  readonly overlays?: readonly unknown[]
+  readonly telemetryDisabledEnv?: string | undefined
 }
 
 /** The one-shot public launch envelope encoded for the Client child. */
@@ -156,6 +160,7 @@ export function buildChildEnvironment(
   profileContext: ProfileContextLike,
   launchEnvelope: string,
   source: NodeJS.ProcessEnv = process.env,
+  programResume?: ProgramResumeCapability,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...source }
   for (const key of Object.keys(env)) {
@@ -164,10 +169,18 @@ export function buildChildEnvironment(
   delete env.DSH_PI_TUI_ROLE
   delete env.DSH_PI_TUI_HOST_ENTRY
   delete env.DSH_PI_TUI_BACKEND
+  // The OSC capability is process-private and never inherited by a generic
+  // Split child. Only an admitted foreground Client receives the protocol
+  // token and the non-secret v1 launch facts.
+  scrubProgramResumeEnvironment(env)
   env.SPLIT_PROCESS_DSH_ANCHOR = profileContext.installAnchor
   env.SPLIT_PROCESS_PROFILE = profileContext.name
   env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
   env[CLIENT_LAUNCH_ENVELOPE_ENV] = launchEnvelope
+  if (programResume !== undefined) {
+    env[PROGRAM_RESUME_TOKEN_ENV] = programResume.token
+    env[PROGRAM_RESUME_HANDOFF_ENV] = encodeProgramResumeHandoff(programResume.facts)
+  }
   return env
 }
 
@@ -189,6 +202,8 @@ export function buildAcpStdioEnvironment(
   delete env.DSH_PI_TUI_ROLE
   delete env.DSH_PI_TUI_HOST_ENTRY
   delete env.DSH_PI_TUI_BACKEND
+  // ACP stdio is a pure relay: it is never a program-resume reporter.
+  scrubProgramResumeEnvironment(env)
   delete env[ACP_STDIO_SOCKET_ENV]
   env[ACP_STDIO_SOCKET_ENV] = socketPath
   return env
@@ -709,7 +724,29 @@ export function apply(ctx: Context): void {
 
   const packageRoot = resolveProfilePackageRoot(profileContext.dir)
   const entry = resolveClientEntry(packageRoot)
-  const env = buildChildEnvironment(profileContext, encodeLaunchEnvelope(startup))
+  const launchEnvironment = ctx.get('launchEnvironment') as ProgramResumeLaunchEnvironment | undefined
+  const programResume = launchEnvironment === undefined
+    ? undefined
+    : daemonProgramResumeCapability({
+        profileContext: {
+          name: profileContext.name,
+          home: profileContext.home,
+          cwd: profileContext.cwd,
+          installAnchor: profileContext.installAnchor,
+          overlays: profileContext.overlays ?? [],
+          telemetryDisabledEnv: profileContext.telemetryDisabledEnv,
+        },
+        launch: launchEnvironment,
+        presetId: startup.presetId,
+        env: process.env,
+        execArgv: process.execArgv,
+        argv: process.argv,
+        execPath: process.execPath,
+        stdinIsTTY: process.stdin.isTTY === true,
+        stdoutIsTTY: process.stdout.isTTY === true,
+        platform: process.platform,
+      })
+  const env = buildChildEnvironment(profileContext, encodeLaunchEnvelope(startup), process.env, programResume)
   // The daemon supervisor paints nothing: keep its diagnostics off the terminal.
   const diag = createEntryDiag('host', () => {})
   const reportFatal = (line: string): void => { try { process.stderr.write(`${line}\n`) } catch { /* best effort */ } }

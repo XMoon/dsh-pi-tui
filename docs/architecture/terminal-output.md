@@ -48,6 +48,33 @@ terminal-sanitized display projection. Rendering is a disposable projection
 over it: the same raw
 value can be copied byte-exactly and also painted safely.
 
+## Program resume (OSC 7577)
+
+OSC 7577 is the ONE Client-local program-resume output. It is
+application-generated terminal protocol, not display material: the sender is
+`src/client/program-resume/**`, it never consumes transcript, tool, model or
+other untrusted text, and it is never passed through either sanitizer. The
+composition offers a record only while the real PiTUI Client owns the physical
+terminal, using the inherited `OSC7577_TOKEN` and the official Profile, DSH
+home, backend, launch cwd, Node executable and `@deepseek-ai/dsh` entry; the
+command is exactly
+`/usr/bin/env DSH_HOME=… DSH_PI_TUI_BACKEND=… <node> <dsh-bin.js> --profile <p>
+--session <canonical-id>` with the cwd carried by the protocol field. An
+overlay, explicit preset, telemetry override, special Node option, multiplexer/
+SSH topology, non-TTY launch or non-canonical Session id fails closed and
+never guesses a target.
+
+The token is a capability, never a Session/Profile secret: it is removed from
+the ambient environment at the first synchronous Client/Host step, is never
+placed in argv, a log, a Session event, a Host DTO or the private handoff JSON,
+and only an admitted foreground Client receives it. The Host never writes OSC
+7577. A sessionless/unrepresentable target, a human exit and an accepted reload
+whose replacement cannot consume the v1 handoff use the protocol's clear;
+signal, PTY loss, fatal, generic disposal and a compatible Client reexec never
+withdraw the record. The protocol has no ACK:
+the sender never claims that the terminal accepted a record or that a later
+resume succeeded.
+
 ## The two policies
 
 `src/tui/presentation/terminal-text.ts` is the only implementation. It is a

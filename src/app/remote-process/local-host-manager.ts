@@ -53,6 +53,7 @@ import {
 import { userInfo } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
 import { installedPackageRootFromEntry, LocalScopeError, type LocalScope } from './local-scope.ts'
 import {
   inspectOwnedLaunchdUnit,
@@ -131,8 +132,13 @@ export function selectRuntimeDir(uid: number): string | undefined {
 }
 
 function systemctlEnv(runtimeDir: string | undefined): NodeJS.ProcessEnv {
-  if (runtimeDir === undefined) return { ...process.env }
-  return { ...process.env, XDG_RUNTIME_DIR: runtimeDir }
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  // The OSC capability belongs to the foreground Client process only. A
+  // manager helper is an independent process and must never inherit it.
+  scrubProgramResumeEnvironment(env)
+  if (runtimeDir === undefined) return env
+  env.XDG_RUNTIME_DIR = runtimeDir
+  return env
 }
 
 /**
@@ -1541,6 +1547,30 @@ export async function startManagedHostCandidate(
 }
 
 /**
+ * The exact environment of one detached Host candidate. The Host is never an
+ * OSC 7577 reporter: the protocol capability and its private handoff are
+ * removed even if an older caller left them ambient.
+ */
+export function hostCandidateEnvironment(
+  options: { readonly dshAnchor: string; readonly profile: string },
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...source,
+    SPLIT_PROCESS_DSH_ANCHOR: options.dshAnchor,
+    SPLIT_PROCESS_PROFILE: options.profile,
+  }
+  scrubProgramResumeEnvironment(env)
+  delete env.SPLIT_PROCESS_EXTRA_PATCH
+  delete env.DSH_PI_TUI_ROLE
+  delete env.DSH_PI_TUI_HOST_ENTRY
+  // A one-shot public backend selector belongs to the launching Client only; it
+  // must never reach the Host process this fallback starts.
+  delete env.DSH_PI_TUI_BACKEND
+  return env
+}
+
+/**
  * Start one Host candidate as a detached OS process: the default basic daemon
  * whenever no profile unit is installed, and the internal qualification/peer/
  * manual path. It opens/creates the scope `host.log` (a NEW file is 0600; an
@@ -1567,17 +1597,7 @@ export function spawnHostCandidate(options: HostStartOptions): HostStartObservat
   let fd: number | undefined
   try {
     fd = openSync(logPath, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW, 0o600)
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      SPLIT_PROCESS_DSH_ANCHOR: options.dshAnchor,
-      SPLIT_PROCESS_PROFILE: options.profile,
-    }
-    delete env.SPLIT_PROCESS_EXTRA_PATCH
-    delete env.DSH_PI_TUI_ROLE
-    delete env.DSH_PI_TUI_HOST_ENTRY
-    // A one-shot public backend selector belongs to the launching Client only; it
-    // must never reach the Host process this fallback starts.
-    delete env.DSH_PI_TUI_BACKEND
+    const env = hostCandidateEnvironment(options)
     const child = spawn(process.execPath, [options.hostEntryPath], {
       cwd: options.scope.profileRealpath,
       detached: true,

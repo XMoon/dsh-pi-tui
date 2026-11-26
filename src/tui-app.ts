@@ -2541,6 +2541,15 @@ export interface TuiAppOptions {
    */
   onProgramStatus?: (status: ProgramStatus) => void
   /**
+   * Synchronous, READ-ONLY terminal-ownership observation. `true` fires after
+   * the app has really (re)acquired the physical screen at start/resume;
+   * `false` fires before it releases the screen at stop/external-editor
+   * suspend. The observer must not write through the app's status inputs and
+   * must tolerate being called before it is armed. Absent keeps every
+   * existing composition unchanged.
+   */
+  onTerminalOwnership?: (owned: boolean) => void
+  /**
    * The structural icon palette (emoji | symbols | minimal), read once at
    * startup from the persisted settings. Runtime switches go through
    * {@link TuiApp.setIconStyle} — renderers NEVER deep-read a settings
@@ -3745,6 +3754,8 @@ export class TuiApp {
    * is never consulted by the physical terminal writers.
    */
   private readonly onProgramStatus: ((status: ProgramStatus) => void) | undefined
+  /** The read-only physical terminal ownership observation (see options). */
+  private readonly onTerminalOwnership: ((owned: boolean) => void) | undefined
   /**
    * The already-SETTLED outcome of the current main-Agent running interval, as
    * proven by the application evidence fold before this commit. It only
@@ -5325,6 +5336,7 @@ export class TuiApp {
     this.terminalProgressActive = options.initialTerminalProgress === true
     this.terminalProgressMode = options.terminalProgressMode ?? DEFAULT_TERMINAL_PROGRESS_MODE
     this.onProgramStatus = options.onProgramStatus
+    this.onTerminalOwnership = options.onTerminalOwnership
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
     this.onWorkflowAction = options.onWorkflowAction
@@ -6210,6 +6222,9 @@ export class TuiApp {
     // point re-samples a terminal observation that stop() released, so a restarted surface
     // cannot stay on a stale palette until some later report.
     this.completeScreenHandoff()
+    // The screen is physically live again. This observation is read-only and
+    // belongs to the same successful boundary as the presentation re-entry.
+    this.onTerminalOwnership?.(true)
   }
 
   /**
@@ -6285,6 +6300,9 @@ export class TuiApp {
    * the round-trip (they die only with dispose()).
    */
   private suspendForExternalEditor(): void {
+    // $EDITOR is about to take the PTY: report the loss BEFORE the physical
+    // release so no observer writes into the editor's terminal.
+    this.onTerminalOwnership?.(false)
     // A workspace (Job OR Settings) leases its OWN terminal screen: $EDITOR
     // must never take the PTY over while that screen is still the physical
     // owner. Leave the workspace first (the SAME close path Esc uses, restoring
@@ -6350,6 +6368,8 @@ export class TuiApp {
     // re-samples once when the latest intent still follows the terminal (the shared
     // hand-off completion point).
     this.completeScreenHandoff()
+    // The screen is physically live again after the editor round-trip.
+    this.onTerminalOwnership?.(true)
   }
 
   /** Leave raw mode and stop rendering. The process live-TUI slot is
@@ -6360,6 +6380,9 @@ export class TuiApp {
    * tui/process-slot.ts). */
   stop(): void {
     this.surfaceStopped = true
+    // The terminal is being released NOW: report the loss before any screen
+    // teardown, so an observer never writes into a stopped/foreign terminal.
+    this.onTerminalOwnership?.(false)
     // The stop releases the screen's OSC 11 probe and later restarts the SAME
     // screen object: register the lifecycle invalidation BEFORE the physical
     // loss, so the released observation is a cancellation and the restarted

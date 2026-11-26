@@ -36,6 +36,19 @@ import { pathToFileURL } from 'node:url'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { mergeCause } from '../remote/dispose-cause.ts'
 import type { CliSessionLaunchIntent } from '../../startup.ts'
+import {
+  encodeProgramResumeHandoff,
+  PROGRAM_RESUME_HANDOFF_ENV,
+  PROGRAM_RESUME_TOKEN_ENV,
+  scrubProgramResumeEnvironment,
+  takeProgramResumeHandoff,
+} from '../../client/program-resume/handoff.ts'
+import {
+  clientProgramResumeCapability,
+  type ProgramResumeCapability,
+} from '../../client/program-resume/target.ts'
+import type { ProgramResumeReporter } from '../../client/program-resume/reporter.ts'
+import type { ProgramResumeClientHandle } from '../application-runtime.ts'
 import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlRequest, type EntryRecordSink } from './entry-control.ts'
 import {
   clientDiagnosticLocation,
@@ -340,6 +353,8 @@ export interface ClientReexecTarget {
   readonly entry: string
   readonly buildId: string
   readonly bundleVersion: string
+  /** Whether the replacement artifact consumes the v1 OSC 7577 handoff. */
+  readonly programResumeHandoff: boolean
 }
 
 /** The one-shot facts handed to the replacement Client OS process. */
@@ -353,6 +368,8 @@ export interface ClientReexecIntent {
   readonly targetEntry: string
   readonly targetBuildId: string
   readonly targetBundleVersion: string
+  /** Whether the replacement artifact consumes the v1 OSC 7577 handoff. */
+  readonly targetProgramResumeHandoff?: boolean
 }
 
 const CLIENT_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
@@ -451,6 +468,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
+/** Whether the installed target manifest implements the v1 Client handoff. */
+function clientHandoffCapability(manifest: Record<string, unknown>): boolean {
+  const capabilities = manifest.dshPiTuiInternalCapabilities
+  return isRecord(capabilities) && capabilities.osc7577ClientHandoff === 1
+}
+
 /**
  * Validate one replacement Client package root and derive its production build
  * fingerprint. The same checks apply to the package currently installed in the
@@ -508,6 +531,7 @@ export function inspectClientReexecTarget(packageRoot: string, dshVersion: strin
     entry,
     buildId: computeBuildId(root, dshVersion),
     bundleVersion: manifest.version,
+    programResumeHandoff: clientHandoffCapability(manifest),
   }
 }
 
@@ -590,6 +614,7 @@ export function prepareClientReexec(options: PrepareClientReexecOptions): Client
     targetEntry: target.entry,
     targetBuildId: target.buildId,
     targetBundleVersion: target.bundleVersion,
+    targetProgramResumeHandoff: target.programResumeHandoff,
   }
 }
 
@@ -691,10 +716,15 @@ export function createClientReexecRequestHandler(options: ClientReexecRequestOpt
 export function createClientReexecChildEnvironment(
   intent: ClientReexecIntent,
   source: NodeJS.ProcessEnv = process.env,
+  programResume?: ProgramResumeCapability,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...source }
   const injectedFailure = source.SPLIT_PROCESS_CLIENT_REEXEC_CHILD_FAILURE
   for (const name of OLD_CLIENT_ENVIRONMENT) delete env[name]
+  // The capability is process-private state, never inherited by a replacement
+  // that cannot consume it. It is re-injected explicitly below only after the
+  // target manifest and the accepted reload both proved the v1 contract.
+  scrubProgramResumeEnvironment(env)
   // A handoff never creates a fresh Session through a preset.
   delete env.SPLIT_PROCESS_CLIENT_PRESET
   // The public launch envelope is consumed by the ORIGINAL Client only; a
@@ -707,6 +737,10 @@ export function createClientReexecChildEnvironment(
   env.SPLIT_PROCESS_PROFILE = intent.profile
   if (intent.sessionId === undefined) delete env.SPLIT_PROCESS_CLIENT_SESSION
   else env.SPLIT_PROCESS_CLIENT_SESSION = intent.sessionId
+  if (intent.targetProgramResumeHandoff === true && programResume !== undefined) {
+    env[PROGRAM_RESUME_TOKEN_ENV] = programResume.token
+    env[PROGRAM_RESUME_HANDOFF_ENV] = encodeProgramResumeHandoff(programResume.facts)
+  }
   // Test-only child fault injection: only the replacement child receives the
   // existing injection variable, never the old Client and never a later child.
   if (injectedFailure !== undefined && injectedFailure !== '') env.SPLIT_PROCESS_CLIENT_FORCE_FAILURE = injectedFailure
@@ -787,6 +821,8 @@ export interface ClientEntryShutdownOptions {
   readonly reexec?: {
     readonly intent: ClientReexecIntent
     readonly teardownSucceeded: boolean
+    /** The admitted old-Client capability, forwarded only to a v1 target. */
+    readonly programResume?: ProgramResumeCapability
     /**
      * Live pre-spawn cancellation latch. It is read AFTER the seat close (a
      * no-op for `surface`), so a termination signal arriving while that close
@@ -874,7 +910,9 @@ export async function finishClientEntryShutdown(options: ClientEntryShutdownOpti
     options.stderr(handoffStartupFailureLine(error))
     return 1
   }
-  if (target.buildId !== reexec.intent.targetBuildId || target.entry !== reexec.intent.targetEntry) {
+  if (target.buildId !== reexec.intent.targetBuildId
+    || target.entry !== reexec.intent.targetEntry
+    || target.programResumeHandoff !== (reexec.intent.targetProgramResumeHandoff === true)) {
     const changed = new Error('local client reexec: the replacement Client package changed between the preflight and the spawn')
     options.emit({
       m4r: 'handoff-failed',
@@ -892,7 +930,11 @@ export async function finishClientEntryShutdown(options: ClientEntryShutdownOpti
   try {
     exit = await spawnChild(
       target.entry,
-      createClientReexecChildEnvironment(reexec.intent),
+      createClientReexecChildEnvironment(
+        reexec.intent,
+        process.env,
+        reexec.programResume,
+      ),
       child => options.onChildSpawned?.(child),
     )
   } catch (error) {
@@ -1215,6 +1257,12 @@ function observeQualificationSocket(
  * caller.
  */
 export async function runLocalClientEntry(options: LocalClientEntryOptions): Promise<void> {
+  // OSC 7577: capture and unconditionally delete both private fields in this
+  // FIRST synchronous stage, before the scope/Host ensure or ANY spawn. A
+  // malformed or untrusted pair only disables the sender; it never affects the
+  // existing business startup. The Host fallback receives its own scrubbed
+  // environment below.
+  const programResumeCapture = takeProgramResumeHandoff(process.env)
   // Handoff mode is validated before ANY process seat or Context exists: a
   // contradictory environment is refused without touching a seat.
   const expectedHostInstanceId = expectedHostInstanceFromEnvironment(options.mode)
@@ -1240,6 +1288,36 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   const invokedEntry = process.argv[1]
   const packageRoot = installedPackageRootFromEntry(invokedEntry === undefined ? import.meta.url : pathToFileURL(invokedEntry).href)
   const profileDir = hostModules.resolveProfileDir(options.profile, dshHome)
+  // The private handoff is trusted only for a real public Client launch (the
+  // decoded envelope) or the existing expected-instance reexec. A
+  // qualification/peer/manual surface never gets a reporter.
+  const programResumeHandle: ProgramResumeClientHandle | undefined =
+    options.mode === 'surface' && (launchEnvelope !== undefined || expectedHostInstanceId !== undefined)
+      ? (() => {
+          const capability = clientProgramResumeCapability({
+            token: programResumeCapture.token,
+            handoff: programResumeCapture.handoff,
+            expectedHome: dshHome,
+            expectedProfile: options.profile,
+            isReexec: expectedHostInstanceId !== undefined,
+            parentPid: process.ppid,
+            env: process.env,
+            execArgv: process.execArgv,
+            stdinIsTTY: process.stdin.isTTY === true,
+            stdoutIsTTY: process.stdout.isTTY === true,
+            platform: process.platform,
+          })
+          if (capability === undefined) return undefined
+          let reporter: ProgramResumeReporter | undefined
+          const handle: ProgramResumeClientHandle = {
+            capability,
+            attach: next => { reporter = next },
+            unsupportedReloadAccepted: () => { reporter?.unsupportedReloadAccepted() },
+            forReexec: () => capability,
+          }
+          return handle
+        })()
+      : undefined
   const installedDshVersion = readInstalledDshVersion(options.dshAnchor)
   const scope = scopeFromInstalledProfile({
     dshHome,
@@ -2255,6 +2333,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
             // replacement (a fresh plugin fiber per revision would reset the
             // per-Peer revision counter into a `stale-revision` refusal).
             presencePeerScope: clientContext,
+            ...(programResumeHandle === undefined ? {} : { programResume: programResumeHandle }),
             // M4 PR4: the ONE process-owned manual reload capability of this
             // real surface mount. The command handler has already made the
             // Client-local safety decision in the SAME synchronous stack; this
@@ -2338,7 +2417,14 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         },
         emit,
         canRequest: () => stopping === undefined,
-        onAccepted: accepted => { reexecIntent = accepted },
+        onAccepted: accepted => {
+          reexecIntent = accepted
+          // A replacement that cannot consume v1 must not leave the old
+          // supervisor record pointing at a Session the old build can no
+          // longer report. This runs at ACCEPTANCE while the old surface still
+          // owns the TTY; refused/already-current reloads never clear.
+          if (accepted.targetProgramResumeHandoff !== true) programResumeHandle?.unsupportedReloadAccepted()
+        },
       })
       if (reexecProbe) process.on('SIGUSR2', () => { reexecHandler?.request('qualification') })
       // A closed terminal (PTY HUP) is a normal Client exit: the physical
@@ -2652,7 +2738,14 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       seat,
       ...(reexecIntent === undefined
         ? {}
-        : { reexec: { intent: reexecIntent, teardownSucceeded: reexecTeardownSucceeded, cancelled: () => reexecCancelled } }),
+        : {
+            reexec: {
+              intent: reexecIntent,
+              teardownSucceeded: reexecTeardownSucceeded,
+              cancelled: () => reexecCancelled,
+              ...(programResumeHandle === undefined ? {} : { programResume: programResumeHandle.forReexec() }),
+            },
+          }),
       emit,
       stderr: line => { process.stderr.write(`${line}\n`) },
       onChildSpawned: child => { reexecChild = child },

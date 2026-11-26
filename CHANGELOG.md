@@ -9,6 +9,8 @@
 
 ### 新增
 
+- **终端恢复记录（OSC 7577 v0.5 发送端）**：当运行终端注入 `OSC7577_TOKEN` 时，Direct 与 Daemon Client 会把已提交主 Session 的精确恢复命令作为 OSC 7577 记录提供给终端；Daemon 记录使用稳定的 supervisor PID，Client 重载不会丢失记录身份，旧版替换目标会在接受 reload 时撤销旧记录。手工退出会撤销记录，信号、终端丢失、崩溃、HMR 与 Client reload 不撤销；Token 不进入 argv、Session、日志或 Host/manager/ACP 子进程。终端 ACK 与真实 Rex 互操作尚未验证。
+
 - **ACP 设置统一到 Host · ACP access 页**：PiTui 的 `/acp` 与 `/settings → Host → ACP access` 现在打开同一个 Settings 页面，集中展示当前 Host 的本地 ACP Listener 状态、Enable/Disable（关闭前二次确认）、一键复制当前已验证 Profile 的 `acp stdio` 客户端命令、下次 Host 启动的 `Start automatically` 偏好以及客户端接入说明。运行状态只影响当前 Host，偏好只影响下次启动，两者互不改变；原 `/settings → Tools → ACP Server` 与 `Host → Start ACP automatically` 两行以及旧 `/acp` 弹出菜单已退役。
 - **无 TUI 的 ACP 管理命令**：`dsh --profile pi-tui acp status|enable|disable` 可在不打开 TUI、不启动 Host 的情况下查看并切换当前 Profile 已运行 Host 的本地 ACP Listener。`status` 只读并输出 Host 的真实状态；`enable` / `disable` 各自只发送一次写入，状态未确认或响应丢失时明确报告结果未知，不会猜测成功。它们不改变下次冷启动的自动启动设置，也不会停止 Host、Agent、Session 或 TUI。
 
