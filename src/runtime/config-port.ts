@@ -871,6 +871,14 @@ export interface WebProviderConfig {
    * refresh, queue admission and post-write verification use THIS path.
    */
   readFresh(): Promise<WebProviderSettings | undefined>
+  /**
+   * Whether `capture` still describes the adapter's KNOWN current Web
+   * authority: the same Direct service identity/coherent descriptor revisions
+   * or the same current Remote mirror generation and both namespace revisions.
+   * It is a synchronous fact query over already-known authority state, never a
+   * Host RPC; a stale/not-ready observation is not current.
+   */
+  isObservationCurrent(capture: WebProviderSettings, target?: 'both' | 'web' | 'api'): boolean
   /** Pin the official search provider (`web.searchProvider`) against the
    *  caller's original capture. */
   setSearchProvider(

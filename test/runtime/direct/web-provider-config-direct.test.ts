@@ -588,6 +588,16 @@ test('read() returns the provider layers observed at its synchronous return, not
 test('read() rejects a settings-authority replacement during the credential await; a fresh read gets the new Host', async () => {
   const a = host()
   const b = host({ api: { count: 20 } })
+  let current = a
+  const ctx: HostContextLike = {
+    get: name => name === 'settings'
+      ? current.settings
+      : name === 'credentials' ? current.credentials : undefined,
+  }
+  const config = new DirectWebProviderConfig(ctx)
+  // A REAL capture from A, before the replacement.
+  const captureA = (await config.read())!
+  assert.equal(captureA.authority.generation, a.settings)
   let release: () => void = () => {}
   const gate = new Promise<void>(resolve => { release = resolve })
   let started = false
@@ -596,13 +606,6 @@ test('read() rejects a settings-authority replacement during the credential awai
     await gate
     return { configured: false }
   }
-  let current = a
-  const ctx: HostContextLike = {
-    get: name => name === 'settings'
-      ? current.settings
-      : name === 'credentials' ? current.credentials : undefined,
-  }
-  const config = new DirectWebProviderConfig(ctx)
   const pending = config.read()
   while (!started) await new Promise(resolve => setImmediate(resolve))
   current = b
@@ -611,12 +614,6 @@ test('read() rejects a settings-authority replacement during the credential awai
   const fresh = await config.read()
   assert.equal(fresh?.api.count, 20)
   assert.notEqual(fresh?.authority.generation, a.settings, 'the fresh read belongs to B')
-  // A capture from A never dispatches to B, even with the same numeric revision
-  // and value.
-  const captureA: WebProviderSettings = {
-    ...fresh!,
-    authority: { generation: a.settings, webRevision: 3, apiRevision: 5 },
-  }
   const outcome = await config.setSearchProvider('deepseek-search-api', captureA)
   assert.equal(outcome.kind, 'rejected')
   assert.match(outcome.reason, /authority changed/u)

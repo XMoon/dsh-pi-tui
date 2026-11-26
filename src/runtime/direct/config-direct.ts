@@ -2097,6 +2097,23 @@ export class DirectWebProviderConfig implements WebProviderConfig {
     return await this.readSnapshot()
   }
 
+  /** A synchronous currentness fact over the actual Direct service and ONE
+   *  coherent descriptor read; no RPC boundary exists in-process. A replaced
+   *  service or either namespace revision drift makes the capture stale. */
+  isObservationCurrent(
+    capture: WebProviderSettings,
+    target: 'both' | 'web' | 'api' = 'both',
+  ): boolean {
+    const read = readDirectDescriptors(this.ctx)
+    if (read.kind !== 'ready') return false
+    if (!Object.is(settingsAuthorityOf(read.settings), capture.authority.generation)) return false
+    const web = read.descriptors.find(entry => entry.ns === WEB_PROVIDER_NS)
+    const api = read.descriptors.find(entry => entry.ns === WEB_SEARCH_API_NS)
+    const webCurrent = web?.revision === capture.authority.webRevision
+    const apiCurrent = api?.revision === capture.authority.apiRevision
+    return target === 'web' ? webCurrent : target === 'api' ? apiCurrent : webCurrent && apiCurrent
+  }
+
   private async readSnapshot(): Promise<WebProviderSettings | undefined> {
     // ONE coherent pre-check: both official sections must be mounted before the
     // credential store is consulted. The service authority observed HERE is the
@@ -2294,23 +2311,13 @@ export class DirectWebProviderConfig implements WebProviderConfig {
       api: SettingsDescriptorLike | undefined,
     ) => WebProviderMutationOutcome | undefined,
   ): Promise<WebProviderMutationOutcome> {
-    const settings = this.settings()
-    if (settings === undefined) return { kind: 'rejected', reason: 'settings service unavailable' }
-    if (!Object.is(settingsAuthorityOf(settings), capture.authority.generation)) {
+    const read = readDirectDescriptors(this.ctx)
+    if (read.kind !== 'ready') return { kind: 'rejected', reason: read.reason }
+    if (!Object.is(settingsAuthorityOf(read.settings), capture.authority.generation)) {
       return { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' }
     }
-    if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
-    let descriptors: readonly SettingsDescriptorLike[] | undefined
-    try {
-      descriptors = settings.describe()
-    } catch (error) {
-      return { kind: 'rejected', reason: `the Host settings descriptor read failed: ${safeErrorMessage(error)}` }
-    }
-    if (!Array.isArray(descriptors)) {
-      return { kind: 'rejected', reason: 'the Host settings descriptor list is not readable' }
-    }
-    const web = descriptors.find(entry => entry.ns === WEB_PROVIDER_NS)
-    const api = descriptors.find(entry => entry.ns === WEB_SEARCH_API_NS)
+    const web = read.descriptors.find(entry => entry.ns === WEB_PROVIDER_NS)
+    const api = read.descriptors.find(entry => entry.ns === WEB_SEARCH_API_NS)
     const target = ns === WEB_PROVIDER_NS ? web : api
     if (target === undefined) {
       return { kind: 'rejected', reason: `the official Host settings section "${ns}" is not mounted` }
@@ -2323,18 +2330,10 @@ export class DirectWebProviderConfig implements WebProviderConfig {
     }
     const guarded = guard(web, api)
     if (guarded !== undefined) return guarded
-    try {
-      await settings.mutate(ns, ops, expectedRevision)
-      return { kind: 'accepted' }
-    } catch (error) {
-      const reason = safeErrorMessage(error)
-      if ((error as { readonly code?: unknown } | null)?.code === 'SETTINGS_CONFLICT') {
-        return { kind: 'conflict', reason }
-      }
-      // ConfigEditor can persist before Loader reconciliation throws. An unknown
-      // dispatched failure therefore cannot prove the profile stayed unchanged.
-      return { kind: 'outcome-unconfirmed', reason }
-    }
+    // The existing typed mutation owner is the ONE actual dispatch/classification
+    // path. It re-proves the captured service identity synchronously and submits
+    // the ORIGINAL revision; no await sits between the guard above and this call.
+    return await mutateDirectSection(this.ctx, ns, ops, expectedRevision, capture.authority.generation)
   }
 
   /** The provider SELECT guard: the captured base/USER/effective decision must

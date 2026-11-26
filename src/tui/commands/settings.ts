@@ -606,13 +606,40 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  candidate and no credential action while the backend is not current — the
    *  commit entry would refuse every one of them at its turn, so offering them
    *  would be a false affordance. */
-  const webWritableRefusal = (): string | undefined => {
+  /** Which of the TWO namespace observations a write actually depends on. */
+  type WebWriteTarget = 'both' | 'web' | 'api'
+  const webDecisionTarget = (request: WebSettingsDecision): WebWriteTarget =>
+    request.kind === 'provider-select' || request.kind === 'provider-restore'
+      ? 'web'
+      : request.kind === 'set-search-billing' || request.kind === 'set-fetch-billing'
+        ? 'both'
+        : 'api'
+  const webRowTarget = (rowId: WebSettingRowId): WebWriteTarget =>
+    rowId === 'web-search-provider' || rowId === 'web-fetch-provider'
+      ? 'web'
+      : rowId === 'web-search-billing' || rowId === 'web-fetch-billing'
+        ? 'both'
+        : rowId === 'web-search-count' || rowId === 'web-send-original-question'
+          ? 'api'
+          : 'both'
+
+  const webWritableRefusal = (rowId?: WebSettingRowId): string | undefined => {
     if (!webSettingsAvailable()) return 'the Host Web provider settings are not available on this backend'
     const readiness = runner.config.configReadiness()
-    if (readiness === 'ready') return undefined
-    return readiness === 'stale'
-      ? 'the configuration is not current (reconnecting): Web settings are read-only until it reconnects'
-      : 'the configuration backend is unavailable: Web settings are read-only'
+    if (readiness !== 'ready') {
+      return readiness === 'stale'
+        ? 'the configuration is not current (reconnecting): Web settings are read-only until it reconnects'
+        : 'the configuration backend is unavailable: Web settings are read-only'
+    }
+    const target = rowId === undefined ? 'both' : webRowTarget(rowId)
+    if (webSettings !== undefined && !runner.config.web.isObservationCurrent(webSettings, target)) {
+      return target === 'web'
+        ? 'the Host Web provider settings changed since they were read; refresh before saving'
+        : target === 'api'
+          ? 'the Host DeepSeek API settings changed since they were read; refresh before saving'
+          : 'the Host Web settings changed since they were read; refresh before saving'
+    }
+    return undefined
   }
 
   /** The LATEST authority facts the Web page renders. A pending read is
@@ -653,10 +680,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         ? { summary: 'Unavailable', freshness: 'unavailable', description }
         : { summary: 'Loading…', freshness: 'runtime', description }
     }
+    const current = runner.config.web.isObservationCurrent(webSettings, 'both')
     return {
       summary: `Search: ${providerLabel(WEB_SEARCH_PROVIDER_VALUES, webSettings.searchProvider) ?? 'Automatic'} · Fetch: ${providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider) ?? 'Automatic'}`,
-      freshness: 'ready',
-      description,
+      freshness: current ? 'ready' : 'last-known',
+      description: current
+        ? description
+        : `${description} The Host Web settings changed since this read; refresh to review.`,
     }
   }
 
@@ -858,6 +888,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       if (base === undefined) {
         return { kind: 'not-saved', reason: 'the current Web settings could not be read' }
       }
+      if (!runner.config.web.isObservationCurrent(base, webDecisionTarget(request))) {
+        return {
+          kind: 'not-saved',
+          reason: 'the Host Web settings changed since they were read; refresh before saving',
+          actual: webDecisionActual(base, request),
+        }
+      }
       const admission = webAdmissionFailure(request, base)
       if (admission !== undefined) {
         return { kind: 'not-saved', reason: admission, actual: webDecisionActual(base, request) }
@@ -868,28 +905,53 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       } catch (error) {
         // The adapter contract returns typed settlements; an unexpected throw
         // is an unattributable outcome, never a refusal derived from a value.
-        return { kind: 'outcome-unconfirmed', reason: safeErrorMessage(error) }
+        outcome = { kind: 'outcome-unconfirmed', reason: safeErrorMessage(error) }
       }
-      switch (outcome.kind) {
-        case 'no-changes':
-          return { kind: 'no-changes', actual: webDecisionActual(base, request), authority: base.authority }
-        case 'rejected':
-        case 'conflict':
-          return { kind: 'not-saved', reason: outcome.reason, actual: webDecisionActual(base, request) }
-        case 'outcome-unconfirmed':
-          return { kind: 'outcome-unconfirmed', reason: outcome.reason }
-        case 'accepted':
-          break
-      }
-      // The receipt is accepted; the verdict needs a trusted read STARTED after
-      // it. `settleWebReadAfterWrite` issues a new read and waits for the newest
-      // settlement (never a snapshot a later read superseded).
+      // After ANY actual adapter settlement (including no-changes, conflict,
+      // rejection, unknown and throw) the command owner takes ONE fresh
+      // postterminal observation with the existing serial read owner. The
+      // classification stays independent of that fact; the fresh facts only
+      // update what the surface can truthfully show and diagnose.
       await settleWebReadAfterWrite()
       const after = webSettings
-      if (after === undefined) {
-        return { kind: 'unverified', reason: 'the Host readback after the write was unavailable' }
+      const actual = after !== undefined ? webDecisionActual(after, request) : webDecisionActual(base, request)
+      let result: WebCommitResult
+      switch (outcome.kind) {
+        case 'no-changes':
+          // A validated no-op is not a save. Bind its receipt to the ADMISSION
+          // observation, so a replacement after the no-op retires it.
+          result = { kind: 'no-changes', actual, authority: base.authority }
+          break
+        case 'rejected':
+        case 'conflict':
+          result = { kind: 'not-saved', reason: outcome.reason, actual }
+          break
+        case 'outcome-unconfirmed':
+          result = { kind: 'outcome-unconfirmed', reason: outcome.reason }
+          break
+        case 'accepted':
+          result = after === undefined
+            ? { kind: 'unverified', reason: 'the Host readback after the write was unavailable' }
+            : verifyWebDecision(request, request.capture, after)
+          break
       }
-      return verifyWebDecision(request, request.capture, after)
+      // The write OWNER records the safe field/outcome/reason even if the page
+      // was disposed by the time the terminal settlement arrived. This is the
+      // diagnostic, never a second user-facing error; no authority object,
+      // credential, token or secret enters it.
+      const reason = 'reason' in result ? result.reason : undefined
+      const diagnostic = {
+        row: request.rowId,
+        field: request.kind,
+        outcome: result.kind,
+        ...reason === undefined ? {} : { reason },
+      }
+      if (result.kind === 'verified' || result.kind === 'no-changes') {
+        runner.diag.debug('settings web write', diagnostic)
+      } else {
+        runner.diag.warn('settings web write', diagnostic)
+      }
+      return result
     })
 
   /** The ONE Settings workspace open path: the lease is taken SYNCHRONOUSLY

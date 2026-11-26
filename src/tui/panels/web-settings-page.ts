@@ -252,11 +252,11 @@ export interface WebRowPhase {
 export interface WebSettingsPageIntents {
   /** The LATEST authoritative read state, read synchronously at render time. */
   readonly readFacts: () => WebSettingsFacts
-  /** Why this page may not commit right now (backend non-current/unavailable).
-   *  The page still paints the last read facts, but offers NO confirmable
-   *  candidate and no credential action until it is writable again — the
-   *  command queue would refuse every one of them. */
-  readonly writableRefusal: () => string | undefined
+  /** Why ONE row may not commit right now (backend non-current/unavailable, or
+   *  the row's own namespace observation moved). The page still paints the last
+   *  read facts, but offers NO confirmable candidate and no credential action
+   *  until that row is writable again — the command queue would refuse it. */
+  readonly writableRefusal: (rowId?: import('./web-settings-page.ts').WebSettingRowId) => string | undefined
   /** Whether the official credential store is mounted right now. */
   readonly credentialAvailable: () => boolean
   /** Queue ONE confirmed decision on the command owner's single Web FIFO. */
@@ -612,7 +612,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return
     if (!sameWebAuthority(facts.settings.authority, decision.request.capture.authority)) return
-    if (this.intents.writableRefusal() !== undefined) return
+    if (this.intents.writableRefusal(this.selectedSettingId()) !== undefined) return
     if (this.phases.get(target.rowId)?.kind === 'saving') return
     if (!this.paintedChoiceVisible(target.candidate)) return
     // The ONE business sink: the same typed decision the frame painted, never a
@@ -793,7 +793,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return
     if (!sameWebAuthority(facts.settings.authority, painted.request.capture.authority)) return
-    if (this.intents.writableRefusal() !== undefined) return
+    if (this.intents.writableRefusal(this.selectedSettingId()) !== undefined) return
     if (this.phases.get(rowId)?.kind === 'saving') return
     // The candidate must be VISIBLE in this frame: an off-screen highlight is
     // never confirmed (the same rule the workspace's choice projection keeps).
@@ -909,7 +909,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (rowId === undefined || rowId === 'web-search-advanced' || rowId === 'web-fetch-advanced') return []
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return []
-    if (this.intents.writableRefusal() !== undefined) return []
+    if (this.intents.writableRefusal(rowId) !== undefined) return []
     switch (rowId) {
       case 'web-search-provider':
         return this.providerChoices(rowId, facts.settings).map(choice => choice.key)
@@ -1135,7 +1135,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private credentialActions(): readonly { readonly action: 'configure' | 'clear'; readonly label: string; readonly enabled: boolean }[] {
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return []
-    if (this.intents.writableRefusal() !== undefined) return []
+    if (this.intents.writableRefusal(this.selectedSettingId()) !== undefined) return []
     const state = this.credentialState(facts)
     if (!state.available) return []
     return [
@@ -1698,7 +1698,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const value = this.authorityValue(rowId, facts)
     // A readable but non-current authority is a last-known fact, never a
     // current Host claim (#893 demotion).
-    const readOnly = facts.kind === 'ready' && this.intents.writableRefusal() !== undefined
+    const readOnly = facts.kind === 'ready' && this.intents.writableRefusal(this.selectedSettingId()) !== undefined
     const head = readOnly ? 'Last-known · read-only: ' : 'Current: '
     const headWidth = visibleWidth(head)
     const valueLines = (raw: string): DetailLine[] => {
@@ -1718,7 +1718,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         ...wrapTextWithAnsi(sanitizedPhysicalLine(facts.reason), Math.max(1, width)).map(text => ({ text: color.textDim(text) })),
       ]
     }
-    const refusal = this.intents.writableRefusal()
+    const refusal = this.intents.writableRefusal(this.selectedSettingId())
     if (refusal !== undefined) {
       return [
         ...valueLines(value),
@@ -1938,7 +1938,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  mid-sentence. A settled success under a non-current authority is demoted
    *  to the #893 recovery sentence instead of claiming a current save. */
   private phaseLines(phase: WebRowPhase, width: number): DetailLine[] {
-    const readOnly = this.intents.writableRefusal() !== undefined
+    const readOnly = this.intents.writableRefusal(this.selectedSettingId()) !== undefined
     if ((phase.kind === 'verified' || phase.kind === 'no-changes') && readOnly) {
       return [{ text: color.textDim('Previous save completed; refresh to review.') }]
     }
@@ -1982,7 +1982,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     ]
     const actions = this.credentialActions()
     if (actions.length === 0 && facts.kind === 'ready') {
-      const refusal = this.intents.writableRefusal()
+      const refusal = this.intents.writableRefusal(this.selectedSettingId())
       if (refusal !== undefined) {
         lines.push(...wrapTextWithAnsi(refusal, Math.max(1, width)).map(text => ({ text: color.warning(text) })))
       } else {

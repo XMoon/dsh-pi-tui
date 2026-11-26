@@ -1801,24 +1801,44 @@ function readRemoteShellExecutionSection(mirror: RemoteConfigMirror): SectionRea
   return projectRemoteView(snapshot.generation, mirror.namespace(active.namespace)!, projectShellExecutionSettings(active.executor))
 }
 
+/** The narrow opt-in seam the Web owner needs on the existing typed helper:
+ *  one queue-turn fresh observation and one synchronous domain guard after the
+ *  helper's own generation/revision checks but before `dispatchAdmitted`.
+ *  Every other section caller omits it and keeps the historical behavior. */
+interface RemoteSectionMutationSeam {
+  readonly freshObservation?: boolean
+  readonly beforeDispatch?: (
+    descriptor: RemoteSettingsNamespaceView,
+    queuedRevision: number | undefined,
+  ) => void
+}
+
 async function mutateRemoteSection(
   mirror: RemoteConfigMirror,
   namespace: string,
   ops: readonly RemoteSettingsPathOp[],
   expectedRevision: number,
   generation: object,
+  seam?: RemoteSectionMutationSeam,
 ): Promise<SectionMutationOutcome> {
 
   const currentGeneration = mirror.readyGeneration()
-  if (currentGeneration === undefined || !Object.is(currentGeneration, generation)) {
+  // The Web seam may recover a merely STALE mirror by its queue-turn
+  // `describeFresh()`: in that case the original capture stays authoritative
+  // and the synchronous callback re-proves generation/revision after the fresh
+  // observation. Every other caller keeps the historical ready-mirror fence.
+  const deferToFreshQueue = currentGeneration === undefined && seam?.freshObservation === true
+  if (!deferToFreshQueue && (currentGeneration === undefined || !Object.is(currentGeneration, generation))) {
     return { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' }
   }
-  const current = mirror.namespace(namespace)
-  if (current === undefined) {
-    return { kind: 'rejected', reason: 'the official Host settings section is not mounted' }
-  }
-  if (current.revision !== expectedRevision) {
-    return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+  if (!deferToFreshQueue) {
+    const current = mirror.namespace(namespace)
+    if (current === undefined) {
+      return { kind: 'rejected', reason: 'the official Host settings section is not mounted' }
+    }
+    if (current.revision !== expectedRevision) {
+      return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+    }
   }
   if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
 
@@ -1831,10 +1851,14 @@ async function mutateRemoteSection(
       if (descriptor.revision !== expectedRevision || queuedRevision !== expectedRevision) {
         throw Object.assign(new Error('the Host settings section changed since it was read'), { code: 'settings/conflict' })
       }
+      seam?.beforeDispatch?.(descriptor, queuedRevision)
       dispatchAdmitted = true
-    })
+    }, seam?.freshObservation === true ? { freshObservation: true } : undefined)
     return { kind: 'accepted' }
   } catch (error) {
+    // The Web no-op is a distinct zero-write result. Keep it typed at the
+    // adapter boundary; every non-Web caller never produces it.
+    if (error instanceof WebProviderNoChanges) throw error
     const reason = remoteFailureMessage(error)
     const code = remoteFailureCode(error)
     if (code === 'settings/conflict' || code === 'SETTINGS_CONFLICT') {
@@ -2491,6 +2515,23 @@ class RemoteWebProviderConfig implements WebProviderConfig {
     return await this.readSnapshot(true)
   }
 
+  /** A synchronous currentness fact over the mirror's already-known authority.
+   *  It never starts a describe: a stale/not-ready mirror is not current, and a
+   *  ready replacement is a different generation. */
+  isObservationCurrent(
+    capture: WebProviderSettings,
+    target: 'both' | 'web' | 'api' = 'both',
+  ): boolean {
+    if (this.mirror.readiness() !== 'ready') return false
+    const generation = this.mirror.readyGeneration()
+    if (generation === undefined || !Object.is(generation, capture.authority.generation)) return false
+    const web = this.mirror.namespace(WEB_PROVIDER_NS)
+    const api = this.mirror.namespace(WEB_SEARCH_API_NS)
+    const webCurrent = web?.revision === capture.authority.webRevision
+    const apiCurrent = api?.revision === capture.authority.apiRevision
+    return target === 'web' ? webCurrent : target === 'api' ? apiCurrent : webCurrent && apiCurrent
+  }
+
   private async readSnapshot(fresh: boolean): Promise<WebProviderSettings | undefined> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (fresh) await this.mirror.describeFresh()
@@ -2558,10 +2599,10 @@ class RemoteWebProviderConfig implements WebProviderConfig {
     throw new SupersededReadError('the Remote Web settings read was repeatedly superseded')
   }
 
-  /** The actual Remote dispatch boundary. The captured generation/target
-   *  revision are re-proven, the queue turn starts a FRESH official describe,
-   *  and the Web-specific guard runs synchronously immediately before the
-   *  official mutate. No second queue, mirror or fallback path exists. */
+  /** The actual Remote dispatch boundary: the existing typed mutation helper
+   *  owns the receipt classification; this adapter contributes only the
+   *  plan-authorized queue-turn fresh observation and the synchronous Web
+   *  domain guard (after the helper's own generation/revision checks). */
   private async dispatch(
     ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
     ops: readonly RemoteSettingsPathOp[],
@@ -2572,58 +2613,23 @@ class RemoteWebProviderConfig implements WebProviderConfig {
       api: RemoteSettingsNamespaceView | undefined,
     ) => void,
   ): Promise<WebProviderMutationOutcome> {
-    // A CURRENT mirror that already belongs to a different generation is a
-    // definite refusal. A merely STALE mirror is not: the queue turn starts a
-    // fresh official describe and re-proves the captured generation there, so a
-    // reconnect/invalidation can be recovered by the same write instead of
-    // being refused against a snapshot that has not refreshed yet.
-    const currentGeneration = this.mirror.readyGeneration()
-    if (currentGeneration !== undefined && !Object.is(currentGeneration, capture.authority.generation)) {
-      return { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' }
-    }
-    if (this.mirror.readiness() === 'ready') {
-      const current = this.mirror.namespace(ns)
-      if (current === undefined) {
-        return { kind: 'rejected', reason: 'the official Host settings section is not mounted' }
-      }
-      if (!validRemoteSettingsRevision(current.revision)) {
-        return { kind: 'rejected', reason: 'the official Host settings revision is not readable' }
-      }
-      if (current.revision !== expectedRevision) {
-        return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
-      }
-    }
-    if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
-    let dispatchAdmitted = false
     try {
-      await this.mirror.mutate(ns, ops, expectedRevision, 'record', (descriptor, queuedRevision) => {
-        if (!Object.is(this.mirror.readyGeneration(), capture.authority.generation)) {
-          throw Object.assign(new Error('the Host authority changed before dispatch'), { code: 'settings/writer-superseded' })
-        }
-        if (descriptor.revision !== expectedRevision || queuedRevision !== expectedRevision) {
-          throw Object.assign(new Error('the Host settings section changed since it was read'), { code: 'settings/conflict' })
-        }
-        // Synchronous domain guard on the SAME fresh mirror snapshot: the raw
-        // official facts decide eligibility, never a UI boolean or a display
-        // string. A no-op throws the sentinel BEFORE dispatch.
-        guard(this.mirror.namespace(WEB_PROVIDER_NS), this.mirror.namespace(WEB_SEARCH_API_NS))
-        dispatchAdmitted = true
-      }, { freshObservation: true })
-      return { kind: 'accepted' }
+      return await mutateRemoteSection(
+        this.mirror,
+        ns,
+        ops,
+        expectedRevision,
+        capture.authority.generation,
+        {
+          freshObservation: true,
+          beforeDispatch: () => {
+            guard(this.mirror.namespace(WEB_PROVIDER_NS), this.mirror.namespace(WEB_SEARCH_API_NS))
+          },
+        },
+      )
     } catch (error) {
       if (error instanceof WebProviderNoChanges) return { kind: 'no-changes' }
-      const reason = remoteFailureMessage(error)
-      const code = remoteFailureCode(error)
-      if (code === 'settings/conflict' || code === 'SETTINGS_CONFLICT') {
-        return { kind: 'conflict', reason }
-      }
-      if (!dispatchAdmitted) return { kind: 'rejected', reason }
-      // The official controller can label a post-persistence Loader failure as
-      // settings/rejected. Only Gateway pre-invocation refusals prove no edit ran.
-      if (code === 'gateway/bad-request' || (code !== undefined && GATEWAY_PRE_INVOCATION_CODES.has(code))) {
-        return { kind: 'rejected', reason }
-      }
-      return { kind: 'outcome-unconfirmed', reason }
+      throw error
     }
   }
 

@@ -197,6 +197,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       available: () => false,
       read: async () => undefined,
       readFresh: async () => undefined,
+      isObservationCurrent: () => false,
       setSearchProvider: async () => ({ kind: 'rejected' as const, reason: 'the Web settings are unavailable in this fixture' }),
       setFetchProvider: async () => ({ kind: 'rejected' as const, reason: 'the Web settings are unavailable in this fixture' }),
       restoreSearchProvider: async () => ({ kind: 'rejected' as const, reason: 'the Web settings are unavailable in this fixture' }),

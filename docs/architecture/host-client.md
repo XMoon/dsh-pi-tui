@@ -870,8 +870,15 @@ explicitly selected route and that capability's YAML override must still be
 unset. These are TWO namespace observations, not one atomic cross-namespace
 transaction: the official Settings CAS is per namespace, so a provider change
 that lands after Billing has already been dispatched is a real post-dispatch
-outcome, never retroactively a proven pre-dispatch refusal. A legal no-op is a
-distinct zero-write `no-changes` outcome; `accepted`
+outcome, never retroactively a proven pre-dispatch refusal. A synchronous
+currentness fact over the adapter's known authority (Direct: the live service
+identity and ONE coherent descriptor read; Remote: the ready mirror generation
+and both descriptor revisions) drives the launcher freshness, the per-row
+affordance and the command owner's admission/receipt attribution. It starts no
+Host RPC. Count/question require the API observation, provider writes require
+the `web` observation and Billing requires both; a genuinely independent
+namespace revision never blocks another row. A legal no-op is a distinct
+zero-write `no-changes` outcome; `accepted`
 is only a receipt, and `Saved` requires a trusted fresh readback that still
 belongs to the captured generation and proves the requested raw value/action.
 An accepted-but-unattributable readback is `unverified`, and a lost/ambiguous

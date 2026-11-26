@@ -596,7 +596,12 @@ specialist-page contract below).
   ready read carries the opaque Host settings-authority generation and both
   namespace revisions; page entry, explicit `r`, queue admission and post-write
   verification use `readFresh()` (Direct: a real descriptor read; Remote: an
-  official `describeFresh`), never a cached mirror. The
+  official `describeFresh`), never a cached mirror. A synchronous currentness
+  fact compares a cached observation with the adapter's known generation and
+  revisions; a non-current observation paints `Last-known · read-only` for the
+  affected row, offers no Confirm and cannot authorize a write. Count/question
+  depend on the API namespace, provider rows on `web`, and Billing on both;
+  an independent namespace revision never makes another row unwritable. The
   provider choices are the official identities `DeepSeek server-side
   search`↔`deepseek-official` and `HTTP`↔`http`, plus the separately billed
   `DeepSeek Search API` / `DeepSeek Fetch API`. HOST SELECTION IS AUTHORITATIVE:

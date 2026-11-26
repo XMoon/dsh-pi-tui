@@ -505,30 +505,31 @@ async function selectCandidate(client, index, label, candidateLabel) {
     `${label}: the Detail cursor never reached ${JSON.stringify(candidateLabel)}: ${JSON.stringify(frame.split('\n'))}`)
 }
 
-/** Wait for the selected Detail's settled success word. The page deliberately
- *  suppresses `Saved`/`No changes` on the list rows, so these words can only
- *  come from the selected Detail; `settings-web-visual.test.ts` locks that
- *  invariant. A legitimate zero-write confirm paints `No changes` instead of
- *  `Saved`. */
-async function waitForDetailVerdict(client, label, timeoutMs = 20_000) {
+/** Wait for the selected Detail's settled EXPECTED verdict. The page
+ *  deliberately suppresses `Saved`/`No changes` on the list rows, so these
+ *  words can only come from the selected Detail; `settings-web-visual.test.ts`
+ *  locks that invariant. The caller names the intended outcome (a changed
+ *  mutation is `Saved`; a validated zero-write confirm is `No changes`), so a
+ *  prior/other success word cannot satisfy this confirm. */
+async function waitForDetailVerdict(client, expected, label, timeoutMs = 20_000) {
   let detail = ''
   try {
     await waitForCondition(async () => {
       detail = pageDetailText(await frameOf(client))
-      return detail.includes('Saved') || detail.includes('No changes')
+      return detail.includes(expected)
     }, label, timeoutMs)
   } catch (error) {
-    throw new SplitSmokeAssertionError(`${label}: the selected Detail never stated Saved/No changes: ${JSON.stringify(detail)}`, { cause: error })
+    throw new SplitSmokeAssertionError(`${label}: the selected Detail never stated ${expected}: ${JSON.stringify(detail)}`, { cause: error })
   }
   return detail
 }
 
 /** ONE explicit Detail confirm; the read-back is the authority (a verdict on
  *  its own could still describe an older write of the same row). */
-async function confirmCandidate(client, expectedCurrent, label) {
+async function confirmCandidate(client, expectedCurrent, label, expectedVerdict = 'Saved') {
   client.send('\r')
   await waitForCurrentValue(client, expectedCurrent, `${label} authoritative read-back`)
-  return await waitForDetailVerdict(client, `${label} saved/no-changes verdict`)
+  return await waitForDetailVerdict(client, expectedVerdict, `${label} ${expectedVerdict} verdict`)
 }
 
 /** Every page row's Host-returned value, read through the real Detail. Each

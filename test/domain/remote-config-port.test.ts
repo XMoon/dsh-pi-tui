@@ -25,6 +25,7 @@ import { serializeTuiSettingsMutation, type ProviderProfileConfig, type TuiSetti
 import { UNPARSEABLE_WEB_OVERRIDE_URL } from '../../src/domain/web-provider-settings.ts'
 import type { WebProviderSettings } from '../../src/runtime/config-port.ts'
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
+import { RemoteConfigWriteLifetime } from '../../src/runtime/remote/config-write-lifetime.ts'
 import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
 
 /* ------------------------------------------------------------------------- *
@@ -420,11 +421,12 @@ function createBackend(seed?: (state: FakeState) => void, options: { readonly au
   for (const [key, value] of Object.entries(remote)) {
     Object.defineProperty(wire, key, { get: () => value, enumerable: false, configurable: false })
   }
+  const writeLifetime = new RemoteConfigWriteLifetime()
   const port = new RemoteConfigPort({
     remote: wire as never,
     connection: { generation: generation.source },
-  })
-  return { port, state, generation, emit, listeners, wire }
+  }, { writeLifetime })
+  return { port, state, generation, emit, listeners, wire, writeLifetime }
 }
 
 /** The create decision over the REAL Remote provider adapter: the other
@@ -2431,17 +2433,19 @@ test('a Remote Billing write is refused when the web provider dependency revisio
   assert.equal(state.namespaces.get(WEB_API_NS)?.value.searchBilling, 'auto')
 })
 
-test('an unrelated namespace revision never blocks a Remote count write', async () => {
-  const { port, state } = createBackend(current => {
-    seedWebNamespaces(current)
-    current.namespaces.set('subagent', {
-      ns: 'subagent', value: { maxDepth: 1, maxActiveSubagents: 8 }, base: { maxDepth: 1, maxActiveSubagents: 8 }, revision: 5,
-    })
-  })
+test('a web-namespace revision change never blocks a Remote count write', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
   await port.describe()
   const capture = await webCaptureOf(port)
-  state.namespaces.get('subagent')!.revision += 1
+  // The OTHER Web namespace changes; the count's target API revision stays.
+  // Count binds only `web-deepseek-api`.
+  const web = state.namespaces.get(WEB_NS)!
+  web.value = { ...web.value, fetchProvider: 'deepseek-fetch-api' }
+  web.user = { ...web.user, fetchProvider: 'deepseek-fetch-api' }
+  web.revision += 1
   await port.describe()
+  assert.equal(port.web.isObservationCurrent(capture, 'api'), true)
+  assert.equal(port.web.isObservationCurrent(capture, 'web'), false)
   const outcome = await port.web.setSearchApiCount(20, capture)
   assert.equal(outcome.kind, 'accepted')
   assert.deepEqual(state.mutateCalls.at(-1)?.ops, [{ op: 'set', path: ['count'], value: 20 }])
@@ -2472,4 +2476,74 @@ test('a Remote provider write re-proves the same-revision USER facts', async () 
   assert.equal(outcome.kind, 'rejected')
   assert.match(outcome.reason, /selection changed since the page read it/u)
   assert.deepEqual(state.mutateCalls, [], 'a same-revision semantic drift never reaches the Host mutate')
+})
+
+test('a Web capture is current only for the ready mirror generation and both revisions', async () => {
+  const { port, state, generation } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  assert.equal(port.web.isObservationCurrent(capture), true)
+  // Same target revisions/values, a replacement Host generation: the old
+  // capture is never current for B.
+  generation.set({ id: 'gen-2' })
+  assert.equal(port.web.isObservationCurrent(capture), false)
+  await port.describe()
+  const fresh = (await webCaptureOf(port))!
+  assert.equal(port.web.isObservationCurrent(fresh), true)
+  // Same generation, one of the two namespace revisions moves: not current.
+  state.namespaces.get(WEB_NS)!.revision += 1
+  await port.describe()
+  assert.equal(port.web.isObservationCurrent(fresh), false)
+  assert.equal(port.web.isObservationCurrent((await webCaptureOf(port))!), true)
+})
+
+test('Remote Billing re-proves the web dependency in the actual queue turn', async () => {
+  const { port, state, writeLifetime, generation } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_NS)!.value = { searchProvider: 'deepseek-search-api', fetchProvider: 'http' }
+    current.namespaces.get(WEB_NS)!.user = { searchProvider: 'deepseek-search-api' }
+    current.namespaces.set('subagent', {
+      ns: 'subagent',
+      value: { maxDepth: 1, maxActiveSubagents: 8 },
+      base: { maxDepth: 1, maxActiveSubagents: 8 },
+      revision: 5,
+    })
+  })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  let release: () => void = () => {}
+  let entered: () => void = () => {}
+  const enteredGate = new Promise<void>(resolve => { entered = resolve })
+  state.mutateGate = () => {
+    entered()
+    return new Promise<void>(resolve => { release = resolve })
+  }
+  // The predecessor is on the UNRELATED subagent section, so neither the
+  // billing target's API revision nor the web dependency is touched by it.
+  const predecessor = port.subagentLimits.mutate(
+    { maxActiveSubagents: { kind: 'set', value: 9 } },
+    5,
+    generation.source.getSnapshot()!,
+  )
+  await enteredGate
+  // The web dependency moves WITHOUT an invalidation: the committed mirror is
+  // still the old, ready observation. Only the queue-turn fresh describe can
+  // see this change.
+  const web = state.namespaces.get(WEB_NS)!
+  web.value = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
+  web.user = { searchProvider: 'deepseek-official' }
+  web.revision += 1
+  const billing = port.web.setSearchBilling('account', capture)
+  for (let attempt = 0; attempt < 100 && writeLifetime.pendingCount() < 2; attempt += 1) await tick()
+  assert.equal(writeLifetime.pendingCount(), 2,
+    'the billing write was admitted to the actual queue behind the predecessor')
+  release()
+  await predecessor
+  const outcome = await billing
+  assert.equal(outcome.kind, 'conflict')
+  assert.match(outcome.reason, /dependency changed since it was read/u)
+  assert.equal(state.mutateCalls.filter(call =>
+    call.ns === WEB_API_NS && call.ops.some(op => op.path[0] === 'searchBilling')).length, 0,
+  'the billing target never dispatches without the fresh dependency proof')
+  assert.equal(state.namespaces.get(WEB_API_NS)?.value.searchBilling, 'auto')
 })

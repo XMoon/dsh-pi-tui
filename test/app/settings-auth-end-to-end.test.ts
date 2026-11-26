@@ -270,6 +270,7 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
         available: () => true,
         read: async () => readWebFacts(),
         readFresh: async () => readWebFacts(),
+        isObservationCurrent: () => true,
       },
       providers: {
         available: () => true,

@@ -95,6 +95,7 @@ interface Harness {
   readonly store: {
     web: WebProviderSettings
     available: boolean
+    current: boolean
     failNext: string | undefined
   }
   readonly view: () => string
@@ -115,6 +116,7 @@ function setup(options: {
   const hostGeneration = {}
   const store = {
     available: true,
+    current: true,
     failNext: undefined as string | undefined,
     web: {
       searchProvider: 'searchProvider' in options ? options.searchProvider : 'deepseek-official',
@@ -251,6 +253,7 @@ function setup(options: {
               authority: { ...store.web.authority },
             }
           : undefined,
+        isObservationCurrent: () => store.current,
         setSearchProvider: async (id: string, _capture: WebProviderSettings) => {
           const selection = store.web.providerSelection.search
           if (store.web.searchProvider === id && selection.userSet && selection.userId === id) {
@@ -1007,4 +1010,28 @@ test('the list region never carries a settled success word', async t => {
   assert.match(list, /Search API Result Count/u)
   assert.doesNotMatch(list, /Saved|No changes/u,
     'the list row suppresses success words; only the selected Detail may carry one')
+})
+
+test('a replaced ready Host demotes the old Current/Saved to Last-known read-only and offers no confirm', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await selectListRow(h, 2) // Search API Result Count
+  await key(h, ENTER)
+  await key(h, DOWN) // 10 -> 20
+  await key(h, ENTER)
+  await waitForPainted(h, 'the count Saved', frame => frame.includes('Current: 20') && frame.includes('Saved'))
+  // B is a new ready Host generation; the page's cached A observation is no
+  // longer current, even if the numeric revisions/values happen to match.
+  h.store.current = false
+  h.store.web.authority = { ...h.store.web.authority, generation: {} }
+  h.store.web.api.count = 50
+  // A real fresh read publishes B; the old A Saved receipt must retire, and
+  // the ready-but-not-current facts may only be painted as read-only.
+  await key(h, 'r')
+  const frame = await waitForPainted(h, 'the last-known demotion',
+    f => f.includes('Last-known · read-only: 50'))
+  assert.doesNotMatch(frame, /Saved/u, 'A\'s receipt is retired, never painted as B\'s current save')
+  assert.doesNotMatch(frame, /Confirm \[Enter\]/u, 'a non-current observation offers no confirm')
+  assert.equal(h.store.web.api.count, 50, 'the stale gesture dispatched nothing')
 })
