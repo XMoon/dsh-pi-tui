@@ -482,7 +482,7 @@ async function assertPublicChain(receipt, launch, at, options = {}) {
       entry: role === 'cli' ? facts.entryRealpath : installation.entries[role],
       receiptEntry: role,
       home,
-      profile: facts.officialProfile ?? launch.profile,
+      profile: role === 'cli' ? undefined : (facts.officialProfile ?? launch.profile),
       anchor: role === 'cli' ? undefined : anchor,
       uid,
       requireEnv: true,
