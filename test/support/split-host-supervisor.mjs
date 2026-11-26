@@ -869,6 +869,56 @@ async function terminateOwnedEntry(handle, reason) {
   return await handle.termination
 }
 
+function assertPublicAuthorityAdmission(label) {
+  assertLifecycleOpen(label)
+  if (publicAuthorityProducer === undefined || publicAuthorityProducer.admissionOpen !== true) {
+    throw new Error(`${label}: the G1 native producer admission is closed`)
+  }
+}
+
+/**
+ * The ONE scene-level native reservation for the fixed G1 authority producer.
+ * It is registered before terminal.run and settled through this single-flight
+ * path by both the handler and the Supervisor cleanup.
+ */
+async function settlePublicAuthorityProducer(reason) {
+  const producer = publicAuthorityProducer
+  if (producer === undefined) return
+  producer.admissionOpen = false
+  if (producer.settlementPromise !== undefined) return await producer.settlementPromise
+  producer.settlementPromise = (async () => {
+    try {
+      await producer.terminal.closeQuiet()
+    } catch (error) {
+      producer.closeError = boundedErrorText(error)
+    }
+    const sessionDeadline = Date.now() + 15_000
+    for (;;) {
+      const sessions = new Set(await openTuiSessions())
+      if (!sessions.has(producer.sessionId)) break
+      if (Date.now() >= sessionDeadline) throw new Error(`${reason}: the G1 native session ${producer.sessionId} is still open`)
+      await sleep(50)
+    }
+    producer.nativeSessionTerminal = true
+    if (producer.shellIdentity !== undefined) {
+      const state = processIdentityState(producer.shellIdentity.identity)
+      if (state === 'alive' || state === 'unknown') {
+        throw new Error(`${reason}: the G1 native shell identity is ${state}`)
+      }
+      const pgid = producer.shellIdentity.identity.pgid
+      if (Number.isInteger(pgid)) {
+        const members = kernelGroupLiveMemberPids(processKernelReaders(), pgid, `${reason} G1 foreground group`)
+        if (members.length > 0) throw new Error(`${reason}: the G1 foreground group still has live members: ${JSON.stringify(members)}`)
+      }
+      producer.foregroundGroupTerminal = true
+    } else if (producer.nativeRunAttempted === true) {
+      throw new Error(`${reason}: the G1 producer attempted a native run without a captured shell identity`)
+    }
+    producer.settled = true
+  })()
+  return await producer.settlementPromise
+}
+
 async function terminateAllProcessEntries(reason) {
   const problems = []
   const reclaim = async (handle, label) => {
@@ -886,7 +936,7 @@ async function terminateAllProcessEntries(reason) {
         }
       }
     } catch (error) {
-      problems.push({ entryId: handle.entryId, kind: handle.kind ?? null, error: boundedError(error) })
+      problems.push({ entryId: handle.entryId, kind: handle.kind ?? null, error: boundedErrorText(error) })
     }
   }
   for (const handle of [...qualificationClients].reverse()) {
@@ -1919,13 +1969,11 @@ async function cleanup(reason, options = {}) {
       // reclaim it BEFORE the Host generations and before the scene root.
       await terminateQualificationClient(reason)
       if (scene?.kind === 'process') {
-        for (const authorityTerminal of publicAuthorityTerminals.splice(0).reverse()) {
-          try {
-            await authorityTerminal.closeQuiet()
-          } catch (error) {
-            clean = false
-            appendNote('public-authority-terminal-close-failed', { reason: boundedErrorText(error) })
-          }
+        try {
+          await settlePublicAuthorityProducer(`${reason}: authority producer`)
+        } catch (error) {
+          clean = false
+          appendNote('public-authority-producer-settlement-failed', { reason: boundedErrorText(error) })
         }
         try {
           const problems = await terminateAllProcessEntries(reason)
@@ -6219,10 +6267,12 @@ function capturePublicShellTty(pid, label) {
 async function waitForPublicProcessOrExit(handle, rootPid, marker, label, timeoutMs, options = {}) {
   const started = Date.now()
   let lastUnknown = []
+  let lastNotTarget = []
   for (;;) {
     const scan = scanPublicProcessTree(rootPid, marker, label, options)
     if (scan.kind === 'found') return { kind: 'process', process: scan.process }
-    if (scan.kind === 'none') lastUnknown = scan.unknown
+    if (scan.kind === 'none') { lastUnknown = scan.unknown; lastNotTarget = scan.notTarget ?? [] }
+    if (scan.kind === 'unknown') { lastUnknown = [{ code: scan.code ?? 'UNKNOWN', detail: scan.detail ?? null }]; lastNotTarget = [] }
     assertPublicAdmissionOpen(label)
     const state = await withProcessNativeOperation('public-daemon-process-state', handle.launchId,
       () => handle.terminal.state()).catch(() => undefined)
@@ -6232,7 +6282,7 @@ async function waitForPublicProcessOrExit(handle, rootPid, marker, label, timeou
       return { kind: 'exit', exit: { code: state.exited, signal: state.exit_signal ?? null }, text }
     }
     if (Date.now() - started >= timeoutMs) {
-      throw new Error(`${label}: no real ${marker} process and no real exit under PID ${String(rootPid)} within ${String(timeoutMs)}ms${lastUnknown.length === 0 ? '' : `; unresolved unknown reads: ${JSON.stringify(lastUnknown)}`}`)
+      throw new Error(`${label}: no real ${marker} process and no real exit under PID ${String(rootPid)} within ${String(timeoutMs)}ms${lastUnknown.length === 0 ? '' : `; unresolved unknown reads: ${JSON.stringify(lastUnknown)}`}${lastNotTarget.length === 0 ? '' : `; not-target reasons: ${JSON.stringify(lastNotTarget)}`}`)
     }
     await sleep(25)
   }
@@ -6256,6 +6306,7 @@ async function waitForPublicProcess(rootPid, marker, label, timeoutMs, options =
     const scan = scanPublicProcessTree(rootPid, marker, label, options)
     if (scan.kind === 'found') return scan.process
     if (scan.kind === 'none') lastUnknown = scan.unknown
+    if (scan.kind === 'unknown') lastUnknown = [{ code: scan.code ?? 'UNKNOWN', detail: scan.detail ?? null }]
     if (Date.now() - started >= timeoutMs) {
       throw new Error(`${label}: no real ${marker} process under PID ${String(rootPid)} within ${String(timeoutMs)}ms${lastUnknown.length === 0 ? '' : `; unresolved unknown reads: ${JSON.stringify(lastUnknown)}`}`)
     }
@@ -7348,7 +7399,31 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
     if (handle.cli.pid === handle.shellPid) {
       // A direct native spawn has no intermediate shell; the same kernel
       // identity is one process, never a fabricated edge.
-      handle.shellIdentity = captureShellIdentity(handle.shellPid, `${label} public CLI/shell`)
+      const originalShellIdentity = handle.shellIdentity
+      const freshShellIdentity = captureShellIdentity(handle.shellPid, `${label} public CLI/shell`)
+      if (freshShellIdentity.birth !== originalShellIdentity.birth) {
+        const before = originalShellIdentity.identity
+        const after = freshShellIdentity.identity
+        const sameKernelProcess = before.platform === after.platform && before.pid === after.pid
+          && (before.platform === 'linux'
+            ? before.startTicks === after.startTicks
+            : before.bootUUID === after.bootUUID
+              && before.uniqueId === after.uniqueId
+              && before.startSec === after.startSec
+              && before.startUsec === after.startUsec)
+        if (!sameKernelProcess) {
+          throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the CLI=shell identity changed its kernel process`)
+        }
+        // Darwin exec refreshes p_uuid while the pid/uniqueid/start are the
+        // same kernel process. Record the observed transition explicitly; do
+        // not silently replace the original shell birth.
+        handle.shellExecTransition = {
+          from: originalShellIdentity.birth,
+          to: freshShellIdentity.birth,
+          at: now(),
+        }
+      }
+      handle.shellIdentity = freshShellIdentity
       handle.shellTty = capturePublicShellTty(handle.shellPid, `${label} public CLI/shell`)
     }
     syncPublicLaunchReceipt()
@@ -7924,6 +7999,21 @@ function parseDaemonStatusFields(text) {
   return fields
 }
 
+async function handlePublicScopeState() {
+  requireProcessScene('PUBLIC_SCOPE_STATE')
+  assertLifecycleOpen('PUBLIC_SCOPE_STATE')
+  const registry = publicPathPresence(join(processScope.dir, 'instance.json'), 'PUBLIC_SCOPE_STATE registry')
+  const launch = publicPathPresence(join(processScope.dir, 'launch.json'), 'PUBLIC_SCOPE_STATE launch')
+  const hosts = livePublicHostPids()
+  // A live Host legitimately holds the seat. Only a no-Host state is expected
+  // to be seat-free; the test compares the whole result for no-effect cases.
+  if (hosts.length === 0) {
+    await assertSceneHostSeatFree('PUBLIC_SCOPE_STATE')
+    await assertClientSeatFree(scene.installation, processScope.scopeId, 'PUBLIC_SCOPE_STATE')
+  }
+  return { registry, launch, hosts: hosts.map(host => ({ pid: host.pid, birth: host.birth })) }
+}
+
 async function handlePublicDaemonStatus(message) {
   requireProcessScene('PUBLIC_DAEMON_STATUS')
   assertLifecycleOpen('PUBLIC_DAEMON_STATUS')
@@ -8009,17 +8099,23 @@ setInterval(() => {}, 1000)
   const other = join(otherDir, 'authority-child.mjs')
   writeFileSync(other, readFileSync(child, 'utf8'), { mode: 0o600 })
   const python = join(dir, 'execve.py')
-  writeFileSync(python, `import ctypes,json,os,sys
+  writeFileSync(python, `import ctypes,json,os,sys,time
 node=sys.argv[1]
 child=sys.argv[2]
 env=json.loads(os.environ["P1D_AUTH_EXEC_ENV"])
 argv=[node,child]
-libc=ctypes.CDLL(None,use_errno=True)
-libc.execve.argtypes=[ctypes.c_char_p,ctypes.POINTER(ctypes.c_char_p),ctypes.POINTER(ctypes.c_char_p)]
-argv_p=(ctypes.c_char_p*(len(argv)+1))(*[x.encode() for x in argv],None)
-env_p=(ctypes.c_char_p*(len(env)+1))(*[x.encode() for x in env],None)
-libc.execve(node.encode(),argv_p,env_p)
-raise OSError(ctypes.get_errno(),os.strerror(ctypes.get_errno()))
+pid=os.fork()
+if pid == 0:
+    libc=ctypes.CDLL(None,use_errno=True)
+    libc.execve.argtypes=[ctypes.c_char_p,ctypes.POINTER(ctypes.c_char_p),ctypes.POINTER(ctypes.c_char_p)]
+    argv_p=(ctypes.c_char_p*(len(argv)+1))(*[x.encode() for x in argv],None)
+    env_p=(ctypes.c_char_p*(len(env)+1))(*[x.encode() for x in env],None)
+    libc.execve(node.encode(),argv_p,env_p)
+    os._exit(127)
+with open(os.environ["P1D_AUTH_CHILD_PID_OUT"], "w") as out:
+    json.dump({"pid": pid}, out)
+while True:
+    time.sleep(1)
 `, { mode: 0o600 })
   return { child, parent, other, python }
 }
@@ -8071,6 +8167,23 @@ async function handlePublicAuthorityControl(message) {
     sentinel: {},
   }
   try {
+    const split = createSplitTerminal({
+      prefix: 'public-authority',
+      traceDirectory: join(scene.workDir, 'trace'),
+      artifactsDirectory: join(scene.workDir, 'artifacts'),
+    })
+    terminal = split.terminal
+    if (publicAuthorityProducer !== undefined) throw new Error('PUBLIC_AUTHORITY_CONTROL: a previous producer reservation is still registered')
+    publicAuthorityProducer = {
+      label: 'authority producer',
+      terminal,
+      sessionId: split.sessionId,
+      admissionOpen: true,
+      nativeRunAttempted: false,
+      shellIdentity: undefined,
+      settled: false,
+    }
+    assertPublicAuthorityAdmission('PUBLIC_AUTHORITY_CONTROL before sentinel')
     sentinel = spawn('/bin/sleep', ['120'], { stdio: 'ignore', detached: true })
     sentinelHandle = registerAuthorityHelper({
       entryId: 'public-authority-sentinel', kind: 'authority-sentinel', label: 'authority sentinel',
@@ -8078,13 +8191,6 @@ async function handlePublicAuthorityControl(message) {
     })
     helpers.push(sentinelHandle)
     facts.sentinel = { pid: sentinel.pid, birth: sentinelHandle.birth }
-    const split = createSplitTerminal({
-      prefix: 'public-authority',
-      traceDirectory: join(scene.workDir, 'trace'),
-      artifactsDirectory: join(scene.workDir, 'artifacts'),
-    })
-    terminal = split.terminal
-    publicAuthorityTerminals.push(terminal)
     const out = {
       parent: join(dir, 'parent.json'),
       child: join(dir, 'child.json'),
@@ -8092,7 +8198,9 @@ async function handlePublicAuthorityControl(message) {
       detached: join(dir, 'detached.json'),
       missing: join(dir, 'missing.json'),
       duplicate: join(dir, 'duplicate.json'),
+      duplicatePid: join(dir, 'duplicate-child-pid.json'),
       malformed: join(dir, 'malformed.json'),
+      malformedPid: join(dir, 'malformed-child-pid.json'),
       trigger: join(dir, 'spawn-second'),
     }
     const baseEnv = {
@@ -8110,6 +8218,8 @@ async function handlePublicAuthorityControl(message) {
       P1D_AUTH_SPACE: 'a b c',
       P1D_AUTH_ASSIGN: 'x=y=z',
     }
+    assertPublicAuthorityAdmission('PUBLIC_AUTHORITY_CONTROL before PTY run')
+    publicAuthorityProducer.nativeRunAttempted = true
     const opened = await withProcessNativeOperation('public-authority-run', 'public-authority',
       () => terminal.run(process.execPath, [files.parent], {
         cwd: dir, cols: 120, rows: 40, waitReady: false, env: baseEnv,
@@ -8117,6 +8227,8 @@ async function handlePublicAuthorityControl(message) {
     const shellPid = opened.shell_pid
     if (!Number.isInteger(shellPid) || shellPid <= 0) throw new Error('PUBLIC_AUTHORITY_CONTROL: the native PTY has no shell PID')
     const shellIdentity = captureShellIdentity(shellPid, 'PUBLIC_AUTHORITY_CONTROL shell')
+    publicAuthorityProducer.shellPid = shellPid
+    publicAuthorityProducer.shellIdentity = shellIdentity
     const shellTty = capturePublicShellTty(shellPid, 'PUBLIC_AUTHORITY_CONTROL shell')
     const parentGround = await waitForAuthorityFile(out.parent, 'authority parent')
     const parentObservation = obs.observeFull(shellPid)
@@ -8180,6 +8292,7 @@ async function handlePublicAuthorityControl(message) {
     if (childPids.kind !== 'ok' || !childPids.pids.includes(childGround.pid)) {
       throw new Error('PUBLIC_AUTHORITY_CONTROL: the real child enumeration did not include the controlled child')
     }
+    assertPublicAuthorityAdmission('PUBLIC_AUTHORITY_CONTROL before next producer')
     writeFileSync(out.trigger, '', { mode: 0o600 })
     const second = await waitForAuthorityFile(join(dir, 'second-pid.json'), 'authority second child')
     const secondGround = await waitForAuthorityFile(out.second, 'authority second facts')
@@ -8194,6 +8307,7 @@ async function handlePublicAuthorityControl(message) {
 
     // The one fixed detached target is owned by the common tracked-helper
     // lifecycle, not by a parent fixture or a local signal loop.
+    assertPublicAuthorityAdmission('PUBLIC_AUTHORITY_CONTROL before next producer')
     const detachedChild = spawn(process.execPath, [files.child], {
       cwd: dir, stdio: 'ignore', detached: true,
       env: { ...baseEnv, P1D_AUTH_OUT: out.detached },
@@ -8232,6 +8346,7 @@ async function handlePublicAuthorityControl(message) {
 
     const missingEnv = { ...baseEnv }
     delete missingEnv.SPLIT_PROCESS_DSH_ANCHOR
+    assertPublicAuthorityAdmission('PUBLIC_AUTHORITY_CONTROL before next producer')
     const missingChild = spawn(process.execPath, [files.child], {
       cwd: dir, stdio: 'ignore', detached: true,
       env: { ...missingEnv, P1D_AUTH_OUT: out.missing },
@@ -8254,17 +8369,25 @@ async function handlePublicAuthorityControl(message) {
       FOO: 'two',
     }).map(([key, value]) => `${key}=${value}`)
     execEnv.push('FOO=two')
+    assertPublicAuthorityAdmission('PUBLIC_AUTHORITY_CONTROL before next producer')
     const duplicateChild = spawn('/usr/bin/python3', [files.python, process.execPath, files.child], {
       cwd: dir, stdio: 'ignore', detached: true,
-      env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(execEnv) },
+      env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(execEnv), P1D_AUTH_CHILD_PID_OUT: out.duplicatePid },
     })
     const duplicateHandle = registerAuthorityHelper({
       entryId: 'public-authority-duplicate-env', kind: 'authority-duplicate-env', label: 'authority duplicate-env',
       child: duplicateChild, dir,
     })
     helpers.push(duplicateHandle)
+    const duplicatePidFacts = await waitForAuthorityFile(out.duplicatePid, 'duplicate-env child pid')
+    // The wrapper's own Darwin process UUID is refreshed by its controlled
+    // fork; bind the stable wrapper identity after that fork. This is not a
+    // child/exec leader birth overwrite.
+    duplicateHandle.birth = captureEntryBirth(duplicateChild, 'duplicate-env stable wrapper')
     const duplicateGround = await waitForAuthorityFile(out.duplicate, 'duplicate-env child')
-    duplicateHandle.birth = captureEntryBirth(duplicateChild, 'authority duplicate-env post-exec')
+    if (duplicatePidFacts.pid !== duplicateGround.pid) {
+      throw new Error('PUBLIC_AUTHORITY_CONTROL: the duplicate execve wrapper published a different child PID')
+    }
     const duplicateObservation = obs.observeFull(duplicateGround.pid)
     facts.negative.duplicateEnv = duplicateObservation.kind === 'alive'
       ? reason(duplicateObservation, { ...parentExpected, birth: duplicateObservation.birth, entry: files.child })
@@ -8275,17 +8398,22 @@ async function handlePublicAuthorityControl(message) {
       `P1D_AUTH_OUT=${out.malformed}`,
       'NOEQUALS',
     ]
+    assertPublicAuthorityAdmission('PUBLIC_AUTHORITY_CONTROL before next producer')
     const malformedChild = spawn('/usr/bin/python3', [files.python, process.execPath, files.child], {
       cwd: dir, stdio: 'ignore', detached: true,
-      env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(malformedOnly), P1D_AUTH_OUT: out.malformed },
+      env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(malformedOnly), P1D_AUTH_OUT: out.malformed, P1D_AUTH_CHILD_PID_OUT: out.malformedPid },
     })
     const malformedHandle = registerAuthorityHelper({
       entryId: 'public-authority-malformed-env', kind: 'authority-malformed-env', label: 'authority malformed-env',
       child: malformedChild, dir,
     })
     helpers.push(malformedHandle)
+    const malformedPidFacts = await waitForAuthorityFile(out.malformedPid, 'malformed-env child pid')
+    malformedHandle.birth = captureEntryBirth(malformedChild, 'malformed-env stable wrapper')
     const malformedGround = await waitForAuthorityFile(out.malformed, 'malformed-env child')
-    malformedHandle.birth = captureEntryBirth(malformedChild, 'authority malformed-env post-exec')
+    if (malformedPidFacts.pid !== malformedGround.pid) {
+      throw new Error('PUBLIC_AUTHORITY_CONTROL: the malformed execve wrapper published a different child PID')
+    }
     const malformedObservation = obs.observeFull(malformedGround.pid)
     facts.negative.malformedEnv = malformedObservation.kind === 'alive'
       ? reason(malformedObservation, { ...parentExpected, birth: malformedObservation.birth, entry: files.child })
@@ -8348,14 +8476,18 @@ async function handlePublicAuthorityControl(message) {
     for (const path of [join(dir, 'spawn-second')]) {
       try { unlinkSync(path) } catch (error) { if (error?.code !== 'ENOENT') closeErrors.push(`trigger ${path}: ${boundedErrorText(error)}`) }
     }
-    if (terminal !== undefined) {
-      try { await terminal.closeQuiet() } catch (error) { closeErrors.push(boundedErrorText(error)) }
+    let producerSettlementError
+    try {
+      await settlePublicAuthorityProducer('PUBLIC_AUTHORITY_CONTROL cleanup')
+    } catch (error) {
+      producerSettlementError = boundedErrorText(error)
     }
     const terminationProblems = await terminateAllProcessEntries('PUBLIC_AUTHORITY_CONTROL cleanup')
     for (const handle of qualificationHelpers) {
       if (handle.exited) handle.finished = true
     }
-    const liveHelpers = qualificationHelpers.filter(handle => !handle.exited || handle.finished !== true)
+    const liveHelpers = qualificationHelpers.filter(handle => !handle.exited)
+    const unfinishedHelpers = qualificationHelpers.filter(handle => handle.finished !== true)
     const unknownHelpers = liveHelpers.filter(handle => {
       const observation = readKernelProcess(handle.child.pid)
       return observation.kind === 'unknown'
@@ -8373,8 +8505,7 @@ async function handlePublicAuthorityControl(message) {
         }
       }
     }
-    const terminalIndex = publicAuthorityTerminals.indexOf(terminal)
-    if (terminalIndex >= 0) publicAuthorityTerminals.splice(terminalIndex, 1)
+    const producer = publicAuthorityProducer
     facts.cleanup = {
       registered: helpers.length,
       leaked: liveHelpers.length,
@@ -8383,10 +8514,25 @@ async function handlePublicAuthorityControl(message) {
       unregistered,
       closeErrors,
       terminationProblems,
+      producerSettlementError,
+      producerSettled: producer?.settled === true,
+      nativeSessionTerminal: producer?.nativeSessionTerminal === true,
+      foregroundGroupTerminal: producer?.foregroundGroupTerminal === true,
       helpersTerminal: liveHelpers.length === 0,
+      unfinishedHelpers: unfinishedHelpers.map(handle => handle.entryId),
       sentinelGone: readKernelProcess(sentinel.pid).kind === 'gone',
     }
+    facts.cleanup.blocking = [
+      ...(producerSettlementError === undefined ? [] : [`producer:${producerSettlementError}`]),
+      ...(producer?.settled === true ? [] : ['producer-not-settled']),
+      ...(liveHelpers.length > 0 ? [`live-helpers:${liveHelpers.length}`] : []),
+      ...terminationProblems.map(problem => `termination:${JSON.stringify(problem)}`),
+      ...closeErrors,
+    ]
     writeReceipt({ publicAuthorityControl: facts })
+    if (facts.cleanup.blocking.length > 0) {
+      throw new Error(`PUBLIC_AUTHORITY_CONTROL: cleanup is not quiesced: ${JSON.stringify(facts.cleanup.blocking)}`)
+    }
   }
 }
 
@@ -8403,12 +8549,25 @@ async function handlePublicDaemonStop(message) {
   if (host.published !== true || host.winner !== true) {
     throw new Error('PUBLIC_DAEMON_STOP: this Host is not the unique published/authenticated winner')
   }
+  for (const attempt of publicHosts) {
+    if (attempt === host || attempt.reclaimed === true) continue
+    if (publicHostStillLive(attempt)) throw new Error(`PUBLIC_DAEMON_STOP: another captured Host attempt is still live: ${String(attempt.pid)}`)
+    if (Number.isInteger(attempt.pgid)) {
+      const members = kernelGroupLiveMemberPids(processKernelReaders(), attempt.pgid, 'PUBLIC_DAEMON_STOP other attempt group')
+      if (members.length > 0) throw new Error(`PUBLIC_DAEMON_STOP: another attempt group still has live members: ${JSON.stringify(members)}`)
+    }
+  }
   if (host.reclaimed === true) return publicDaemonHostFacts(host)
   if (!publicHostStillLive(host)) {
     throw new Error('PUBLIC_DAEMON_STOP: the captured public Host is already dead before daemon stop')
   }
   await bindLatePublicHostRegistry(host, 'PUBLIC_DAEMON_STOP')
   assertPublicHostOwnership(host, 'PUBLIC_DAEMON_STOP:before')
+  const stopFiles = readScopeFiles(scene.installation.dshHome, processScope.scopeId)
+  const stopAuth = await waitForPublicHostAuthentication(handle, stopFiles.registry, stopFiles.launch, 30_000)
+  if (stopAuth.identity === undefined || host.instanceId !== stopFiles.registry.instanceId) {
+    throw new Error('PUBLIC_DAEMON_STOP: the current official authentication does not bind the captured Host')
+  }
   if (Number.isInteger(host.pgid)) {
     const members = kernelGroupLiveMemberPids(processKernelReaders(), host.pgid, 'PUBLIC_DAEMON_STOP group')
       .filter(pid => pid !== host.pid)
@@ -8757,6 +8916,13 @@ async function reclaimPublicHostWithAdmission(host, reason, options = {}) {
   try {
     await waitForPublicHostTerminal(host, `reclaimPublicHost:${reason}`, 30_000)
   } catch (error) {
+    const escalationFiles = readScopeFiles(scene.installation.dshHome, processScope.scopeId)
+    const escalationHandle = publicLaunches.find(candidate => candidate.launchId === host.attemptByLaunchId)
+    if (escalationHandle === undefined) throw new Error(`reclaimPublicHost:${reason}: the published Host has no owning launch`)
+    const escalationAuth = await waitForPublicHostAuthentication(escalationHandle, escalationFiles.registry, escalationFiles.launch, 30_000, { allowClosed: true })
+    if (escalationAuth.identity === undefined || host.instanceId !== escalationFiles.registry.instanceId) {
+      throw new Error(`reclaimPublicHost:${reason}: the escalation lost current official authentication`)
+    }
     const fresh = assertPublicHostOwnership(host, `reclaimPublicHost:${reason}: escalation`,
       options.expectedBirth ?? host.birth)
     appendNote('public-host-escalated', { pid: host.pid, birth: fresh.birth, reason, signal: 'SIGKILL' })
@@ -9416,7 +9582,7 @@ const ENTRY_REDACTED_KEYS = new Set([
 
 /** The real detached helper processes this Scene owns beyond Host/Client. */
 const qualificationHelpers = []
-const publicAuthorityTerminals = []
+let publicAuthorityProducer
 let qualificationHelperSequence = 0
 /**
  * The ONE scoped installed-copy mutation of a process Scene, or undefined.
@@ -11784,6 +11950,11 @@ async function dispatch(message) {
       }
       case 'PUBLIC_DAEMON_TERMINATE_CLI': {
         const payload = await handlePublicDaemonTerminateCli(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'PUBLIC_SCOPE_STATE': {
+        const payload = await handlePublicScopeState()
         if (requestId !== undefined) reply(requestId, payload)
         break
       }

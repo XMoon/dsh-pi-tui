@@ -22,6 +22,7 @@ import {
   parseLinuxEnvironment,
   publicAdmissionDisposition,
   publicCaptureDisposition,
+  decodePidSlots,
   publicPathPresence,
 } from '../support/split-public-process-observation.mjs'
 
@@ -251,4 +252,12 @@ test('capture rejects a torn birth and an unproven admission as unknown', () => 
   assert.equal(publicCaptureDisposition(light, full, { admitted: false, reason: 'tty-unproven' }), 'unknown')
   assert.equal(publicCaptureDisposition(light, full, { admitted: false, reason: 'tty-mismatch' }), 'not-target')
   assert.equal(publicCaptureDisposition(light, { kind: 'unknown', code: 'TORN_OBSERVATION' }, { admitted: false, reason: 'tty-unproven' }), 'unknown')
+})
+
+
+test('PID slot framing keeps empty holes distinct from malformed entries', () => {
+  assert.deepEqual(decodePidSlots([1, 0, 2]), { kind: 'ok', pids: [1, 2], emptySlots: 1 })
+  assert.equal(decodePidSlots([1, -1]).code, 'ENUMERATION_FRAMING')
+  assert.equal(decodePidSlots([0, 0]).pids.length, 0)
+  assert.equal(decodePidSlots([1, 0, 2]).emptySlots, 1)
 })

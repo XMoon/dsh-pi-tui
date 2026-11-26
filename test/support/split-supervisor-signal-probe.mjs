@@ -487,7 +487,7 @@ async function assertPublicChain(receipt, launch, at, options = {}) {
       entry: role === 'cli' ? cliEntry : installation.entries[role],
       receiptEntry: role,
       home,
-      profile: role === 'cli' ? undefined : (facts.officialProfile ?? launch.profile),
+      profile: role === 'cli' ? undefined : launch.profile,
       anchor: role === 'cli' ? undefined : anchor,
       uid,
       requireEnv: true,
@@ -1584,8 +1584,11 @@ try {
           }
           if (registry?.hostPid !== launch.host.pid || registry?.instanceId !== launch.host.instanceId
             || registry?.scopeId !== launch.host.scopeId || registry?.buildId !== launch.host.buildId
-            || launchMaterial?.instanceId !== launch.host.instanceId) {
-            fail('public-daemon-before-ready-ack: the current registry/launch does not name the checkpoint Host')
+            || registry?.protocol !== 'dsh-pi-tui/local/2'
+            || registry?.profileRealpath !== receipt.installation.profileDir
+            || launchMaterial?.instanceId !== launch.host.instanceId
+            || launchMaterial?.schema !== 1) {
+            fail('public-daemon-before-ready-ack: the current registry/launch does not match the exact Host material')
           }
           try {
             lstatSync(registryPath)
@@ -1629,7 +1632,7 @@ try {
           birth: refusedHost.birth,
           entry: refused.installation.entries.host,
           home: refused.installation.dshHome,
-          profile: refusedHost.officialProfile ?? refusedLaunch.profile,
+          profile: refusedLaunch.profile,
           anchor: refused.installation.anchor,
           uid: typeof process.getuid === 'function' ? process.getuid() : undefined,
           requireEnv: true,
@@ -1656,8 +1659,11 @@ try {
           || refusedRegistryFacts?.instanceId !== refusedHost.instanceId
           || refusedRegistryFacts?.scopeId !== refusedHost.scopeId
           || refusedRegistryFacts?.buildId !== refusedHost.buildId
-          || refusedLaunchFacts?.instanceId !== refusedHost.instanceId) {
-          fail('public-daemon-ownership-refused: the current material does not name the refused Host')
+          || refusedRegistryFacts?.protocol !== 'dsh-pi-tui/local/2'
+          || refusedRegistryFacts?.profileRealpath !== refused.installation.profileDir
+          || refusedLaunchFacts?.instanceId !== refusedHost.instanceId
+          || refusedLaunchFacts?.schema !== 1) {
+          fail('public-daemon-ownership-refused: the current material does not match the refused Host')
         }
         writeFileSync(publicRefusalReleaseFile, 'release\n', { mode: 0o600 })
         const compensated = await waitUntil(() => {

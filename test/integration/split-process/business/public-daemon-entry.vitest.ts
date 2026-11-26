@@ -364,6 +364,10 @@ test('keeps the default Direct launch independent of the split backend', async (
   try {
     // Cold default Direct must be proven with no existing split Host/Client.
     const sessionsAtStart = [...await scene.sessionIds()].sort()
+    const coldScopeBefore = await scene.publicScopeState()
+    expect(coldScopeBefore.registry).toBe('absent')
+    expect(coldScopeBefore.launch).toBe('absent')
+    expect(coldScopeBefore.hosts).toEqual([])
     const cold = await scene.startPublicDaemon({ label: 'direct-cold-default', cols: 120, rows: 36 })
     launches.push(cold)
     expect(cold.ready, 'the cold default Direct launch reached a usable surface').toBe(true)
@@ -371,8 +375,10 @@ test('keeps the default Direct launch independent of the split backend', async (
     expect(cold.host, 'a cold Direct launch owns no split Host').toBeNull()
     expect(cold.client, 'a cold Direct launch owns no split Client').toBeNull()
     expect(cold.hostAttempt, 'a cold Direct launch captured no Host attempt').toBeNull()
-    expect(existsSync(join(scene.scopeDir, 'instance.json')), 'a cold Direct launch published no split registry').toBe(false)
-    expect(existsSync(join(scene.scopeDir, 'launch.json')), 'a cold Direct launch published no split launch material').toBe(false)
+    const coldScopeDuring = await scene.publicScopeState()
+    expect(coldScopeDuring.registry, 'a cold Direct launch published no split registry').toBe('absent')
+    expect(coldScopeDuring.launch, 'a cold Direct launch published no split launch material').toBe('absent')
+    expect(coldScopeDuring.hosts, 'a cold Direct launch owns no split Host').toEqual([])
     await waitForFrame(cold, '❯', 'the cold Direct composer')
     await cold.type('cold direct')
     await waitForFrame(cold, 'cold direct', 'the cold Direct composer accepts input')
@@ -382,7 +388,10 @@ test('keeps the default Direct launch independent of the split backend', async (
     expect(coldExit.code, 'the cold Direct CLI exit code').toBe(0)
     expect(coldExit.signal).toBe(null)
     await cold.close()
-    expect(existsSync(join(scene.scopeDir, 'instance.json')), 'the cold Direct exit created no split registry').toBe(false)
+    const coldScopeAfter = await scene.publicScopeState()
+    expect(coldScopeAfter.registry, 'the cold Direct exit left no split registry').toBe('absent')
+    expect(coldScopeAfter.launch, 'the cold Direct exit left no split launch material').toBe('absent')
+    expect(coldScopeAfter.hosts, 'the cold Direct exit left no split Host').toEqual([])
     expect([...(await scene.sessionIds())].sort(), 'the cold Direct launch created no Session').toEqual(sessionsAtStart)
 
     const peer = await scene.startPublicDaemon({ label: 'direct-warm-host', backend: 'daemon' })
@@ -395,6 +404,7 @@ test('keeps the default Direct launch independent of the split backend', async (
     const registryBefore = fileDigest(join(scene.scopeDir, 'instance.json'))
     const launchBefore = fileDigest(join(scene.scopeDir, 'launch.json'))
     const sessionsBeforeWarmDirect = [...await scene.sessionIds()].sort()
+    const warmDirectScopeBefore = await scene.publicScopeState()
 
     const launch = await scene.startPublicDaemon({ label: 'direct-warm-default', cols: 120, rows: 36 })
     launches.push(launch)
@@ -421,6 +431,8 @@ test('keeps the default Direct launch independent of the split backend', async (
     expect(fileDigest(join(scene.scopeDir, 'instance.json')), 'the Direct launch changed no split registry content').toBe(registryBefore)
     expect(fileDigest(join(scene.scopeDir, 'launch.json')), 'the Direct launch changed no split launch content').toBe(launchBefore)
     expect([...(await scene.sessionIds())].sort(), 'the warm Direct launch created no Session').toEqual(sessionsBeforeWarmDirect)
+    const warmDirectScopeAfter = await scene.publicScopeState()
+    expect(warmDirectScopeAfter).toEqual(warmDirectScopeBefore)
     expect(peerAfter.clientState, 'the warm peer is still usable after the Direct exit').toBe('alive')
     await peer.type('warm-peer-after-direct')
     await waitForFrame(peer, 'warm-peer-after-direct', 'the warm peer accepts input after the Direct exit')
@@ -527,6 +539,7 @@ test('refuses illegal public backend inputs before creating a split Host', async
     const warmRegistry = fileDigest(join(scene.scopeDir, 'instance.json'))
     const warmLaunch = fileDigest(join(scene.scopeDir, 'launch.json'))
     const warmSessions = [...await scene.sessionIds()].sort()
+    const warmScope = await scene.publicScopeState()
     const warmHeadless = await scene.runPublicDaemonHeadless({ label: 'refuse-headless-warm', backend: 'daemon' })
     expect(warmHeadless.exit.signal, 'the warm non-TTY daemon launch must exit normally').toBeNull()
     expect(warmHeadless.exit.code, 'the warm non-TTY daemon launch exit code').toBeGreaterThan(0)
@@ -542,6 +555,7 @@ test('refuses illegal public backend inputs before creating a split Host', async
     expect(fileDigest(join(scene.scopeDir, 'instance.json')), 'the warm non-TTY refusal changed no registry').toBe(warmRegistry)
     expect(fileDigest(join(scene.scopeDir, 'launch.json')), 'the warm non-TTY refusal changed no launch material').toBe(warmLaunch)
     expect([...(await scene.sessionIds())].sort(), 'the warm non-TTY refusal created no Session').toEqual(warmSessions)
+    expect(await scene.publicScopeState(), 'the warm non-TTY refusal changed no split scope state').toEqual(warmScope)
     await peer.type('warm-refusal-peer')
     await waitForFrame(peer, 'warm-refusal-peer', 'the warm peer stays usable after the refusal')
     await peer.press('Ctrl+U')
@@ -1023,8 +1037,11 @@ test('persists the public daemon preference for the next launch without restarti
     await waitForFrame(current, '> Backend', 'the Backend row is focused')
     await current.press('Enter')
     await waitForFrame(current, 'Choose value', 'the Backend value chooser')
-    await waitForFrame(current, 'Daemon', 'the Daemon candidate')
     await current.press('Down')
+    // Wait for the actual focus transition before committing. Under a loaded
+    // concurrent runner the key can otherwise arrive before the chooser has
+    // applied the Down transition, leaving the chooser open.
+    await waitForFrame(current, '> Daemon', 'the Daemon candidate focused')
     await current.press('Enter')
     // The optional OS-supervision prompt is a real platform representation on
     // macOS; Linux may write the preference directly. The transient

@@ -209,6 +209,19 @@ export function parseLinuxEnvironment(buffer) {
   }
 }
 
+/** Deterministic PID-slot framing: holes are empty, negatives are invalid. */
+export function decodePidSlots(values) {
+  const pids = []
+  let emptySlots = 0
+  for (const value of values) {
+    if (!Number.isInteger(value)) return { kind: 'unknown', code: 'ENUMERATION_FRAMING' }
+    if (value === 0) { emptySlots += 1; continue }
+    if (value < 0) return { kind: 'unknown', code: 'ENUMERATION_FRAMING' }
+    pids.push(value)
+  }
+  return { kind: 'ok', pids, emptySlots }
+}
+
 function readCString(data, offset) {
   if (offset < 0 || offset >= data.length) return undefined
   const end = data.indexOf(0, offset)
@@ -1106,12 +1119,22 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
 
   function children(pid, options = {}) {
     if (platform === 'darwin') {
+      const before = kernelState(pid)
+      if (before.state !== 'alive') return before.state === 'gone' ? gone() : unknown(before.code)
       const listed = darwin.listPids('child', pid, options.startCapacity ?? 64)
-      if (listed.kind !== 'ok' || listed.pids.length > 0) return listed
-      // Zero is an empty child set only when the parent is still current; a
-      // list API success alone does not distinguish an exited parent.
-      const state = kernelState(pid)
-      if (state.state !== 'alive') return state.state === 'gone' ? gone() : unknown(state.code)
+      if (listed.kind === 'gone') {
+        const current = kernelState(pid)
+        if (current.state === 'gone') return gone()
+        return current.state === 'unknown' ? unknown(current.code) : unknown('ENUMERATION_CONTRADICTION')
+      }
+      if (listed.kind !== 'ok') return listed
+      const after = kernelState(pid)
+      if (after.state !== 'alive') return after.state === 'gone' ? gone() : unknown(after.code)
+      if (after.birth !== before.birth) return unknown('TORN_OBSERVATION')
+      if (listed.pids.length > 0) return listed
+      // Zero is an empty child set only when the same parent birth bracketed
+      // the successful list call and the API reported no error (handled by
+      // listPids' errno discriminator above).
       return listed
     }
     let raw
@@ -1143,7 +1166,9 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
 
   function allPids(options = {}) {
     if (platform === 'darwin') {
-      return darwin.listPids('all', 0, options.startCapacity ?? 1024)
+      const listed = darwin.listPids('all', 0, options.startCapacity ?? 1024)
+      if (listed.kind === 'ok' && listed.count === 0) return unknown('ENUMERATION_EMPTY')
+      return listed
     }
     let entries
     try {
@@ -1209,13 +1234,16 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
     if (listed.kind === 'gone') return { kind: 'gone' }
     const candidates = options.includeRoot === true ? [rootPid, ...listed.pids] : listed.pids
     const unknownReads = []
+    const notTarget = []
     for (const pid of candidates) {
       if (options.excludePids?.includes(pid) === true) continue
       const captured = capture(pid, expected)
       if (captured.kind === 'captured') return { kind: 'found', process: captured.process }
       if (captured.kind === 'unknown') unknownReads.push({ pid, code: captured.code })
+      if (captured.kind === 'gone' && pid === rootPid) unknownReads.push({ pid, code: 'ROOT_GONE' })
+      if (captured.kind === 'not-target') notTarget.push({ pid, reason: captured.reason })
     }
-    return { kind: 'none', unknown: unknownReads }
+    return { kind: 'none', unknown: unknownReads, notTarget }
   }
 
   return {
@@ -1473,6 +1501,7 @@ function createDarwinBridge(koffiEntry) {
       if (capacity > MAX_PID_ENUMERATION) return unknown('ENUMERATION_LIMIT')
       const bytes = Buffer.alloc(capacity * 4)
       let count
+      koffi.errno(0)
       try {
         count = kind === 'all'
           ? procListAllPids(bytes, bytes.length)
@@ -1480,19 +1509,23 @@ function createDarwinBridge(koffiEntry) {
       } catch {
         return unknown('READ_FAILED')
       }
-      if (count < 0) {
-        const errno = koffi.errno()
+      const errno = koffi.errno()
+      if (count < 0 || (count === 0 && errno !== 0)) {
         if (errno === ESRCH) return gone()
         if (errno === EPERM || errno === EACCES) return unknown('ACCESS_DENIED')
-        return unknown('READ_FAILED')
+        return unknown('ENUMERATION_ERROR', { count, errno })
       }
       if (count > capacity) return unknown('ENUMERATION_OVERSIZE', { count, capacity })
-      const pids = []
-      for (let index = 0; index < count; index += 1) {
-        const pid = bytes.readInt32LE(index * 4)
-        if (pid > 0) pids.push(pid)
+      const values = []
+      for (let index = 0; index < count; index += 1) values.push(bytes.readInt32LE(index * 4))
+      const decoded = decodePidSlots(values)
+      if (decoded.kind !== 'ok') return unknown(decoded.code)
+      if (decoded.pids.length === 0 && kind === 'all') {
+        return unknown('ENUMERATION_EMPTY', { count, emptySlots: decoded.emptySlots })
       }
-      if (count < capacity) return { kind: 'ok', pids, count, capacity }
+      if (count < capacity) {
+        return { kind: 'ok', pids: decoded.pids, count, capacity, emptySlots: decoded.emptySlots }
+      }
       capacity *= 2
     }
   }

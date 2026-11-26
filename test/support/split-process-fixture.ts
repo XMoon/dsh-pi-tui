@@ -380,6 +380,12 @@ export interface PublicDaemonLaunch {
   readHerdrInvocations(): Array<{ ppid: number; argv: string[] }>
 }
 
+export interface PublicScopeStateFacts {
+  registry: 'present' | 'absent'
+  launch: 'present' | 'absent'
+  hosts: Array<{ pid: number; birth: string }>
+}
+
 export interface PublicDaemonTermOrder {
   sentAt: string
   observedAt: string
@@ -646,6 +652,7 @@ export interface SplitProcessScene {
   /** Release one Supervisor-preallocated qualification barrier (file existence). */
   releaseBarrier(handle: EntryQualificationHandle, name: string): void
   sessionIds(): Promise<string[]>
+  publicScopeState(): Promise<PublicScopeStateFacts>
   sessionEvents(sessionId: string): SessionEvent[] | undefined
   hostSessionLogCount(): number
   waitForNewSessionId(before: ReadonlySet<string>, label: string, timeoutMs?: number): Promise<string>
@@ -1704,6 +1711,10 @@ class ProcessScene implements SplitProcessScene {
 
   async sessionIds(): Promise<string[]> {
     return listSessionIds(this.installation.dshHome)
+  }
+
+  async publicScopeState(): Promise<PublicScopeStateFacts> {
+    return await this.request('PUBLIC_SCOPE_STATE', {}, 60_000) as PublicScopeStateFacts
   }
 
   sessionEvents(sessionId: string): SessionEvent[] | undefined {
