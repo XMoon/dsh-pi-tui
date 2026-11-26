@@ -67,7 +67,11 @@ export function createProgramResumeReporter(input: {
   const emit = (force: boolean): void => {
     if (!installed || closed || suspended) return
     if (!input.canWrite()) return
-    const target = programResumeTarget(input.capability, input.currentSessionId())
+    // Capture the committed id ONCE. The write below is a callback boundary; a
+    // synchronous re-entrant owner change must not make the state record a
+    // newer target than the one actually offered.
+    const sessionId = input.currentSessionId()
+    const target = programResumeTarget(input.capability, sessionId)
     if (target === undefined) {
       // A sessionless/unrepresentable owner withdraws the previous target once.
       if (!force && (lastKind === 'clear' || lastKind === undefined)) return
@@ -83,7 +87,7 @@ export function createProgramResumeReporter(input: {
       dirty = false
       return
     }
-    if (!force && !dirty && lastKind === 'report' && lastSessionId === input.currentSessionId()) return
+    if (!force && !dirty && lastKind === 'report' && lastSessionId === sessionId) return
     try {
       const frame = encodeProgramResumeReport({
         token: target.token,
@@ -108,7 +112,7 @@ export function createProgramResumeReporter(input: {
       return
     }
     lastKind = 'report'
-    lastSessionId = input.currentSessionId()
+    lastSessionId = sessionId
     dirty = false
   }
 

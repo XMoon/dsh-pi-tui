@@ -95,6 +95,27 @@ test('the initial committed Session offers one exact report and duplicate observ
   assert.equal(h.frames.length, 1, 'a generation-only notification or repaint never duplicates the target')
 })
 
+test('a synchronous owner change inside the writer cannot desynchronize the offered target', () => {
+  let current = SESSION_A
+  const frames: string[] = []
+  const reporter = createProgramResumeReporter({
+    capability: capability(),
+    currentSessionId: () => current,
+    canWrite: () => true,
+    write: frame => {
+      frames.push(frame)
+      if (frames.length === 1) current = SESSION_B
+    },
+    diag,
+  })
+  reporter.install()
+  assert.equal(frames.length, 1)
+  assert.deepEqual(decodedArgv(bodyOf(frames[0] as string).body).slice(-1), [SESSION_A])
+  reporter.observe()
+  assert.equal(frames.length, 2)
+  assert.deepEqual(decodedArgv(bodyOf(frames[1] as string).body).slice(-1), [SESSION_B])
+})
+
 test('an A -> B commit reports B and never replays A', () => {
   const h = harness(SESSION_A)
   h.reporter.install()
