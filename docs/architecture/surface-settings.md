@@ -590,7 +590,11 @@ specialist-page contract below).
   is painted through the existing sanitizers and width helpers.
 
   Authority is the Host `web` / `web-deepseek-api` sections through the
-  `WebProviderConfig` read and its provider/count/question/Billing setters. The
+  `WebProviderConfig` read and its provider/count/question/Billing setters. A
+  ready read carries the opaque Host settings-authority generation and both
+  namespace revisions; page entry, explicit `r`, queue admission and post-write
+  verification use `readFresh()` (Direct: a real descriptor read; Remote: an
+  official `describeFresh`), never a cached mirror. The
   provider choices are the official identities `DeepSeek server-side
   search`↔`deepseek-official` and `HTTP`↔`http`, plus the separately billed
   `DeepSeek Search API` / `DeepSeek Fetch API`. HOST SELECTION IS AUTHORITATIVE:
@@ -621,19 +625,21 @@ specialist-page contract below).
   reset. The reset is the official
   `settings.mutate('web', [{op:'unset', path:[field]}], revision)`; the page
   never substitutes `''`, `null`, `undefined`, `auto` or the deployment id and
-  never edits the profile document. Its settled verdict comes from a fresh
-  authoritative read: `Verified` requires the read to be ready AND the effective
-  raw id to equal the fresh deployment `baseId` (including `undefined`). The
-  Host may keep an explicit USER value equal to that base while the same section
-  carries another USER override; the page reports that residual state as a fact
-  rather than claiming the USER field vanished. A provider write in flight
-  carries the action (reset vs explicit id) and the layer facts the frame
-  painted; the queue head refuses (`Not saved`, zero writes) a gesture whose
-  deployment default or USER layer another writer already changed. Confirming a
-  provider the authority already holds with a USER own-field of the same id is a
-  zero-write `Verified`; an explicit candidate that is only inherited still
-  issues the ONE official setter and is `Verified` only when the fresh USER
-  own-field really carries it. The count row offers the `5/10/20/50` presets while the official domain
+  never edits the profile document. The confirmed decision carries the
+  generation and BOTH revisions of the frame that painted it plus the raw layer
+  facts; the command FIFO and the adapter's actual dispatch boundary re-prove
+  the SAME generation, the target `web` revision and those facts. A moved target
+  revision (including a sibling field) or changed deployment/USER facts is
+  `Could not save` with ZERO writes; a newer read is never adopted as a new
+  authorization. A legal no-op (no USER own-field and effective equal to the
+  deployment base, or an explicit USER pin already carrying the requested id) is
+  the distinct `No changes` outcome with ZERO Host mutation. `Saved` requires a
+  trusted fresh readback started after the receipt: the effective raw id equals
+  the fresh deployment `baseId` for a reset, and an explicit set additionally
+  requires the USER own-field to carry the requested id. The Host may keep an
+  explicit USER value equal to that base while the same section carries another
+  USER override; the page reports that residual state as a fact rather than
+  claiming the USER field vanished. The count row offers the `5/10/20/50` presets while the official domain
   stays 1–50: a stored integer outside the presets (for example `7`) is reported
   exactly and is never rewritten by navigation or refresh. `Share Original
   Question` is `on` by default and states the payload boundary (up to 128
@@ -666,28 +672,41 @@ specialist-page contract below).
   Detail viewport and the latest authority is ready and writable; a candidate
   row click only moves the draft highlight and writes nothing. A Confirm span
   that is absent, cropped, from a previous frame or invalidated by any
-  key/wheel/resize/refresh/save phase dispatches nothing, and the delegated
-  activation re-proves the same row, raw candidate and live authority before
-  the same `confirmSelected()` path runs. At its turn the intent re-proves
-  readiness and section availability, takes the NEWEST committed read as its
-  base, refuses a custom-route/candidate violation with ZERO writes and
-  dispatches the ONE official setter (or the official reset described above). A
-  fresh read-back then decides the settled word: `Verified` only when the
-  authority holds the requested identity (for a provider row, the provider
-  layer rule above), `Not saved` (with the value the Host really keeps) when a
-  readable authority differs, and `Outcome unknown` when the result cannot be
-  read back. A superseded read never decides
-  a verdict; a newer read is awaited first, and a page closed mid-write only
-  loses its own repaint — the dispatched Host operation still settles in the
-  command owner. Confirming a value the authority already holds performs NO
-  setter (that states the current fact, never a promise about the stored USER
-  layer) — except that a provider row's already-current shortcut additionally
-  requires the USER own-field to carry that id; the AUTOMATIC (absent) provider
-  state never satisfies an explicit candidate — confirming one always issues the
-  ONE real setter and verifies from the fresh read-back.
+  key/wheel/resize/refresh/save phase dispatches nothing. The confirmed decision
+  carries the EXACT semantic action, raw candidate, row and original capture
+  (generation, both revisions and observed facts) from the LAST painted frame;
+  keyboard `Enter` and the delegated span consume that same typed decision,
+  never a live index or a candidate list re-derived after the paint, and an
+  A→B→A authority round trip cannot revive an earlier press. At its turn the
+  intent re-proves readiness and section availability against that capture,
+  refuses a changed generation/target revision/semantic fact with ZERO writes,
+  and dispatches the ONE official setter (or the official reset described
+  above). A target `web` revision change (including a sibling field) refuses
+  provider writes; count/question bind only their own `web-deepseek-api`
+  revision; Billing additionally binds the `web` provider dependency revision
+  and re-reads raw eligibility (its API is still the explicitly selected route
+  and its capability override is still unset). A fresh read started after the
+  receipt decides the settled word: `Saved` only when it belongs to the
+  captured generation and holds the requested raw value/action (for a provider
+  row, the provider layer rule above), `No changes` for a validated zero-write
+  request, `Could not save` (with the value the Host really keeps) for a proven
+  pre-dispatch refusal or CAS conflict, and `Could not confirm save` when an
+  accepted write's readback is unavailable, different or superseded (the Detail
+  adds `The change may have been saved. Refresh and check.`). A superseded read
+  never decides a verdict; a newer read is awaited first, and a page closed
+  mid-write only loses its own repaint — the dispatched Host operation still
+  settles in the command owner. Confirming a value the authority already holds
+  performs NO setter and is `No changes` (that states the current fact, never a
+  promise about the stored USER layer) — except that a provider row's no-op
+  additionally requires the USER own-field to carry that id; the AUTOMATIC
+  (absent) provider state never satisfies an explicit candidate — confirming one
+  always issues the ONE real setter and verifies from the fresh read-back.
   `Loading…` on page entry or `r` is a real pending state, never a last-known
-  value presented as current; every read that settles refreshes the Tools row
-  summary and the mounted page from the same facts.
+  value presented as current. A readable but non-current authority demotes the
+  value head to `Last-known · read-only` and a retained success to `Previous
+  save completed; refresh to review.`; a newer trusted observation retires the
+  old success instead of repainting it as current. Every read that settles
+  refreshes the Tools row summary and the mounted page from the same facts.
 
   `DeepSeek API Key` shows ONLY the official credential reference
   (`DEEPSEEK_API_KEY`), its presence and its source layer — never the value.

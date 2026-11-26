@@ -112,6 +112,7 @@ function setup(options: {
   readonly searchProvider?: string
 }): Harness {
   const vt = new VirtualTerminal(options.columns, options.rows)
+  const hostGeneration = {}
   const store = {
     available: true,
     failNext: undefined as string | undefined,
@@ -131,6 +132,7 @@ function setup(options: {
       api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
       advanced: {},
       credential: { configured: true, source: 'file' },
+      authority: { generation: hostGeneration, webRevision: 1, apiRevision: 1 },
     } as WebProviderSettings,
   }
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC }
@@ -145,13 +147,21 @@ function setup(options: {
     find: () => undefined,
     execute: async () => undefined,
   }
-  const write = (apply: () => void): void => {
+  const bumpAuthority = (ns: 'web' | 'api'): void => {
+    const authority = store.web.authority
+    store.web.authority = ns === 'web'
+      ? { ...authority, webRevision: authority.webRevision + 1 }
+      : { ...authority, apiRevision: authority.apiRevision + 1 }
+  }
+  const write = (apply: () => void, bump?: 'web' | 'api'): { readonly kind: 'accepted' } | { readonly kind: 'rejected'; readonly reason: string } => {
     if (store.failNext !== undefined) {
       const reason = store.failNext
       store.failNext = undefined
-      throw new Error(reason)
+      return { kind: 'rejected', reason }
     }
     apply()
+    if (bump !== undefined) bumpAuthority(bump)
+    return { kind: 'accepted' }
   }
   const ctx = new Context()
   ctx.provide('commands', commands as never)
@@ -226,50 +236,87 @@ function setup(options: {
       web: {
         available: () => store.available,
         read: async () => store.available
-          ? { ...store.web, providerSelection: structuredClone(store.web.providerSelection), api: { ...store.web.api } }
+          ? {
+              ...store.web,
+              providerSelection: structuredClone(store.web.providerSelection),
+              api: { ...store.web.api },
+              authority: { ...store.web.authority },
+            }
           : undefined,
-        setSearchProvider: async (id: string) => {
-          write(() => {
+        readFresh: async () => store.available
+          ? {
+              ...store.web,
+              providerSelection: structuredClone(store.web.providerSelection),
+              api: { ...store.web.api },
+              authority: { ...store.web.authority },
+            }
+          : undefined,
+        setSearchProvider: async (id: string, _capture: WebProviderSettings) => {
+          const selection = store.web.providerSelection.search
+          if (store.web.searchProvider === id && selection.userSet && selection.userId === id) {
+            return { kind: 'no-changes' as const }
+          }
+          return write(() => {
             store.web.searchProvider = id
             store.web.providerSelection = {
               ...store.web.providerSelection,
               search: { baseId: store.web.providerSelection.search.baseId, userSet: true, userId: id },
             }
-          })
+          }, 'web')
         },
-        setFetchProvider: async (id: string) => {
-          write(() => {
+        setFetchProvider: async (id: string, _capture: WebProviderSettings) => {
+          const selection = store.web.providerSelection.fetch
+          if (store.web.fetchProvider === id && selection.userSet && selection.userId === id) {
+            return { kind: 'no-changes' as const }
+          }
+          return write(() => {
             store.web.fetchProvider = id
             store.web.providerSelection = {
               ...store.web.providerSelection,
               fetch: { baseId: store.web.providerSelection.fetch.baseId, userSet: true, userId: id },
             }
-          })
+          }, 'web')
         },
-        restoreSearchProvider: async () => {
-          write(() => {
+        restoreSearchProvider: async (_capture: WebProviderSettings) => {
+          const selection = store.web.providerSelection.search
+          if (!selection.userSet && store.web.searchProvider === selection.baseId) {
+            return { kind: 'no-changes' as const }
+          }
+          return write(() => {
             const baseId = store.web.providerSelection.search.baseId
             store.web.searchProvider = baseId
             store.web.providerSelection = {
               ...store.web.providerSelection,
               search: { baseId, userSet: false, userId: undefined },
             }
-          })
+          }, 'web')
         },
-        restoreFetchProvider: async () => {
-          write(() => {
+        restoreFetchProvider: async (_capture: WebProviderSettings) => {
+          const selection = store.web.providerSelection.fetch
+          if (!selection.userSet && store.web.fetchProvider === selection.baseId) {
+            return { kind: 'no-changes' as const }
+          }
+          return write(() => {
             const baseId = store.web.providerSelection.fetch.baseId
             store.web.fetchProvider = baseId
             store.web.providerSelection = {
               ...store.web.providerSelection,
               fetch: { baseId, userSet: false, userId: undefined },
             }
-          })
+          }, 'web')
         },
-        setSearchApiCount: async (count: number) => { write(() => { store.web.api.count = count }) },
-        setSendOriginalQuestion: async (enabled: boolean) => { write(() => { store.web.api.sendOriginalQuestion = enabled }) },
-        setSearchBilling: async (mode: string) => { write(() => { store.web.api.searchBilling = mode as 'auto' | 'account' | 'api-key' }) },
-        setFetchBilling: async (mode: string) => { write(() => { store.web.api.fetchBilling = mode as 'auto' | 'account' | 'api-key' }) },
+        setSearchApiCount: async (count: number, _capture: WebProviderSettings) => store.web.api.count === count
+          ? { kind: 'no-changes' as const }
+          : write(() => { store.web.api.count = count }, 'api'),
+        setSendOriginalQuestion: async (enabled: boolean, _capture: WebProviderSettings) => store.web.api.sendOriginalQuestion === enabled
+          ? { kind: 'no-changes' as const }
+          : write(() => { store.web.api.sendOriginalQuestion = enabled }, 'api'),
+        setSearchBilling: async (mode: string, _capture: WebProviderSettings) => store.web.api.searchBilling === mode
+          ? { kind: 'no-changes' as const }
+          : write(() => { store.web.api.searchBilling = mode as 'auto' | 'account' | 'api-key' }, 'api'),
+        setFetchBilling: async (mode: string, _capture: WebProviderSettings) => store.web.api.fetchBilling === mode
+          ? { kind: 'no-changes' as const }
+          : write(() => { store.web.api.fetchBilling = mode as 'auto' | 'account' | 'api-key' }, 'api'),
       },
     }),
     catalog: { models: { available: () => false } },
@@ -540,16 +587,16 @@ test('the state vocabulary uses its frozen ink roles in dark and light', async t
     await key(dark, ENTER)
     const darkChip = chipCell(dark, 'DeepSeek server-side search', '[current]')
     assert.equal(darkChip, hexToRgb(currentPalette.textMuted), 'the current chip is textMuted')
-    // A REFUSED write paints Not saved in error ink (the word rides the state).
+    // A REFUSED write paints Could not save in error ink (the word rides the state).
     dark.store.failNext = 'mutate rejected'
     await key(dark, DOWN)
     await key(dark, ENTER)
-    await waitForPainted(dark, 'the refused write verdict', frame => frame.includes('Not saved'))
-    const verdictRow = dark.plain().findIndex(line => line.includes('Not saved ·'))
+    await waitForPainted(dark, 'the refused write verdict', frame => frame.includes('Could not save'))
+    const verdictRow = dark.plain().findIndex(line => line.includes('Could not save ·'))
     assert.ok(verdictRow >= 0, `the Detail paints the verdict:\n${dark.view()}`)
-    const verdictCol = dark.plain()[verdictRow]!.indexOf('Not saved ·')
+    const verdictCol = dark.plain()[verdictRow]!.indexOf('Could not save ·')
     assert.equal(dark.vt.getCellFgRgb(verdictRow, verdictCol), hexToRgb(currentPalette.error),
-      'Not saved wears the error token')
+      'Could not save wears the error token')
     dark.dispose()
 
     // The LIGHT palette supplies the same roles on its own open.
@@ -571,7 +618,7 @@ test('the state vocabulary uses its frozen ink roles in dark and light', async t
   }
 })
 
-test('a VERIFIED write paints Verified in the success role', async t => {
+test('a VERIFIED write paints Saved in the success role', async t => {
   const h = setup({ columns: 120, rows: 40 })
   try {
     await openWebPage(h)
@@ -579,13 +626,13 @@ test('a VERIFIED write paints Verified in the success role', async t => {
     await key(h, ENTER)
     await key(h, DOWN)
     await key(h, ENTER)
-    await waitForPainted(h, 'the verified verdict', frame => frame.includes('Verified'))
+    await waitForPainted(h, 'the verified verdict', frame => frame.includes('Saved'))
     const lines = h.plain()
-    const row = lines.findIndex(line => line.includes('Verified'))
+    const row = lines.findIndex(line => line.includes('Saved'))
     assert.ok(row >= 0)
-    const col = lines[row]!.indexOf('Verified')
+    const col = lines[row]!.indexOf('Saved')
     assert.equal(h.vt.getCellFgRgb(row, col), hexToRgb(currentPalette.success),
-      'Verified wears the success token')
+      'Saved wears the success token')
   } finally {
     h.dispose()
     setTheme('dark')
@@ -671,7 +718,7 @@ test('a click on an option only highlights it; the explicit Confirm [Enter] clic
   assert.match(h.view(), /› DeepSeek Search API · explicit · billed per Search API call/u, 'the click only moved the draft')
   // The complete painted Confirm [Enter] is the ONE delegated target.
   clickWord(h, 'Confirm [Enter]')
-  await waitForPainted(h, 'the confirmed write', frame => frame.includes('Verified'))
+  await waitForPainted(h, 'the confirmed write', frame => frame.includes('Saved'))
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
   assert.equal(h.store.web.api.count, 10, 'no neighbouring Web field was written')
   // The commit verb uses the primary action ink while the Back affordance keeps
@@ -687,11 +734,11 @@ test('a click on an option only highlights it; the explicit Confirm [Enter] clic
     'Back keeps the secondary action ink')
 })
 
-test('the AUTOMATIC page offers a complete pointer-only route: click the row, the API candidate, Confirm, Verified, Back out', async t => {
+test('the AUTOMATIC page offers a complete pointer-only route: click the row, the API candidate, Confirm, Saved, Back out', async t => {
   // With NO stored provider the page paints the real AUTOMATIC fact, paints no
   // [current] chip, and the pointer route reaches the SAME real write path:
   // row click (opens the Detail) → option click (draft only) → Confirm click
-  // → Verified → the painted Back span returns to the list. The only keyboard
+  // → Saved → the painted Back span returns to the list. The only keyboard
   // input is the workspace-level entry into the page itself.
   const h = setup({ columns: 120, rows: 40, searchProvider: undefined })
   t.after(h.dispose)
@@ -713,12 +760,12 @@ test('the AUTOMATIC page offers a complete pointer-only route: click the row, th
   assert.equal(h.store.web.searchProvider, undefined, 'the option click only moves the draft')
   assert.match(h.view(), /› DeepSeek Search API · explicit · billed per Search API call/u)
   clickWord(h, 'Confirm [Enter]')
-  await waitForPainted(h, 'the verified explicit write', frame => frame.includes('Verified'))
+  await waitForPainted(h, 'the verified explicit write', frame => frame.includes('Saved'))
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api', 'the ONE real Host write landed')
   // The painted Back span (the page's own last-row Esc affordance) exits the
   // Detail to the list — pointer-only, no keyboard Esc. The Root requests a
   // render after admitting a body press, so the release resolves against the
-  // child's next painted frame; the settled Verified verdict legitimately stays
+  // child's next painted frame; the settled Saved verdict legitimately stays
   // painted on the list, so the exit is proven by the list's own bar.
   const back = paintedWordPoint(h, 'Back [Esc]')
   press(h, back.row, back.column)
@@ -751,7 +798,7 @@ for (const [columns, rows] of [[120, 40], [44, 20]] as const) {
     // The complete painted Confirm [Enter] is the ONE delegated reset target.
     clickWord(h, 'Confirm [Enter]')
     await waitForPainted(h, 'the verified deployment reset', frame =>
-      frame.includes('Verified') && frame.includes('Current: Automatic'))
+      frame.includes('Saved') && frame.includes('Current: Automatic'))
     assert.equal(h.store.web.searchProvider, undefined, 'the official unset restored the deployment selection')
     assert.equal(h.store.web.providerSelection.search.userSet, false)
     // The painted Back span returns to the list without a keyboard Esc.
@@ -805,7 +852,7 @@ test('a Confirm press followed by a key, wheel or resize never writes on release
   await settlePointerClick(h)
   await waitForPainted(h, 'the resized Detail', frame => frame.includes('Confirm [Enter]'))
   clickWord(h, 'Confirm [Enter]')
-  await waitForPainted(h, 'the confirmed write', frame => frame.includes('Verified'))
+  await waitForPainted(h, 'the confirmed write', frame => frame.includes('Saved'))
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
 })
 
@@ -829,7 +876,7 @@ test('a cropped candidate publishes no Confirm target and a click there writes n
   h.vt.resize(120, 40)
   await waitForPainted(h, 'the restored Confirm target', frame => frame.includes('Confirm [Enter]'))
   clickWord(h, 'Confirm [Enter]')
-  await waitForPainted(h, 'the restored confirm write', frame => frame.includes('Verified'))
+  await waitForPainted(h, 'the restored confirm write', frame => frame.includes('Saved'))
   assert.equal(h.store.web.api.count, 20)
 })
 
@@ -848,8 +895,9 @@ for (const [columns, rows] of [[80, 24], [44, 20], [44, 8]] as const) {
         `the complete delegated span is painted at ${columns}x${rows}:\n${frame}`)
       for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
       clickWord(h, 'Confirm [Enter]')
-      await waitForPainted(h, 'the confirmed provider write', painted => painted.includes('Verified'))
-      assert.equal(h.store.web.searchProvider, 'deepseek-official')
+      await waitForPainted(h, 'the delegated provider verdict', painted => painted.includes('No changes'))
+      assert.equal(h.store.web.searchProvider, 'deepseek-official',
+        'the already-pinned official provider is a validated zero-write confirmation')
     })
   }
 }

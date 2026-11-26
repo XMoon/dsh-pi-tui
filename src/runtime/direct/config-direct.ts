@@ -57,13 +57,17 @@ import {
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
 import {
   assertFetchProviderId,
-  assertFetchProviderReplaceable,
   assertSearchApiCount,
   assertSearchProviderId,
-  assertSearchProviderReplaceable,
   assertWebApiBilling,
   readWebApiBilling,
   webApiAdvancedFactsOf,
+  webBillingEligibility,
+  webProviderEffectiveId,
+  webProviderRestoreIsNoOp,
+  webProviderSelectIsNoOp,
+  webProviderSelectRefusal,
+  webProviderSelectionChanged,
   webProviderSelectionFactsOf,
 } from '../../domain/web-provider-settings.ts'
 import type {
@@ -110,6 +114,7 @@ import type {
   VisualToolsConfig,
   VisualToolsState,
   WebProviderConfig,
+  WebProviderMutationOutcome,
   WebProviderSettings,
   WebStartupPreferenceConfig,
   WebStartupPreferenceState,
@@ -297,6 +302,16 @@ function readSettingsDescriptor(settings: SettingsServiceLike | undefined, ns: s
   } catch {
     // A throwing projection read degrades to "no descriptor" — the caller's
     // own fail-soft rules decide what that means.
+    return undefined
+  }
+}
+
+/** ONE descriptor read on the caller's already-captured service. A throwing
+ *  projection degrades to `undefined` (the caller's own fail-soft rule). */
+function describeDirectSettings(settings: SettingsServiceLike): readonly SettingsDescriptorLike[] | undefined {
+  try {
+    return settings.describe()
+  } catch {
     return undefined
   }
 }
@@ -2071,26 +2086,52 @@ export class DirectWebProviderConfig implements WebProviderConfig {
   }
 
   async read(): Promise<WebProviderSettings | undefined> {
+    return await this.readSnapshot()
+  }
+
+  /** Direct owns no cache: `readFresh()` is the same real `describe()` of the
+   *  current Host settings service. The explicit entry exists so the semantic
+   *  contract is identical on Direct and Remote (Remote must use
+   *  `describeFresh`, never a ready cache). */
+  async readFresh(): Promise<WebProviderSettings | undefined> {
+    return await this.readSnapshot()
+  }
+
+  private async readSnapshot(): Promise<WebProviderSettings | undefined> {
+    // ONE coherent pre-check: both official sections must be mounted before the
+    // credential store is consulted. The service authority observed HERE is the
+    // identity the whole read must still belong to after the await.
     const settings = this.settings()
     if (settings === undefined) return undefined
-    // Availability is the cheap synchronous pre-check: a half-mounted
-    // configuration is UNAVAILABLE before the credential store is consulted.
-    if (readSettingsDescriptor(settings, WEB_PROVIDER_NS) === undefined
-      || readSettingsDescriptor(settings, WEB_SEARCH_API_NS) === undefined) return undefined
-    // The credential presence is the read's ONLY await. Every descriptor fact
-    // is projected AFTER it, so the returned value/base/user facts are the
-    // Host state at this SYNCHRONOUS return. That is what lets the command
-    // queue's reset decision and the adapter's revision-checked dispatch act on
-    // the same state instead of a snapshot the credential read outlived.
+    const pre = describeDirectSettings(settings)
+    if (pre === undefined) return undefined
+    if (!pre.some(entry => entry.ns === WEB_PROVIDER_NS)
+      || !pre.some(entry => entry.ns === WEB_SEARCH_API_NS)) return undefined
+    const generation = settingsAuthorityOf(settings)
+    // The credential presence is the read's ONLY await. The ORIGINAL service
+    // authority is remembered before it; a replacement during the await is
+    // rejected (or must be read again), never silently rebound to the old read.
     const credential = await this.credentialFact()
-    // Both official descriptors must be readable form projections: a missing
-    // or malformed one is UNAVAILABLE, never a defaulted value. The `web`
-    // descriptor is read ONCE: its `value`, `base` and `user` are the same
-    // snapshot, so the layering facts can never be stitched from mismatched
-    // reads.
-    const providerDescriptor = readSettingsDescriptor(settings, WEB_PROVIDER_NS)
+    const current = this.settings()
+    if (current === undefined || !Object.is(settingsAuthorityOf(current), generation)) {
+      throw new Error('the Host settings authority changed while the Web settings were read; refresh to read the current Host')
+    }
+    // ONE coherent descriptor read for both sections on the SAME service the
+    // generation was captured from. The descriptors are projected AFTER the
+    // credential await, so the returned value/base/user and revisions are the
+    // Host state at this SYNCHRONOUS return.
+    const descriptors = describeDirectSettings(settings)
+    if (descriptors === undefined) return undefined
+    const providerDescriptor = descriptors.find(entry => entry.ns === WEB_PROVIDER_NS)
+    const apiDescriptor = descriptors.find(entry => entry.ns === WEB_SEARCH_API_NS)
+    if (providerDescriptor === undefined || apiDescriptor === undefined) return undefined
+    // The two revisions are the exact CAS tokens the captured decision will
+    // submit. A malformed one makes the whole read UNAVAILABLE: it can never
+    // authorize a write.
+    if (!validSettingsRevision(providerDescriptor.revision)
+      || !validSettingsRevision(apiDescriptor.revision)) return undefined
     const provider = formValueOf(providerDescriptor)
-    const api = formValueOf(readSettingsDescriptor(settings, WEB_SEARCH_API_NS))
+    const api = formValueOf(apiDescriptor)
     if (provider === undefined || api === undefined) return undefined
     // `base`/`user` are official projections (always objects when the section
     // is readable). A missing/non-object layer is UNAVAILABLE — never "there is
@@ -2115,6 +2156,11 @@ export class DirectWebProviderConfig implements WebProviderConfig {
       api: { searchBilling, fetchBilling, count, sendOriginalQuestion },
       advanced: webApiAdvancedFactsOf(api),
       credential,
+      authority: {
+        generation,
+        webRevision: providerDescriptor.revision,
+        apiRevision: apiDescriptor.revision,
+      },
     }
   }
 
@@ -2131,101 +2177,266 @@ export class DirectWebProviderConfig implements WebProviderConfig {
     }
   }
 
-  async setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void> {
+  async setSearchProvider(
+    id: 'deepseek-official' | 'deepseek-search-api',
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome> {
     assertSearchProviderId(id)
-    await this.mutate('web', [{ op: 'set', path: ['searchProvider'], value: id }], descriptor => {
-      const current = formValueOf(descriptor)
-      if (current === undefined) throw new Error('the official Host Web settings section is unreadable')
-      assertSearchProviderReplaceable(current.searchProvider)
-    })
+    return await this.dispatchWeb(
+      capture,
+      WEB_PROVIDER_NS,
+      capture.authority.webRevision,
+      [{ op: 'set', path: ['searchProvider'], value: id }],
+      web => this.guardProviderSelect(web, capture, 'search', id),
+    )
   }
 
-  async setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void> {
+  async setFetchProvider(
+    id: 'http' | 'deepseek-fetch-api',
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome> {
     assertFetchProviderId(id)
-    await this.mutate('web', [{ op: 'set', path: ['fetchProvider'], value: id }], descriptor => {
-      const current = formValueOf(descriptor)
-      if (current === undefined) throw new Error('the official Host Web settings section is unreadable')
-      assertFetchProviderReplaceable(current.fetchProvider)
-    })
+    return await this.dispatchWeb(
+      capture,
+      WEB_PROVIDER_NS,
+      capture.authority.webRevision,
+      [{ op: 'set', path: ['fetchProvider'], value: id }],
+      web => this.guardProviderSelect(web, capture, 'fetch', id),
+    )
   }
 
-  async setSearchApiCount(count: number): Promise<void> {
+  async setSearchApiCount(
+    count: number,
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome> {
     assertSearchApiCount(count)
-    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['count'], value: count }])
+    return await this.dispatchWeb(
+      capture,
+      WEB_SEARCH_API_NS,
+      capture.authority.apiRevision,
+      [{ op: 'set', path: ['count'], value: count }],
+      (_web, api) => this.guardApiValue(api, 'count', count),
+    )
   }
 
-  async setSendOriginalQuestion(enabled: boolean): Promise<void> {
-    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['sendOriginalQuestion'], value: enabled }])
+  async setSendOriginalQuestion(
+    enabled: boolean,
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome> {
+    return await this.dispatchWeb(
+      capture,
+      WEB_SEARCH_API_NS,
+      capture.authority.apiRevision,
+      [{ op: 'set', path: ['sendOriginalQuestion'], value: enabled }],
+      (_web, api) => this.guardApiValue(api, 'sendOriginalQuestion', enabled),
+    )
   }
 
-  async setSearchBilling(mode: 'auto' | 'account' | 'api-key'): Promise<void> {
+  async setSearchBilling(
+    mode: 'auto' | 'account' | 'api-key',
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome> {
     assertWebApiBilling(mode)
-    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['searchBilling'], value: mode }])
+    return await this.dispatchWeb(
+      capture,
+      WEB_SEARCH_API_NS,
+      capture.authority.apiRevision,
+      [{ op: 'set', path: ['searchBilling'], value: mode }],
+      (web, api) => this.guardBilling(web, api, capture, 'search', mode),
+    )
   }
 
-  async setFetchBilling(mode: 'auto' | 'account' | 'api-key'): Promise<void> {
+  async setFetchBilling(
+    mode: 'auto' | 'account' | 'api-key',
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome> {
     assertWebApiBilling(mode)
-    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['fetchBilling'], value: mode }])
+    return await this.dispatchWeb(
+      capture,
+      WEB_SEARCH_API_NS,
+      capture.authority.apiRevision,
+      [{ op: 'set', path: ['fetchBilling'], value: mode }],
+      (web, api) => this.guardBilling(web, api, capture, 'fetch', mode),
+    )
   }
 
-  async restoreSearchProvider(): Promise<void> {
-    await this.restoreProvider('searchProvider')
+  async restoreSearchProvider(capture: WebProviderSettings): Promise<WebProviderMutationOutcome> {
+    return await this.dispatchWeb(
+      capture,
+      WEB_PROVIDER_NS,
+      capture.authority.webRevision,
+      [{ op: 'unset', path: ['searchProvider'] }],
+      web => this.guardProviderRestore(web, capture, 'search'),
+    )
   }
 
-  async restoreFetchProvider(): Promise<void> {
-    await this.restoreProvider('fetchProvider')
+  async restoreFetchProvider(capture: WebProviderSettings): Promise<WebProviderMutationOutcome> {
+    return await this.dispatchWeb(
+      capture,
+      WEB_PROVIDER_NS,
+      capture.authority.webRevision,
+      [{ op: 'unset', path: ['fetchProvider'] }],
+      web => this.guardProviderRestore(web, capture, 'fetch'),
+    )
   }
 
-  /** The ONE official USER-layer reset of one provider selection: a single
-   *  `unset` path op at the descriptor revision the reset decision read. A
-   *  readable section whose USER layer does not own the field is a real no-op
-   *  (there is nothing to remove); an unreadable `base`/`user` layer is an
-   *  error, never an assumed "no override". This deliberately does NOT consult
-   *  the effective value: a custom route is a reason to refuse an explicit SET,
-   *  never a reason to hide an official reset of the USER layer.
-   *
-   *  The synchronous descriptor read below is the CAS source on purpose: it runs
-   *  in the same Promise-continuation chain as the command owner's fresh read
-   *  (after that read's final synchronous projection there is no macrotask
-   *  boundary before this method), so the revision submitted as
-   *  `expectedRevision` belongs to the state the user's reset intent was just
-   *  validated against. A Host writer's SettingsForms/ConfigEditor commit is
-   *  file-I/O based and cannot interleave there; any writer that commits after
-   *  this read makes the CAS fail rather than silently overwriting. */
-  private async restoreProvider(field: 'searchProvider' | 'fetchProvider'): Promise<void> {
-    const settings = this.settings()
-    if (settings === undefined) throw new Error('settings service unavailable')
-    const descriptor = readSettingsDescriptor(settings, WEB_PROVIDER_NS)
-    if (descriptor === undefined) {
-      throw new Error(`the official Host settings section "${WEB_PROVIDER_NS}" is not mounted`)
-    }
-    const user = plainRecordOf(descriptor.user)
-    const base = plainRecordOf(descriptor.base)
-    if (user === undefined || base === undefined) {
-      throw new Error('the official Host Web settings section does not report its USER/base layers')
-    }
-    if (!Object.hasOwn(user, field)) return
-    await settings.mutate(WEB_PROVIDER_NS, [{ op: 'unset', path: [field] }], descriptor.revision)
-  }
-
-  /** One revision-checked official settings mutation. The section must be a
-   *  real configured entry: an unmounted section is an explicit failure rather
-   *  than a write against an invented namespace. */
-  private async mutate(
+  /** The actual Direct dispatch boundary. The generation, the target
+   *  descriptor revision and the Web-specific semantic facts are re-proven
+   *  SYNCHRONOUSLY here, and the official mutate is called immediately after
+   *  with the CAPTURED revision: no await can rebase the decision. */
+  private async dispatchWeb(
+    capture: WebProviderSettings,
     ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
+    expectedRevision: number,
     ops: readonly SettingsMutationOp[],
-    validate?: (descriptor: SettingsDescriptorLike) => void,
-  ): Promise<void> {
+    guard: (
+      web: SettingsDescriptorLike | undefined,
+      api: SettingsDescriptorLike | undefined,
+    ) => WebProviderMutationOutcome | undefined,
+  ): Promise<WebProviderMutationOutcome> {
     const settings = this.settings()
-    if (settings === undefined) throw new Error('settings service unavailable')
-    const descriptor = readSettingsDescriptor(settings, ns)
-    if (descriptor === undefined) {
-      throw new Error(`the official Host settings section "${ns}" is not mounted`)
+    if (settings === undefined) return { kind: 'rejected', reason: 'settings service unavailable' }
+    if (!Object.is(settingsAuthorityOf(settings), capture.authority.generation)) {
+      return { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' }
     }
-    validate?.(descriptor)
-    // This descriptor both validates the provider choice and supplies the CAS
-    // token; never reread a newer revision after making that decision.
-    await settings.mutate(ns, ops, descriptor.revision)
+    if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
+    let descriptors: readonly SettingsDescriptorLike[] | undefined
+    try {
+      descriptors = settings.describe()
+    } catch (error) {
+      return { kind: 'rejected', reason: `the Host settings descriptor read failed: ${safeErrorMessage(error)}` }
+    }
+    if (!Array.isArray(descriptors)) {
+      return { kind: 'rejected', reason: 'the Host settings descriptor list is not readable' }
+    }
+    const web = descriptors.find(entry => entry.ns === WEB_PROVIDER_NS)
+    const api = descriptors.find(entry => entry.ns === WEB_SEARCH_API_NS)
+    const target = ns === WEB_PROVIDER_NS ? web : api
+    if (target === undefined) {
+      return { kind: 'rejected', reason: `the official Host settings section "${ns}" is not mounted` }
+    }
+    if (!validSettingsRevision(target.revision)) {
+      return { kind: 'rejected', reason: 'the official Host settings revision is not readable' }
+    }
+    if (target.revision !== expectedRevision) {
+      return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+    }
+    const guarded = guard(web, api)
+    if (guarded !== undefined) return guarded
+    try {
+      await settings.mutate(ns, ops, expectedRevision)
+      return { kind: 'accepted' }
+    } catch (error) {
+      const reason = safeErrorMessage(error)
+      if ((error as { readonly code?: unknown } | null)?.code === 'SETTINGS_CONFLICT') {
+        return { kind: 'conflict', reason }
+      }
+      // ConfigEditor can persist before Loader reconciliation throws. An unknown
+      // dispatched failure therefore cannot prove the profile stayed unchanged.
+      return { kind: 'outcome-unconfirmed', reason }
+    }
+  }
+
+  /** The provider SELECT guard: the captured base/USER/effective decision must
+   *  still describe the same Host state, a custom route is never overwritten,
+   *  and a real USER pin with the requested id is a zero-write no-op. */
+  private guardProviderSelect(
+    web: SettingsDescriptorLike | undefined,
+    capture: WebProviderSettings,
+    capability: 'search' | 'fetch',
+    id: string,
+  ): WebProviderMutationOutcome | undefined {
+    const value = formValueOf(web)
+    if (value === undefined) {
+      return { kind: 'rejected', reason: 'the official Host Web settings section is unreadable' }
+    }
+    const field = capability === 'search' ? 'searchProvider' : 'fetchProvider'
+    const selection = webProviderSelectionFactsOf(web?.base, web?.user, field)
+    if (selection === undefined) {
+      return { kind: 'rejected', reason: 'the official Host Web settings section does not report its USER/base layers' }
+    }
+    const effective = webProviderEffectiveId(value, field)
+    const capturedEffective = capability === 'search' ? capture.searchProvider : capture.fetchProvider
+    if (webProviderSelectionChanged(selection, capture.providerSelection[capability])
+      || effective !== capturedEffective) {
+      return { kind: 'rejected', reason: 'the Host Web selection changed since the page read it; nothing was written' }
+    }
+    const refusal = webProviderSelectRefusal(capability, effective)
+    if (refusal !== undefined) return { kind: 'rejected', reason: refusal }
+    if (webProviderSelectIsNoOp(selection, effective, id)) return { kind: 'no-changes' }
+    return undefined
+  }
+
+  /** The provider RESTORE guard: the captured USER/base/effective facts must
+   *  still hold; an absent USER own-field is a zero-write no-op only when the
+   *  effective value already equals the deployment base. */
+  private guardProviderRestore(
+    web: SettingsDescriptorLike | undefined,
+    capture: WebProviderSettings,
+    capability: 'search' | 'fetch',
+  ): WebProviderMutationOutcome | undefined {
+    const value = formValueOf(web)
+    if (value === undefined) {
+      return { kind: 'rejected', reason: 'the official Host Web settings section is unreadable' }
+    }
+    const field = capability === 'search' ? 'searchProvider' : 'fetchProvider'
+    const selection = webProviderSelectionFactsOf(web?.base, web?.user, field)
+    if (selection === undefined) {
+      return { kind: 'rejected', reason: 'the official Host Web settings section does not report its USER/base layers' }
+    }
+    const effective = webProviderEffectiveId(value, field)
+    const capturedEffective = capability === 'search' ? capture.searchProvider : capture.fetchProvider
+    if (webProviderSelectionChanged(selection, capture.providerSelection[capability])
+      || effective !== capturedEffective) {
+      return { kind: 'rejected', reason: 'the Host Web USER selection changed since the page read it; nothing was written' }
+    }
+    if (!selection.userSet) {
+      return webProviderRestoreIsNoOp(selection, effective)
+        ? { kind: 'no-changes' }
+        : {
+            kind: 'rejected',
+            reason: `the USER selection is already absent, but the Host reads "${effective ?? 'Automatic'}" instead of the deployment default`,
+          }
+    }
+    return undefined
+  }
+
+  /** One scalar API option guard: the captured revision is already checked by
+   *  `dispatchWeb`; an equal current value is a zero-write no-op. */
+  private guardApiValue(
+    api: SettingsDescriptorLike | undefined,
+    field: 'count' | 'sendOriginalQuestion',
+    value: unknown,
+  ): WebProviderMutationOutcome | undefined {
+    const current = formValueOf(api)
+    if (current === undefined) {
+      return { kind: 'rejected', reason: 'the official Host Web settings section is unreadable' }
+    }
+    return current[field] === value ? { kind: 'no-changes' } : undefined
+  }
+
+  /** The Billing guard: the target API revision is checked by `dispatchWeb`;
+   *  the captured `web` dependency revision and the raw eligibility (explicit
+   *  API route, no YAML override for THIS capability) are re-proven here. */
+  private guardBilling(
+    web: SettingsDescriptorLike | undefined,
+    api: SettingsDescriptorLike | undefined,
+    capture: WebProviderSettings,
+    capability: 'search' | 'fetch',
+    mode: 'auto' | 'account' | 'api-key',
+  ): WebProviderMutationOutcome | undefined {
+    if (!validSettingsRevision(web?.revision) || web.revision !== capture.authority.webRevision) {
+      return { kind: 'conflict', reason: 'the Host Web provider dependency changed since it was read' }
+    }
+    const webValue = formValueOf(web)
+    const apiValue = formValueOf(api)
+    if (webValue === undefined || apiValue === undefined) {
+      return { kind: 'rejected', reason: 'the official Host Web settings section is unreadable' }
+    }
+    const eligibility = webBillingEligibility(webValue, apiValue, capability)
+    if (!eligibility.ok) return { kind: 'rejected', reason: eligibility.reason }
+    const field = capability === 'search' ? 'searchBilling' : 'fetchBilling'
+    return apiValue[field] === mode ? { kind: 'no-changes' } : undefined
   }
 }
 

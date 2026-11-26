@@ -36,6 +36,23 @@ import { DirectWebProviderConfig } from '../../../src/runtime/direct/config-dire
 import { mountWebProviderPlane } from '../../support/web-provider-plane.ts'
 import { testLifecycle, type TestLifecycle } from '../../support/temp-lifecycle.ts'
 import { selectSettingsCategory } from '../../support/settings-rail.ts'
+import type { WebProviderSettings } from '../../../src/runtime/config-port.ts'
+
+/** ONE real readable capture; every write is bound to the observation the user
+ *  saw, never to a fresher revision. */
+async function captureOf(source: { read(): Promise<WebProviderSettings | undefined> }): Promise<WebProviderSettings> {
+  const capture = await source.read()
+  assert.ok(capture !== undefined, 'the real Host plane must produce a readable Web capture')
+  return capture
+}
+
+/** The opaque generation must NEVER enter a deepEqual (a Cordis traceable
+ *  proxy is inspected recursively and throws); compare the semantic fields. */
+function withoutWebAuthority(read: WebProviderSettings | undefined): Omit<WebProviderSettings, 'authority'> | undefined {
+  if (read === undefined) return undefined
+  const { authority: _authority, ...rest } = read
+  return rest
+}
 
 const SESSION = 'session-web-l5'
 const QUESTION = 'what changed in the last release of the harness?'
@@ -171,7 +188,7 @@ test('the shipped base defaults read ready with AUTOMATIC search routing', async
   // DEEPSEEK_API_KEY does NOT make the Web settings unavailable.
   const life = testLifecycle(t)
   const booted = await boot(life, { providers: 'base-defaults', credential: false })
-  assert.deepEqual(await booted.config.read(), {
+  assert.deepEqual(withoutWebAuthority(await booted.config.read()), {
     searchProvider: undefined,
     fetchProvider: 'http',
     providerSelection: {
@@ -221,11 +238,11 @@ test('a TUI settings write switches the NEXT search to the DeepSeek Search API w
   const life = testLifecycle(t)
   const booted = await boot(life)
 
-  await booted.config.setSearchProvider('deepseek-search-api')
-  await booted.config.setSearchApiCount(20)
+  await booted.config.setSearchProvider('deepseek-search-api', await captureOf(booted.config))
+  await booted.config.setSearchApiCount(20, await captureOf(booted.config))
   // The billing CAS write lands on the EXACT official field and reads back.
-  await booted.config.setSearchBilling('api-key')
-  assert.deepEqual(await booted.config.read(), {
+  await booted.config.setSearchBilling('api-key', await captureOf(booted.config))
+  assert.deepEqual(withoutWebAuthority(await booted.config.read()), {
     searchProvider: 'deepseek-search-api',
     fetchProvider: 'http',
     // The official rc.5 ConfigEditor materializes the COMPOSED section on the
@@ -254,7 +271,7 @@ test('a TUI settings write switches the NEXT search to the DeepSeek Search API w
   assert.equal(booted.transport.requests[0]?.authorization, 'Bearer l5-test-key')
 
   // sendOriginalQuestion=false removes the field on the next call only.
-  await booted.config.setSendOriginalQuestion(false)
+  await booted.config.setSendOriginalQuestion(false, await captureOf(booted.config))
   await searchAsInitiator(booted, 'third query')
   assert.deepEqual(booted.transport.requests[1]?.body, { query: 'third query', count: 20, need_content: false })
 
@@ -285,7 +302,7 @@ test('a TUI settings write switches the NEXT search to the DeepSeek Search API w
 
   // The stored Messages selection still selects the Messages route (the Search
   // API override belongs to the DeepSeek Search API provider only).
-  await booted.config.setSearchProvider('deepseek-official')
+  await booted.config.setSearchProvider('deepseek-official', await captureOf(booted.config))
   await searchAsInitiator(booted, 'fifth query')
   assert.equal(booted.transport.requests[3]?.url, MESSAGES_ENDPOINT, 'the reset is live too')
 })
@@ -293,7 +310,7 @@ test('a TUI settings write switches the NEXT search to the DeepSeek Search API w
 test('the real web_search tool delivers the selected provider result to the model-facing outcome', async t => {
   const life = testLifecycle(t)
   const booted = await boot(life)
-  await booted.config.setSearchProvider('deepseek-search-api')
+  await booted.config.setSearchProvider('deepseek-search-api', await captureOf(booted.config))
 
   // `web_search` registers with a step condition (`when: searchReady`), so a
   // direct execution needs the SAME admission the agent loop resolves at step
@@ -393,7 +410,7 @@ test('an explicit ConfigPort pin overrides the model route preference and reads 
     providers: 'base-defaults',
     requestContext: { provider: 'deepseek-official', model: 'deepseek-chat' },
   })
-  await booted.config.setSearchProvider('deepseek-search-api')
+  await booted.config.setSearchProvider('deepseek-search-api', await captureOf(booted.config))
   assert.equal((await booted.config.read())?.searchProvider, 'deepseek-search-api',
     'the official ConfigPort write reads back the RAW configured id')
 
@@ -425,7 +442,7 @@ test('an explicit ConfigPort pin overrides the model route preference and reads 
 test('a missing credential fails with the official error and NEVER falls back to the other provider', async t => {
   const life = testLifecycle(t)
   const booted = await boot(life)
-  await booted.config.setSearchProvider('deepseek-search-api')
+  await booted.config.setSearchProvider('deepseek-search-api', await captureOf(booted.config))
   await (booted.ctx.get('credentials') as { unset(ref: unknown): Promise<unknown> })
     .unset(credentialRef('DEEPSEEK_API_KEY'))
 
@@ -441,7 +458,7 @@ test('a missing credential fails with the official error and NEVER falls back to
 test('endpoint failures keep the official error shape and switch nothing', async t => {
   const life = testLifecycle(t)
   const booted = await boot(life)
-  await booted.config.setSearchProvider('deepseek-search-api')
+  await booted.config.setSearchProvider('deepseek-search-api', await captureOf(booted.config))
 
   booted.transport.respond = () => ({ status: 401, json: { error: { message: 'invalid api key' } } })
   await assert.rejects(searchAsInitiator(booted, 'rejected'), (error: unknown) => {
@@ -474,7 +491,7 @@ test('cancellation and the DeepSeek Fetch API path keep their official semantics
   })
   assert.equal(booted.transport.requests.length, 0, 'a cancelled call never dispatches')
 
-  await booted.config.setFetchProvider('deepseek-fetch-api')
+  await booted.config.setFetchProvider('deepseek-fetch-api', await captureOf(booted.config))
   const fetched = await web.fetch({ url: 'https://example.test/page' }) as {
     readonly url: string
     readonly statusCode: number
@@ -928,7 +945,7 @@ test('the Web credential deeplink completes a real store set and clear and the p
   //    PROVIDER is arranged through the port here (this case's subject is the
   //    credential chain); the search path itself is the production consumer.
   await closeSettingsInApp(app)
-  await config.setSearchProvider('deepseek-search-api')
+  await config.setSearchProvider('deepseek-search-api', await captureOf(config))
   await (app.host.ctx.get('agentDefaultModel') as { saveSelection(next: unknown): Promise<void> })
     .saveSelection({ provider: 'scripted', model: 'review-model' })
   adapter.push({ kind: 'text', text: 'ready' })
@@ -1056,10 +1073,10 @@ test('the real rc.5 unset restores the deployment value and clears the USER fiel
   // the whole section equal the base, so the USER config is dropped entirely.
   {
     const booted = await boot(life, { providers: 'base-defaults' })
-    await booted.config.setSearchProvider('deepseek-search-api')
+    await booted.config.setSearchProvider('deepseek-search-api', await captureOf(booted.config))
     assert.deepEqual([...webPatchFields(booted.patchPath)].sort(), ['fetchProvider', 'searchProvider'],
       'the first profile write materializes the composed section (rc.5 ConfigEditor)')
-    await booted.config.restoreSearchProvider()
+    await booted.config.restoreSearchProvider(await captureOf(booted.config))
     const read = await booted.config.read()
     assert.equal(read?.searchProvider, undefined, 'the deployment has no Search provider')
     assert.deepEqual(read?.providerSelection.search, { baseId: undefined, userSet: false, userId: undefined })
@@ -1070,9 +1087,9 @@ test('the real rc.5 unset restores the deployment value and clears the USER fiel
   // its own field and keeps the sibling Fetch override.
   {
     const booted = await boot(life, { providers: 'base-defaults' })
-    await booted.config.setSearchProvider('deepseek-search-api')
-    await booted.config.setFetchProvider('deepseek-fetch-api')
-    await booted.config.restoreSearchProvider()
+    await booted.config.setSearchProvider('deepseek-search-api', await captureOf(booted.config))
+    await booted.config.setFetchProvider('deepseek-fetch-api', await captureOf(booted.config))
+    await booted.config.restoreSearchProvider(await captureOf(booted.config))
     const read = await booted.config.read()
     assert.equal(read?.searchProvider, undefined)
     assert.deepEqual(read?.providerSelection.search, { baseId: undefined, userSet: false, userId: undefined },
@@ -1089,9 +1106,9 @@ test('the real rc.5 unset restores the deployment value and clears the USER fiel
   // value returns to HTTP.
   {
     const booted = await boot(life, { providers: 'base-defaults' })
-    await booted.config.setFetchProvider('deepseek-fetch-api')
+    await booted.config.setFetchProvider('deepseek-fetch-api', await captureOf(booted.config))
     assert.equal((await booted.config.read())?.fetchProvider, 'deepseek-fetch-api')
-    await booted.config.restoreFetchProvider()
+    await booted.config.restoreFetchProvider(await captureOf(booted.config))
     const read = await booted.config.read()
     assert.equal(read?.fetchProvider, 'http', 'the deployment HTTP provider applies again')
     assert.deepEqual(read?.providerSelection.fetch, { baseId: 'http', userSet: false, userId: undefined })
@@ -1103,9 +1120,9 @@ test('the real rc.5 unset restores the deployment value and clears the USER fiel
   // the effective value still returns to the deployment HTTP.
   {
     const booted = await boot(life, { providers: 'base-defaults' })
-    await booted.config.setSearchProvider('deepseek-search-api')
-    await booted.config.setFetchProvider('deepseek-fetch-api')
-    await booted.config.restoreFetchProvider()
+    await booted.config.setSearchProvider('deepseek-search-api', await captureOf(booted.config))
+    await booted.config.setFetchProvider('deepseek-fetch-api', await captureOf(booted.config))
+    await booted.config.restoreFetchProvider(await captureOf(booted.config))
     const read = await booted.config.read()
     assert.equal(read?.fetchProvider, 'http', 'the deployment value IS restored')
     assert.deepEqual(read?.providerSelection.fetch, { baseId: 'http', userSet: true, userId: 'http' },
@@ -1118,9 +1135,9 @@ test('the real rc.5 unset restores the deployment value and clears the USER fiel
   // way — the unset restores it and keeps the USER copy while a sibling exists.
   {
     const booted = await boot(life, { providers: 'messages' })
-    await booted.config.setSearchProvider('deepseek-search-api')
-    await booted.config.setFetchProvider('deepseek-fetch-api')
-    await booted.config.restoreSearchProvider()
+    await booted.config.setSearchProvider('deepseek-search-api', await captureOf(booted.config))
+    await booted.config.setFetchProvider('deepseek-fetch-api', await captureOf(booted.config))
+    await booted.config.restoreSearchProvider(await captureOf(booted.config))
     const read = await booted.config.read()
     assert.equal(read?.searchProvider, 'deepseek-official', 'the composed Search provider applies again')
     assert.deepEqual(read?.providerSelection.search, { baseId: 'deepseek-official', userSet: true, userId: 'deepseek-official' })
@@ -1134,7 +1151,7 @@ test('after the official Search reset the NEXT DeepSeek-model search takes the s
     providers: 'base-defaults',
     requestContext: { provider: 'deepseek-official', model: 'deepseek-chat' },
   })
-  await booted.config.setSearchProvider('deepseek-search-api')
+  await booted.config.setSearchProvider('deepseek-search-api', await captureOf(booted.config))
   assert.equal((await booted.config.read())?.searchProvider, 'deepseek-search-api')
   // While the USER pin exists the explicit API route owns the call.
   const signal = new AbortController().signal
@@ -1159,7 +1176,7 @@ test('after the official Search reset the NEXT DeepSeek-model search takes the s
 
   // The official reset removes the USER selection; the NEXT call is decided by
   // the Host's automatic routing from the SAME real Session request context.
-  await booted.config.restoreSearchProvider()
+  await booted.config.restoreSearchProvider(await captureOf(booted.config))
   assert.equal((await booted.config.read())?.searchProvider, undefined, 'the reset reads back Automatic')
   const serverSide = await agents.withInitiator(booted.agent, () =>
     executeModelToolFixture(booted.ctx, {
@@ -1182,8 +1199,8 @@ test('after the official Search reset a non-DeepSeek model still prefers the Sea
     providers: 'base-defaults',
     requestContext: { provider: 'mock', model: 'model' },
   })
-  await booted.config.setSearchProvider('deepseek-search-api')
-  await booted.config.restoreSearchProvider()
+  await booted.config.setSearchProvider('deepseek-search-api', await captureOf(booted.config))
+  await booted.config.restoreSearchProvider(await captureOf(booted.config))
   assert.equal((await booted.config.read())?.searchProvider, undefined)
   const signal = new AbortController().signal
   const toolSet = await booted.ctx.tools.resolve({

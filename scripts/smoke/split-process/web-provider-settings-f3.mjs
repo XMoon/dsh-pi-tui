@@ -245,7 +245,7 @@ async function waitForScreenText(client, text, label, timeoutMs = 60_000) {
     await waitForCondition(async () => (await frameOf(client)).includes(text), label, timeoutMs)
   } catch (error) {
     const frame = await client.viewport()
-    const lines = frame.filter(line => /Web|Search|Fetch|Provider|Current|State|Saved|Verified|Billing|Override|Question|Settings/u.test(line))
+    const lines = frame.filter(line => /Web|Search|Fetch|Provider|Current|State|Saved|No changes|Could not|Billing|Override|Question|Settings/u.test(line))
     throw new SplitSmokeAssertionError(`${label}: ${JSON.stringify({ wanted: text, diagnosticLines: lines.slice(-18) })}`, { cause: error })
   }
 }
@@ -508,7 +508,7 @@ async function selectCandidate(client, index, label, candidateLabel) {
 async function confirmCandidate(client, expectedCurrent, label) {
   client.send('\r')
   await waitForCurrentValue(client, expectedCurrent, `${label} authoritative read-back`)
-  await waitForScreenText(client, 'Verified', `${label} verified verdict`, 20_000)
+  await waitForScreenText(client, 'Saved', `${label} saved verdict`, 20_000)
   return pageDetailText(await frameOf(client))
 }
 
@@ -627,8 +627,8 @@ async function assertInertBilling(client, documentPath, row, expectedValue, expe
   await sleep(700)
   assert(snapshot(namespaceConfig(documentPath, WEB_API_NS)) === before,
     `${label}: an inert Billing row reached the official Host document`)
-  assert(!(await frameOf(client)).includes('Verified'),
-    `${label}: an inert Billing row painted a Verified verdict`)
+  assert(!(await frameOf(client)).includes('Saved'),
+    `${label}: an inert Billing row painted a Saved verdict`)
   await returnToWebList(client, `${label} list`)
   return detail
 }

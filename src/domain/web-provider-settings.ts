@@ -173,3 +173,135 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   const proto: unknown = Object.getPrototypeOf(value)
   return proto === Object.prototype || proto === null
 }
+
+/** The effective provider id of one official `web` descriptor value. */
+export function webProviderEffectiveId(
+  value: Record<string, unknown> | undefined,
+  field: 'searchProvider' | 'fetchProvider',
+): string | undefined {
+  const raw = value?.[field]
+  return typeof raw === 'string' && raw !== '' ? raw : undefined
+}
+
+/** Whether the official USER/base layering facts moved since the capture. The
+ *  target namespace revision is checked separately; this is the semantic fact
+ *  comparison (a same-revision Host can still project different layers). */
+export function webProviderSelectionChanged(
+  current: WebProviderSelectionFacts | undefined,
+  captured: WebProviderSelectionFacts,
+): boolean {
+  return current === undefined
+    || current.baseId !== captured.baseId
+    || current.userSet !== captured.userSet
+    || current.userId !== captured.userId
+}
+
+/** Whether an explicit provider select is already stored as a USER own-field.
+ *  An inherited effective value with the same id is NOT a no-op: the explicit
+ *  pin must reach the official setter. */
+export function webProviderSelectIsNoOp(
+  selection: WebProviderSelectionFacts,
+  effective: string | undefined,
+  id: string,
+): boolean {
+  return effective === id && selection.userSet && selection.userId === id
+}
+
+/** Whether a provider restore is already satisfied: no USER own-field and the
+ *  effective value already equals the deployment base. */
+export function webProviderRestoreIsNoOp(
+  selection: WebProviderSelectionFacts,
+  effective: string | undefined,
+): boolean {
+  return !selection.userSet && effective === selection.baseId
+}
+
+/** The refusal reason for an explicit provider select when the current
+ *  effective route is a CUSTOM id. A custom route is never overwritten here. */
+export function webProviderSelectRefusal(
+  capability: 'search' | 'fetch',
+  effective: string | undefined,
+): string | undefined {
+  if (effective === undefined) return undefined
+  const official = capability === 'search' ? SEARCH_PROVIDER_IDS : FETCH_PROVIDER_IDS
+  if (official.has(effective)) return undefined
+  return `the configured provider is a custom route (${effective}); only the official candidates are selectable here`
+}
+
+/** The non-empty rc.2 YAML-only override FIELD NAMES of one capability, read
+ *  from the official `web-deepseek-api` descriptor value. This is the raw
+ *  presence guard: display labels, masked facts or a UI boolean never decide
+ *  billing eligibility. */
+export function webAdvancedOverrideFieldNames(
+  value: Record<string, unknown> | undefined,
+  capability: 'search' | 'fetch',
+): readonly string[] {
+  const fields = capability === 'search'
+    ? ['searchBaseURL', 'searchApiKeyEnv'] as const
+    : ['fetchBaseURL', 'fetchApiKeyEnv'] as const
+  return fields.filter(field => typeof value?.[field] === 'string' && (value[field] as string) !== '')
+}
+
+/** The official billing eligibility of one capability: only the EXPLICITLY
+ *  selected API route with no non-empty YAML override admits its Billing row.
+ *  The other capability's override/provider never blocks this one. */
+export type WebBillingEligibility =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: string }
+
+/** The shared eligibility REASON: the same product policy answers both the
+ *  command admission (detached facts) and the adapter dispatch guard (raw
+ *  descriptor facts). */
+export function webBillingEligibilityReason(
+  capability: 'search' | 'fetch',
+  effectiveProvider: string | undefined,
+  overrideFields: readonly string[],
+): string | undefined {
+  const apiId = capability === 'search' ? 'deepseek-search-api' : 'deepseek-fetch-api'
+  if (effectiveProvider !== apiId) {
+    return capability === 'search'
+      ? 'the DeepSeek Search API Billing is editable here only while that API is the explicitly selected provider; Automatic routes at request time'
+      : 'the Fetch route is not the DeepSeek Fetch API; Fetch Billing applies only to that API'
+  }
+  if (overrideFields.length > 0) {
+    return `the ${capability} API is overridden by Host YAML (${overrideFields.join(' and ')}); the billing choice cannot be written here`
+  }
+  return undefined
+}
+
+export function webBillingEligibility(
+  webValue: Record<string, unknown> | undefined,
+  apiValue: Record<string, unknown> | undefined,
+  capability: 'search' | 'fetch',
+): WebBillingEligibility {
+  const field = capability === 'search' ? 'searchProvider' : 'fetchProvider'
+  const reason = webBillingEligibilityReason(
+    capability,
+    webProviderEffectiveId(webValue, field),
+    webAdvancedOverrideFieldNames(apiValue, capability),
+  )
+  return reason === undefined ? { ok: true } : { ok: false, reason }
+}
+
+/** Whether two Web observations belong to the SAME Host authority observation
+ *  (opaque generation identity + both revisions). A→B→A is three distinct
+ *  observations even when the numeric revisions and values repeat. */
+export function sameWebAuthority(
+  a: { readonly generation: object; readonly webRevision: number; readonly apiRevision: number } | undefined,
+  b: { readonly generation: object; readonly webRevision: number; readonly apiRevision: number } | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return a === b
+  return Object.is(a.generation, b.generation)
+    && a.webRevision === b.webRevision
+    && a.apiRevision === b.apiRevision
+}
+
+/** Internal control-flow sentinel: the captured request is already satisfied
+ *  and NO Host mutation may be dispatched. Adapters translate it into the
+ *  distinct `no-changes` outcome; it never reaches a UI or a wire. */
+export class WebProviderNoChanges extends Error {
+  constructor() {
+    super('the Host already holds the requested Web setting; nothing was written')
+    this.name = 'WebProviderNoChanges'
+  }
+}

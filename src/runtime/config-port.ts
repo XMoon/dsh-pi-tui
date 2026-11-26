@@ -764,6 +764,18 @@ export interface PresetDefaultConfig {
  */
 export type WebApiBilling = 'auto' | 'account' | 'api-key'
 
+/** The SAME coherent Host observation a Web provider decision was captured
+ *  under: the opaque settings-authority generation and BOTH official namespace
+ *  revisions. The generation is process-local and is never serialized; the two
+ *  revisions are the exact CAS tokens an original decision may dispatch with.
+ *  A read that cannot prove all three is unavailable, never a write
+ *  authorization. */
+export interface WebProviderAuthority {
+  readonly generation: object
+  readonly webRevision: number
+  readonly apiRevision: number
+}
+
 /**
  * The OFFICIAL web provider selection and DeepSeek Search/Fetch API options
  * (the DSH `web` / `web-deepseek-api` settings sections, S2/PR-B §3.2).
@@ -821,7 +833,17 @@ export interface WebProviderSettings {
     configured: boolean
     source?: string
   }
+  /** The SAME observation's authority. Required: a capture without a proven
+   *  generation and both revisions is not a write authorization. */
+  authority: WebProviderAuthority
 }
+
+/** The settlement of ONE Web provider write. A legal zero-write request is the
+ *  distinct `no-changes` outcome (never an accepted RPC or a verified save);
+ *  every actual mutation reuses the existing `SectionMutationOutcome`. */
+export type WebProviderMutationOutcome =
+  | { readonly kind: 'no-changes' }
+  | SectionMutationOutcome
 
 /**
  * The Web provider configuration sub-domain: the ONLY write path to the
@@ -842,31 +864,46 @@ export interface WebProviderConfig {
    * separately, as a documented expectation rather than a fact).
    */
   read(): Promise<WebProviderSettings | undefined>
-  /** Pin the official search provider (`web.searchProvider`). */
-  setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void>
-  /** Pin the official fetch provider (`web.fetchProvider`). */
-  setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void>
+  /**
+   * ONE explicit fresh official observation. Unlike `read()` it must prove the
+   * observation was started at this call's boundary (the Remote adapter uses
+   * the mirror's `describeFresh`, never a ready cache); page entry, explicit
+   * refresh, queue admission and post-write verification use THIS path.
+   */
+  readFresh(): Promise<WebProviderSettings | undefined>
+  /** Pin the official search provider (`web.searchProvider`) against the
+   *  caller's original capture. */
+  setSearchProvider(
+    id: 'deepseek-official' | 'deepseek-search-api',
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome>
+  /** Pin the official fetch provider (`web.fetchProvider`) against the
+   *  caller's original capture. */
+  setFetchProvider(
+    id: 'http' | 'deepseek-fetch-api',
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome>
   /** Restore the deployment selection for Search: the ONE official `unset`
    *  path op, which lets the `base` layer apply again. It carries NO id (an
    *  automatic choice is not a provider id). A readable section with no USER
    *  own-field is a no-op; an UNREADABLE USER layer is an error, never an
    *  assumed absence. */
-  restoreSearchProvider(): Promise<void>
+  restoreSearchProvider(capture: WebProviderSettings): Promise<WebProviderMutationOutcome>
   /** Restore the deployment selection for Fetch (the same official `unset`). */
-  restoreFetchProvider(): Promise<void>
+  restoreFetchProvider(capture: WebProviderSettings): Promise<WebProviderMutationOutcome>
   /** `web-deepseek-api.count`: an integer from 1 through 50 (the official rule). */
-  setSearchApiCount(count: number): Promise<void>
+  setSearchApiCount(count: number, capture: WebProviderSettings): Promise<WebProviderMutationOutcome>
   /** `web-deepseek-api.sendOriginalQuestion`: whether the next API search may
    *  send the triggering human question (the provider bounds it to 128
    *  characters). */
-  setSendOriginalQuestion(enabled: boolean): Promise<void>
+  setSendOriginalQuestion(enabled: boolean, capture: WebProviderSettings): Promise<WebProviderMutationOutcome>
   /** `web-deepseek-api.searchBilling`: one explicit official billing choice
    *  for the Search API (`auto` is a persisted choice, never a reset of the
    *  YAML-only overrides). */
-  setSearchBilling(mode: WebApiBilling): Promise<void>
+  setSearchBilling(mode: WebApiBilling, capture: WebProviderSettings): Promise<WebProviderMutationOutcome>
   /** `web-deepseek-api.fetchBilling`: the same explicit official billing
    *  choice for the Fetch API. */
-  setFetchBilling(mode: WebApiBilling): Promise<void>
+  setFetchBilling(mode: WebApiBilling, capture: WebProviderSettings): Promise<WebProviderMutationOutcome>
 }
 
 /** The effective state of the Host `pi-tui-visual-tools` row — the ONE

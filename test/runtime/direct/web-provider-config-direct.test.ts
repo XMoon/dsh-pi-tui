@@ -23,6 +23,30 @@ import test from 'node:test'
 import { DirectConfigPort, DirectWebProviderConfig } from '../../../src/runtime/direct/config-direct.ts'
 import { UNPARSEABLE_WEB_OVERRIDE_URL } from '../../../src/domain/web-provider-settings.ts'
 import type { HostContextLike } from '../../../src/runtime/direct/config-direct.ts'
+import type { WebProviderSettings } from '../../../src/runtime/config-port.ts'
+
+/** ONE real readable capture for a test write. Production never fabricates a
+ *  capture: every write is bound to the observation the user saw. */
+async function captureOf(source: { read(): Promise<WebProviderSettings | undefined> }): Promise<WebProviderSettings> {
+  const capture = await source.read()
+  assert.ok(capture !== undefined, 'the fixture Host must produce a readable Web capture')
+  return capture
+}
+
+/** The DTO fields WITHOUT the opaque authority, for the legacy deepEqual
+ *  assertions; the authority is asserted separately. */
+function withoutAuthority(read: WebProviderSettings | undefined): Omit<WebProviderSettings, 'authority'> | undefined {
+  if (read === undefined) return undefined
+  const { authority: _authority, ...rest } = read
+  return rest
+}
+
+function assertAuthority(read: WebProviderSettings | undefined, webRevision: number, apiRevision: number): void {
+  assert.ok(read !== undefined)
+  assert.equal(typeof read.authority.generation, 'object')
+  assert.equal(read.authority.webRevision, webRevision)
+  assert.equal(read.authority.apiRevision, apiRevision)
+}
 
 interface Descriptor {
   ns: string
@@ -155,7 +179,8 @@ test('read() maps the pure rc.2 defaults, the credential presence and nothing el
   const h = host({ credential: { configured: true, source: 'file' }, searchProvider: 'acme-search' })
   const config = new DirectWebProviderConfig(h.ctx)
   const settings = await config.read()
-  assert.deepEqual(settings, {
+  assertAuthority(settings, 3, 5)
+  assert.deepEqual(withoutAuthority(settings), {
     searchProvider: 'acme-search',
     fetchProvider: 'http',
     providerSelection: {
@@ -271,12 +296,12 @@ test('read() reports UNAVAILABLE for a missing section, an unreadable count or a
 test('the provider selections, API options and billing modes write the exact official path with the CURRENT revision', async () => {
   const h = host()
   const config = new DirectWebProviderConfig(h.ctx)
-  await config.setSearchProvider('deepseek-search-api')
-  await config.setFetchProvider('deepseek-fetch-api')
-  await config.setSearchApiCount(20)
-  await config.setSendOriginalQuestion(false)
-  await config.setSearchBilling('account')
-  await config.setFetchBilling('api-key')
+  await config.setSearchProvider('deepseek-search-api', await captureOf(config))
+  await config.setFetchProvider('deepseek-fetch-api', await captureOf(config))
+  await config.setSearchApiCount(20, await captureOf(config))
+  await config.setSendOriginalQuestion(false, await captureOf(config))
+  await config.setSearchBilling('account', await captureOf(config))
+  await config.setFetchBilling('api-key', await captureOf(config))
   assert.deepEqual(h.settings.recorded, [
     { ns: 'web', ops: [{ op: 'set', path: ['searchProvider'], value: 'deepseek-search-api' }], revision: 3 },
     { ns: 'web', ops: [{ op: 'set', path: ['fetchProvider'], value: 'deepseek-fetch-api' }], revision: 4 },
@@ -287,7 +312,7 @@ test('the provider selections, API options and billing modes write the exact off
   ])
   // The read-back is the authority the UI must display: the two billing modes
   // are independent and each stays the raw official enum.
-  assert.deepEqual(await config.read(), {
+  assert.deepEqual(withoutAuthority(await config.read()), {
     searchProvider: 'deepseek-search-api',
     fetchProvider: 'deepseek-fetch-api',
     providerSelection: {
@@ -300,16 +325,29 @@ test('the provider selections, API options and billing modes write the exact off
   })
 })
 
-test('an explicit `auto` billing write is a real persisted choice, never a reset of the overrides', async () => {
-  const h = host({ api: { searchBaseURL: 'https://search-gateway.example.test/v1/tools' } })
+test('a non-empty Search YAML override refuses the Billing write with zero Host mutation', async () => {
+  const h = host({ searchProvider: 'deepseek-search-api', api: { searchBaseURL: 'https://search-gateway.example.test/v1/tools' } })
   const config = new DirectWebProviderConfig(h.ctx)
-  await config.setSearchBilling('auto')
-  assert.deepEqual(h.settings.recorded, [
-    { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['searchBilling'], value: 'auto' }], revision: 5 },
-  ])
+  const outcome = await config.setSearchBilling('auto', await captureOf(config))
+  assert.equal(outcome.kind, 'rejected')
+  assert.match(outcome.reason, /overridden by Host YAML/u)
+  assert.deepEqual(h.settings.recorded, [], 'the override owns the capability; no billing write is dispatched')
   const read = await config.read()
   assert.deepEqual(read?.advanced, { searchBaseURL: 'https://search-gateway.example.test/v1/tools' },
-    'the override survives an explicit Automatic choice (the Host owns the precedence)')
+    'the override remains the Host fact')
+})
+
+test('an explicit `auto` billing write is a real persisted choice when eligible', async () => {
+  const h = host({ searchProvider: 'deepseek-search-api' })
+  const config = new DirectWebProviderConfig(h.ctx)
+  await config.setSearchBilling('api-key', await captureOf(config))
+  const auto = await config.setSearchBilling('auto', await captureOf(config))
+  assert.equal(auto.kind, 'accepted')
+  assert.deepEqual(h.settings.recorded, [
+    { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['searchBilling'], value: 'api-key' }], revision: 5 },
+    { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['searchBilling'], value: 'auto' }], revision: 6 },
+  ])
+  assert.equal((await config.read())?.api.searchBilling, 'auto')
 })
 
 test('a custom configured provider id is reported as-is and never silently replaced', async () => {
@@ -321,8 +359,8 @@ test('a custom configured provider id is reported as-is and never silently repla
 
 test('a custom provider refreshed before a stale Direct intent is never overwritten', async () => {
   for (const item of [
-    { field: 'searchProvider', value: 'custom-search', write: (config: DirectWebProviderConfig) => config.setSearchProvider('deepseek-search-api') },
-    { field: 'fetchProvider', value: 'custom-fetch', write: (config: DirectWebProviderConfig) => config.setFetchProvider('deepseek-fetch-api') },
+    { field: 'searchProvider', value: 'custom-search', write: (config: DirectWebProviderConfig, capture: WebProviderSettings) => config.setSearchProvider('deepseek-search-api', capture) },
+    { field: 'fetchProvider', value: 'custom-fetch', write: (config: DirectWebProviderConfig, capture: WebProviderSettings) => config.setFetchProvider('deepseek-fetch-api', capture) },
   ] as const) {
     const h = host()
     const descriptor = h.settings.descriptors.get('web')!
@@ -332,54 +370,73 @@ test('a custom provider refreshed before a stale Direct intent is never overwrit
     const config = new DirectWebProviderConfig(h.ctx)
     assert.equal((await config.read())?.[item.field], item.value,
       'the Direct adapter sees the external custom route before the old intent reaches its setter')
-    await assert.rejects(item.write(config), /custom route/u)
+    const outcome = await item.write(config, await captureOf(config))
+    assert.equal(outcome.kind, 'rejected')
+    assert.match(outcome.reason, /custom route/u)
     assert.equal(value[item.field], item.value)
     assert.deepEqual(h.settings.recorded, [], 'the Direct adapter refuses before Host mutate')
   }
 })
 
 test('invalid human input is refused BEFORE any Host write', async () => {
-  const h = host()
+  const h = host({ searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' })
   const config = new DirectWebProviderConfig(h.ctx)
   for (const count of [0, 51, 2.5, Number.NaN]) {
-    await assert.rejects(config.setSearchApiCount(count), /count must be an integer from 1 through 50/u)
+    await assert.rejects(config.setSearchApiCount(count, await captureOf(config)), /count must be an integer from 1 through 50/u)
   }
   // The billing mode is the official CLOSED enum; legacy free-form values and
   // typos are refused before the Host settings service is ever consulted. The
   // invalid values are cast through the enum type on purpose: the RUNTIME guard
   // is the subject.
   for (const mode of ['subscription', 'AUTO', 'api_key', '', 'auto '] as readonly string[]) {
-    await assert.rejects(config.setSearchBilling(mode as 'auto' | 'account' | 'api-key'), /billing mode/u, `refused: ${mode}`)
-    await assert.rejects(config.setFetchBilling(mode as 'auto' | 'account' | 'api-key'), /billing mode/u, `refused: ${mode}`)
+    await assert.rejects(config.setSearchBilling(mode as 'auto' | 'account' | 'api-key', await captureOf(config)), /billing mode/u, `refused: ${mode}`)
+    await assert.rejects(config.setFetchBilling(mode as 'auto' | 'account' | 'api-key', await captureOf(config)), /billing mode/u, `refused: ${mode}`)
   }
   assert.deepEqual(h.settings.recorded, [], 'a refused input never reaches the Host settings service')
   // The three official modes write their exact field.
-  await config.setSearchBilling('api-key')
-  await config.setFetchBilling('auto')
+  await config.setSearchBilling('api-key', await captureOf(config))
+  await config.setFetchBilling('account', await captureOf(config))
   assert.deepEqual(h.settings.recorded, [
     { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['searchBilling'], value: 'api-key' }], revision: 5 },
-    { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['fetchBilling'], value: 'auto' }], revision: 6 },
+    { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['fetchBilling'], value: 'account' }], revision: 6 },
   ])
 })
 
 test('an unmounted settings section refuses the write instead of inventing a namespace', async () => {
-  const h = host({ omitWeb: true })
+  const h = host()
   const config = new DirectWebProviderConfig(h.ctx)
-  await assert.rejects(config.setSearchProvider('deepseek-official'), /is not mounted/u)
-  const apiHost = host({ omitApi: true })
+  const capture = await captureOf(config)
+  h.settings.descriptors.delete('web')
+  const webOutcome = await config.setSearchProvider('deepseek-official', capture)
+  assert.equal(webOutcome.kind, 'rejected')
+  assert.match(webOutcome.reason, /is not mounted/u)
+
+  const apiHost = host()
   const apiConfig = new DirectWebProviderConfig(apiHost.ctx)
-  await assert.rejects(apiConfig.setSearchBilling('account'), /is not mounted/u)
-  await assert.rejects(apiConfig.setFetchBilling('account'), /is not mounted/u)
+  const apiCapture = await captureOf(apiConfig)
+  apiHost.settings.descriptors.delete('web-deepseek-api')
+  const billingOutcome = await apiConfig.setSearchBilling('account', apiCapture)
+  assert.equal(billingOutcome.kind, 'rejected')
+  assert.match(billingOutcome.reason, /is not mounted/u)
+  const fetchBillingOutcome = await apiConfig.setFetchBilling('account', apiCapture)
+  assert.equal(fetchBillingOutcome.kind, 'rejected')
+  assert.match(fetchBillingOutcome.reason, /is not mounted/u)
   assert.deepEqual(h.settings.recorded, [])
   assert.deepEqual(apiHost.settings.recorded, [])
 })
 
-test('a rejected settings mutation surfaces with its own reason (never a silent success)', async () => {
-  const h = host()
-  h.settings.mutate = async () => { throw new Error('SETTINGS_CONFLICT: revision moved') }
+test('a rejected settings mutation surfaces with its own typed reason (never a silent success)', async () => {
+  const h = host({ searchProvider: 'deepseek-official', fetchProvider: 'deepseek-fetch-api' })
+  h.settings.mutate = async () => {
+    throw Object.assign(new Error('SETTINGS_CONFLICT: revision moved'), { code: 'SETTINGS_CONFLICT' })
+  }
   const config = new DirectWebProviderConfig(h.ctx)
-  await assert.rejects(config.setSearchProvider('deepseek-search-api'), /SETTINGS_CONFLICT/u)
-  await assert.rejects(config.setFetchBilling('account'), /SETTINGS_CONFLICT/u)
+  const provider = await config.setSearchProvider('deepseek-search-api', await captureOf(config))
+  assert.equal(provider.kind, 'conflict')
+  assert.match(provider.reason, /SETTINGS_CONFLICT/u)
+  const billing = await config.setFetchBilling('account', await captureOf(config))
+  assert.equal(billing.kind, 'conflict')
+  assert.match(billing.reason, /SETTINGS_CONFLICT/u)
 })
 
 test('the DirectConfigPort exposes the same sub-domain through the assembly', async () => {
@@ -387,7 +444,7 @@ test('the DirectConfigPort exposes the same sub-domain through the assembly', as
   const port = new DirectConfigPort(h.ctx, undefined, () => undefined)
   assert.equal(port.web.available(), true)
   assert.equal((await port.web.read())?.api.count, 10)
-  await port.web.setSendOriginalQuestion(false)
+  await port.web.setSendOriginalQuestion(false, await captureOf(port.web))
   assert.deepEqual(h.settings.recorded, [
     { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['sendOriginalQuestion'], value: false }], revision: 5 },
   ])
@@ -441,12 +498,14 @@ test('read() projects the SAME web descriptor value/base/user layers as detached
 test('restore providers send the exact official unset at the read revision and skip a true no-op', async () => {
   const h = host()
   const config = new DirectWebProviderConfig(h.ctx)
-  await config.restoreSearchProvider()
+  const reset = await config.restoreSearchProvider(await captureOf(config))
+  assert.equal(reset.kind, 'accepted')
   assert.deepEqual(h.settings.recorded, [
     { ns: 'web', ops: [{ op: 'unset', path: ['searchProvider'] }], revision: 3 },
   ], 'the reset is ONE official unset path op with the descriptor revision')
   // The second reset finds no USER own-field: a real no-op, zero Host writes.
-  await config.restoreFetchProvider()
+  const noChange = await config.restoreFetchProvider(await captureOf(config))
+  assert.equal(noChange.kind, 'no-changes')
   assert.equal(h.settings.recorded.length, 1, 'no unset is dispatched when the USER field is absent')
   // The authoritative read-back reports the post-reset layers/effective value.
   const read = await config.read()
@@ -468,10 +527,11 @@ test('a CUSTOM effective route is restorable through unset while an explicit off
   })
   const config = new DirectWebProviderConfig(h.ctx)
   assert.equal((await config.read())?.providerSelection.search.baseId, 'deepseek-official')
-  await assert.rejects(config.setSearchProvider('deepseek-search-api'), /custom route/u,
-    'the explicit-set protection keeps refusing to overwrite a custom route')
+  const refused = await config.setSearchProvider('deepseek-search-api', await captureOf(config))
+  assert.equal(refused.kind, 'rejected', 'the explicit-set protection keeps refusing to overwrite a custom route')
+  assert.match(refused.reason, /custom route/u)
   assert.deepEqual(h.settings.recorded, [], 'the refused explicit set wrote nothing')
-  await config.restoreSearchProvider()
+  await config.restoreSearchProvider(await captureOf(config))
   assert.deepEqual(h.settings.recorded, [
     { ns: 'web', ops: [{ op: 'unset', path: ['searchProvider'] }], revision: 3 },
   ], 'the USER reset is the official unset, never a custom-id write')
@@ -483,10 +543,15 @@ test('a CUSTOM effective route is restorable through unset while an explicit off
 test('an unreadable USER/base layer refuses the reset instead of assuming no override', async () => {
   for (const layer of ['base', 'user'] as const) {
     const h = host()
-    Reflect.deleteProperty(h.settings.descriptors.get('web')!, layer)
     const config = new DirectWebProviderConfig(h.ctx)
-    await assert.rejects(config.restoreSearchProvider(), /USER\/base layers/u)
-    await assert.rejects(config.restoreFetchProvider(), /USER\/base layers/u)
+    const capture = await captureOf(config)
+    Reflect.deleteProperty(h.settings.descriptors.get('web')!, layer)
+    const search = await config.restoreSearchProvider(capture)
+    assert.equal(search.kind, 'rejected')
+    assert.match(search.reason, /USER\/base layers/u)
+    const fetch = await config.restoreFetchProvider(capture)
+    assert.equal(fetch.kind, 'rejected')
+    assert.match(fetch.reason, /USER\/base layers/u)
     assert.deepEqual(h.settings.recorded, [], 'an unreadable layer is never a write authorization')
   }
 })
@@ -516,4 +581,74 @@ test('read() returns the provider layers observed at its synchronous return, not
     userId: 'deepseek-search-api',
   }, 'the returned layer facts are the state at the synchronous return, not a snapshot the credential read outlived')
   assert.equal(read?.searchProvider, 'deepseek-search-api')
+})
+
+// ── SUX-06A: original-generation capture, CAS revision and replacement ──────
+
+test('read() rejects a settings-authority replacement during the credential await; a fresh read gets the new Host', async () => {
+  const a = host()
+  const b = host({ api: { count: 20 } })
+  let release: () => void = () => {}
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let started = false
+  a.credentials.describe = async () => {
+    started = true
+    await gate
+    return { configured: false }
+  }
+  let current = a
+  const ctx: HostContextLike = {
+    get: name => name === 'settings'
+      ? current.settings
+      : name === 'credentials' ? current.credentials : undefined,
+  }
+  const config = new DirectWebProviderConfig(ctx)
+  const pending = config.read()
+  while (!started) await new Promise(resolve => setImmediate(resolve))
+  current = b
+  release()
+  await assert.rejects(pending, /authority changed/u)
+  const fresh = await config.read()
+  assert.equal(fresh?.api.count, 20)
+  assert.notEqual(fresh?.authority.generation, a.settings, 'the fresh read belongs to B')
+  // A capture from A never dispatches to B, even with the same numeric revision
+  // and value.
+  const captureA: WebProviderSettings = {
+    ...fresh!,
+    authority: { generation: a.settings, webRevision: 3, apiRevision: 5 },
+  }
+  const outcome = await config.setSearchProvider('deepseek-search-api', captureA)
+  assert.equal(outcome.kind, 'rejected')
+  assert.match(outcome.reason, /authority changed/u)
+  assert.deepEqual(a.settings.recorded, [])
+  assert.deepEqual(b.settings.recorded, [])
+})
+
+test('a readable revision 0 is a valid CAS token', async () => {
+  const h = host()
+  h.settings.descriptors.get('web')!.revision = 0
+  h.settings.descriptors.get('web-deepseek-api')!.revision = 0
+  const config = new DirectWebProviderConfig(h.ctx)
+  const capture = await captureOf(config)
+  assert.equal(capture.authority.webRevision, 0)
+  assert.equal(capture.authority.apiRevision, 0)
+  const outcome = await config.setSearchApiCount(20, capture)
+  assert.equal(outcome.kind, 'accepted')
+  assert.deepEqual(h.settings.recorded, [
+    { ns: 'web-deepseek-api', ops: [{ op: 'set', path: ['count'], value: 20 }], revision: 0 },
+  ])
+})
+
+test('a malformed namespace revision makes the read unavailable and refuses every write', async () => {
+  for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const h = host()
+    const config = new DirectWebProviderConfig(h.ctx)
+    const capture = await captureOf(config)
+    h.settings.descriptors.get('web')!.revision = bad
+    assert.equal(await config.read(), undefined, `revision ${String(bad)} must not authorize a read`)
+    const outcome = await config.setSearchProvider('deepseek-search-api', capture)
+    assert.equal(outcome.kind, 'rejected')
+    assert.match(outcome.reason, /revision is not readable/u)
+    assert.deepEqual(h.settings.recorded, [], 'a malformed revision never reaches the Host mutate')
+  }
 })

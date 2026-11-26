@@ -52,8 +52,8 @@ import { HostNumericSettingsPage } from '../panels/host-numeric-settings-page.ts
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
 import { commitPersistedSetting, readPersistedSetting, resolvePersistedSettingOwner, type PersistedSettingCommitOutcome, type PersistedSettingRecord } from '../../app/client-extensions/persisted-setting.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
-import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState, type BackendStartupPreferenceState, type PublicBackendValue, type SectionRead, type SectionMutationOutcome, type SessionLogUpload, type AgentLoopSettings, type ShellExecutionSettings } from '../../runtime/config-port.ts'
-import { isWebApiBilling } from '../../domain/web-provider-settings.ts'
+import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderMutationOutcome, type WebProviderSettings, type WebStartupPreferenceState, type BackendStartupPreferenceState, type PublicBackendValue, type SectionRead, type SectionMutationOutcome, type SessionLogUpload, type AgentLoopSettings, type ShellExecutionSettings } from '../../runtime/config-port.ts'
+import { webBillingEligibilityReason, webProviderSelectRefusal } from '../../domain/web-provider-settings.ts'
 import {
   WEB_FETCH_PROVIDER_CANDIDATES,
   WEB_SEARCH_PROVIDER_CANDIDATES,
@@ -63,9 +63,8 @@ import {
   webAdvancedOverrideFields,
   webBillingLabel,
   type WebCommitResult,
-  type WebProviderCommitIntent,
   type WebSettingRowId,
-  type WebSettingsCommitRequest,
+  type WebSettingsDecision,
   type WebSettingsFacts,
 } from '../panels/web-settings-page.ts'
 import { ModelsWorkspacePage, type ModelsInitialView, type ModelsWorkspaceSource } from '../panels/models-workspace-page.ts'
@@ -469,7 +468,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    */
   const readWebSettings = async (): Promise<{ settings: WebProviderSettings | undefined; fresh: boolean }> => {
     const serial = ++webReadSerial
-    const promise = (async (): Promise<WebProviderSettings | undefined> => await runner.config.web.read())()
+    const promise = (async (): Promise<WebProviderSettings | undefined> => await runner.config.web.readFresh())()
     webReadInFlight = { serial, promise }
     let settings: WebProviderSettings | undefined
     let failure: string | undefined
@@ -637,26 +636,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     id: string | undefined,
   ): string | undefined => id === undefined ? undefined : (values.find(entry => entry.id === id)?.label ?? id)
 
-  /** The SETTLED Host value only (never a transient word): this is what a
-   *  choice row positions itself on and what a failed write reverts to. */
-  const webSettledValue = (id: WebSettingRowId): string | undefined => {
-    if (webSettings === undefined) return undefined
-    switch (id) {
-      case 'web-search-count': return String(webSettings.api.count)
-      case 'web-send-original-question': return webSettings.api.sendOriginalQuestion ? 'on' : 'off'
-      case 'web-search-billing': return webBillingLabel(webSettings.api.searchBilling)
-      case 'web-fetch-billing': return webBillingLabel(webSettings.api.fetchBilling)
-      case 'web-search-advanced': return webAdvancedFactsText(webSettings.advanced, 'search')
-      case 'web-fetch-advanced': return webAdvancedFactsText(webSettings.advanced, 'fetch')
-    }
-  }
-
   /** The launcher row's facts. The Settings workspace snapshot is SYNCHRONOUS
    *  and the command reads the Host BEFORE the workspace leases the screen, so
    *  the first frame already carries authoritative values; a missing or failed
    *  read is stated, never defaulted. */
   const webWorkspaceRowFacts = (): { summary: string; freshness: SettingsWorkspaceFreshness; description: string } => {
-    const description = 'Host Web settings for the base profile, not an Optional Bundle. Search: with no explicit provider the Host routes AUTOMATICALLY (DSH rc.5; older Host versions may decide differently) — DeepSeek model routes prefer DeepSeek server-side search (no per-search charge), while other models and requests outside a model route prefer the DeepSeek Search API (billed separately per call; a Messages plan does not guarantee coverage), an explicit provider always overrides the automatic routing, and the Host may pick another single usable provider or fail when no preferred provider is usable. Fetch: the official Host base configures HTTP (no billed API); DeepSeek Fetch API is the opt-in, separately billed alternative; other bundles never change these settings. Share Original Question is on by default: it sends up to 128 characters of the human question as ori_question (never the full history or system prompt). Each Search/Fetch API billing mode (Automatic/Account/API key) is one explicit choice; the YAML-only Search/Fetch endpoint overrides are read-only facts here and, when set, own their capability over the billing choice. Old baseURL/apiKeyEnv/apiKey keys no longer control Search/Fetch. The key stays in the official credential reference and is never shown. Enter opens the Web Search / Fetch page in this same workspace: each value is written only by its own explicit Confirm and reads Verified only after the Host write and authoritative read-back agree.'
+    const description = 'Host Web settings for the base profile, not an Optional Bundle. Search: with no explicit provider the Host routes AUTOMATICALLY (DSH rc.5; older Host versions may decide differently) — DeepSeek model routes prefer DeepSeek server-side search (no per-search charge), while other models and requests outside a model route prefer the DeepSeek Search API (billed separately per call; a Messages plan does not guarantee coverage), an explicit provider always overrides the automatic routing, and the Host may pick another single usable provider or fail when no preferred provider is usable. Fetch: the official Host base configures HTTP (no billed API); DeepSeek Fetch API is the opt-in, separately billed alternative; other bundles never change these settings. Share Original Question is on by default: it sends up to 128 characters of the human question as ori_question (never the full history or system prompt). Each Search/Fetch API billing mode (Automatic/Account/API key) is one explicit choice; the YAML-only Search/Fetch endpoint overrides are read-only facts here and, when set, own their capability over the billing choice. Old baseURL/apiKeyEnv/apiKey keys no longer control Search/Fetch. The key stays in the official credential reference and is never shown. Enter opens the Web Search / Fetch page in this same workspace: each value is written only by its own explicit Confirm and reads Saved only after the Host write and authoritative read-back agree.'
     if (!webSettingsAvailable()) {
       return { summary: 'Unavailable', freshness: 'unavailable', description: `${description} Not supported on this backend.` }
     }
@@ -687,79 +672,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return run
   }
 
-  /** The exact ConfigPort operation one choice row means (undefined = the value
-   *  is not one this UI writes, so the row is restored unchanged). The override
-   *  rows are read-only facts: they never carry a write. */
-  const webWriteFor = (id: WebSettingRowId, value: string): (() => Promise<void>) | undefined => {
-    switch (id) {
-      case 'web-search-provider':
-      case 'web-fetch-provider':
-        // The provider rows commit through the typed intent path; this
-        // value-only mapping must never become a second provider writer.
-        return undefined
-      case 'web-search-count': {
-        const count = Number(value)
-        return Number.isInteger(count) && count >= 1 && count <= 50
-          ? () => runner.config.web.setSearchApiCount(count)
-          : undefined
-      }
-      case 'web-send-original-question':
-        return value !== 'on' && value !== 'off'
-          ? undefined
-          : () => runner.config.web.setSendOriginalQuestion(value === 'on')
-      case 'web-search-billing':
-        return isWebApiBilling(value) ? () => runner.config.web.setSearchBilling(value) : undefined
-      case 'web-fetch-billing':
-        return isWebApiBilling(value) ? () => runner.config.web.setFetchBilling(value) : undefined
-      case 'web-search-advanced':
-      case 'web-fetch-advanced':
-        // Read-only YAML-only facts: no write path exists for them here.
-        return undefined
-    }
-  }
-
-  /** The RAW identity one requested value means, or undefined when this UI never
-   *  writes it. Providers accept their official id OR their display label (the
-   *  page submits ids, an already-stored label still names the same route); the
-   *  write itself only ever uses the official id. Billing rows accept only the
-   *  official closed enum. */
-  const webRequestedIdentity = (id: WebSettingRowId, requested: string): string | undefined => {
-    switch (id) {
-      case 'web-search-provider':
-      case 'web-fetch-provider':
-        return undefined
-      case 'web-search-count': {
-        const count = Number(requested)
-        return Number.isInteger(count) && count >= 1 && count <= 50 ? String(count) : undefined
-      }
-      case 'web-send-original-question':
-        return requested === 'on' || requested === 'off' ? requested : undefined
-      case 'web-search-billing':
-      case 'web-fetch-billing':
-        return isWebApiBilling(requested) ? requested : undefined
-      case 'web-search-advanced':
-      case 'web-fetch-advanced':
-        return undefined
-    }
-  }
-
-  /** The RAW identity the LATEST authoritative settings hold (never a display
-   *  label): the write verdict compares THIS against the requested identity, so
-   *  a canonical form / a winning external writer is a readable difference. The
-   *  billing rows report the raw billing mode; the read-only override rows
-   *  report their facts string (no write exists, so the identity is
-   *  display-only). */
-  const webCommittedIdentity = (settings: WebProviderSettings, id: WebSettingRowId): string | undefined => {
-    switch (id) {
-      case 'web-search-count': return String(settings.api.count)
-      case 'web-send-original-question': return settings.api.sendOriginalQuestion ? 'on' : 'off'
-      case 'web-search-billing': return settings.api.searchBilling
-      case 'web-fetch-billing': return settings.api.fetchBilling
-      case 'web-search-advanced': return webAdvancedFactsText(settings.advanced, 'search')
-      case 'web-fetch-advanced': return webAdvancedFactsText(settings.advanced, 'fetch')
-    }
-  }
-
   /** A read issued AFTER a dispatched write, judged by the NEWEST settlement:
    *  a superseded snapshot never decides the verdict. */
   const settleWebReadAfterWrite = async (): Promise<void> => {
@@ -771,30 +683,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }
   }
 
-  /**
-   * The ONE Web commit entry (C2-R4 §5): every writable row confirms through
-   * this function, so there is exactly ONE FIFO, ONE latest-read fence and ONE
-   * settlement vocabulary:
-   *
-   *  - (1) the caller already decided the exact field + value;
-   *  - (2) the intent joins the command-owned chain;
-   *  - (3) its turn re-proves readiness/availability and takes the NEWEST
-   *    committed read as the base — a snapshot a later read superseded is never
-   *    a commit base;
-   *  - (4) the candidate / custom-provider / value / override guard runs with
-   *    ZERO Host writes on refusal;
-   *  - (5) the ONE official setter is dispatched;
-   *  - (6) a fresh read-back decides `verified` / `not-saved` / `outcome-unknown`;
-   *  - (7) the result is returned to whichever presentation still exists.
-   *
-   * An already-current request writes NOTHING and is `verified` from the real
-   * authority (browsing/confirming the current value is not a mutation).
-   */
-  /** The provider capability one provider row addresses (undefined for every
-   *  other row, which keeps its plain value request). */
-  const providerCapability = (id: WebSettingRowId): 'search' | 'fetch' | undefined =>
-    id === 'web-search-provider' ? 'search' : id === 'web-fetch-provider' ? 'fetch' : undefined
-
   /** One provider's display identity (the raw Automatic state is a fact, not a
    *  missing read). */
   const webProviderDisplay = (capability: 'search' | 'fetch', id: string | undefined): string => {
@@ -802,160 +690,157 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return providerLabel(capability === 'search' ? WEB_SEARCH_PROVIDER_VALUES : WEB_FETCH_PROVIDER_VALUES, id) ?? id
   }
 
-  /** The latest Host facts one provider decision needs, from the SAME read. */
-  const webProviderSnapshot = (
-    settings: WebProviderSettings,
-    capability: 'search' | 'fetch',
-  ): { readonly baseId: string | undefined; readonly userSet: boolean; readonly userId: string | undefined; readonly effective: string | undefined } => ({
-    ...(capability === 'search' ? settings.providerSelection.search : settings.providerSelection.fetch),
-    effective: capability === 'search' ? settings.searchProvider : settings.fetchProvider,
-  })
-
-  /**
-   * ONE typed provider commit. The page already decided the OFFICIAL semantic
-   * (`select` -> set, `restore` -> unset) against the SAME Host read; this
-   * queue-head re-read only proves that the gesture still describes the Host:
-   *
-   * - a deployment (`base`) change invalidates the page-time decision for BOTH
-   *   actions (`Not saved`, zero writes) — the deployment default the user saw
-   *   is not the one that now applies;
-   * - a USER-layer change invalidates a RESET gesture only (an explicit set
-   *   intentionally replaces the USER value), so the stale "clear" can never
-   *   erase a value another writer just stored;
-   * - `Verified` for a reset is the fresh effective value equal to the fresh
-   *   deployment `baseId` (the official Host may keep an explicit USER value
-   *   equal to the base while the same section carries another override; that
-   *   is the official rc.5 reset behaviour and is NOT reported as a failed
-   *   write). An explicit set is only Verified when the fresh USER own-field
-   *   really carries the requested id — never from an inherited effective value.
-   */
-  const commitWebProviderIntent = async (
-    id: 'web-search-provider' | 'web-fetch-provider',
-    capability: 'search' | 'fetch',
-    intent: WebProviderCommitIntent,
-    base: WebProviderSettings,
-  ): Promise<WebCommitResult> => {
-    const observed = intent.observed
-    const fresh = webProviderSnapshot(base, capability)
-    if (fresh.baseId !== observed.baseId) {
-      return {
-        kind: 'not-saved',
-        reason: 'the Host deployment selection changed since the page read it; nothing was written',
-      }
-    }
-    if (intent.kind === 'provider-restore') {
-      if (fresh.userSet !== observed.userSet || fresh.userId !== observed.userId) {
-        return {
-          kind: 'not-saved',
-          reason: 'the Host USER selection changed since the page read it; nothing was written',
-          ...fresh.effective === undefined ? {} : { actual: webProviderDisplay(capability, fresh.effective) },
-        }
-      }
-      if (!fresh.userSet) {
-        if (fresh.effective === fresh.baseId) {
-          return { kind: 'verified', actual: webProviderDisplay(capability, fresh.effective) }
-        }
-        return {
-          kind: 'not-saved',
-          reason: `the USER selection is already absent, but the Host reads "${webProviderDisplay(capability, fresh.effective)}" instead of "${webProviderDisplay(capability, fresh.baseId)}"`,
-          ...fresh.effective === undefined ? {} : { actual: webProviderDisplay(capability, fresh.effective) },
-        }
-      }
-      try {
-        await (capability === 'search' ? runner.config.web.restoreSearchProvider() : runner.config.web.restoreFetchProvider())
-      } catch (error) {
-        const reason = safeErrorMessage(error)
-        await settleWebReadAfterWrite()
-        if (webSettings === undefined) return { kind: 'outcome-unknown', reason }
-        const after = webProviderSnapshot(webSettings, capability)
-        if (after.effective === after.baseId) {
-          return {
-            kind: 'outcome-unknown',
-            reason: `${reason}; the Host now reads "${webProviderDisplay(capability, after.effective)}" as the deployment default, so the rejection cannot be attributed`,
-          }
-        }
-        return { kind: 'not-saved', reason, actual: webProviderDisplay(capability, after.effective) }
-      }
-      await settleWebReadAfterWrite()
-      if (webSettings === undefined) {
-        return { kind: 'outcome-unknown', reason: 'the Host reset could not be verified: the Web settings could not be read back' }
-      }
-      const after = webProviderSnapshot(webSettings, capability)
-      if (after.effective === after.baseId) {
-        return { kind: 'verified', actual: webProviderDisplay(capability, after.effective) }
-      }
-      return {
-        kind: 'not-saved',
-        reason: `the Host keeps "${webProviderDisplay(capability, after.effective)}" instead of the deployment default "${webProviderDisplay(capability, after.baseId)}"`,
-        actual: webProviderDisplay(capability, after.effective),
-      }
-    }
-    // Explicit selection: the official setter, NEVER the base-substitution.
-    let write: (() => Promise<void>) | undefined
-    if (capability === 'search') {
-      const target = WEB_SEARCH_PROVIDER_VALUES.find(candidate => candidate.id === intent.id)
-      if (target !== undefined) write = () => runner.config.web.setSearchProvider(target.id)
-    } else {
-      const target = WEB_FETCH_PROVIDER_VALUES.find(candidate => candidate.id === intent.id)
-      if (target !== undefined) write = () => runner.config.web.setFetchProvider(target.id)
-    }
-    if (write === undefined) {
-      return { kind: 'not-saved', reason: `"${intent.id}" is not an official provider this page writes` }
-    }
-    // A CUSTOM effective route is displayed verbatim and is NEVER overwritten
-    // here: zero writes, explicit cause. Only a fresh authority can change that.
-    if (fresh.effective !== undefined
-      && !(capability === 'search' ? WEB_SEARCH_PROVIDER_VALUES : WEB_FETCH_PROVIDER_VALUES)
-        .some(candidate => candidate.id === fresh.effective)) {
-      return {
-        kind: 'not-saved',
-        reason: `the configured provider is a custom route (${fresh.effective}); only the official candidates are selectable here`,
-      }
-    }
-    // The USER layer really carrying the requested id satisfies the intent with
-    // zero writes; an inherited effective value does NOT (the page's explicit
-    // pin intent must reach the official setter).
-    if (fresh.effective === intent.id && fresh.userSet && fresh.userId === intent.id) {
-      return { kind: 'verified', actual: intent.id }
-    }
-    try {
-      await write()
-    } catch (error) {
-      const reason = safeErrorMessage(error)
-      await settleWebReadAfterWrite()
-      if (webSettings === undefined) return { kind: 'outcome-unknown', reason }
-      const after = webProviderSnapshot(webSettings, capability)
-      if (after.effective !== intent.id) {
-        return { kind: 'not-saved', reason, actual: webProviderDisplay(capability, after.effective) }
-      }
-      return {
-        kind: 'outcome-unknown',
-        reason: `${reason}; the Host now reads the submitted value, so the rejection cannot be attributed`,
-      }
-    }
-    await settleWebReadAfterWrite()
-    if (webSettings === undefined) {
-      return { kind: 'outcome-unknown', reason: 'the Host write could not be verified: the Web settings could not be read back' }
-    }
-    const after = webProviderSnapshot(webSettings, capability)
-    if (after.effective === intent.id && after.userSet && after.userId === intent.id) {
-      return { kind: 'verified', actual: intent.id }
-    }
-    if (after.effective === intent.id) {
-      return {
-        kind: 'not-saved',
-        reason: `the Host reads "${webProviderDisplay(capability, after.effective)}" only as an inherited value; the requested USER selection was not stored`,
-        actual: intent.id,
-      }
-    }
-    return {
-      kind: 'not-saved',
-      reason: `the Host keeps "${webProviderDisplay(capability, after.effective)}" instead of the submitted value`,
-      actual: webProviderDisplay(capability, after.effective),
+  /** The raw committed identity one decision's verification compares against. */
+  const webDecisionActual = (settings: WebProviderSettings, request: WebSettingsDecision): string => {
+    switch (request.rowId) {
+      case 'web-search-provider': return webProviderDisplay('search', settings.searchProvider)
+      case 'web-fetch-provider': return webProviderDisplay('fetch', settings.fetchProvider)
+      case 'web-search-count': return String(settings.api.count)
+      case 'web-send-original-question': return settings.api.sendOriginalQuestion ? 'on' : 'off'
+      case 'web-search-billing': return settings.api.searchBilling
+      case 'web-fetch-billing': return settings.api.fetchBilling
     }
   }
 
-  const commitWebIntent = async (id: WebSettingRowId, requested: WebSettingsCommitRequest): Promise<WebCommitResult> =>
+  /** The FIFO admission re-proof. It NEVER takes the newest revision as a new
+   *  authorization: the capture's generation, target revision and semantic
+   *  facts must still hold, otherwise the decision is refused with zero
+   *  writes. */
+  const webAdmissionFailure = (request: WebSettingsDecision, base: WebProviderSettings): string | undefined => {
+    if (!Object.is(base.authority.generation, request.capture.authority.generation)) {
+      return 'the Host authority changed since the page read it; nothing was written'
+    }
+    switch (request.kind) {
+      case 'provider-select':
+      case 'provider-restore': {
+        if (base.authority.webRevision !== request.capture.authority.webRevision) {
+          return 'the Host Web settings section changed since the page read it; nothing was written'
+        }
+        const capability = request.rowId === 'web-search-provider' ? 'search' : 'fetch'
+        const current = base.providerSelection[capability]
+        const captured = request.capture.providerSelection[capability]
+        const currentEffective = capability === 'search' ? base.searchProvider : base.fetchProvider
+        const capturedEffective = capability === 'search' ? request.capture.searchProvider : request.capture.fetchProvider
+        if (current.baseId !== captured.baseId || current.userSet !== captured.userSet
+          || current.userId !== captured.userId || currentEffective !== capturedEffective) {
+          return 'the Host Web selection changed since the page read it; nothing was written'
+        }
+        if (request.kind === 'provider-select') {
+          const refusal = webProviderSelectRefusal(capability, currentEffective)
+          if (refusal !== undefined) return refusal
+        }
+        return undefined
+      }
+      case 'set-count':
+      case 'set-original-question':
+        return base.authority.apiRevision === request.capture.authority.apiRevision
+          ? undefined
+          : 'the Host Web API settings section changed since the page read it; nothing was written'
+      case 'set-search-billing':
+      case 'set-fetch-billing': {
+        if (base.authority.apiRevision !== request.capture.authority.apiRevision
+          || base.authority.webRevision !== request.capture.authority.webRevision) {
+          return 'the Host Web settings section changed since the page read it; nothing was written'
+        }
+        const capability = request.kind === 'set-search-billing' ? 'search' : 'fetch'
+        return webBillingEligibilityReason(
+          capability,
+          capability === 'search' ? base.searchProvider : base.fetchProvider,
+          webAdvancedOverrideFields(base.advanced, capability).map(entry => entry.field),
+        )
+      }
+    }
+  }
+
+  /** ONE typed decision → the existing ConfigPort operation. The original
+   *  capture travels with every call; the adapter re-proves it at its actual
+   *  dispatch boundary. */
+  const dispatchWebDecision = async (
+    request: WebSettingsDecision,
+  ): Promise<WebProviderMutationOutcome> => {
+    const capture = request.capture
+    switch (request.kind) {
+      case 'provider-select':
+        return request.rowId === 'web-search-provider'
+          ? await runner.config.web.setSearchProvider(request.id as 'deepseek-official' | 'deepseek-search-api', capture)
+          : await runner.config.web.setFetchProvider(request.id as 'http' | 'deepseek-fetch-api', capture)
+      case 'provider-restore':
+        return request.rowId === 'web-search-provider'
+          ? await runner.config.web.restoreSearchProvider(capture)
+          : await runner.config.web.restoreFetchProvider(capture)
+      case 'set-count':
+        return await runner.config.web.setSearchApiCount(request.count, capture)
+      case 'set-original-question':
+        return await runner.config.web.setSendOriginalQuestion(request.enabled, capture)
+      case 'set-search-billing':
+        return await runner.config.web.setSearchBilling(request.mode, capture)
+      case 'set-fetch-billing':
+        return await runner.config.web.setFetchBilling(request.mode, capture)
+    }
+  }
+
+  /** The accepted-write verification: ONLY a trusted fresh read STARTED after
+   *  the terminal receipt may earn `Saved`, and only when it still belongs to
+   *  the captured generation and proves the requested raw value/action. An
+   *  accepted write whose readback is unavailable, different or superseded is
+   *  `unverified` — never `not-saved`. */
+  const verifyWebDecision = (
+    request: WebSettingsDecision,
+    capture: WebProviderSettings,
+    after: WebProviderSettings,
+  ): WebCommitResult => {
+    if (!Object.is(after.authority.generation, capture.authority.generation)) {
+      return {
+        kind: 'unverified',
+        reason: 'the Host authority changed after the write; the saved value could not be checked',
+        authority: after.authority,
+      }
+    }
+    switch (request.kind) {
+      case 'provider-select': {
+        const capability = request.rowId === 'web-search-provider' ? 'search' : 'fetch'
+        const selection = after.providerSelection[capability]
+        const effective = capability === 'search' ? after.searchProvider : after.fetchProvider
+        return effective === request.id && selection.userSet && selection.userId === request.id
+          ? { kind: 'verified', actual: webDecisionActual(after, request), authority: after.authority }
+          : {
+              kind: 'unverified',
+              reason: `the Host readback does not confirm the requested ${capability} USER selection`,
+              authority: after.authority,
+            }
+      }
+      case 'provider-restore': {
+        const capability = request.rowId === 'web-search-provider' ? 'search' : 'fetch'
+        const selection = after.providerSelection[capability]
+        const effective = capability === 'search' ? after.searchProvider : after.fetchProvider
+        return effective === selection.baseId
+          ? { kind: 'verified', actual: webDecisionActual(after, request), authority: after.authority }
+          : {
+              kind: 'unverified',
+              reason: `the Host readback keeps "${webProviderDisplay(capability, effective)}" instead of the deployment default`,
+              authority: after.authority,
+            }
+      }
+      case 'set-count':
+        return after.api.count === request.count
+          ? { kind: 'verified', actual: String(after.api.count), authority: after.authority }
+          : { kind: 'unverified', reason: `the Host readback keeps "${String(after.api.count)}"`, authority: after.authority }
+      case 'set-original-question':
+        return after.api.sendOriginalQuestion === request.enabled
+          ? { kind: 'verified', actual: after.api.sendOriginalQuestion ? 'on' : 'off', authority: after.authority }
+          : { kind: 'unverified', reason: `the Host readback keeps "${after.api.sendOriginalQuestion ? 'on' : 'off'}"`, authority: after.authority }
+      case 'set-search-billing':
+        return after.api.searchBilling === request.mode
+          ? { kind: 'verified', actual: after.api.searchBilling, authority: after.authority }
+          : { kind: 'unverified', reason: `the Host readback keeps "${after.api.searchBilling}"`, authority: after.authority }
+      case 'set-fetch-billing':
+        return after.api.fetchBilling === request.mode
+          ? { kind: 'verified', actual: after.api.fetchBilling, authority: after.authority }
+          : { kind: 'unverified', reason: `the Host readback keeps "${after.api.fetchBilling}"`, authority: after.authority }
+    }
+  }
+
+  const commitWebIntent = async (request: WebSettingsDecision): Promise<WebCommitResult> =>
     queueWebOperation(async (): Promise<WebCommitResult> => {
       if (!webSettingsAvailable()) {
         return { kind: 'not-saved', reason: 'the Host Web provider settings are unavailable on this backend' }
@@ -965,96 +850,46 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         return { kind: 'not-saved', reason: `the configuration is ${readiness}; the Web setting was not changed` }
       }
       await awaitWebSettled()
-      // (3) the queue head takes a FRESH official snapshot. A completed read —
-      // even the newest one — can predate an EXTERNAL Host settings writer, so
-      // the custom-provider / already-current / legality decisions below must
-      // never be based on a cached snapshot: that stale base could pass the
-      // custom-route guard and overwrite a provider id another writer just set.
+      // The queue head takes a FRESH official snapshot; the capture is then
+      // re-proven against it. A newer revision is NEVER adopted as a new
+      // authorization.
       await settleWebReadAfterWrite()
       const base = webSettings
       if (base === undefined) {
         return { kind: 'not-saved', reason: 'the current Web settings could not be read' }
       }
-      // The two provider rows commit through the TYPED intent (the page decided
-      // restore vs explicit select from the same read); every other row keeps
-      // its plain value request.
-      const capability = providerCapability(id)
-      if (capability !== undefined) {
-        if (typeof requested === 'string') {
-          return { kind: 'not-saved', reason: `"${requested}" is not a supported provider intent` }
-        }
-        return commitWebProviderIntent(id as 'web-search-provider' | 'web-fetch-provider', capability, requested, base)
+      const admission = webAdmissionFailure(request, base)
+      if (admission !== undefined) {
+        return { kind: 'not-saved', reason: admission, actual: webDecisionActual(base, request) }
       }
-      if (typeof requested !== 'string') {
-        return { kind: 'not-saved', reason: 'a provider intent can only address the two provider rows' }
-      }
-      const requestedIdentity = webRequestedIdentity(id, requested)
-      if (requestedIdentity === undefined) {
-        return { kind: 'not-saved', reason: `"${requested}" is not a value this page writes` }
-      }
-      // A non-empty YAML-only override owns its capability's endpoint/credential
-      // configuration, and only the EXPLICITLY selected official API admits its
-      // Billing row. Both gates run BEFORE the already-current (zero-write
-      // Verified) shortcut: a stale Billing confirm queued while the route was
-      // writable must still be REFUSED (never Verified) after another Host
-      // writer moved the route, with zero writes either way.
-      if (id === 'web-search-billing' || id === 'web-fetch-billing') {
-        const capability = id === 'web-search-billing' ? 'search' : 'fetch'
-        const providerSelected = capability === 'search'
-          ? base.searchProvider === 'deepseek-search-api'
-          : base.fetchProvider === 'deepseek-fetch-api'
-        // Only the explicitly selected official API consumes its billing mode
-        // (the official Client's product policy). An AUTOMATIC route may still
-        // execute the Search API for other models' requests, so the stored
-        // Billing stays a Host setting — but this page refuses to edit it here.
-        if (!providerSelected) {
-          return {
-            kind: 'not-saved',
-            reason: capability === 'search'
-              ? 'the DeepSeek Search API Billing is editable here only while that API is the explicitly selected provider; Automatic routes at request time'
-              : 'the Fetch route is not the DeepSeek Fetch API; Fetch Billing applies only to that API',
-          }
-        }
-        const overrides = webAdvancedOverrideFields(base.advanced, capability)
-        if (overrides.length > 0) {
-          return {
-            kind: 'not-saved',
-            reason: `the ${capability} API is overridden by Host YAML (${overrides.map(entry => entry.field).join(' and ')}); the billing choice cannot be written here`,
-          }
-        }
-      }
-      if (webCommittedIdentity(base, id) === requestedIdentity) {
-        return { kind: 'verified', actual: requestedIdentity }
-      }
-      const write = webWriteFor(id, requested)
-      if (write === undefined) {
-        return { kind: 'not-saved', reason: `"${requested}" is not a value this page writes` }
-      }
+      let outcome: WebProviderMutationOutcome
       try {
-        await write()
+        outcome = await dispatchWebDecision(request)
       } catch (error) {
-        const reason = safeErrorMessage(error)
-        // A REJECTED write is attributed from a FRESH read: an authority that no
-        // longer carries the requested identity refutes it; an authority that
-        // now carries it cannot attribute the rejection, and a rejected write is
-        // never Verified.
-        await settleWebReadAfterWrite()
-        const rejectedActual = webSettings === undefined ? undefined : webCommittedIdentity(webSettings, id)
-        if (rejectedActual === undefined) return { kind: 'outcome-unknown', reason }
-        if (rejectedActual !== requestedIdentity) return { kind: 'not-saved', reason, actual: rejectedActual }
-        return {
-          kind: 'outcome-unknown',
-          reason: `${reason}; the Host now reads the submitted value, so the rejection cannot be attributed`,
-        }
+        // The adapter contract returns typed settlements; an unexpected throw
+        // is an unattributable outcome, never a refusal derived from a value.
+        return { kind: 'outcome-unconfirmed', reason: safeErrorMessage(error) }
       }
+      switch (outcome.kind) {
+        case 'no-changes':
+          return { kind: 'no-changes', actual: webDecisionActual(base, request), authority: base.authority }
+        case 'rejected':
+        case 'conflict':
+          return { kind: 'not-saved', reason: outcome.reason, actual: webDecisionActual(base, request) }
+        case 'outcome-unconfirmed':
+          return { kind: 'outcome-unconfirmed', reason: outcome.reason }
+        case 'accepted':
+          break
+      }
+      // The receipt is accepted; the verdict needs a trusted read STARTED after
+      // it. `settleWebReadAfterWrite` issues a new read and waits for the newest
+      // settlement (never a snapshot a later read superseded).
       await settleWebReadAfterWrite()
-      const actual = webSettings === undefined ? undefined : webCommittedIdentity(webSettings, id)
-      if (actual === undefined) {
-        return { kind: 'outcome-unknown', reason: 'the Host write could not be verified: the Web settings could not be read back' }
+      const after = webSettings
+      if (after === undefined) {
+        return { kind: 'unverified', reason: 'the Host readback after the write was unavailable' }
       }
-      if (actual === requestedIdentity) return { kind: 'verified', actual }
-      const keeps = webSettledValue(id) ?? actual
-      return { kind: 'not-saved', reason: `the Host keeps "${keeps}" instead of the submitted value`, actual }
+      return verifyWebDecision(request, request.capture, after)
     })
 
   /** The ONE Settings workspace open path: the lease is taken SYNCHRONOUSLY
@@ -1385,7 +1220,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             readFacts: webSettingsFacts,
             writableRefusal: webWritableRefusal,
             credentialAvailable: () => runner.config.credentials.available(),
-            commit: (id, requested) => commitWebIntent(id, requested),
+            commit: (request) => commitWebIntent(request),
             refresh: () => { startWebSettingsRead() },
             navigateToModels: initial => { navigateToModels(initial) },
             requestRender: () => { if (!app.isDisposed()) app.requestRender() },
