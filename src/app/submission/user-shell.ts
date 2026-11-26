@@ -115,6 +115,9 @@ export interface UserShellDeps<ExactAgent extends InterruptAgentLike> {
 
 /** The user-shell owner as the rest of the application consumes it. */
 export interface UserShellOwner {
+  /** Whether the selected Host composition has a supported shell capability
+   * (the same fact the port reports; read live). */
+  isAvailable(): boolean
   /** Capture the current main-session transcript position synchronously. */
   capturePlacement(): UserShellPresentationPlacement
   /**
@@ -459,6 +462,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
   }
 
   return {
+    isAvailable: () => deps.shell.availability.supported,
     capturePlacement: () => deps.app().captureLocalShellPlacement(),
     run: runUserShell,
     interrupt,

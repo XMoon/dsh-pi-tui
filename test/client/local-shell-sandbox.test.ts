@@ -462,6 +462,24 @@ test('the sandbox preference without a composition sandbox capability fails clos
   assert.ok(!view.includes('[exit 0]'), `an unavailable sandbox policy must not execute the command:\n${view}`)
 })
 
+test('an unsupported Host shell refuses the gesture before Session creation and keeps the draft', async (t) => {
+  const mounted = await mountSandboxRunner(t, undefined)
+  const text = '!!printf unavailable'
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+  assert.ok(descriptor?.configurable)
+  try {
+    Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' })
+    mounted.submit(text)
+    const view = await waitForView(mounted, 'Host user shell is unavailable', 'the pre-session unavailable notice')
+    assert.equal(mounted.app().getDraft(), text, 'the rejected gesture keeps its draft')
+    assert.ok(mounted.notices.includes('Host user shell is unavailable in this composition — nothing was executed'),
+      `the one truthful notice must be delivered: ${JSON.stringify(mounted.notices)}`)
+    assert.doesNotMatch(view, /Shell printf unavailable/u, 'no local shell card is created for a refused gesture')
+  } finally {
+    Object.defineProperty(process, 'platform', descriptor)
+  }
+})
+
 test('the default bypass preference runs raw Bash through Subprocess and never confines', async (t) => {
   const host = makeHostFake()
   const mounted = await mountSandboxRunner(t, host, 'bypass')
