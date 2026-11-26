@@ -6528,8 +6528,13 @@ function assertPublicPairColdFacts(pair) {
   if (attempts.some(attempt => attempt === undefined)) {
     throw new Error('PUBLIC_PAIR_NOT_VERIFIED: both cold producers must capture a real Host attempt before publication')
   }
-  if (new Set(attempts.map(attempt => attempt.birth)).size !== 2) {
-    throw new Error('PUBLIC_PAIR_NOT_VERIFIED: the two cold producers did not capture distinct Host births')
+  // Linux birth is startTicks at clock-tick resolution, so two legitimate
+  // concurrent Hosts can share a birth string. The ledger identity is the
+  // exact PID+birth pair; distinct PIDs with the same birth are still distinct
+  // attempts, and the distinct controlling devices below prove two producers.
+  const attemptKeys = attempts.map(attempt => `${String(attempt.pid)}:${attempt.birth}`)
+  if (new Set(attemptKeys).size !== 2) {
+    throw new Error(`PUBLIC_PAIR_NOT_VERIFIED: the two cold producers did not capture distinct Host PID+birth identities (${JSON.stringify(attemptKeys)})`)
   }
   for (const handle of pair.handles) {
     if (handle.registryAbsentBefore !== true || handle.registryAbsentAfter !== true) {
