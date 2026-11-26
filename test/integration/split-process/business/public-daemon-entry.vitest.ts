@@ -494,6 +494,7 @@ test('refuses illegal public backend inputs before creating a split Host', async
       await launch.close()
     }
 
+    const sessionsBeforeHeadless = [...await scene.sessionIds()].sort()
     const headless = await scene.runPublicDaemonHeadless({ label: 'refuse-headless', backend: 'daemon' })
     expect(headless.exit.signal, 'the non-TTY daemon launch must exit normally').toBeNull()
     expect(typeof headless.exit.code, 'the non-TTY daemon launch exit code type').toBe('number')
@@ -501,8 +502,11 @@ test('refuses illegal public backend inputs before creating a split Host', async
     expect(headless.text, `the non-TTY daemon refusal text (${headless.text})`).toMatch(
       /not a (?:TTY|terminal)|non-interactive|requires (?:an? )?(?:TTY|terminal)|interactive terminal/iu,
     )
-    expect(existsSync(join(scene.scopeDir, 'instance.json')),
-      'the non-TTY daemon launch published no Host registry').toBe(false)
+    const headlessScope = await scene.publicScopeState()
+    expect(headlessScope.registry, 'the non-TTY daemon launch published no Host registry').toBe('absent')
+    expect(headlessScope.launch, 'the non-TTY daemon launch published no launch material').toBe('absent')
+    expect(headlessScope.hosts, 'the non-TTY daemon launch owned no Host').toEqual([])
+    expect([...(await scene.sessionIds())].sort(), 'the non-TTY daemon launch created no Session').toEqual(sessionsBeforeHeadless)
 
     const beforeMutual = await scene.sessionIds()
     launch = await scene.startPublicDaemon({

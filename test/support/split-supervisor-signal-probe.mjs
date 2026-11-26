@@ -32,7 +32,7 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, existsSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -126,6 +126,25 @@ function requireEnv(name) {
 
 function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+function assertExactMaterialFiles(registryPath, launchPath, registry, launch, label) {
+  for (const path of [registryPath, launchPath]) {
+    const stat = statSync(path)
+    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) throw new Error(`${label}: material mode is not 0600`)
+    if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) throw new Error(`${label}: material is not owned by this user`)
+  }
+  if (Object.keys(launch).sort().join(',') !== 'connectUrl,instanceId,schema') {
+    throw new Error(`${label}: launch keys are not the exact Host contract`)
+  }
+  const connect = new URL(String(launch.connectUrl))
+  if (connect.origin !== registry.origin || connect.pathname !== '/connect'
+    || connect.username !== '' || connect.password !== '' || connect.hash !== ''
+    || connect.searchParams.getAll('token').length !== 1
+    || (connect.searchParams.get('token') ?? '') === ''
+    || [...connect.searchParams.keys()].length !== 1) {
+    throw new Error(`${label}: launch is not the Host-owned /connect token URL`)
+  }
 }
 
 function pidAlive(pid) {
@@ -1591,6 +1610,12 @@ try {
             fail('public-daemon-before-ready-ack: the current registry/launch does not match the exact Host material')
           }
           try {
+            assertExactMaterialFiles(registryPath, launchPath, registry, launchMaterial,
+              'public-daemon-before-ready-ack')
+          } catch (error) {
+            fail(`public-daemon-before-ready-ack: ${String(error.message)}`)
+          }
+          try {
             lstatSync(registryPath)
           } catch (error) {
             fail(`public-daemon-before-ready-ack: the registry is not strictly present immediately before SIGKILL (${String(error?.code)})`)
@@ -1664,6 +1689,12 @@ try {
           || refusedLaunchFacts?.instanceId !== refusedHost.instanceId
           || refusedLaunchFacts?.schema !== 1) {
           fail('public-daemon-ownership-refused: the current material does not match the refused Host')
+        }
+        try {
+          assertExactMaterialFiles(refusedRegistry, refusedLaunchPath, refusedRegistryFacts, refusedLaunchFacts,
+            'public-daemon-ownership-refused')
+        } catch (error) {
+          fail(`public-daemon-ownership-refused: ${String(error.message)}`)
         }
         writeFileSync(publicRefusalReleaseFile, 'release\n', { mode: 0o600 })
         const compensated = await waitUntil(() => {

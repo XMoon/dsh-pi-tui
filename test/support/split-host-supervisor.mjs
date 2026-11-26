@@ -888,7 +888,8 @@ async function settlePublicAuthorityProducer(reason) {
   if (producer.settlementPromise !== undefined) return await producer.settlementPromise
   producer.settlementPromise = (async () => {
     try {
-      await producer.terminal.closeQuiet()
+      await withProcessNativeOperation('public-authority-close', 'public-authority',
+        () => producer.terminal.closeQuiet())
     } catch (error) {
       producer.closeError = boundedErrorText(error)
     }
@@ -925,19 +926,8 @@ async function waitForPublicAuthoritySettlement(reason, timeoutMs = 45_000) {
   const timeout = new Promise(resolve => setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs))
   const result = await Promise.race([settlement.promise, timeout])
   if (result?.kind !== 'timeout') return result
-  const blocking = [`authority-settlement-timeout:${String(timeoutMs)}`]
-  try {
-    await settlePublicAuthorityProducer(`${reason}: settlement timeout`)
-  } catch (error) {
-    blocking.push(`producer:${boundedErrorText(error)}`)
-  }
-  try {
-    const problems = await terminateAllProcessEntries(`${reason}: settlement timeout`)
-    for (const problem of problems) blocking.push(`termination:${JSON.stringify(problem)}`)
-  } catch (error) {
-    blocking.push(`termination:${boundedErrorText(error)}`)
-  }
-  return { blocking }
+  throw new Error(`${reason}: the G1 cleanup settlement did not complete within ${String(timeoutMs)}ms; the owner is unjoined`)
+
 }
 
 async function terminateAllProcessEntries(reason) {
@@ -1990,28 +1980,19 @@ async function cleanup(reason, options = {}) {
       // reclaim it BEFORE the Host generations and before the scene root.
       await terminateQualificationClient(reason)
       if (scene?.kind === 'process') {
-        try {
-          const authorityCleanup = await waitForPublicAuthoritySettlement(reason)
-          if (authorityCleanup?.blocking?.length > 0) {
-            clean = false
-            appendNote('public-authority-cleanup-blocking', { blocking: authorityCleanup.blocking })
-          }
-        } catch (error) {
-          clean = false
-          appendNote('public-authority-cleanup-failed', { reason: boundedErrorText(error) })
+        const authorityCleanup = await waitForPublicAuthoritySettlement(reason)
+        if (authorityCleanup?.blocking?.length > 0) {
+          // A failed G1 join is a NOT_QUIESCED result. Do not run generic
+          // destructive cleanup against the same unjoined owner.
+          throw new Error(`the G1 cleanup settlement is not clean: ${JSON.stringify(authorityCleanup.blocking)}`)
         }
         // Generic reclaim for every process Scene, including Scenes with no
         // G1 producer. The per-handle termination promise makes this
         // idempotent with the G1 handler settlement.
-        try {
-          const problems = await terminateAllProcessEntries(reason)
-          if (problems.length > 0) {
-            clean = false
-            for (const problem of problems) appendNote('process-entry-termination-failed', problem)
-          }
-        } catch (error) {
+        const problems = await terminateAllProcessEntries(reason)
+        if (problems.length > 0) {
           clean = false
-          appendNote('process-entry-termination-failed', { reason: boundedErrorText(error) })
+          for (const problem of problems) appendNote('process-entry-termination-failed', problem)
         }
       }
       // Public daemon launches are REAL installed-CLI PTYs: close every
@@ -7418,6 +7399,29 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
       })
     if (cliOutcome.kind === 'exit') return finishPublicRefusal(handle, cliOutcome)
     handle.cli = cliOutcome.process
+    if (handle.cli.pid === handle.shellPid && handle.cli.birth !== handle.shellIdentity.birth) {
+      const original = handle.shellIdentity
+      const fresh = captureShellIdentity(handle.shellPid, `${label} public CLI=shell after exec`)
+      const before = original.identity
+      const after = fresh.identity
+      const sameKernelProcess = before.platform === after.platform && before.pid === after.pid
+        && (before.platform === 'linux'
+          ? before.startTicks === after.startTicks
+          : before.bootUUID === after.bootUUID
+            && before.uniqueId === after.uniqueId
+            && before.startSec === after.startSec
+            && before.startUsec === after.startUsec)
+      if (!sameKernelProcess || fresh.birth !== handle.cli.birth) {
+        throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the captured CLI birth is not the same CLI=shell kernel process`)
+      }
+      handle.shellExecTransition = {
+        from: original.birth,
+        to: fresh.birth,
+        at: now(),
+      }
+      appendNote('public-shell-exec-transition', handle.shellExecTransition)
+      handle.shellIdentity = fresh
+    }
     if (handle.cli.pid !== handle.shellPid && handle.cli.ppid !== handle.shellPid) {
       throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the public CLI is not a direct child of the native shell`)
     }
@@ -7427,31 +7431,6 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
     if (handle.cli.pid === handle.shellPid) {
       // A direct native spawn has no intermediate shell; the same kernel
       // identity is one process, never a fabricated edge.
-      const originalShellIdentity = handle.shellIdentity
-      const freshShellIdentity = captureShellIdentity(handle.shellPid, `${label} public CLI/shell`)
-      if (freshShellIdentity.birth !== originalShellIdentity.birth) {
-        const before = originalShellIdentity.identity
-        const after = freshShellIdentity.identity
-        const sameKernelProcess = before.platform === after.platform && before.pid === after.pid
-          && (before.platform === 'linux'
-            ? before.startTicks === after.startTicks
-            : before.bootUUID === after.bootUUID
-              && before.uniqueId === after.uniqueId
-              && before.startSec === after.startSec
-              && before.startUsec === after.startUsec)
-        if (!sameKernelProcess) {
-          throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the CLI=shell identity changed its kernel process`)
-        }
-        // Darwin exec refreshes p_uuid while the pid/uniqueid/start are the
-        // same kernel process. Record the observed transition explicitly; do
-        // not silently replace the original shell birth.
-        handle.shellExecTransition = {
-          from: originalShellIdentity.birth,
-          to: freshShellIdentity.birth,
-          at: now(),
-        }
-      }
-      handle.shellIdentity = freshShellIdentity
       handle.shellTty = capturePublicShellTty(handle.shellPid, `${label} public CLI/shell`)
     }
     syncPublicLaunchReceipt()
@@ -8206,7 +8185,6 @@ async function handlePublicAuthorityControl(message) {
     sentinel: {},
   }
   try {
-    publicAuthorityBlocking = []
     publicAuthoritySettlement = (() => {
       let resolve
       const promise = new Promise(settle => { resolve = settle })
@@ -8575,7 +8553,6 @@ async function handlePublicAuthorityControl(message) {
       ...closeErrors,
       ...(sentinel === undefined ? ['sentinel-not-spawned'] : []),
     ]
-    publicAuthorityBlocking = facts.cleanup.blocking
     writeReceipt({ publicAuthorityControl: facts })
     if (publicAuthoritySettlement !== undefined) {
       publicAuthoritySettlement.settled = true
@@ -8619,6 +8596,7 @@ async function handlePublicDaemonStop(message) {
   if (stopAuth.identity === undefined || host.instanceId !== stopFiles.registry.instanceId) {
     throw new Error('PUBLIC_DAEMON_STOP: the current official authentication does not bind the captured Host')
   }
+  assertPublicHostOwnership(host, 'PUBLIC_DAEMON_STOP:post-auth', host.birth)
   if (Number.isInteger(host.pgid)) {
     const members = kernelGroupLiveMemberPids(processKernelReaders(), host.pgid, 'PUBLIC_DAEMON_STOP group')
       .filter(pid => pid !== host.pid)
@@ -9634,7 +9612,6 @@ const ENTRY_REDACTED_KEYS = new Set([
 /** The real detached helper processes this Scene owns beyond Host/Client. */
 const qualificationHelpers = []
 let publicAuthorityProducer
-let publicAuthorityBlocking = []
 let publicAuthoritySettlement
 let qualificationHelperSequence = 0
 /**
