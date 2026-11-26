@@ -168,7 +168,7 @@ dsh --profile pi-tui acp stdio
 
 在 [Herdr](https://github.com/herdrdev/herdr) Pane 中运行时，TUI 可以上报 Agent 工作状态；对有持久 Session ID 的场景可提供经 Profile 约束的恢复命令，实际能力取决于 Herdr 客户端。
 
-支持 [OSC 7577 Program Resume Protocol v0.5](https://www.superlogical.com/rex/docs/build/program-resume) 的终端（例如 Rex）会在终端注入 `OSC7577_TOKEN` 时收到 Client-local 的恢复记录。Direct 与 Daemon 都只从已提交的主 Session 生成精确恢复命令；Daemon 记录使用稳定的 supervisor PID，Client 替换不会改变记录身份。普通人工退出会撤销记录；信号、终端丢失、崩溃与 HMR 不撤销；兼容的 Client reload 会继续记录，只有接受 reload 到不支持新交接的旧版时才撤销。Token 不会进入 argv、Session、日志或 Host/manager/ACP 子进程，终端不发送 ACK，本版本**尚未验证真实 Rex 的接受/恢复结果**。
+支持 [OSC 7577 Program Resume Protocol v0.5](https://www.superlogical.com/rex/docs/build/program-resume) 的终端（例如 Rex）会在终端注入 `OSC7577_TOKEN` 时收到 Client-local 的恢复记录。Direct 与 Daemon 都只从已提交的主 Session 生成精确恢复命令；Daemon 记录使用稳定的 supervisor PID，Client 替换不会改变记录身份。普通人工退出会撤销记录；信号、终端丢失、崩溃与 HMR 不撤销；兼容的 Client reload 会继续记录，只有接受 reload 到不支持新交接的旧版时才撤销。Token 不会进入 argv、Session 或日志，也不会传给独立的 Host/manager/ACP 子进程；Direct 同进程内的官方 launch snapshot 仍按 same-UID 可信边界保留继承值。终端不发送 ACK，本版本**尚未验证真实 Rex 的接受/恢复结果**。
 
 ## 设置、扩展与开发
 
