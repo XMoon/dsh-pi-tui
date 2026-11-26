@@ -32,7 +32,8 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, existsSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
+import { assertPublishedHostMatchesKernel } from './split-process-authentication.ts'
 import { createServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -130,8 +131,10 @@ function sha256(path) {
 
 function assertExactMaterialFiles(registryPath, launchPath, registry, launch, label) {
   for (const path of [registryPath, launchPath]) {
-    const stat = statSync(path)
-    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) throw new Error(`${label}: material mode is not 0600`)
+    const stat = lstatSync(path)
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) {
+      throw new Error(`${label}: material is not a regular final 0600 file`)
+    }
     if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) throw new Error(`${label}: material is not owned by this user`)
   }
   if (Object.keys(launch).sort().join(',') !== 'connectUrl,instanceId,schema') {
@@ -1612,6 +1615,7 @@ try {
           try {
             assertExactMaterialFiles(registryPath, launchPath, registry, launchMaterial,
               'public-daemon-before-ready-ack')
+            assertPublishedHostMatchesKernel(registry, 'public-daemon-before-ready-ack')
           } catch (error) {
             fail(`public-daemon-before-ready-ack: ${String(error.message)}`)
           }
@@ -1693,6 +1697,7 @@ try {
         try {
           assertExactMaterialFiles(refusedRegistry, refusedLaunchPath, refusedRegistryFacts, refusedLaunchFacts,
             'public-daemon-ownership-refused')
+          assertPublishedHostMatchesKernel(refusedRegistryFacts, 'public-daemon-ownership-refused')
         } catch (error) {
           fail(`public-daemon-ownership-refused: ${String(error.message)}`)
         }

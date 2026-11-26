@@ -9210,6 +9210,14 @@ async function auditPublicLaunchLedger(reason) {
 async function handleFinalize(message) {
   if (scene?.kind === 'process') {
     const preconditions = []
+    try {
+      const authorityCleanup = await waitForPublicAuthoritySettlement('FINALIZE')
+      if (authorityCleanup?.blocking?.length > 0) {
+        preconditions.push(`the G1 cleanup settlement is not clean: ${JSON.stringify(authorityCleanup.blocking)}`)
+      }
+    } catch (error) {
+      preconditions.push(`the G1 cleanup settlement is unjoined: ${boundedErrorText(error)}`)
+    }
     if (publicLaunches.length > 0) {
       try {
         await settlePublicLaunchHandlers('FINALIZE')
