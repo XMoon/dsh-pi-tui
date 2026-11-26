@@ -279,7 +279,11 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   /** The preference observation that produced the current successful config
    *  receipt. A later different observation retires it; unknown/refused
    *  settlements deliberately have no such lifetime. */
-  private configOutcomeSerial: number | undefined
+  private configOutcomeObservation: {
+    readonly generation: object
+    readonly revision: number
+    readonly value: boolean
+  } | undefined
   /** The runtime observation that produced the current successful runtime
    *  receipt. A replacement or a different served state retires it. */
   private runtimeSuccessObservation: { readonly generation: unknown; readonly state: 'enabled' | 'disabled' } | undefined
@@ -543,10 +547,16 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   /** Retire a known-success receipt once its own observation is no longer
    *  the current one. It never touches a refusal/pending/unknown result. */
   private retireStaleSuccess(): void {
-    if (this.configOutcome?.tone === 'success'
-      && (this.configOutcomeSerial === undefined || this.configOutcomeSerial !== this.preferenceSerial)) {
-      this.configOutcome = undefined
-      this.configOutcomeSerial = undefined
+    if (this.configOutcome?.tone === 'success') {
+      const observed = this.preference
+      const proved = this.configOutcomeObservation
+      if (proved === undefined || observed === undefined || observed.generation === undefined
+        || !Object.is(observed.generation, proved.generation)
+        || observed.revision !== proved.revision
+        || observed.autoStart !== proved.value) {
+        this.configOutcome = undefined
+        this.configOutcomeObservation = undefined
+      }
     }
     if (this.runtimeOutcome?.tone === 'success') {
       const observed = this.runtimeSuccessObservation
@@ -1006,6 +1016,10 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       return
     }
     const revision = fence
+    // Capture the authority the admission was proven against, not whatever
+    // the mirror reads after the write. A replacement during the write must
+    // not bind the receipt to the successor.
+    const admissionGeneration = generation
     const serial = ++this.writeSerial
     this.phase = 'pending-config'
     this.configOutcome = undefined
@@ -1026,7 +1040,26 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       // verified; the settlement is never applied optimistically.
       this.reconcilePreference()
       this.configOutcome = configOutcomeNote(outcome)
-      this.configOutcomeSerial = outcome.outcome === 'verified' ? this.preferenceSerial : undefined
+      if (outcome.outcome === 'verified') {
+        const observed = this.preference
+        // A verified A receipt is only current while the post-write observation
+        // is still A's authority and the requested value. Otherwise the
+        // successor never inherits A's Saved.
+        if (observed?.generation !== undefined
+          && Object.is(observed.generation, admissionGeneration)
+          && observed.autoStart === candidate) {
+          this.configOutcomeObservation = {
+            generation: observed.generation,
+            revision: observed.revision,
+            value: observed.autoStart,
+          }
+        } else {
+          this.configOutcome = undefined
+          this.configOutcomeObservation = undefined
+        }
+      } else {
+        this.configOutcomeObservation = undefined
+      }
       this.autostartCandidate = undefined
       this.autostartFence = undefined
       this.phase = 'settled'
@@ -1036,7 +1069,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       if (this.disposed || serial !== this.writeSerial) return
       this.reconcilePreference()
       this.configOutcome = configOutcomeNote({ outcome: 'indeterminate', reason: safeErrorMessage(error) })
-      this.configOutcomeSerial = undefined
+      this.configOutcomeObservation = undefined
       this.autostartCandidate = undefined
       this.autostartFence = undefined
       this.phase = 'settled'

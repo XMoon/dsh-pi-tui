@@ -48,6 +48,9 @@ interface PageHarnessOptions {  readonly columns?: number
   readonly disconnected?: boolean
   /** Hold every status read; the case resolves each one by index. */
   readonly holdRead?: boolean
+  /** Replace the Config authority after a verified commit but before the page
+   *  binds the receipt (the held-write replacement window). */
+  readonly replacePreferenceOnCommit?: WebStartupPreferenceInput
 }
 
 interface PageHarness {
@@ -169,6 +172,19 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
       commitRevisions.push(revision)
       commitGenerations.push(commitGeneration)
       if (options.commitFailure !== undefined) throw new Error(options.commitFailure)
+      if (options.replacePreferenceOnCommit !== undefined) {
+        preference = options.replacePreferenceOnCommit
+        preferenceGeneration = {}
+      } else if (preference !== undefined) {
+        // The real writer updates the live Config mirror; the page must re-read
+        // it, never optimistically assume the requested value.
+        preference = {
+          ...preference,
+          autoStart: value === 'On',
+          revision: preference.revision + 1,
+          userOverridden: true,
+        }
+      }
       return { outcome: 'verified' }
     },
     currentGeneration: () => generation.value,
@@ -367,7 +383,7 @@ test('a successful next-start save is retired when the preference observation ch
   await h.flush()
   assert.match(h.frame(), /Status\s+Saved/u, 'the verified preference starts as a current Saved')
 
-  h.setAuthority('ready', { autoStart: true, revision: 2, userOverridden: true })
+  h.setAuthority('ready', { autoStart: true, revision: 3, userOverridden: true })
   await h.key('r')
   await h.flush()
   assert.doesNotMatch(h.frame(), /Status\s+Saved/u, 'a different preference observation retires the old Saved')
@@ -553,6 +569,22 @@ test('a status reply from a superseded generation is never painted as current', 
   h.resolveRead(1, { state: 'disabled' })
   await h.flush()
   assert.match(h.frame(), /Serving\s+Disabled/u, 'only the current Host\'s reply settles the fact')
+  h.close()
+})
+
+test('a verified next-start receipt does not bind to a replacement during the write', async () => {
+  const h = await mount({
+    status: { state: 'enabled' },
+    replacePreferenceOnCommit: { autoStart: true, revision: 2, userOverridden: true },
+  })
+  await focusPaintedRow(h, 'Start automatically')
+  await h.key('\r')
+  await h.key('\r')
+  await h.key('\r')
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Status\s+Saved/u,
+    'the successor observation never receives A\'s verified receipt')
+  assert.match(h.frame(), /Start automatically\s+On/u, 'the successor value is painted as the current fact')
   h.close()
 })
 

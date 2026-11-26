@@ -48,6 +48,9 @@ interface PageHarnessOptions {
   readonly holdCopy?: boolean
   /** Hold the Host toggle until `releaseWrite()`. */
   readonly holdWrite?: boolean
+  /** Replace the Config authority after a verified commit but before the page
+   *  binds the receipt (the held-write replacement window). */
+  readonly replacePreferenceOnCommit?: { readonly autoStart: boolean; readonly revision: number }
   /** Start DISCONNECTED (no Connection generation). */
   readonly disconnected?: boolean
   /** Hold every status read; the case resolves each one by index. */
@@ -145,6 +148,14 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
       preference = preference === undefined
         ? undefined
         : { ...preference, autoStart: value === 'On', revision: preference.revision + 1, userOverridden: true, generation: settingsAuthority }
+      if (options.replacePreferenceOnCommit !== undefined) {
+        settingsAuthority = {}
+        preference = {
+          ...options.replacePreferenceOnCommit,
+          userOverridden: true,
+          generation: settingsAuthority,
+        }
+      }
       return { outcome: 'verified' }
     },
     copyToClipboard: async (text) => {
@@ -640,6 +651,22 @@ test('a same-generation Config update refuses the staged confirmation instead of
   assert.match(h.frame(), /Status\s+Could not save/u)
   assert.match(h.frame(), /the configuration changed since this choice was opened; review the new value and confirm again/u)
   assert.match(h.frame(), /Start automatically\s+On · Change…/u, 'the CURRENT value is painted for review')
+  h.close()
+})
+
+test('a verified next-start receipt does not bind to a replacement during the write', async () => {
+  const h = await mount({
+    status: { state: 'enabled' },
+    replacePreferenceOnCommit: { autoStart: true, revision: 2 },
+  })
+  await highlight(h, 'Start automatically')
+  await h.key('\r')
+  await h.key('\r')
+  await h.key('\r')
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Status\s+Saved/u,
+    'the successor observation never receives A\'s verified receipt')
+  assert.match(h.frame(), /Start automatically\s+On/u, 'the successor value is painted as the current fact')
   h.close()
 })
 

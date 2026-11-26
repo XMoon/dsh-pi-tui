@@ -566,6 +566,10 @@ type SettingsWorkspaceEditPhase =
       readonly requestId: number
       readonly attempted: string
       readonly registrationToken?: number
+      /** The Host-config authority identity the write was admitted against.
+       *  A replacement that lands before the post-write refresh must not let
+       *  the old verified outcome bind to the new authority. */
+      readonly authorityGeneration?: object
     }
   | {
       readonly kind: 'settled'
@@ -575,9 +579,8 @@ type SettingsWorkspaceEditPhase =
       readonly outcome: SettingsWorkspaceCommitOutcome['outcome']
       readonly reason?: string
       readonly registrationToken?: number
-      /** The Host-config authority observation the post-write readback
-       *  established. A later ready row with a different authority must not
-       *  revive the old success as current. */
+      /** The post-write Host-config observation, captured only while the
+       *  authority still matches the one the write was admitted against. */
       readonly observation?: { readonly generation: object; readonly revision?: number }
     }
 
@@ -3683,19 +3686,6 @@ export class SettingsWorkspacePanel implements Component {
     return field === 'startup-backend' || field === 'visual-tools' || field === 'session-log-upload'
   }
 
-  /** Capture the current Host-config observation of the row that owns a
-   *  settled write. The generation identity is the authority discriminator;
-   *  the revision alone cannot prove a replacement did not occur. */
-  private settledObservation(field: SettingsWorkspaceWritableField): { readonly generation: object; readonly revision?: number } | undefined {
-    const row = this.snapshot.rows.find(candidate => candidate.edit?.field === field)
-    const generation = row?.edit?.generation
-    if (row === undefined || generation === undefined) return undefined
-    return {
-      generation,
-      ...(row.edit?.revision === undefined ? {} : { revision: row.edit.revision }),
-    }
-  }
-
   /** The commit status of the row's own field, as the last settlement reported
    *  it. Only the row that owns the phase shows it — never a global banner.
    *  The WORD and its tone are separate from the explanation so the pane can
@@ -6131,6 +6121,7 @@ export class SettingsWorkspacePanel implements Component {
       requestId,
       attempted: value,
       ...registrationToken === undefined ? {} : { registrationToken },
+      ...generation === undefined ? {} : { authorityGeneration: generation },
     }
     this.choiceOffset = 0
     this.bumpRevision()
@@ -6154,7 +6145,7 @@ export class SettingsWorkspacePanel implements Component {
     if (this.disposed) return
     const phase = this.editPhase
     if (phase.kind !== 'pending' || phase.requestId !== requestId) return
-    this.settle(phase.field, phase.attempted, outcome, phase.registrationToken)
+    this.settle(phase.field, phase.attempted, outcome, phase.registrationToken, phase.authorityGeneration)
 
   }
 
@@ -6165,6 +6156,7 @@ export class SettingsWorkspacePanel implements Component {
     attempted: string,
     outcome: SettingsWorkspaceCommitOutcome,
     registrationToken?: number,
+    authorityGeneration?: object,
   ): void {
     this.editPhase = {
       kind: 'settled',
@@ -6174,6 +6166,7 @@ export class SettingsWorkspacePanel implements Component {
       outcome: outcome.outcome,
       ...outcome.reason === undefined ? {} : { reason: outcome.reason },
       ...registrationToken === undefined ? {} : { registrationToken },
+      ...authorityGeneration === undefined ? {} : { authorityGeneration },
     }
     this.editRequestId += 1
     this.choiceOffset = 0
@@ -6196,8 +6189,21 @@ export class SettingsWorkspacePanel implements Component {
     this.refresh()
     const settled = this.editPhase
     if (settled.kind === 'settled' && settled.field === field) {
-      const observation = this.settledObservation(field)
-      if (observation !== undefined) this.editPhase = { ...settled, observation }
+      const row = this.snapshot.rows.find(candidate => candidate.edit?.field === field)
+      const generation = row?.edit?.generation
+      // Capture the post-write observation ONLY while the authority is still
+      // the one the write was admitted against. A replacement that landed
+      // before this refresh must not let the receipt bind to the successor.
+      if (row !== undefined && generation !== undefined
+        && authorityGeneration !== undefined && Object.is(generation, authorityGeneration)) {
+        this.editPhase = {
+          ...settled,
+          observation: {
+            generation,
+            ...(row.edit?.revision === undefined ? {} : { revision: row.edit.revision }),
+          },
+        }
+      }
     }
   }
 

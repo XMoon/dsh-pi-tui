@@ -4090,6 +4090,23 @@ function openScalarChoice(h: ReturnType<typeof setup>): void {
   assert.match(plain(h), /Choose value/u)
 }
 
+test('a verified Host-config receipt does not bind to a replacement admitted during the write', () => {
+  let generation = {}
+  const h = setup({ columns: 120, rows: 40, snapshot: () => scalarSnapshot({ revision: 5, generation }) })
+  openScalarChoice(h)
+  h.panel.handleInput('\r') // Confirm Off: the ONE commit is now pending
+  assert.equal(h.commits(), 1, 'the write was admitted against A')
+  assert.equal(h.settlements.length, 1)
+
+  // The Host is replaced AFTER admission and BEFORE the owner settles its
+  // verified A readback. The successor exposes the SAME revision.
+  generation = {}
+  h.settlements[0]!({ outcome: 'verified' })
+  const frame = plain(h)
+  assert.match(frame, /Last-known · read-only/u, 'the receipt stays bound to the authority that proved it')
+  assert.doesNotMatch(frame, /\bSaved\b/u, 'a successor observation never revives A\'s Saved')
+})
+
 test('a same-Host revision change while L2 stays painted refuses Confirm with zero dispatch', () => {
   let revision = 5
   const generation = {}
