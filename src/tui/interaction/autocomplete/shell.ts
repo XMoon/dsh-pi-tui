@@ -432,7 +432,10 @@ function powerShellWordRole(line: string, prefixLength: number, tokenStart: numb
     const character = line[index]!
     if (quote === "'") {
       if (isPowerShellSingleQuoteCharacter(character)) {
-        if (character !== "'" && line[index + 1] === character) {
+        // The scanner treats any doubled single-class quote as literal
+        // content, including the adapter's own ASCII `''`. The role parser
+        // must use the SAME word grammar.
+        if (line[index + 1] === character) {
           current += character
           index += 2
           continue
@@ -491,9 +494,11 @@ function powerShellWordRole(line: string, prefixLength: number, tokenStart: numb
     if (isPowerShellSingleQuoteCharacter(character) || isPowerShellDoubleQuoteCharacter(character)) {
       return { kind: 'unavailable' }
     }
-    if (character === '`' || character === '$' || character === '#'
-      || line.startsWith('--%', index)
-      || ((character === '@' || character === '[') && !started)) {
+    if (character === '`' || character === '$') return { kind: 'unavailable' }
+    // Comment and stop-parsing markers are only special at word start, the
+    // same boundary the scanner uses. A mid-word '#' or '--%' is path text.
+    if (!started && (character === '#' || line.startsWith('--%', index)
+      || character === '@' || character === '[')) {
       return { kind: 'unavailable' }
     }
     current += character
@@ -502,7 +507,7 @@ function powerShellWordRole(line: string, prefixLength: number, tokenStart: numb
   }
   if (quote !== undefined) return { kind: 'unavailable' }
   finish()
-  if (initialCall) return priorWords === 0 ? { kind: 'callArgument' } : { kind: 'unavailable' }
+  if (initialCall && priorWords === 0) return { kind: 'callArgument' }
   if (priorWords === 0) return { kind: 'command' }
   return { kind: 'argument', firstWord, priorWords }
 }

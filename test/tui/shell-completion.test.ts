@@ -1437,3 +1437,35 @@ test('a PowerShell emitted smart-quote directory literal continues into its file
     { kind: 'paths', prefix: '.\\O\u201ABrien\\' },
   ])
 })
+
+test('a PowerShell role parser preserves ordinary arguments after quoted values, hash/dash text and a call target', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-powershell-role-args-')
+  const { port, requests } = powershellShellPort(prefix => prefix === 'C:\\fo'
+    ? ['C:\\foo.txt']
+    : prefix === '.\\fi' ? ['.\\file.txt']
+    : prefix === '' ? ['alpha.txt'] : [])
+  const provider = powershellProvider(root, port)
+  const cases = [
+    "Get-Content 'O''Brien.txt' C:\\fo",
+    "Get-Content 'O''Brien.txt' ",
+    '& .\\script.ps1 C:\\fo',
+    '& .\\script.ps1 ',
+    "& 'O''Brien.ps1' C:\\fo",
+    'Get-Content C:\\a#b.txt C:\\fo',
+    'Get-Content C:\\a--%b.txt C:\\fo',
+  ]
+  for (const line of cases) {
+    const suggestions = await provider.getSuggestions([line], 0, line.length, { signal: abort, force: true })
+    assert.ok(suggestions !== null, `ordinary argument position must remain available: ${line}`)
+    const applied = provider.applyCompletion([line], 0, line.length, suggestions.items[0]!, suggestions.prefix)
+    assert.ok(applied.lines[0]!.startsWith(line.slice(0, line.lastIndexOf(' '))), `the preceding words are preserved: ${line}`)
+  }
+  assert.ok(requests.some(request => request.kind === 'paths' && request.prefix === 'C:\\fo'),
+    'the Host path request was actually issued for the ordinary argument')
+  // A call target followed by its first git subcommand is still unavailable;
+  // a later path argument after the subcommand remains available.
+  assert.equal(await provider.getSuggestions(['& git .\\fi'], 0, '& git .\\fi'.length, { signal: abort, force: true }), null)
+  const afterSubcommand = await provider.getSuggestions(['& git status .\\fi'], 0, '& git status .\\fi'.length, { signal: abort, force: true })
+  assert.ok(afterSubcommand !== null)
+})
