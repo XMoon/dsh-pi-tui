@@ -1035,6 +1035,13 @@ test('Remote A: Ctrl+R reads the Host accepted history, leaves the legacy JSONL 
     assert.deepEqual([...edited.getInputHistory()], memoryBefore,
       'Ctrl+R restore never changes the process recall')
     assertLegacyFileUntouched()
+    // The restore itself never submitted. A LATER Enter is the one submit.
+    const afterAcceptCount = hostUserTexts().length
+    fixture.vt.sendInput('\r')
+    await waitFor('the deliberate second Enter submits the restored text', () =>
+      hostUserTexts().length === afterAcceptCount + 1, 20_000)
+    assert.equal(edited.getDraft(), '', 'the submit clears the restored draft')
+    const hostSubmitsAfterAccept = hostUserTexts()
 
     // A JSONL-only row is NOT a Remote Ctrl+R result; the seat answers the
     // authoritative empty Host page (No matches), never a legacy-file fallback.
@@ -1052,7 +1059,7 @@ test('Remote A: Ctrl+R reads the Host accepted history, leaves the legacy JSONL 
     fixture.vt.sendInput('\x1b')
     await fixture.vt.waitForRender()
     assertLegacyFileUntouched()
-    assert.deepEqual(hostUserTexts(), hostSubmitsBefore,
+    assert.deepEqual(hostUserTexts(), hostSubmitsAfterAccept,
       'an empty Host search dispatches no submission')
 
     // The active-scope face revokes the open seat when the Host working
