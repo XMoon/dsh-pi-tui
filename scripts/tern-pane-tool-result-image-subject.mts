@@ -1,6 +1,8 @@
 /**
- * The subject of the real-pane lane for the tool-result image: the PRODUCTION
- * projection, painted by a REAL Tern client.
+ * The shared subject of the real-client lanes for the tool-result image: the
+ * PRODUCTION projection, painted by a REAL Tern client in a headless `tern
+ * serve` pane or in a real GUI window. The driver decides the actual mode; the
+ * subject never claims a client tier by itself.
  *
  * It renders the very nodes the shipped renderer emits — the production
  * `transcriptView` mapper over a real tool result that carries an image block
