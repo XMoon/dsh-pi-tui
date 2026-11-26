@@ -6841,6 +6841,7 @@ function livePublicHostPids() {
   const home = scene.installation.dshHome
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   const nodeName = scene.installation.dshInvocation[0].split('/').at(-1)
+  const knownHostPids = new Set(publicHosts.map(host => host.pid))
   const pids = []
   for (const pid of listing.pids) {
     if (pid === process.pid) continue
@@ -6850,7 +6851,10 @@ function livePublicHostPids() {
       throw new Error(`PUBLIC_COLD_SCAN_UNKNOWN: PID ${String(pid)} is unreadable (${light.code})`)
     }
     if (uid !== undefined && light.uid !== uid) continue
-    if (light.name !== nodeName && light.name !== 'node') continue
+    // A captured Host may run under a Node worker-thread comm (for example
+    // "MainThread"); its exact pid/birth is already in the ledger. Only that
+    // known PID bypasses the advisory name filter; unknown PIDs stay strict.
+    if (!knownHostPids.has(pid) && light.name !== nodeName && light.name !== 'node') continue
     const identity = obs.observe(pid)
     if (identity.kind === 'gone') continue
     if (identity.kind !== 'alive') {
@@ -8014,14 +8018,7 @@ async function handlePublicScopeState() {
   assertLifecycleOpen('PUBLIC_SCOPE_STATE')
   const registry = publicPathPresence(join(processScope.dir, 'instance.json'), 'PUBLIC_SCOPE_STATE registry')
   const launch = publicPathPresence(join(processScope.dir, 'launch.json'), 'PUBLIC_SCOPE_STATE launch')
-  // Prefer the captured scope ledger: it is the exact Host set this Scene
-  // created. The global entry-name scan is only needed for the cold no-Host
-  // proof; a live ledger Host legitimately holds the seat and may not be
-  // discoverable by a candidate-specific entry name.
-  const ledgerHosts = publicHosts
-    .filter(host => publicHostStillLive(host))
-    .map(host => ({ pid: host.pid, birth: host.birth }))
-  const hosts = ledgerHosts.length > 0 ? ledgerHosts : livePublicHostPids()
+  const hosts = livePublicHostPids()
   if (hosts.length === 0) {
     await assertSceneHostSeatFree('PUBLIC_SCOPE_STATE')
     await assertClientSeatFree(scene.installation, processScope.scopeId, 'PUBLIC_SCOPE_STATE')
