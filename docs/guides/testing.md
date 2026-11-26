@@ -775,19 +775,26 @@ The two positive public windows bind the cold installed-public positive test
 (`starts one real public daemon Client and Host from the installed CLI`);
 `public-daemon-ownership-refused` binds the separate negative test
 (`refuses an unproven public Host ownership signal and compensates truthfully`).
-The `public-daemon-before-registry` hold is after the detached Host/CLI/Client are
-real but before the product registry is published; the external probe waits for
-the real `instance.json`/`launch.json` to appear after the Worker SIGKILL and
-only then releases cleanup, so the Supervisor must verify and authenticate that
-late material before reaching `ABORTED_CLEAN`.
+The `public-daemon-before-registry` hold is after the detached Host/CLI/Client
+are real but before the product registry is published. The external observer
+rechecks the exact registry absence and the live birth-bound CLI/Client/Host
+edge immediately before SIGKILL; if the registry is already published at that
+point the window is `NOT_VERIFIED`/STOP, never a forced pass. A registry that
+appears naturally after the trigger is handled by the ordinary bounded late
+material reconciliation and official Host authentication; there is no
+probe-owned registry-release flag or wait. The positive receipt must prove the
+startup/close handler settlement join, the same captured identities, native
+session/foreground/Host group terminality, both seats and material terminal,
+a complete root removal, and the external Worker exit.
 `public-daemon-before-ready-ack` holds after registry/authentication/surface but
 before the Client start acknowledgement. The ownership-refused negative control
-supplies a mismatched Host birth: the Supervisor must reject it with the
-birth-mismatch guard without sending a signal, the external probe must observe
-the same live target, then the probe releases compensation; the final receipt is
+supplies a mismatched expected Host birth to the SAME destructive admission
+boundary used by ordinary reclaim: the admission must reject it before any
+TERM/KILL, the external probe must observe the same live target and no signal
+attempt, then the probe releases compensation; the final receipt is
 `NOT_QUIESCED` with a retained diagnostic root and a completed compensation.
-A receipt that claims a signal, loses the live target, or does not complete the
-compensation is not this negative control's pass.
+A receipt that claims a signal attempt, loses the live target, or does not
+complete the compensation is not this negative control's pass.
 
 This Project is not the release full lane. `smoke:split-process` and
 `smoke:macos-split` remain the separate distribution-boundary lanes described

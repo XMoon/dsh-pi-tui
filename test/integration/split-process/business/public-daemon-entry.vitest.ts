@@ -43,6 +43,23 @@ async function waitForFrame(
   }
 }
 
+async function waitForFrameMatch(
+  launch: PublicDaemonLaunch,
+  predicate: (frame: string) => boolean,
+  label: string,
+  timeoutMs = 120_000,
+): Promise<string> {
+  const started = Date.now()
+  for (;;) {
+    const frame = await frameText(launch).catch(() => '')
+    if (predicate(frame)) return frame
+    if (Date.now() - started >= timeoutMs) {
+      throw new Error(`${label}: the current frame never matched; frame=${JSON.stringify(frame.slice(-2000))}`)
+    }
+    await sleep(50)
+  }
+}
+
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
@@ -238,7 +255,9 @@ test.skipIf(!linuxOnly)('refuses illegal public backend inputs before creating a
       launch = await scene.startPublicDaemon({ label, backend })
       expect(launch.refused, `${label}: the invalid backend was accepted`).toBe(true)
       expect(launch.exit, `${label}: the invalid backend produced a real exit`).not.toBeNull()
-      expect(launch.exit?.code, `${label}: the invalid backend exit code`).not.toBe(0)
+      expect(launch.exit?.signal, `${label}: the invalid backend must exit normally`).toBeNull()
+      expect(typeof launch.exit?.code, `${label}: the invalid backend exit code type`).toBe('number')
+      expect(launch.exit?.code, `${label}: the invalid backend exit code`).toBeGreaterThan(0)
       const refusalText = await launch.text({ full: true })
       expect(refusalText, `${label}: the actual backend diagnostic (${refusalText})`).toMatch(
         label === 'refuse-wire-local' ? /wire-local|invalid.*backend|backend.*invalid/iu : /DSH_PI_TUI_BACKEND|invalid|empty/iu,
@@ -252,7 +271,9 @@ test.skipIf(!linuxOnly)('refuses illegal public backend inputs before creating a
     }
 
     const headless = await scene.runPublicDaemonHeadless({ label: 'refuse-headless', backend: 'daemon' })
-    expect(headless.exit.code, 'the non-TTY daemon launch exit code').not.toBe(0)
+    expect(headless.exit.signal, 'the non-TTY daemon launch must exit normally').toBeNull()
+    expect(typeof headless.exit.code, 'the non-TTY daemon launch exit code type').toBe('number')
+    expect(headless.exit.code, 'the non-TTY daemon launch exit code').toBeGreaterThan(0)
     expect(headless.text, `the non-TTY daemon refusal text (${headless.text})`).toMatch(
       /not a (?:TTY|terminal)|non-interactive|requires (?:an? )?(?:TTY|terminal)|interactive terminal/iu,
     )
@@ -269,7 +290,9 @@ test.skipIf(!linuxOnly)('refuses illegal public backend inputs before creating a
       },
     })
     expect(launch.refused, '--session and -c together must be refused by the product').toBe(true)
-    expect(launch.exit?.code, 'the mutually exclusive launch exit code').not.toBe(0)
+    expect(launch.exit?.signal, 'the mutually exclusive launch must exit normally').toBeNull()
+    expect(typeof launch.exit?.code, 'the mutually exclusive launch exit code type').toBe('number')
+    expect(launch.exit?.code, 'the mutually exclusive launch exit code').toBeGreaterThan(0)
     const mutualText = await launch.text({ full: true })
     expect(mutualText, `the actual mutual-exclusion diagnostic (${mutualText})`).toMatch(
       /--session.*(?:-c|--continue)|(?:-c|--continue).*--session|mutually exclusive/iu,
@@ -363,13 +386,16 @@ test.skipIf(!linuxOnly)('resumes a durable public Session through --session and 
     const browserFrame = await browser.text()
     expect(browserFrame, `the real Session Browser frame (${browserFrame})`).toContain('Sessions · 1')
     expect(browserFrame, `the real Session Browser workspace row (${browserFrame})`).toContain('pi-tui')
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await browser.press('Escape')
-      await sleep(300)
-      const frame = await browser.text()
-      if (frame.includes('❯') && !frame.includes('Close [Esc]')) break
-    }
-    await waitForFrame(browser, '❯', 'the Session browser returned to the chat')
+    // The non-unique query keeps the browser open. The first Enter focuses the
+    // real search result and the second opens the exact seeded Session; the
+    // resulting chat frame names the full Session id and its history, not just
+    // the workspace count.
+    await browser.press('Enter')
+    await waitForFrame(browser, 'Open [Enter]', 'the Session Browser selected the real result')
+    await browser.press('Enter')
+    await waitForFrame(browser, prefix, 'the Session Browser opened the exact seeded target')
+    await waitForFrame(browser, 'public session seed', 'the Session Browser opened the exact target history')
+    await waitForFrame(browser, '❯', 'the Session Browser opened a usable composer')
     expect([...(await scene.sessionIds())].sort(), 'the Session browser created no Session').toEqual(expectedSessions)
     await exitPublicLaunch(browser, 'public session browser')
 
@@ -568,7 +594,11 @@ test.skipIf(!linuxOnly)('keeps the surviving public peer and its Session after t
       event => event.type === 'turn/end' && event.data?.turn === lastTurn + 1,
       'the surviving peer settled the next Turn')
     await waitForFrame(second, 'peer survives the detach', 'the surviving peer painted the new prompt')
-    await waitForFrame(second, 'stub answer', 'the surviving peer painted the new answer')
+    await waitForFrameMatch(second, frame => {
+      const promptAt = frame.lastIndexOf('peer survives the detach')
+      const answerAt = frame.lastIndexOf('stub answer')
+      return promptAt >= 0 && answerAt > promptAt
+    }, 'the surviving peer painted the new answer below the new prompt')
 
     const newEvents = (scene.sessionEvents(sessionId) ?? []).slice(eventBoundary)
     expect(newEvents.filter(event => event.type === 'user/message'
@@ -667,15 +697,20 @@ test.skipIf(!linuxOnly)('pins the public alias resume command and replays it aga
       'env', 'DSH_PI_TUI_BACKEND=daemon', 'dsh', '--profile', alias, '--session', sessionId,
     ])
 
-    const peer = await scene.startPublicDaemon({
-      label: 'alias-peer',
-      backend: 'daemon',
+    // Replay the captured reporter argv while the ORIGINAL reporting Client is
+    // still live. The owner may only exit after that replay has completed, so
+    // the detach text is read from the same Client that produced the argv.
+    const replay = await scene.startPublicDaemon({
+      label: 'alias-resume-replay',
       alias,
-      args: { session: sessionId },
+      replayCommand: capturedResume,
     })
-    launches.push(peer)
-    await waitForFrame(peer, 'alias resume seed', 'the alias peer opened the same history')
-    expect(peer.host?.instanceId).toBe(owner.host?.instanceId)
+    launches.push(replay)
+    await waitForFrame(replay, 'alias resume seed', 'the replayed resume command opened the exact history')
+    expect(replay.host?.instanceId).toBe(owner.host?.instanceId)
+    expect((await owner.kernelState()).clientState, 'the original reporter Client is live during replay').toBe('alive')
+    await exitPublicLaunch(replay, 'alias replay')
+    expect((await owner.kernelState()).clientState, 'the original reporter Client stays live after replay').toBe('alive')
 
     const exit = await exitPublicLaunch(owner, 'alias owner')
     expect(exit.text).toContain('Disconnected from dsh-pi-tui (daemon client).')
@@ -685,21 +720,7 @@ test.skipIf(!linuxOnly)('pins the public alias resume command and replays it aga
     expect(exit.text).toContain(`dsh --profile ${alias} daemon status`)
     expect(exit.text).toContain(`dsh --profile ${alias} daemon logs`)
     expect(exit.text).toContain(`dsh --profile ${alias} daemon stop`)
-    expect((await peer.kernelState()).clientState, 'the peer Client is live before the replay').toBe('alive')
-
-    const replay = await scene.startPublicDaemon({
-      label: 'alias-resume-replay',
-      alias,
-      replayCommand: capturedResume,
-    })
-    launches.push(replay)
-    await waitForFrame(replay, 'alias resume seed', 'the replayed resume command opened the exact history')
-    expect(replay.host?.instanceId).toBe(owner.host?.instanceId)
-    expect((await peer.kernelState()).clientState, 'the peer Client stays live during the replay').toBe('alive')
-    await exitPublicLaunch(replay, 'alias replay')
-    expect((await peer.kernelState()).clientState, 'the peer Client stays live after the replay').toBe('alive')
-    await exitPublicLaunch(peer, 'alias peer')
-    await peer.stopHost()
+    await owner.stopHost()
   } catch (error) {
     testError = error
     throw error

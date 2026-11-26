@@ -666,6 +666,25 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
       }
     }
   }
+  if ((receipt.publicLaunches ?? []).length > 0) {
+    if (receipt.cleanup?.publicHandlersJoined !== true) {
+      problems.push('the public startup/close handlers were not joined before cleanup')
+    }
+    if (receipt.publicOwnershipRefused === undefined && receipt.cleanup?.sceneRootRemoved !== true) {
+      problems.push('the public Scene root was not removed after the terminal proof')
+    }
+    for (const launch of receipt.publicLaunches ?? []) {
+      if (typeof launch.startupSettledAt !== 'string' || launch.startupSettledAt === '') {
+        problems.push(`public launch ${String(launch.label)} has no settled startup handler fact`)
+      }
+      if (launch.terminalOutcome !== 'native-exit' && launch.terminalOutcome !== 'unknown-abort') {
+        problems.push(`public launch ${String(launch.label)} has no honest terminal outcome`)
+      }
+      if (launch.verifiedTerminal === undefined) {
+        problems.push(`public launch ${String(launch.label)} has no terminal fact`)
+      }
+    }
+  }
   if (receipt.publicOwnershipRefused !== undefined) {
     if (receipt.publicOwnershipRefused.refusalCode !== 'PUBLIC_HOST_BIRTH_MISMATCH') {
       problems.push(`the public ownership refusal did not name the birth-mismatch guard: ${String(receipt.publicOwnershipRefused.refusalCode)}`)
@@ -886,11 +905,6 @@ const publicRefusalReleaseFile = join(tmpBase, `split-public-refusal-release-${S
 if (processMode && at === 'public-daemon-ownership-refused') {
   if (existsSync(publicRefusalReleaseFile)) unlinkSync(publicRefusalReleaseFile)
   env.SPLIT_VITEST_PUBLIC_REFUSAL_RELEASE = publicRefusalReleaseFile
-}
-const publicRegistryReleaseFile = join(tmpBase, `split-public-registry-release-${String(process.pid)}.flag`)
-if (processMode && at === 'public-daemon-before-registry') {
-  if (existsSync(publicRegistryReleaseFile)) unlinkSync(publicRegistryReleaseFile)
-  env.SPLIT_VITEST_PUBLIC_REGISTRY_RELEASE = publicRegistryReleaseFile
 }
 if (mode === 'worker-kill') env.SPLIT_VITEST_WORKER_KILL_POINT = at
 if (mode === 'upgrade-worker-kill' && (at === 'new-host-spawned-before-ack' || at === 'qualification-client-active'
@@ -1371,20 +1385,28 @@ try {
         assertProcessTargetStillLive(kernel, receipt, 'clients-ready target at the signal trigger')
         assertProcessSiblingStillLive(kernel, siblingSnapshot, 'clients-ready sibling at the signal trigger')
       }
-      if (process.kill(killedWorkerPid, 'SIGKILL') === false) {
-        fail(`could not SIGKILL verified process worker PID ${String(killedWorkerPid)}`)
-      }
-      deadline = Date.now() + 180_000
-      if (at === 'public-daemon-before-registry') {
+      if (processMode && at === 'public-daemon-before-registry') {
         const note = processNote(receipt, 'process-probe-hold', at)
         const registryPath = note?.detail?.registryPath
         if (typeof registryPath !== 'string' || registryPath === '') {
           fail('public-daemon-before-registry: the hold carries no registry path')
         }
-        await waitUntil(() => existsSync(registryPath) ? true : undefined,
-          'the real public Host registry publication after the trigger', 120_000)
-        writeFileSync(publicRegistryReleaseFile, 'release\n', { mode: 0o600 })
+        if (existsSync(registryPath)) {
+          fail('public-daemon-before-registry: NOT_VERIFIED — the registry was already published immediately before the SIGKILL; the window was missed')
+        }
+        const launch = (receipt.publicLaunches ?? []).find(value => value.launchId === note.detail?.launchId)
+        if (launch === undefined) fail('public-daemon-before-registry: no public launch at the trigger')
+        for (const [kind, identity] of [['CLI', launch.cli], ['Client', launch.client], ['Host', launch.host]]) {
+          if (identity === undefined || identity === null
+            || identityLiveness(kernel, identity.pid, identity.birth) !== 'live') {
+            fail(`public-daemon-before-registry: the captured ${kind} edge is not live immediately before SIGKILL`)
+          }
+        }
       }
+      if (process.kill(killedWorkerPid, 'SIGKILL') === false) {
+        fail(`could not SIGKILL verified process worker PID ${String(killedWorkerPid)}`)
+      }
+      deadline = Date.now() + 180_000
       if (at === 'public-daemon-ownership-refused') {
         const refused = await waitUntil(() => {
           const current = latestProcessReceipt(tmpBase, runId)
@@ -1403,6 +1425,7 @@ try {
           fail('public-daemon-ownership-refused: the refused target is not live (a signal was sent)')
         }
         if (refusal.signalSent !== false) fail('public-daemon-ownership-refused: the receipt claims a signal was sent')
+        if (refusal.signalAttempts !== 0) fail('public-daemon-ownership-refused: the admission recorded a destructive signal attempt')
         if (refusal.expectedBirth === refusal.birth) fail('public-daemon-ownership-refused: the expected birth was not mismatched')
         if (refusedHost.reclaimed === true) fail('public-daemon-ownership-refused: the Host was already reclaimed before release')
         if (typeof refused.sceneRoot !== 'string' || !existsSync(refused.sceneRoot)) {
