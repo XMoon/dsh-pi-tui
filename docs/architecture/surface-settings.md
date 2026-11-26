@@ -298,10 +298,11 @@ specialist-page contract below).
   same-generation readback, typed refusal-vs-unknown distinction, dirty/leave
   guard, Retry policy and business writer are unchanged. A clean browse paints
   no persistent saved/verified banner. A retained historical success never
-  claims currency: the numeric pages, the Root Host-configuration scalars, and
-  the Subagent page demote it to `Last-known · read-only` with `Previous save
-  completed; refresh to review.` while the internal settlement remains history.
-  A known-success receipt is bound to the observation that proved it: a later
+  claims currency. When the source is not ready, the numeric pages, the Root
+  Host-configuration scalars and the Subagent page demote it to `Last-known ·
+  read-only` with `Previous save completed; refresh to review.`; a READY
+  replacement retires the obsolete receipt without a read-only claim. A
+  known-success receipt is bound to the observation that proved it: a later
   Host/Config observation retires it rather than repainting it as current. No
   settlement surface presents a stale success as a current saved value.
   The Subagent page keeps each namespace's own prefix

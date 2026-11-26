@@ -4105,8 +4105,11 @@ test('a verified Host-config receipt does not bind to a replacement admitted dur
   generation = {}
   h.settlements[0]!({ outcome: 'verified', verifiedValue: 'Off' })
   const frame = plain(h)
-  assert.match(frame, /Last-known · read-only/u, 'the receipt stays bound to the authority that proved it')
   assert.doesNotMatch(frame, /\bSaved\b/u, 'a successor observation never revives A\'s Saved')
+  assert.doesNotMatch(frame, /Last-known · read-only|Previous save completed/u,
+    'a ready successor is not described as read-only')
+  assert.match(frame, /Value\s+Off/u, 'the ready successor keeps its current value')
+  assert.match(frame, /Change(?:…| \[Enter\])/u, 'the ready successor keeps its edit affordance')
 })
 
 test('a verified Host-config receipt does not bind to a concurrent same-generation value', () => {
@@ -4122,8 +4125,11 @@ test('a verified Host-config receipt does not bind to a concurrent same-generati
   current = 'On'
   h.settlements[0]!({ outcome: 'verified', verifiedValue: 'Off' })
   const frame = plain(h)
-  assert.match(frame, /Last-known · read-only/u, 'the receipt is not bound to a different current value')
   assert.doesNotMatch(frame, /\bSaved\b/u)
+  assert.doesNotMatch(frame, /Last-known · read-only|Previous save completed/u,
+    'the ready same-authority value is not described as read-only')
+  assert.match(frame, /Value\s+On/u, 'the ready current value is painted')
+  assert.match(frame, /Change(?:…| \[Enter\])/u)
 })
 
 test('a same-Host revision change while L2 stays painted refuses Confirm with zero dispatch', () => {

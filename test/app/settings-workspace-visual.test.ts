@@ -6617,9 +6617,12 @@ test('a saved Root scalar never resurrects on a same-revision authority replacem
   await settle(h)
   assert.equal(h.visualState()?.revision, savedRevision, 'the replacement deliberately keeps the same revision')
   const detail = detailPaneText(h)
-  assert.match(detail, /Last-known · read-only/u, 'the ready replacement does not resurrect A\'s Saved')
-  assert.match(detail, /Previous save completed; refresh to review\./u)
-  assert.doesNotMatch(detail, /\bSaved\b/u)
+  assert.doesNotMatch(detail, /\bSaved\b/u, 'the ready replacement does not resurrect A\'s Saved')
+  assert.doesNotMatch(detail, /Last-known · read-only|Previous save completed/u,
+    'a ready replacement retires the receipt instead of calling the new source read-only')
+  assert.match(detail, /Freshness\s+Ready/u, 'the fresh row keeps its own ready fact')
+  assert.match(detail, /Value\s+Off/u, 'the fresh row keeps its current value')
+  assert.match(h.view(), /Change…/u, 'the fresh row keeps its edit affordance')
   h.dispose()
 })
 

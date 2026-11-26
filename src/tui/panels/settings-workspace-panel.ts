@@ -3719,13 +3719,19 @@ export class SettingsWorkspacePanel implements Component {
         && row.edit?.generation !== undefined
         && Object.is(phase.observation.generation, row.edit.generation)
         && phase.observation.revision === row.edit.revision
-      if (hostConfig && (row.freshness !== 'ready' || !observationMatches)) {
+      if (hostConfig && row.freshness !== 'ready') {
+        // The source is genuinely stale: keep the historical acknowledgement.
         return {
           word: 'Last-known · read-only',
           reason: 'Previous save completed; refresh to review.',
           tone: 'warning',
           plain: true,
         }
+      }
+      if (hostConfig && !observationMatches) {
+        // The source is READY but a different observation: the old receipt is
+        // obsolete, not read-only. Retire it and let the fresh row speak.
+        return undefined
       }
       return hostConfig
         ? { word: 'Saved', tone: 'success', plain: true }
