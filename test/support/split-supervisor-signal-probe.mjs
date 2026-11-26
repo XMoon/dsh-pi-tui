@@ -652,6 +652,20 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
         problems.push(`public daemon launch ${String(launch.label)} native shell is ${shellState}: ${String(launch.shellPid)}`)
       }
     }
+    if (launch.nativeSessionTerminal !== true) {
+      problems.push(`public daemon launch ${String(launch.label)} has no native-session terminal fact`)
+    }
+    if (launch.foregroundGroupTerminal !== true) {
+      problems.push(`public daemon launch ${String(launch.label)} has no foreground-group terminal fact`)
+    }
+    if (!Number.isInteger(launch.shellPgid)) {
+      problems.push(`public daemon launch ${String(launch.label)} has no captured foreground group id`)
+    } else {
+      const groupState = processGroupTerminalState(kernel, launch.shellPgid)
+      if (groupState !== 'terminal') {
+        problems.push(`public daemon launch ${String(launch.label)} foreground group is ${groupState}: ${String(launch.shellPgid)}`)
+      }
+    }
   }
   for (const host of receipt.publicHosts ?? []) {
     if (host.reclaimed !== true) problems.push(`public Host PID ${String(host.pid)} was not reclaimed`)
@@ -1401,6 +1415,15 @@ try {
             || identityLiveness(kernel, identity.pid, identity.birth) !== 'live') {
             fail(`public-daemon-before-registry: the captured ${kind} edge is not live immediately before SIGKILL`)
           }
+        }
+        if (launch.cli.pid !== launch.shellPid && launch.cli.ppid !== launch.shellPid) {
+          fail('public-daemon-before-registry: the CLI is not the native shell direct child')
+        }
+        if (launch.client.ppid !== launch.cli.pid) {
+          fail('public-daemon-before-registry: the Client is not the CLI direct child')
+        }
+        if (launch.host.ppidAtCapture !== launch.client.pid) {
+          fail('public-daemon-before-registry: the Host was not captured on the Client direct child edge')
         }
       }
       if (process.kill(killedWorkerPid, 'SIGKILL') === false) {

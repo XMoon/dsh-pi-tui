@@ -386,18 +386,38 @@ test.skipIf(!linuxOnly)('resumes a durable public Session through --session and 
     const browserFrame = await browser.text()
     expect(browserFrame, `the real Session Browser frame (${browserFrame})`).toContain('Sessions · 1')
     expect(browserFrame, `the real Session Browser workspace row (${browserFrame})`).toContain('pi-tui')
-    // The non-unique query keeps the browser open. The first Enter focuses the
-    // real search result and the second opens the exact seeded Session; the
-    // resulting chat frame names the full Session id and its history, not just
-    // the workspace count.
-    await browser.press('Enter')
-    await waitForFrame(browser, 'Open [Enter]', 'the Session Browser selected the real result')
-    await browser.press('Enter')
-    await waitForFrame(browser, prefix, 'the Session Browser opened the exact seeded target')
-    await waitForFrame(browser, 'public session seed', 'the Session Browser opened the exact target history')
-    await waitForFrame(browser, '❯', 'the Session Browser opened a usable composer')
+    // Real Escape dismissal, with no blind sleeps: each step waits for the
+    // actual browser composer or the next advertised Back/Close layer.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await browser.press('Escape')
+      const frame = await waitForFrameMatch(browser,
+        value => value.includes('❯') || value.includes('Close [Esc]') || value.includes('Back [Esc]'),
+        'the Session Browser processed Escape', 10_000)
+      if (frame.includes('❯') && !frame.includes('Close [Esc]')) break
+    }
+    await waitForFrame(browser, '❯', 'the Session Browser returned to a usable composer after Esc')
     expect([...(await scene.sessionIds())].sort(), 'the Session browser created no Session').toEqual(expectedSessions)
     await exitPublicLaunch(browser, 'public session browser')
+
+    // Separate browser path for the exact seeded target: a non-unique query
+    // keeps the browser open; the first Enter focuses the exact result and the
+    // second opens it. The chat frame names the full Session id/history.
+    const browserTarget = await scene.startPublicDaemon({
+      label: 'session-browser-target',
+      backend: 'daemon',
+      args: { session: 'session-' },
+      surface: 'workspace',
+    })
+    launches.push(browserTarget)
+    await waitForFrame(browserTarget, 'Workspace & dates', 'the Session Browser painted the workspace result')
+    await browserTarget.press('Enter')
+    await waitForFrame(browserTarget, 'Open [Enter]', 'the Session Browser selected the exact result')
+    await browserTarget.press('Enter')
+    await waitForFrame(browserTarget, prefix, 'the Session Browser opened the exact seeded target')
+    await waitForFrame(browserTarget, 'public session seed', 'the Session Browser opened the exact target history')
+    await waitForFrame(browserTarget, '❯', 'the Session Browser opened a usable composer')
+    expect([...(await scene.sessionIds())].sort(), 'the exact target browser created no Session').toEqual(expectedSessions)
+    await exitPublicLaunch(browserTarget, 'public session browser target')
 
     const continued = await scene.startPublicDaemon({
       label: 'session-continue',

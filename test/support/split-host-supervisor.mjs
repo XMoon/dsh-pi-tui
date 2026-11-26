@@ -6029,6 +6029,9 @@ function publicLaunchFacts(handle) {
     sessionId: handle.sessionId,
     shellPid: handle.shellPid,
     shellBirth: handle.shellIdentity?.birth ?? null,
+    shellPgid: handle.shellIdentity?.identity.pgid ?? null,
+    nativeSessionTerminal: handle.nativeSessionTerminal === true,
+    foregroundGroupTerminal: handle.foregroundGroupTerminal === true,
     cli: handle.cli ?? null,
     client: handle.client ?? null,
     host: handle.host == null ? null : publicDaemonHostFacts(handle.host),
@@ -6716,17 +6719,49 @@ async function handleStartPublicDaemon(message) {
   }
   const { label, profile, alias, cols, rows, surface } = assertPublicLaunchInputs(message)
   if (processScope === undefined) throw new Error('START_PUBLIC_DAEMON: the process scope is not recorded')
-  const cold = !publicHosts.some(host => host.reclaimed !== true)
-    && !publicLaunches.some(handle => handle.host !== undefined && handle.host.reclaimed !== true)
-  let warmHost
-  if (cold) {
-    await assertPublicColdStartOwnership(label)
-  } else {
-    warmHost = await findWarmPublicHost(label)
-  }
   const sequence = ++publicLaunchSequence
   const launchDir = join(scene.workDir, 'public-launches', `${label}-${String(sequence)}`)
   mkdirSync(launchDir, { recursive: true, mode: 0o700 })
+  const backend = message.replayCommand !== undefined ? 'daemon' : message.backend
+  const handle = {
+    launchId: `public-daemon-${String(sequence)}-${String(Date.now().toString(36))}`,
+    label,
+    profile: alias ?? profile,
+    alias: alias ?? null,
+    aliasPath: undefined,
+    initialSurface: surface,
+    backend: backend ?? null,
+    sequence,
+    launchedDir: launchDir,
+    sessionId: null,
+    terminal: undefined,
+    shellPid: null,
+    shellIdentity: undefined,
+    cli: undefined,
+    client: undefined,
+    host: undefined,
+    loaderDumpPath: undefined,
+    loaderRows: undefined,
+    herdr: undefined,
+    reservedAt: now(),
+    openedAt: undefined,
+    readyAt: undefined,
+    surfaceProbe: undefined,
+    exited: false,
+    exitResult: undefined,
+    exitText: undefined,
+    closed: false,
+    closedAt: undefined,
+    refused: false,
+    verifiedTerminal: undefined,
+    terminalOutcome: undefined,
+    nativeSessionTerminal: false,
+    foregroundGroupTerminal: false,
+    hostStopped: undefined,
+  }
+  publicLaunches.push(handle)
+  handle.settlement = Promise.withResolvers()
+  syncPublicLaunchReceipt()
   let aliasPath
   if (alias !== undefined) {
     aliasPath = join(scene.installation.dshHome, 'profiles', alias)
@@ -6745,7 +6780,6 @@ async function handleStartPublicDaemon(message) {
   if (loaderDumpPath !== undefined && existsSync(loaderDumpPath)) {
     throw new Error('START_PUBLIC_DAEMON: the qualification Loader dump target already exists')
   }
-  const backend = message.replayCommand !== undefined ? 'daemon' : message.backend
   let program
   let argv
   if (message.replayCommand !== undefined) {
@@ -6785,43 +6819,21 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
       throw new Error(`START_PUBLIC_DAEMON: the public entry environment carries the internal ${key}`)
     }
   }
-  const handle = {
-    launchId: `public-daemon-${String(sequence)}-${String(Date.now().toString(36))}`,
-    label,
-    profile: profileName,
-    alias: alias ?? null,
-    aliasPath,
-    initialSurface: surface,
-    backend: backend ?? null,
-    sequence,
-    launchedDir: launchDir,
-    sessionId: null,
-    terminal: undefined,
-    shellPid: null,
-    shellIdentity: undefined,
-    cli: undefined,
-    client: undefined,
-    host: undefined,
-    loaderDumpPath,
-    loaderRows: undefined,
-    herdr,
-    reservedAt: now(),
-    openedAt: undefined,
-    readyAt: undefined,
-    surfaceProbe: undefined,
-    exited: false,
-    exitResult: undefined,
-    exitText: undefined,
-    closed: false,
-    closedAt: undefined,
-    refused: false,
-    verifiedTerminal: undefined,
-    hostStopped: undefined,
-  }
-  publicLaunches.push(handle)
-  handle.settlement = Promise.withResolvers()
+  handle.profile = profileName
+  handle.aliasPath = aliasPath
+  handle.loaderDumpPath = loaderDumpPath
+  handle.herdr = herdr
   syncPublicLaunchReceipt()
   try {
+    const cold = !publicHosts.some(host => host.reclaimed !== true)
+      && !publicLaunches.some(candidate => candidate.host !== undefined && candidate.host.reclaimed !== true)
+    let warmHost
+    if (cold) {
+      await assertPublicColdStartOwnership(label)
+    } else {
+      warmHost = await findWarmPublicHost(label)
+    }
+    assertPublicAdmissionOpen(`${label} public startup after discovery`)
     const splitTerminal = createSplitTerminal({
       prefix: 'public-daemon',
       traceDirectory: join(scene.workDir, 'trace'),
@@ -6842,11 +6854,15 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
       argv,
     })
     writeReceipt({ phase: 'PUBLIC_DAEMON_RESERVED' })
-    const opened = await withProcessNativeOperation('public-daemon-run', handle.launchId, () => handle.terminal.run(
-      program,
-      argv,
-      { cwd: scene.installation.profileDir, cols, rows, waitReady: false, env },
-    ))
+    assertPublicAdmissionOpen(`${label} public startup before native run`)
+    const opened = await withProcessNativeOperation('public-daemon-run', handle.launchId, () => {
+      assertPublicAdmissionOpen(`${label} public native run`)
+      return handle.terminal.run(
+        program,
+        argv,
+        { cwd: scene.installation.profileDir, cols, rows, waitReady: false, env },
+      )
+    })
     if (opened.session !== handle.sessionId) {
       throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the public native session identity changed at run()`)
     }
@@ -6871,6 +6887,9 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
       })
     if (cliOutcome.kind === 'exit') return finishPublicRefusal(handle, cliOutcome)
     handle.cli = cliOutcome.process
+    if (handle.cli.pid !== handle.shellPid && handle.cli.ppid !== handle.shellPid) {
+      throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the public CLI is not a direct child of the native shell`)
+    }
     if (handle.cli.pid === handle.shellPid) {
       // A direct native spawn has no intermediate shell; the same kernel
       // identity is one process, never a fabricated edge.
@@ -6918,6 +6937,9 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
     }
     if (clientOutcome.kind === 'exit') return finishPublicRefusal(handle, clientOutcome)
     handle.client = clientOutcome.process
+    if (handle.client.ppid !== handle.cli.pid) {
+      throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the public Client is not a direct child of the public CLI`)
+    }
     syncPublicLaunchReceipt()
     appendNote('public-daemon-client-captured', {
       launchId: handle.launchId,
@@ -6998,6 +7020,7 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
     const material = await waitForPublicHostRegistry(handle)
     const host = handle.host
     if (host === undefined) throw new Error('START_PUBLIC_DAEMON: the public Host row was not bound')
+    const authentication = await waitForPublicHostAuthentication(handle, material.registry, material.launch)
     host.instanceId = material.registry.instanceId
     host.origin = material.registry.origin
     host.protocol = material.registry.protocol
@@ -7006,8 +7029,6 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
     host.schema = material.registry.schema
     host.registryPath = material.registryPath
     host.launchPath = material.launchPath
-    syncPublicLaunchReceipt()
-    const authentication = await waitForPublicHostAuthentication(handle, material.registry, material.launch)
     host.authenticatedAt = authentication.authenticatedAt
     host.identity = authentication.identity
     syncPublicLaunchReceipt()
@@ -7067,6 +7088,9 @@ function publicLaunchReturnFacts(handle) {
     backend: handle.backend,
     shellPid: handle.shellPid,
     shellBirth: handle.shellIdentity?.birth ?? null,
+    shellPgid: handle.shellIdentity?.identity.pgid ?? null,
+    nativeSessionTerminal: handle.nativeSessionTerminal === true,
+    foregroundGroupTerminal: handle.foregroundGroupTerminal === true,
     cli: handle.cli ?? null,
     client: handle.client ?? null,
     host: handle.host == null ? null : publicDaemonHostFacts(handle.host),
@@ -7265,6 +7289,7 @@ async function handlePublicDaemonClose(message) {
 async function assertPublicLaunchTerminalContract(handle, reason) {
   const openSessions = new Set(await openTuiSessions())
   if (openSessions.has(handle.sessionId)) throw new Error(`${reason}: ${handle.label} left its native public session open`)
+  handle.nativeSessionTerminal = true
   for (const entry of [handle.cli, handle.client]) {
     if (entry === undefined) continue
     const state = publicIdentityState(entry)
@@ -7283,6 +7308,7 @@ async function assertPublicLaunchTerminalContract(handle, reason) {
       if (members.length > 0) throw new Error(`${reason}: ${handle.label} foreground group still has live members: ${JSON.stringify(members)}`)
     }
   }
+  handle.foregroundGroupTerminal = true
 }
 
 async function handlePublicDaemonReclaim(message) {
@@ -7392,6 +7418,7 @@ async function handlePublicDaemonStop(message) {
       .filter(pid => pid !== host.pid)
     if (members.length > 0) throw new Error(`PUBLIC_DAEMON_STOP: the Host group has live members before stop: ${JSON.stringify(members)}`)
   }
+  assertPublicAdmissionOpen('PUBLIC_DAEMON_STOP before native stop')
   const helper = await runTrackedOnce(scene.installation.dshInvocation,
     ['--profile', handle.profile, 'daemon', 'stop'],
     scene.installation.profileDir,
@@ -7460,7 +7487,17 @@ function assertPublicHostOwnership(host, reason, expectedBirth = host.birth) {
   if (snapshot === null) throw new Error(`${reason}: the public Host has no readable kernel identity`)
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   if (uid !== undefined && snapshot.uid !== uid) throw new Error(`${reason}: the public Host is not owned by this user`)
-  if (!snapshot.command.includes('local-host.mjs')) throw new Error(`${reason}: the PID does not run the public Host entry`)
+  const tokens = processCommandLineTokens(host.pid)
+  let actualEntry
+  try {
+    if (tokens === undefined || typeof tokens[1] !== 'string') throw new Error('missing argv[1]')
+    actualEntry = realpathSync(tokens[1])
+  } catch {
+    throw new Error(`${reason}: the PID has no readable public Host entry argv`)
+  }
+  if (actualEntry !== publicInstalledEntry('local-host.mjs')) {
+    throw new Error(`${reason}: the PID does not run this profile's exact public Host entry`)
+  }
   if (processEnvironmentValue(host.pid, 'DSH_HOME') !== scene.installation.dshHome) {
     throw new Error(`${reason}: the public Host does not carry this Scene DSH home`)
   }
@@ -7489,6 +7526,9 @@ function assertPublicHostOwnership(host, reason, expectedBirth = host.birth) {
     if (files.registryMode !== 0o600 || files.launchMode !== 0o600) {
       throw new Error(`${reason}: the public Host material is not 0600 (${String(files.registryMode)}/${String(files.launchMode)})`)
     }
+    if (host.instanceId !== undefined && host.authenticatedAt === undefined) {
+      throw new Error(`${reason}: the published public Host was never authenticated`)
+    }
     assertPublicHostRecord(host, files.registry, files.launch)
     assertPublishedHostMatchesKernel(files.registry, reason)
   } else if (host.instanceId !== undefined) {
@@ -7507,7 +7547,14 @@ async function bindLatePublicHostRegistry(host, reason) {
   if (host.instanceId !== undefined) return
   const registryPath = join(processScope.dir, 'instance.json')
   const launchPath = join(processScope.dir, 'launch.json')
-  if (!existsSync(registryPath) || !existsSync(launchPath)) return
+  const deadline = Date.now() + 15_000
+  for (;;) {
+    const hasRegistry = existsSync(registryPath)
+    const hasLaunch = existsSync(launchPath)
+    if (hasRegistry && hasLaunch) break
+    if (Date.now() >= deadline) return
+    await sleep(50)
+  }
   const files = readScopeFiles(scene.installation.dshHome, processScope.scopeId)
   if (files.registryMode !== 0o600 || files.launchMode !== 0o600) {
     throw new Error(`${reason}: the late public Host material is not 0600 (${String(files.registryMode)}/${String(files.launchMode)})`)
@@ -7717,6 +7764,7 @@ async function reconcilePublicLateProducers(handle, reason) {
           foregroundTtyShellPid: handle.shellPid,
         })
       if (captured === undefined) continue
+      if (captured.pid !== handle.shellPid && captured.ppid !== handle.shellPid) continue
       assertPublicForegroundTty(captured.pid, handle.shellPid, `${reason} late public CLI`)
       handle.cli = captured
       appendNote('public-daemon-late-cli-captured', { launchId: handle.launchId, pid: captured.pid, birth: captured.birth })
