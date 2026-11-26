@@ -2000,6 +2000,19 @@ async function cleanup(reason, options = {}) {
           clean = false
           appendNote('public-authority-cleanup-failed', { reason: boundedErrorText(error) })
         }
+        // Generic reclaim for every process Scene, including Scenes with no
+        // G1 producer. The per-handle termination promise makes this
+        // idempotent with the G1 handler settlement.
+        try {
+          const problems = await terminateAllProcessEntries(reason)
+          if (problems.length > 0) {
+            clean = false
+            for (const problem of problems) appendNote('process-entry-termination-failed', problem)
+          }
+        } catch (error) {
+          clean = false
+          appendNote('process-entry-termination-failed', { reason: boundedErrorText(error) })
+        }
       }
       // Public daemon launches are REAL installed-CLI PTYs: close every
       // foreground session, then reclaim the public Hosts they started. The
