@@ -140,6 +140,8 @@ interface Harness {
    *  authoritative settlement of the write itself, distinct from the UI's
    *  read-back verdict. */
   readonly settledWrites: () => readonly string[]
+  /** Every command-owner diagnostic (debug/warn) with its safe detail. */
+  readonly diagnostics: readonly { readonly level: 'debug' | 'warn'; readonly label: string; readonly detail: unknown }[]
   /** How many Web writes overlapped (must never exceed 1: ONE owner FIFO). */
   readonly maxConcurrentWrites: () => number
   /** The write labels in COMMIT order. */
@@ -329,10 +331,24 @@ function setup(options: {
       readsSettled += 1
     }
   }
+  const diagnostics: Array<{ level: 'debug' | 'warn'; label: string; detail: unknown }> = []
+  const baseDiag = createDiag({ filePath: undefined, stderrLevel: 'off' })
+  const emitDebug = baseDiag.debug.bind(baseDiag)
+  const emitWarn = baseDiag.warn.bind(baseDiag)
+  const diag = Object.assign(baseDiag, {
+    debug: (label: string, detail: unknown) => {
+      diagnostics.push({ level: 'debug', label, detail })
+      emitDebug(label, detail as never)
+    },
+    warn: (label: string, detail: unknown) => {
+      diagnostics.push({ level: 'warn', label, detail })
+      emitWarn(label, detail as never)
+    },
+  })
   const base: Record<string, unknown> = {
     ctx,
     app,
-    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    diag,
     cwd: '/ws',
     sessionCwd: () => '/ws',
     signal: new AbortController().signal,
@@ -507,6 +523,7 @@ function setup(options: {
     readCount: () => readsIssued,
     settledReadCount: () => readsSettled,
     settledWrites: () => settledWrites,
+    diagnostics,
     maxConcurrentWrites: () => maxActiveWrites,
     log,
     holdRead: () => {
@@ -3014,6 +3031,8 @@ function createRemoteWebPort(): {
   readonly holdNextMutation: () => { readonly entered: Promise<void>; readonly release: () => void }
   /** Run after an accepted mutation applied, before the post-write refresh. */
   readonly setAfterMutation: (hook: (() => void) | undefined) => void
+  /** Make the NEXT invoked mutation apply and then report an unknown failure. */
+  readonly failAfterApply: (reason: string) => void
   readonly describeCalls: () => number
 } {
   let generation: object = { id: 'web-t3-generation-a' }
@@ -3042,6 +3061,7 @@ function createRemoteWebPort(): {
   let hold: { readonly entered: () => void; readonly released: Promise<void> } | undefined
   let describeCalls = 0
   let afterMutation: (() => void) | undefined
+  let afterApplyFailure: string | undefined
   const remote = {
     settings: {
       describe: async () => {
@@ -3095,6 +3115,11 @@ function createRemoteWebPort(): {
         entry.user = user
         entry.revision += 1
         afterMutation?.()
+        if (afterApplyFailure !== undefined) {
+          const reason = afterApplyFailure
+          afterApplyFailure = undefined
+          return { ok: false as const, error: { code: 'settings/rejected', message: reason } }
+        }
         return { ok: true as const, value: {} }
       },
     },
@@ -3143,6 +3168,7 @@ function createRemoteWebPort(): {
     replaceHost,
     holdNextMutation,
     setAfterMutation: hook => { afterMutation = hook },
+    failAfterApply: reason => { afterApplyFailure = reason },
     describeCalls: () => describeCalls,
   }
 }
@@ -3250,6 +3276,9 @@ test('an accepted Remote write whose post-receipt Host was replaced is unverifie
   assert.equal(webWrites[0]?.destination, 'A', 'the accepted invocation belongs to A, not the replacement B')
   assert.equal((remote.namespaces.get('web')!.value as Record<string, unknown>).searchProvider, 'deepseek-search-api',
     'B really holds the requested value; the UI simply does not attribute it')
+  assert.ok(h.diagnostics.some(entry => entry.level === 'warn'
+    && (entry.detail as { outcome?: string }).outcome === 'unverified'),
+  'the command owner diagnosed the accepted-but-replaced receipt as unverified')
 })
 
 test('the delegated Confirm re-proves the live authority generation, not only the painted revision', async () => {
@@ -3309,4 +3338,48 @@ test('the delegated Confirm re-proves the live authority generation, not only th
   } finally {
     page.dispose()
   }
+})
+
+test('a write settling after page disposal is diagnosed once and never replayed', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 2) // count
+  await chooseCandidate(h, 2) // 20
+  const release = h.holdNextWrite()
+  await key(h, ENTER)
+  await settlePainted(h, 'the pending count write', frame => frame.includes('Saving…'))
+  h.dispose()
+  release()
+  for (let attempt = 0; attempt < 200 && h.diagnostics.length === 0; attempt += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(h.diagnostics.length, 1, 'the original command owner diagnosed the late settlement once')
+  const detail = h.diagnostics[0]!.detail as { row?: string; outcome?: string }
+  assert.equal(detail.row, 'web-search-count')
+  assert.ok(detail.outcome !== undefined)
+  assert.deepEqual(h.writes.filter(label => label.startsWith('count:')), ['count:20'])
+  assert.equal(h.store.web.api.count, 20)
+})
+
+test('an invoked unknown receipt stays outcome-unconfirmed even when the write applied', async t => {
+  const remote = createRemoteWebPort()
+  await remote.port.describe()
+  const h = setup({ remoteConfig: remote.port })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0) // provider
+  await chooseCandidate(h, 2)
+  remote.failAfterApply('settings/rejected: post-persist Loader failure')
+  await key(h, ENTER)
+  const frame = await settlePainted(h, 'the invoked unknown receipt', f =>
+    f.includes('Could not confirm save') && !f.includes('Saving…'))
+  assert.doesNotMatch(frame, /Saved/u)
+  assert.ok(h.diagnostics.some(entry => entry.level === 'warn'
+    && (entry.detail as { outcome?: string }).outcome === 'outcome-unconfirmed'),
+  'the command owner keeps the invoked unknown receipt distinct from a proven refusal')
+  assert.equal(remote.mutateCalls.filter(call => call.ns === 'web').length, 1,
+    'the invocation happened exactly once and was never replayed')
+  assert.equal((remote.namespaces.get('web')!.value as Record<string, unknown>).searchProvider,
+    'deepseek-search-api', 'the applied value is visible but not attributed as a save')
 })

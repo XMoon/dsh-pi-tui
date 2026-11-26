@@ -2109,8 +2109,11 @@ export class DirectWebProviderConfig implements WebProviderConfig {
     if (!Object.is(settingsAuthorityOf(read.settings), capture.authority.generation)) return false
     const web = read.descriptors.find(entry => entry.ns === WEB_PROVIDER_NS)
     const api = read.descriptors.find(entry => entry.ns === WEB_SEARCH_API_NS)
-    const webCurrent = web?.revision === capture.authority.webRevision
-    const apiCurrent = api?.revision === capture.authority.apiRevision
+    // A half-mounted observation is never a write authorization, not even for
+    // the one target whose own revision happens to match.
+    if (web === undefined || api === undefined) return false
+    const webCurrent = web.revision === capture.authority.webRevision
+    const apiCurrent = api.revision === capture.authority.apiRevision
     return target === 'web' ? webCurrent : target === 'api' ? apiCurrent : webCurrent && apiCurrent
   }
 

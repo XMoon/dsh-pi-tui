@@ -697,3 +697,13 @@ test('Direct provider writes re-prove the same-revision base/USER facts', async 
   assert.match(outcome.reason, /selection changed since the page read it/u)
   assert.deepEqual(h.settings.recorded, [], 'a same-revision semantic drift never reaches the Host mutate')
 })
+
+test('a half-mounted Web observation is never current, even for the readable target', async () => {
+  const h = host()
+  const config = new DirectWebProviderConfig(h.ctx)
+  const capture = await captureOf(config)
+  assert.equal(config.isObservationCurrent(capture, 'api'), true)
+  h.settings.descriptors.delete('web')
+  assert.equal(config.isObservationCurrent(capture, 'api'), false,
+    'a missing web descriptor cannot authorize even an API-only write')
+})

@@ -611,7 +611,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (decision.choiceIndex !== this.choiceIndex) return
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return
-    if (!sameWebAuthority(facts.settings.authority, decision.request.capture.authority)) return
+    if (!sameWebAuthority(facts.settings.authority, decision.request.capture.authority, this.authorityTarget(decision.request.kind))) return
     if (this.intents.writableRefusal(this.selectedSettingId()) !== undefined) return
     if (this.phases.get(target.rowId)?.kind === 'saving') return
     if (!this.paintedChoiceVisible(target.candidate)) return
@@ -792,7 +792,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (painted.choiceIndex !== this.choiceIndex) return
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return
-    if (!sameWebAuthority(facts.settings.authority, painted.request.capture.authority)) return
+    if (!sameWebAuthority(facts.settings.authority, painted.request.capture.authority, this.authorityTarget(painted.request.kind))) return
     if (this.intents.writableRefusal(this.selectedSettingId()) !== undefined) return
     if (this.phases.get(rowId)?.kind === 'saving') return
     // The candidate must be VISIBLE in this frame: an off-screen highlight is
@@ -895,6 +895,13 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** The CONFIGURED row behind the cursor (`undefined` for the credential row). */
+  /** Which namespace revision a confirmed decision actually depends on. */
+  private authorityTarget(kind: WebSettingsDecision['kind']): 'both' | 'web' | 'api' {
+    if (kind === 'provider-select' || kind === 'provider-restore') return 'web'
+    if (kind === 'set-search-billing' || kind === 'set-fetch-billing') return 'both'
+    return 'api'
+  }
+
   private selectedSettingId(): WebSettingRowId | undefined {
     const rowId = this.selectedRowId()
     return rowId === undefined || rowId === 'web-credential' ? undefined : rowId

@@ -2527,8 +2527,11 @@ class RemoteWebProviderConfig implements WebProviderConfig {
     if (generation === undefined || !Object.is(generation, capture.authority.generation)) return false
     const web = this.mirror.namespace(WEB_PROVIDER_NS)
     const api = this.mirror.namespace(WEB_SEARCH_API_NS)
-    const webCurrent = web?.revision === capture.authority.webRevision
-    const apiCurrent = api?.revision === capture.authority.apiRevision
+    // A half-mounted observation is never a write authorization, not even for
+    // the one target whose own revision happens to match.
+    if (web === undefined || api === undefined) return false
+    const webCurrent = web.revision === capture.authority.webRevision
+    const apiCurrent = api.revision === capture.authority.apiRevision
     return target === 'web' ? webCurrent : target === 'api' ? apiCurrent : webCurrent && apiCurrent
   }
 

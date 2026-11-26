@@ -289,11 +289,13 @@ export function webBillingEligibility(
 export function sameWebAuthority(
   a: { readonly generation: object; readonly webRevision: number; readonly apiRevision: number } | undefined,
   b: { readonly generation: object; readonly webRevision: number; readonly apiRevision: number } | undefined,
+  target: 'both' | 'web' | 'api' = 'both',
 ): boolean {
   if (a === undefined || b === undefined) return a === b
-  return Object.is(a.generation, b.generation)
-    && a.webRevision === b.webRevision
-    && a.apiRevision === b.apiRevision
+  if (!Object.is(a.generation, b.generation)) return false
+  const web = a.webRevision === b.webRevision
+  const api = a.apiRevision === b.apiRevision
+  return target === 'web' ? web : target === 'api' ? api : web && api
 }
 
 /** Internal control-flow sentinel: the captured request is already satisfied

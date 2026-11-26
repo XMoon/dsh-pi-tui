@@ -2547,3 +2547,14 @@ test('Remote Billing re-proves the web dependency in the actual queue turn', asy
   'the billing target never dispatches without the fresh dependency proof')
   assert.equal(state.namespaces.get(WEB_API_NS)?.value.searchBilling, 'auto')
 })
+
+test('a half-mounted Remote Web observation is never current', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  assert.equal(port.web.isObservationCurrent(capture, 'api'), true)
+  state.namespaces.delete(WEB_NS)
+  await port.describe()
+  assert.equal(port.web.isObservationCurrent(capture, 'api'), false,
+    'a missing web namespace cannot authorize even an API-only write')
+})

@@ -846,10 +846,18 @@ export async function runWebProviderSettingsF3(context) {
       assertNoLegacyEndpointKeys(config, 'UI_L6 A search provider')
     }, 'UI_L6 A search provider')
     // Server-side Search is not the billed Search API: its Billing row is inert
-    // and says so instead of pretending to be writable.
+    // and says so instead of pretending to be writable. The official mutation
+    // ingress is the decisive zero-call witness.
+    const searchRouteBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A search billing route before')
     await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
       'Billing is EDITABLE HERE',
       'UI_L6 A search billing route gate')
+    const searchRouteAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A search billing route after')
+    assert(JSON.stringify(searchRouteAfter.mutationCounts) === JSON.stringify(searchRouteBefore.mutationCounts)
+      && totalMutationsOf(searchRouteAfter) === totalMutationsOf(searchRouteBefore),
+    `UI_L6 A search billing route gate: the inert row called the official mutation ingress (${JSON.stringify(searchRouteBefore.mutationCounts)} -> ${JSON.stringify(searchRouteAfter.mutationCounts)})`)
 
     const beforeSearchProviderBack = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.searchProvider, 'UI_L6 A search provider back')
@@ -866,9 +874,16 @@ export async function runWebProviderSettingsF3(context) {
     // `web` user layer, which is the effective HTTP/Search-API baseline.
     assertWebEffective(documentPath, { searchProvider: 'deepseek-search-api', fetchProvider: 'http' },
       'UI_L6 A fetch provider')
+    const fetchRouteBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A fetch billing route before')
     await assertInertBilling(clientA, documentPath, ROW.fetchBilling, 'Not selected',
       'Billing is EDITABLE HERE',
       'UI_L6 A fetch billing route gate')
+    const fetchRouteAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A fetch billing route after')
+    assert(JSON.stringify(fetchRouteAfter.mutationCounts) === JSON.stringify(fetchRouteBefore.mutationCounts)
+      && totalMutationsOf(fetchRouteAfter) === totalMutationsOf(fetchRouteBefore),
+    `UI_L6 A fetch billing route gate: the inert row called the official mutation ingress (${JSON.stringify(fetchRouteBefore.mutationCounts)} -> ${JSON.stringify(fetchRouteAfter.mutationCounts)})`)
 
     const beforeFetchProviderBack = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.fetchProvider, 'UI_L6 A fetch provider back')
@@ -919,6 +934,8 @@ export async function runWebProviderSettingsF3(context) {
     await openWebRow(clientA, ROW.count, 'UI_L6 A result count')
     await selectCandidate(clientA, COUNT_CANDIDATES.indexOf('20'), 'UI_L6 A result count', '20')
     await confirmCandidate(clientA, '20', 'UI_L6 A result count write')
+    // The SAME current candidate is a validated zero-write no-op, not a save.
+    await confirmCandidate(clientA, '20', 'UI_L6 A result count no-op', 'No changes')
     assertApiSection(documentPath, beforeCount, {
       count: 20,
       sendOriginalQuestion: SEED_SEND_ORIGINAL_QUESTION,
@@ -1120,9 +1137,16 @@ export async function runWebProviderSettingsF3(context) {
     'UI_L6 A search override: Enter on the read-only override row reached the official Host document')
     await returnToWebList(clientA, 'UI_L6 A search override list')
     // The override owns Search Billing: no candidate, no Confirm, zero writes.
+    const overrideBillingBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A overridden billing before')
     await assertInertBilling(clientA, documentPath, ROW.searchBilling, overriddenSearchBilling,
       'Overridden by Host YAML: the advanced searchBaseURL field(s) own',
       'UI_L6 A overridden search billing')
+    const overrideBillingAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A overridden billing after')
+    assert(JSON.stringify(overrideBillingAfter.mutationCounts) === JSON.stringify(overrideBillingBefore.mutationCounts)
+      && totalMutationsOf(overrideBillingAfter) === totalMutationsOf(overrideBillingBefore),
+    `UI_L6 A overridden search billing: the inert row called the official mutation ingress (${JSON.stringify(overrideBillingBefore.mutationCounts)} -> ${JSON.stringify(overrideBillingAfter.mutationCounts)})`)
     // Fetch Billing is NOT overridden: it stays independently writable, and its
     // second exact CAS read-back cannot move the Search field or the override.
     const beforeFetchBillingAfterOverride = sectionsSnapshot(documentPath)

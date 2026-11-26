@@ -95,7 +95,7 @@ interface Harness {
   readonly store: {
     web: WebProviderSettings
     available: boolean
-    current: boolean
+    current: { both: boolean; web: boolean; api: boolean }
     failNext: string | undefined
   }
   readonly view: () => string
@@ -116,7 +116,7 @@ function setup(options: {
   const hostGeneration = {}
   const store = {
     available: true,
-    current: true,
+    current: { both: true, web: true, api: true },
     failNext: undefined as string | undefined,
     web: {
       searchProvider: 'searchProvider' in options ? options.searchProvider : 'deepseek-official',
@@ -253,7 +253,7 @@ function setup(options: {
               authority: { ...store.web.authority },
             }
           : undefined,
-        isObservationCurrent: () => store.current,
+        isObservationCurrent: (_capture: WebProviderSettings, target: 'both' | 'web' | 'api' = 'both') => store.current[target],
         setSearchProvider: async (id: string, _capture: WebProviderSettings) => {
           const selection = store.web.providerSelection.search
           if (store.web.searchProvider === id && selection.userSet && selection.userId === id) {
@@ -1023,7 +1023,7 @@ test('a replaced ready Host demotes the old Current/Saved to Last-known read-onl
   await waitForPainted(h, 'the count Saved', frame => frame.includes('Current: 20') && frame.includes('Saved'))
   // B is a new ready Host generation; the page's cached A observation is no
   // longer current, even if the numeric revisions/values happen to match.
-  h.store.current = false
+  h.store.current = { both: false, web: false, api: false }
   h.store.web.authority = { ...h.store.web.authority, generation: {} }
   h.store.web.api.count = 50
   // A real fresh read publishes B; the old A Saved receipt must retire, and
@@ -1034,4 +1034,30 @@ test('a replaced ready Host demotes the old Current/Saved to Last-known read-onl
   assert.doesNotMatch(frame, /Saved/u, 'A\'s receipt is retired, never painted as B\'s current save')
   assert.doesNotMatch(frame, /Confirm \[Enter\]/u, 'a non-current observation offers no confirm')
   assert.equal(h.store.web.api.count, 50, 'the stale gesture dispatched nothing')
+})
+
+test('a Root press across a published web-only drift dispatches nothing; the fresh count Confirm succeeds', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await selectListRow(h, 2) // Search API Result Count
+  await key(h, ENTER)
+  await key(h, DOWN) // 10 -> 20
+  const oldPoint = paintedWordPoint(h, 'Confirm [Enter]')
+  press(h, oldPoint.row, oldPoint.column + 1)
+  // A fresh read publishes B: only the UNRELATED `web` revision moved; the
+  // count's API target is still current. The old press must die with the A
+  // frame; a new explicit count Confirm must still be allowed.
+  h.store.web.authority = { ...h.store.web.authority, webRevision: h.store.web.authority.webRevision + 1 }
+  h.store.current = { both: false, web: false, api: true }
+  await key(h, 'r')
+  await waitForPainted(h, 'the fresh count Detail', f => f.includes('Current: 10') && f.includes('Confirm [Enter]'))
+  release(h, oldPoint.row, oldPoint.column + 1)
+  await h.vt.waitForRender()
+  assert.equal(h.store.web.api.count, 10, 'the old A press dispatched no count write')
+  await settlePointerClick(h)
+  clickWord(h, 'Confirm [Enter]')
+  const frame = await waitForPainted(h, 'the fresh count write', f => f.includes('Current: 20') && f.includes('Saved'))
+  assert.match(frame, /Current: 20/u)
+  assert.equal(h.store.web.api.count, 20, 'the fresh target-current gesture wrote exactly once')
 })
