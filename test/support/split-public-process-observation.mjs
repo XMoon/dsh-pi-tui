@@ -24,10 +24,17 @@
  * flavor 3 ctty, `KERN_PROCARGS2`). Any other platform is unsupported.
  */
 
-import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
+
+import {
+  DARWIN_BSDINFO_BYTES,
+  classifyDarwinReadOutcome,
+  readDarwinBootSessionUuid,
+  readDarwinSessionId,
+  readDarwinUniqueInfo,
+} from '../../src/runtime/native-process/darwin.ts'
 
 const SUPPORTED_PLATFORMS = new Set(['linux', 'darwin'])
 
@@ -36,7 +43,9 @@ const LIBSYSTEM = '/usr/lib/libSystem.B.dylib'
 const PROC_PIDTBSDINFO = 3
 const PROC_FLAG_CONTROLT = 0x80
 const NODEV32 = 0xffffffff
-const BSDINFO_BYTES = 136
+const BSDINFO_BYTES = DARWIN_BSDINFO_BYTES
+const SHORTBSDINFO_BYTES = 64
+const PROC_PIDT_SHORTBSDINFO = 13
 const CTL_KERN = 1
 const KERN_PROCARGS2 = 49
 const KERN_ARGMAX = 8
@@ -315,6 +324,9 @@ export function parseDarwinProcargs(buffer, used) {
           appleSectionBytes += tail.next - offset
           offset = tail.next
         }
+        if (duplicateKeys.length > 0) {
+          return unknown('DUPLICATE_ENV_KEY', { duplicateKeys: [...new Set(duplicateKeys)] })
+        }
         return {
           kind: 'ok',
           argc,
@@ -332,13 +344,52 @@ export function parseDarwinProcargs(buffer, used) {
       continue
     }
     const item = readCString(data, offset)
-    envStarted = true
     if (item === undefined) return unknown('ENV_FRAMING', { stage: 'env' })
     if (item.invalidUtf8 === true) return unknown('INVALID_UTF8', { stage: 'env' })
-    offset = item.next
     const equals = item.value.indexOf('=')
     if (equals <= 0) return unknown('MALFORMED_ENV_ITEM', { stage: 'env' })
     const key = item.value.slice(0, equals)
+    if (envStarted !== true && DARWIN_APPLE_STRING_KEYS.has(key)) {
+      // The process has an empty environment: the first kernel apple string is
+      // the section start, not an environment entry.
+      const appleKeys = [key]
+      let appleSectionBytes = item.next - offset
+      offset = item.next
+      while (offset < data.length) {
+        if (data[offset] === 0) {
+          offset += 1
+          continue
+        }
+        const tail = readCString(data, offset)
+        if (tail === undefined || tail.invalidUtf8 === true) {
+          return unknown('ENV_FRAMING', { stage: 'apple-tail' })
+        }
+        const tailEquals = tail.value.indexOf('=')
+        const tailKey = tailEquals > 0 ? tail.value.slice(0, tailEquals) : ''
+        if (!DARWIN_APPLE_STRING_KEYS.has(tailKey)) {
+          return unknown('ENV_FRAMING', { stage: 'apple-tail', key: tailKey })
+        }
+        appleKeys.push(tailKey)
+        appleSectionBytes += tail.next - offset
+        offset = tail.next
+      }
+      return {
+        kind: 'ok',
+        argc,
+        execPath: execPath.value,
+        argv,
+        argvEnd,
+        envEntries: [],
+        envMap,
+        envPresent: false,
+        envSectionBytes: 0,
+        appleKeys,
+        appleSectionBytes,
+      }
+    }
+    envStarted = true
+    offset = item.next
+    envEnd = offset
     const value = item.value.slice(equals + 1)
     envEntries.push({ key, value })
     if (envMap.has(key)) duplicateKeys.push(key)
@@ -376,6 +427,14 @@ function parseLinuxStat(stat) {
     return undefined
   }
   return { state, ppid, pgid, sid, ttyNr, starttime }
+}
+
+function readProcDirUid(pid) {
+  try {
+    return statSync(`/proc/${String(pid)}`).uid
+  } catch {
+    return undefined
+  }
 }
 
 function readLinuxComm(pid) {
@@ -567,16 +626,6 @@ function publicProcessFacts(observation, expected) {
   }
 }
 
-/** The OS process-table UID, used only to skip a proven foreign prefilter pid. */
-function readForeignUid(pid) {
-  try {
-    const raw = execFileSync('ps', ['-o', 'uid=', '-p', String(pid)], { encoding: 'utf8' }).trim()
-    return /^-?\d+$/u.test(raw) ? Number(raw) : undefined
-  } catch {
-    return undefined
-  }
-}
-
 /**
  * Create the platform observation seam. `kernel` must be the production
  * readers: `{ read, serialize, classify, listMembers }`.
@@ -596,6 +645,10 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
     if (typeof koffiEntry !== 'string' || koffiEntry === '' || typeof anchor !== 'string' || anchor === '') {
       throw new PublicObservationError('INPUT_UNQUALIFIED', 'Darwin observation requires the installed DSH anchor and its Koffi entry')
     }
+    // The production Darwin readers resolve their own bridge through the
+    // installed DSH anchor. This Supervisor process is not the public CLI, so
+    // set only the process-local anchor fact (the public child env is explicit).
+    process.env.SPLIT_PROCESS_DSH_ANCHOR = anchor
     darwin = createDarwinBridge(koffiEntry)
   }
 
@@ -645,40 +698,48 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
     if (!Number.isInteger(pid) || pid <= 0) return { kind: 'unknown', code: 'INPUT_UNQUALIFIED' }
     if (platform === 'darwin') {
       const bsd = darwin.readBsd(pid)
-      if (bsd.kind !== 'ok') {
-        // A non-root system process can deny proc_pidinfo. Use the OS process
-        // table ONLY to skip a proven foreign UID; a same/unknown UID stays a
-        // fail-closed unknown and is never admitted from this prefilter.
-        if (bsd.kind === 'unknown') {
-          const foreign = readForeignUid(pid)
-          if (foreign !== undefined && foreign !== process.getuid?.()) {
-            return { kind: 'ok', pid, uid: foreign, name: '', comm: '', foreign: true }
+      if (bsd.kind === 'ok') {
+        return {
+          kind: 'ok',
+          pid,
+          uid: bsd.value.uid,
+          name: bsd.value.name,
+          comm: bsd.value.comm,
+          ppid: bsd.value.ppid,
+          pgid: bsd.value.pgid,
+        }
+      }
+      if (bsd.kind === 'unknown') {
+        // Some system processes deny the full proc_bsdinfo read. The
+        // short-bsd flavor is the real kernel UID/name prefilter; an unreadable
+        // value remains unknown and fails closed.
+        const short = darwin.readShortBsd(pid)
+        if (short.kind === 'ok') {
+          return {
+            kind: 'ok',
+            pid,
+            uid: short.value.uid,
+            name: short.value.comm,
+            comm: short.value.comm,
+            ppid: short.value.ppid,
+            pgid: short.value.pgid,
+            foreign: short.value.uid !== process.getuid?.(),
           }
         }
-        return bsd
+        return short
       }
-      return {
-        kind: 'ok',
-        pid,
-        uid: bsd.value.uid,
-        name: bsd.value.name,
-        comm: bsd.value.comm,
-        ppid: bsd.value.ppid,
-        pgid: bsd.value.pgid,
-      }
+      return bsd
     }
     const stat = readLinuxTty(pid)
     if (stat.kind !== 'ok') return stat
     let uid = readLinuxUid(pid)
-    if (!Number.isInteger(uid) || uid <= 0) {
-      // A hidepid-style `/proc` can deny another user's status. Use the OS
-      // process table ONLY to prove a foreign UID; same/unknown stays closed.
-      const foreign = readForeignUid(pid)
-      if (foreign !== undefined && foreign !== process.getuid?.()) {
-        return { kind: 'ok', pid, uid: foreign, name: '', comm: '', foreign: true }
-      }
-      return unknown('ACCESS_DENIED')
+    if (uid === undefined) {
+      // A hidepid-style `/proc` can deny another user's status. The `/proc`
+      // directory inode owner is still the kernel's process UID fact; an
+      // unreadable value stays unknown.
+      uid = readProcDirUid(pid)
     }
+    if (!Number.isInteger(uid) || uid < 0) return unknown('ACCESS_DENIED')
     return {
       kind: 'ok',
       pid,
@@ -734,7 +795,7 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
       return unknown('TORN_OBSERVATION')
     }
     const uid = readLinuxUid(pid)
-    if (!Number.isInteger(uid) || uid <= 0) return unknown('ACCESS_DENIED')
+    if (!Number.isInteger(uid) || uid < 0) return unknown('ACCESS_DENIED')
     return {
       kind: 'alive',
       pid,
@@ -883,7 +944,7 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
       return unknown('TORN_OBSERVATION')
     }
     const uid = readLinuxUid(pid)
-    if (!Number.isInteger(uid) || uid <= 0) return unknown('ACCESS_DENIED')
+    if (!Number.isInteger(uid) || uid < 0) return unknown('ACCESS_DENIED')
     const observation = {
       kind: 'alive',
       pid,
@@ -1124,34 +1185,36 @@ function createDarwinBridge(koffiEntry) {
     pbi_start_tvsec: 'uint64',
     pbi_start_tvusec: 'uint64',
   })
-  const uniqueStruct = koffi.struct({
-    p_uuid: koffi.array('uint8', 16),
-    p_uniqueid: 'uint64',
-    p_puniqueid: 'uint64',
-    p_reserve: koffi.array('int32', 6),
+  const shortStruct = koffi.struct({
+    pbsi_pid: 'uint32',
+    pbsi_ppid: 'uint32',
+    pbsi_pgid: 'uint32',
+    pbsi_status: 'uint32',
+    pbsi_comm: koffi.array('uint8', 16),
+    pbsi_flags: 'uint32',
+    pbsi_uid: 'uint32',
+    pbsi_gid: 'uint32',
+    pbsi_ruid: 'uint32',
+    pbsi_rgid: 'uint32',
+    pbsi_svuid: 'uint32',
+    pbsi_svgid: 'uint32',
+    pbsi_rfu: 'uint32',
   })
   if (koffi.sizeof(bsdStruct) !== BSDINFO_BYTES) {
     throw new PublicObservationError('ABI_UNSUPPORTED', `proc_bsdinfo ABI is ${String(koffi.sizeof(bsdStruct))} bytes`)
   }
-  if (koffi.sizeof(uniqueStruct) !== 56) {
-    throw new PublicObservationError('ABI_UNSUPPORTED', 'proc_uniqidentifierinfo ABI is not 56 bytes')
+  if (koffi.sizeof(shortStruct) !== SHORTBSDINFO_BYTES) {
+    throw new PublicObservationError('ABI_UNSUPPORTED', `proc_bsdshortinfo ABI is ${String(koffi.sizeof(shortStruct))} bytes`)
   }
   const procPidinfoBsd = libproc.func('proc_pidinfo', 'int', ['int', 'int', 'uint64', koffi.out(koffi.pointer(bsdStruct)), 'int'])
-  const procPidinfoUnique = libproc.func('proc_pidinfo', 'int', ['int', 'int', 'uint64', koffi.out(koffi.pointer(uniqueStruct)), 'int'])
+  const procPidinfoShort = libproc.func('proc_pidinfo', 'int', ['int', 'int', 'uint64', koffi.out(koffi.pointer(shortStruct)), 'int'])
   const procListChildPids = libproc.func('proc_listchildpids', 'int', ['int', 'void *', 'int'])
   const procListAllPids = libproc.func('proc_listallpids', 'int', ['void *', 'int'])
   const sysctl = libsystem.func('sysctl', 'int', ['int *', 'uint', 'void *', koffi.inout(koffi.pointer(koffi.types.size_t)), 'void *', 'size_t'])
   const sysctlByName = libsystem.func('sysctlbyname', 'int', ['const char *', 'void *', koffi.inout(koffi.pointer(koffi.types.size_t)), 'void *', 'size_t'])
-  const getsid = libsystem.func('getsid', 'int', ['int'])
 
   function classifyLibproc(expected, actual) {
-    if (actual === expected && expected > 0) return { kind: 'ok' }
-    if (actual > 0) return unknown('ABI_UNSUPPORTED')
-    const errno = koffi.errno()
-    if (errno === ESRCH) return gone()
-    if (errno === EPERM || errno === EACCES) return unknown('ACCESS_DENIED')
-    if (errno === EINVAL) return unknown('ABI_UNSUPPORTED')
-    return unknown('READ_FAILED')
+    return classifyDarwinReadOutcome(expected, actual, koffi.errno())
   }
 
   function readBsd(pid) {
@@ -1193,25 +1256,29 @@ function createDarwinBridge(koffiEntry) {
     }
   }
 
-  function readUnique(pid) {
+  function readShortBsd(pid) {
     const out = {}
     let actual
     try {
-      actual = procPidinfoUnique(pid, 17, 0, out, 56)
+      actual = procPidinfoShort(pid, PROC_PIDT_SHORTBSDINFO, 0, out, SHORTBSDINFO_BYTES)
     } catch {
       return unknown('READ_FAILED')
     }
-    const classified = classifyLibproc(56, actual)
+    const classified = classifyLibproc(SHORTBSDINFO_BYTES, actual)
     if (classified.kind !== 'ok') return classified
     try {
-      const uuid = out.p_uuid
-      if (!(uuid instanceof Uint8Array) || uuid.length !== 16) return unknown('ABI_UNSUPPORTED')
+      const observedPid = requireInteger(out.pbsi_pid, 'pbsi_pid')
+      if (observedPid !== pid) return unknown('ABI_UNSUPPORTED')
       return {
         kind: 'ok',
         value: {
-          uniqueId: decimal(out.p_uniqueid),
-          parentUniqueId: decimal(out.p_puniqueid),
-          processUUID: [...uuid].map(byte => byte.toString(16).padStart(2, '0')).join(''),
+          pid: observedPid,
+          ppid: requireInteger(out.pbsi_ppid, 'pbsi_ppid'),
+          pgid: requireInteger(out.pbsi_pgid, 'pbsi_pgid'),
+          status: requireInteger(out.pbsi_status, 'pbsi_status'),
+          flags: requireInteger(out.pbsi_flags, 'pbsi_flags'),
+          uid: requireInteger(out.pbsi_uid, 'pbsi_uid'),
+          comm: decodeFixed(out.pbsi_comm),
         },
       }
     } catch {
@@ -1219,37 +1286,25 @@ function createDarwinBridge(koffiEntry) {
     }
   }
 
+  function readUnique(pid) {
+    const result = readDarwinUniqueInfo(pid)
+    if (result.kind !== 'ok') return result
+    return {
+      kind: 'ok',
+      value: {
+        uniqueId: result.value.uniqueId,
+        parentUniqueId: result.value.parentUniqueId,
+        processUUID: result.value.processUuid,
+      },
+    }
+  }
+
   function readBootUuid() {
-    const bytes = Buffer.alloc(128)
-    const length = [128]
-    let rc
-    try {
-      rc = sysctlByName('kern.bootsessionuuid', bytes, length, null, 0)
-    } catch {
-      return unknown('READ_FAILED')
-    }
-    if (rc !== 0) return unknown(classifyErrno(koffi.errno()))
-    const used = length[0]
-    if (!Number.isInteger(used) || used < 2 || used > 128 || bytes[used - 1] !== 0) return unknown('READ_FAILED')
-    const value = bytes.toString('utf8', 0, used - 1)
-    if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/iu.test(value)) {
-      return unknown('READ_FAILED')
-    }
-    return { kind: 'ok', value }
+    return readDarwinBootSessionUuid()
   }
 
   function readSessionId(pid) {
-    let sid
-    try {
-      sid = getsid(pid)
-    } catch {
-      return unknown('READ_FAILED')
-    }
-    if (sid > 0) return { kind: 'ok', value: sid }
-    const errno = koffi.errno()
-    if (errno === ESRCH) return gone()
-    if (errno === EPERM || errno === EACCES) return unknown('ACCESS_DENIED')
-    return unknown('READ_FAILED')
+    return readDarwinSessionId(pid)
   }
 
   function argmax() {
@@ -1352,6 +1407,7 @@ function createDarwinBridge(koffiEntry) {
 
   return {
     readBsd,
+    readShortBsd,
     readUnique,
     readBootUuid,
     readSessionId,

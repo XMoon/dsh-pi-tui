@@ -23,14 +23,19 @@ import {
   publicPathPresence,
 } from '../support/split-public-process-observation.mjs'
 
-function procargs({ argc, execPath = '/usr/bin/node', argv = [], env = [], pad = 0, trailing = Buffer.alloc(0) }) {
+function procargs({ argc, execPath = '/usr/bin/node', argv = [], env = [], apple = [], pad = 0, trailing = Buffer.alloc(0) }) {
   const parts = [Buffer.from(execPath), Buffer.alloc(1)]
   parts.push(Buffer.alloc(pad))
   for (const value of argv.slice(0, argc)) {
     parts.push(Buffer.from(value), Buffer.alloc(1))
   }
   for (const value of env) parts.push(Buffer.from(value), Buffer.alloc(1))
-  parts.push(Buffer.alloc(16), trailing)
+  parts.push(Buffer.alloc(16))
+  if (apple.length > 0) {
+    parts.push(Buffer.alloc(1))
+    for (const value of apple) parts.push(Buffer.from(value), Buffer.alloc(1))
+  }
+  parts.push(trailing)
   const body = Buffer.concat(parts)
   const header = Buffer.alloc(4)
   header.writeInt32LE(argc, 0)
@@ -50,6 +55,45 @@ test('Darwin procargs preserves interior empty argv entries and exact environmen
   assert.equal(parsed.envMap.get('P1D_EMPTY'), '')
   assert.equal(parsed.envMap.get('P1D_SPACE'), 'a b c')
   assert.equal(parsed.envMap.get('P1D_ASSIGN'), 'x=y=z')
+})
+
+test('Darwin procargs records the real env section bytes and a real apple tail', () => {
+  const { buffer, used } = procargs({
+    argc: 2,
+    argv: ['node', 'child'],
+    env: ['A=1', 'B=two'],
+    apple: ['ptr_munge=0x1', 'main_stack=0x2'],
+  })
+  const parsed = parseDarwinProcargs(buffer, used)
+  assert.equal(parsed.kind, 'ok')
+  assert.equal(parsed.envEntries.length, 2)
+  assert.ok(parsed.envSectionBytes > 0)
+  assert.deepEqual(parsed.appleKeys, ['ptr_munge', 'main_stack'])
+  assert.ok(parsed.appleSectionBytes > 0)
+})
+
+test('Darwin procargs still rejects a duplicate env key before the apple tail', () => {
+  const { buffer, used } = procargs({
+    argc: 2,
+    argv: ['node', 'child'],
+    env: ['FOO=one', 'FOO=two'],
+    apple: ['ptr_munge=0x1'],
+  })
+  assert.equal(parseDarwinProcargs(buffer, used).code, 'DUPLICATE_ENV_KEY')
+})
+
+test('Darwin procargs treats apple strings after an empty env as non-env', () => {
+  const { buffer, used } = procargs({
+    argc: 2,
+    argv: ['node', 'child'],
+    env: [],
+    apple: ['ptr_munge=0x1', 'main_stack=0x2'],
+  })
+  const parsed = parseDarwinProcargs(buffer, used)
+  assert.equal(parsed.kind, 'ok')
+  assert.equal(parsed.envPresent, false)
+  assert.deepEqual(parsed.envEntries, [])
+  assert.deepEqual(parsed.appleKeys, ['ptr_munge', 'main_stack'])
 })
 
 test('Darwin procargs rejects duplicate keys, malformed entries and trailing garbage after padding', () => {

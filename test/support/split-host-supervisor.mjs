@@ -6307,7 +6307,13 @@ async function waitForPublicProfileBackendKind(handle, label, timeoutMs = 120_00
         tty: { kind: 'foreground', shell: handle.shellTty },
       })
       if (late.kind === 'found') return { kind: 'daemon', client: late.process }
-      return { kind: 'direct' }
+      if (late.kind === 'none' && late.unknown.length === 0) return { kind: 'direct' }
+      lastUnknown = late.kind === 'none' ? late.unknown : [{ code: late.code ?? 'unknown' }]
+      if (Date.now() - started >= timeoutMs) {
+        throw new Error(`${label}: a painted composer has unresolved client-read unknowns within ${String(timeoutMs)}ms: ${JSON.stringify(lastUnknown)}`)
+      }
+      await sleep(25)
+      continue
     }
     if (Date.now() - started >= timeoutMs) {
       throw new Error(`${label}: neither a real Client nor a painted Direct composer appeared within ${String(timeoutMs)}ms${lastUnknown.length === 0 ? '' : `; unresolved unknown reads: ${JSON.stringify(lastUnknown)}`}`)
@@ -7782,7 +7788,7 @@ async function handlePublicDaemonTerminateCli(message) {
     if (Date.now() - started >= 60_000) break
     await sleep(5)
   }
-  const order = clientTerminalWhileCliLive
+  const order = clientTerminalWhileCliLive && cliGoneAt !== null
     ? 'client-terminal-while-cli-live'
     : cliGoneAt !== undefined && clientGoneAt !== undefined && clientGoneAt < cliGoneAt
       ? 'client-first'
@@ -7802,7 +7808,7 @@ async function handlePublicDaemonTerminateCli(message) {
   appendNote('public-daemon-cli-term-order', { launchId: handle.launchId, ...handle.cliTermOrder })
   syncPublicLaunchReceipt()
   writeReceipt({ publicCliTermOrder: { launchId: handle.launchId, ...handle.cliTermOrder } })
-  if (clientTerminalWhileCliLive !== true) {
+  if (order !== 'client-terminal-while-cli-live') {
     throw new Error(`PUBLIC_DAEMON_TERMINATE_CLI: the strict Client-before-CLI terminal order was not observed: ${JSON.stringify(handle.cliTermOrder)}`)
   }
   return {
@@ -7965,11 +7971,11 @@ async function handlePublicAuthorityControl(message) {
   const ownedGroups = [{ pid: sentinel.pid, birth: sentinelBirth, kind: 'sentinel' }]
   const terminals = []
   let terminal
+  let authoritySignals = 0
   const facts = {
     kind: 'PUBLIC_AUTHORITY_CONTROL',
     platform: process.platform,
     probe: obs.probe(),
-    signalAttemptsBeforeCleanup: 0,
     negative: {},
     enumeration: {},
     registry: {},
@@ -8148,7 +8154,7 @@ async function handlePublicAuthorityControl(message) {
     execEnv.push('FOO=two')
     const duplicateChild = spawn('/usr/bin/python3', [files.python, process.execPath, files.child], {
       cwd: dir, stdio: 'ignore', detached: true,
-      env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify([...execEnv, 'NOEQUALS']) },
+      env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(execEnv) },
     })
     ownedGroups.push({ pid: duplicateChild.pid, birth: undefined, kind: 'execve-control' })
     const duplicateOut = await waitForAuthorityFile(join(dir, 'duplicate.json'), 'duplicate-env child')
@@ -8156,7 +8162,7 @@ async function handlePublicAuthorityControl(message) {
     ownedGroups[ownedGroups.length - 1].birth = duplicateObservation.kind === 'alive' ? duplicateObservation.birth : undefined
     facts.negative.duplicateEnv = duplicateObservation.kind === 'alive'
       ? reason(duplicateObservation, { ...parentExpected, birth: duplicateObservation.birth, entry: files.child })
-      : `observation-${duplicateObservation.kind}`
+      : duplicateObservation.code
 
     const malformedOut = join(dir, 'malformed.json')
     const malformedOnly = [
@@ -8174,7 +8180,7 @@ async function handlePublicAuthorityControl(message) {
     ownedGroups[ownedGroups.length - 1].birth = malformedObservation.kind === 'alive' ? malformedObservation.birth : undefined
     facts.negative.malformedEnv = malformedObservation.kind === 'alive'
       ? reason(malformedObservation, { ...parentExpected, birth: malformedObservation.birth, entry: files.child })
-      : `observation-${malformedObservation.kind}`
+      : malformedObservation.code
 
     const gone = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', detached: true })
     gone.unref()
@@ -8209,20 +8215,20 @@ async function handlePublicAuthorityControl(message) {
       assertKernelGroupSignalOwnership(kernel, siblingGround.pid, `${siblingObservation.birth}-mismatch`, 'PUBLIC_AUTHORITY_CONTROL wrong birth')
       wrongBirthRefusal = 'UNEXPECTED_PASS'
     } catch (error) {
-      wrongBirthRefusal = boundedError(error)
+      wrongBirthRefusal = boundedErrorText(error)
     }
     let goneRefusal
     try {
       assertKernelGroupSignalOwnership(kernel, gone.pid, 'gone-birth', 'PUBLIC_AUTHORITY_CONTROL gone')
       goneRefusal = 'UNEXPECTED_PASS'
     } catch (error) {
-      goneRefusal = boundedError(error)
+      goneRefusal = boundedErrorText(error)
     }
     facts.signalAdmission = {
       positive: 'passed',
       wrongBirth: wrongBirthRefusal,
       gone: goneRefusal,
-      signalAttempts: 0,
+      signalsSent: authoritySignals,
     }
     const sentinelAfter = obs.observe(sentinel.pid)
     facts.sentinel.after = sentinelAfter.kind === 'alive' ? sentinelAfter.birth : `${sentinelAfter.kind}/${String(sentinelAfter.code)}`
@@ -8237,21 +8243,20 @@ async function handlePublicAuthorityControl(message) {
       await split.terminal.closeQuiet().catch(() => undefined)
     }
     const kernel = processKernelReaders()
+    // Only an entry with a recorded birth is a signal candidate. A missing
+    // birth is not replaced by a fresh self-proving read; it stays unproven and
+    // is left to the native PTY close / Scene audit.
     for (const entry of [...ownedGroups].reverse()) {
-      if (!Number.isInteger(entry.pid) || entry.pid <= 0) continue
-      const fresh = readKernelProcess(entry.pid)
-      if (fresh.kind !== 'alive') continue
-      const birth = entry.birth ?? serializeKernelIdentity(fresh.identity)
+      if (!Number.isInteger(entry.pid) || entry.pid <= 0 || typeof entry.birth !== 'string') continue
+      const fresh = obs.observe(entry.pid)
+      if (fresh.kind !== 'alive' || fresh.birth !== entry.birth) continue
+      if (fresh.pgid !== entry.pid || fresh.sid !== entry.pid) continue
       try {
-        assertKernelGroupSignalOwnership(kernel, entry.pid, birth, `PUBLIC_AUTHORITY_CONTROL cleanup ${entry.kind}`)
+        assertKernelGroupSignalOwnership(kernel, entry.pid, entry.birth, `PUBLIC_AUTHORITY_CONTROL cleanup ${entry.kind}`)
         process.kill(-entry.pid, 'SIGTERM')
+        authoritySignals += 1
       } catch {
-        // Not a group leader or already gone: leave it for the Scene audit.
-      }
-    }
-    for (const entry of ownedGroups) {
-      if (Number.isInteger(entry.pid) && entry.pid > 0) {
-        try { process.kill(entry.pid, 'SIGTERM') } catch { /* gone/reused */ }
+        // Already gone or no longer the proved group: leave it.
       }
     }
     // Sweep only THIS fixed fixture directory: the parent spawns its detached
@@ -8270,23 +8275,36 @@ async function handlePublicAuthorityControl(message) {
         if (entry === undefined) continue
         const captured = obs.capture(pid, { entry, uid: typeof process.getuid === 'function' ? process.getuid() : undefined, requireEnv: false })
         if (captured.kind === 'captured') {
-          swept.push({ pid, entry })
-          try { process.kill(pid, 'SIGTERM') } catch { /* gone */ }
+          const fresh = obs.observe(pid)
+          if (fresh.kind === 'alive' && fresh.birth === captured.process.birth) {
+            swept.push({ pid, entry, birth: captured.process.birth })
+            try {
+              process.kill(pid, 'SIGTERM')
+              authoritySignals += 1
+            } catch { /* gone */ }
+          }
         }
       }
     }
     await sleep(250)
     for (const entry of swept) {
       const fresh = obs.observe(entry.pid)
-      if (fresh.kind === 'alive') {
-        try { process.kill(entry.pid, 'SIGKILL') } catch { /* gone */ }
+      if (fresh.kind === 'alive' && fresh.birth === entry.birth) {
+        try {
+          process.kill(entry.pid, 'SIGKILL')
+          authoritySignals += 1
+        } catch { /* gone */ }
       }
     }
     await sleep(100)
     facts.cleanup = {
       ownedGroups: ownedGroups.length,
       swept: swept.length,
-      leaked: swept.filter(entry => obs.observe(entry.pid).kind === 'alive').length,
+      leaked: swept.filter(entry => {
+        const fresh = obs.observe(entry.pid)
+        return fresh.kind === 'alive' && fresh.birth === entry.birth
+      }).length,
+      signalsSent: authoritySignals,
       sentinelGone: readKernelProcess(sentinel.pid).kind === 'gone',
     }
     writeReceipt({ publicAuthorityControl: facts })
