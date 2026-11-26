@@ -621,7 +621,13 @@ test('read() rejects a settings-authority replacement during the credential awai
   assert.equal(outcome.kind, 'rejected')
   assert.match(outcome.reason, /authority changed/u)
   assert.deepEqual(a.settings.recorded, [])
-  assert.deepEqual(b.settings.recorded, [])
+  assert.deepEqual(b.settings.recorded, [], 'the stale A capture never reached B')
+  // A FRESH B gesture is the only request that reaches B, and it writes at B's
+  // own revision.
+  const freshWrite = await config.setSearchProvider('deepseek-search-api', fresh!)
+  assert.equal(freshWrite.kind, 'accepted')
+  assert.equal(b.settings.recorded.length, 1)
+  assert.equal((b.settings.descriptors.get('web')?.value as Record<string, unknown>).searchProvider, 'deepseek-search-api')
 })
 
 test('a readable revision 0 is a valid CAS token', async () => {
@@ -651,4 +657,46 @@ test('a malformed namespace revision makes the read unavailable and refuses ever
     assert.match(outcome.reason, /revision is not readable/u)
     assert.deepEqual(h.settings.recorded, [], 'a malformed revision never reaches the Host mutate')
   }
+})
+
+// ── SUX-06A: real-adapter no-op and second-line guards ──────────────────────
+
+test('an explicit select already pinned in the USER layer is a zero-write no-changes', async () => {
+  const h = host()
+  const config = new DirectWebProviderConfig(h.ctx)
+  const capture = await captureOf(config)
+  assert.equal(capture.providerSelection.search.userSet, true)
+  assert.equal(capture.providerSelection.search.userId, 'deepseek-official')
+  const outcome = await config.setSearchProvider('deepseek-official', capture)
+  assert.equal(outcome.kind, 'no-changes')
+  assert.deepEqual(h.settings.recorded, [], 'the explicit pin needs no Host mutation')
+})
+
+test('Direct Billing re-proves the web provider dependency revision', async () => {
+  const h = host({ searchProvider: 'deepseek-search-api' })
+  const config = new DirectWebProviderConfig(h.ctx)
+  const capture = await captureOf(config)
+  const web = h.settings.descriptors.get('web')!
+  web.value = { ...(web.value as Record<string, unknown>), fetchProvider: 'deepseek-fetch-api' }
+  web.user = { ...(web.user as Record<string, unknown>), fetchProvider: 'deepseek-fetch-api' }
+  web.revision = (web.revision ?? 0) + 1
+  const outcome = await config.setSearchBilling('account', capture)
+  assert.equal(outcome.kind, 'conflict')
+  assert.match(outcome.reason, /dependency changed since it was read/u)
+  assert.deepEqual(h.settings.recorded, [], 'the API revision never dispatches without its web dependency')
+})
+
+test('Direct provider writes re-prove the same-revision base/USER facts', async () => {
+  const h = host()
+  const config = new DirectWebProviderConfig(h.ctx)
+  const capture = await captureOf(config)
+  const web = h.settings.descriptors.get('web')!
+  // Same numeric revision, different USER/base projection: the captured
+  // decision no longer describes this Host state.
+  web.value = { ...(web.value as Record<string, unknown>), searchProvider: 'deepseek-search-api' }
+  web.user = { ...(web.user as Record<string, unknown>), searchProvider: 'deepseek-search-api' }
+  const outcome = await config.setSearchProvider('deepseek-official', capture)
+  assert.equal(outcome.kind, 'rejected')
+  assert.match(outcome.reason, /selection changed since the page read it/u)
+  assert.deepEqual(h.settings.recorded, [], 'a same-revision semantic drift never reaches the Host mutate')
 })

@@ -867,7 +867,11 @@ refusal; a genuinely independent namespace is never compared for count,
 question or provider. Billing additionally binds the `web` provider dependency
 revision and re-reads the raw eligibility: its own API must still be the
 explicitly selected route and that capability's YAML override must still be
-unset. A legal no-op is a distinct zero-write `no-changes` outcome; `accepted`
+unset. These are TWO namespace observations, not one atomic cross-namespace
+transaction: the official Settings CAS is per namespace, so a provider change
+that lands after Billing has already been dispatched is a real post-dispatch
+outcome, never retroactively a proven pre-dispatch refusal. A legal no-op is a
+distinct zero-write `no-changes` outcome; `accepted`
 is only a receipt, and `Saved` requires a trusted fresh readback that still
 belongs to the captured generation and proves the requested raw value/action.
 An accepted-but-unattributable readback is `unverified`, and a lost/ambiguous

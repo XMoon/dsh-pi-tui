@@ -3000,8 +3000,17 @@ function createRemoteWebPort(): {
   readonly port: RemoteConfigPort
   readonly namespaces: Map<string, { ns: string; value?: unknown; base?: unknown; user?: unknown; revision: number }>
   readonly mutateCalls: Array<{ readonly ns: string; readonly ops: readonly { readonly op: string; readonly path: readonly string[]; readonly value?: unknown }[]; readonly revision: number | undefined }>
+  /** Replace the Host identity while keeping the SAME numeric revisions and
+   *  (unless requested) the SAME values: the exact wrong-Host negative control. */
+  readonly replaceHost: (requested?: 'search' | 'fetch') => void
+  /** Hold the NEXT official mutate after it entered the mirror queue, so a
+   *  queued decision can be replaced before its queue turn. */
+  readonly holdNextMutation: () => { readonly entered: Promise<void>; readonly release: () => void }
+  /** Run after an accepted mutation applied, before the post-write refresh. */
+  readonly setAfterMutation: (hook: (() => void) | undefined) => void
+  readonly describeCalls: () => number
 } {
-  const generation = { id: 'web-t3-generation' }
+  let generation: object = { id: 'web-t3-generation-a' }
   const namespaces = new Map<string, { ns: string; value?: unknown; base?: unknown; user?: unknown; revision: number }>()
   namespaces.set('pi-tui-preferences', {
     ns: 'pi-tui-preferences',
@@ -3023,16 +3032,22 @@ function createRemoteWebPort(): {
     revision: 8,
   })
   const mutateCalls: Array<{ readonly ns: string; readonly ops: readonly { readonly op: string; readonly path: readonly string[]; readonly value?: unknown }[]; readonly revision: number | undefined }> = []
+  let hold: { readonly entered: () => void; readonly released: Promise<void> } | undefined
+  let describeCalls = 0
+  let afterMutation: (() => void) | undefined
   const remote = {
     settings: {
-      describe: async () => ({
-        ok: true as const,
-        value: {
-          writable: true,
-          hasDocument: true,
-          namespaces: [...namespaces.values()].map(entry => structuredClone(entry)),
-        },
-      }),
+      describe: async () => {
+        describeCalls += 1
+        return {
+          ok: true as const,
+          value: {
+            writable: true,
+            hasDocument: true,
+            namespaces: [...namespaces.values()].map(entry => structuredClone(entry)),
+          },
+        }
+      },
       update: async () => ({ ok: true as const, value: {} }),
       replace: async () => ({ ok: true as const, value: {} }),
       mutate: async (
@@ -3044,6 +3059,12 @@ function createRemoteWebPort(): {
         if (entry === undefined) return { ok: false as const, error: { code: 'settings/absent', message: 'no section' } }
         if (revision !== undefined && revision !== entry.revision) {
           return { ok: false as const, error: { code: 'settings/conflict', message: `revision ${revision} != ${entry.revision}` } }
+        }
+        if (hold !== undefined) {
+          const current = hold
+          hold = undefined
+          current.entered()
+          await current.released
         }
         mutateCalls.push({ ns, ops: structuredClone(ops), revision })
         const value = { ...(entry.value as Record<string, unknown>) }
@@ -3065,6 +3086,7 @@ function createRemoteWebPort(): {
         entry.value = value
         entry.user = user
         entry.revision += 1
+        afterMutation?.()
         return { ok: true as const, value: {} }
       },
     },
@@ -3078,7 +3100,37 @@ function createRemoteWebPort(): {
     remote,
     connection: { generation: { getSnapshot: () => generation, subscribe: () => () => {} } },
   } as never)
-  return { port, namespaces, mutateCalls }
+  const replaceHost = (requested?: 'search' | 'fetch'): void => {
+    generation = { id: 'web-t3-generation-b' }
+    const web = namespaces.get('web')!
+    const value = { ...(web.value as Record<string, unknown>) }
+    const user = { ...(web.user as Record<string, unknown>) }
+    if (requested === 'search') {
+      value.searchProvider = 'deepseek-search-api'
+      user.searchProvider = 'deepseek-search-api'
+    } else if (requested === 'fetch') {
+      value.fetchProvider = 'deepseek-fetch-api'
+      user.fetchProvider = 'deepseek-fetch-api'
+    }
+    namespaces.set('web', { ...web, value, user })
+  }
+  const holdNextMutation = (): { readonly entered: Promise<void>; readonly release: () => void } => {
+    let signalEntered: () => void = () => {}
+    let signalRelease: () => void = () => {}
+    const entered = new Promise<void>(resolve => { signalEntered = resolve })
+    const released = new Promise<void>(resolve => { signalRelease = resolve })
+    hold = { entered: signalEntered, released }
+    return { entered, release: () => signalRelease() }
+  }
+  return {
+    port,
+    namespaces,
+    mutateCalls,
+    replaceHost,
+    holdNextMutation,
+    setAfterMutation: hook => { afterMutation = hook },
+    describeCalls: () => describeCalls,
+  }
 }
 
 test('a mounted Web page binds the REAL RemoteConfigPort capture to the target namespace revision', async t => {
@@ -3114,4 +3166,66 @@ test('a mounted Web page binds the REAL RemoteConfigPort capture to the target n
   assert.equal(writes.length, 1, 'exactly ONE real web mutation, by the fresh gesture')
   assert.equal(writes[0]?.revision, 5, 'the fresh gesture dispatched at the NEW revision')
   assert.deepEqual(writes[0]?.ops, [{ op: 'set', path: ['searchProvider'], value: 'deepseek-search-api' }])
+})
+
+test('a replaced Remote Host with the SAME revisions never receives the stale decision', async t => {
+  const remote = createRemoteWebPort()
+  await remote.port.describe()
+  const h = setup({ remoteConfig: remote.port })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 2)
+  // Hold the mirror write queue with an unrelated predecessor on the SAME queue.
+  const held = remote.holdNextMutation()
+  const predecessor = remote.port.web.setSearchApiCount(20, (await remote.port.web.read())!)
+  await held.entered
+  const describesBefore = remote.describeCalls()
+  // The page's provider decision is admitted and queued behind the predecessor.
+  await key(h, ENTER)
+  await waitForFrame(() => h.view(), () => remote.describeCalls() > describesBefore,
+    () => h.vt.waitForRender(), 'the queued provider admission read')
+  // Replace the Host with B: SAME numeric revisions and values.
+  remote.replaceHost()
+  held.release()
+  await predecessor
+  const refused = await settlePainted(h, 'the replaced-Host refusal', frame =>
+    frame.includes('Could not save') && !frame.includes('Saving…'))
+  assert.equal(remote.mutateCalls.filter(call => call.ns === 'web').length, 0,
+    'the stale A decision never reaches B, even at the same numeric revision/value')
+  assert.equal((remote.namespaces.get('web')!.value as Record<string, unknown>).searchProvider, 'deepseek-official')
+  assert.match(refused, /the Host authority changed/u)
+
+  // A fresh B gesture writes exactly once at B's revision.
+  await key(h, 'r')
+  await settlePainted(h, 'the fresh B read', frame => frame.includes('Current: DeepSeek server-side search'))
+  await chooseCandidate(h, 2)
+  await key(h, ENTER)
+  await settlePainted(h, 'the fresh B write', frame =>
+    frame.includes('Saved') && frame.includes('Current: DeepSeek Search API'))
+  const webWrites = remote.mutateCalls.filter(call => call.ns === 'web')
+  assert.equal(webWrites.length, 1, 'exactly ONE real web mutation, by the fresh B gesture')
+  assert.equal(webWrites[0]?.revision, 4, 'the fresh B gesture dispatched at B\'s own revision')
+})
+
+test('an accepted Remote write whose post-receipt Host was replaced is unverified, not Saved', async t => {
+  const remote = createRemoteWebPort()
+  await remote.port.describe()
+  const h = setup({ remoteConfig: remote.port })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 2)
+  // The accepted A mutate is followed by a Host replacement whose B already
+  // holds the requested value: the value must not be attributed to A.
+  remote.setAfterMutation(() => { remote.replaceHost('search') })
+  await key(h, ENTER)
+  const frame = await settlePainted(h, 'the post-receipt replacement verdict', f =>
+    f.includes('Could not confirm save') && !f.includes('Saving…'))
+  assert.match(frame, /The change may have been saved\. Refresh and check\./u)
+  assert.doesNotMatch(frame, /Saved/u, 'B\'s coincidental value is never attributed to A')
+  assert.equal(remote.mutateCalls.filter(call => call.ns === 'web').length, 1,
+    'A dispatched exactly once; the unknown receipt is never replayed')
+  assert.equal((remote.namespaces.get('web')!.value as Record<string, unknown>).searchProvider, 'deepseek-search-api',
+    'B really holds the requested value; the UI simply does not attribute it')
 })

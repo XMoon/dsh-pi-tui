@@ -2447,3 +2447,29 @@ test('an unrelated namespace revision never blocks a Remote count write', async 
   assert.deepEqual(state.mutateCalls.at(-1)?.ops, [{ op: 'set', path: ['count'], value: 20 }])
   assert.equal(state.namespaces.get(WEB_API_NS)?.value.count, 20)
 })
+
+test('a Remote explicit select already pinned in the USER layer is a zero-write no-changes', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  assert.equal(capture.providerSelection.search.userSet, true)
+  const outcome = await port.web.setSearchProvider('deepseek-official', capture)
+  assert.equal(outcome.kind, 'no-changes')
+  assert.deepEqual(state.mutateCalls, [], 'the explicit pin needs no Host mutation')
+})
+
+test('a Remote provider write re-proves the same-revision USER facts', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  const web = state.namespaces.get(WEB_NS)!
+  // Same numeric revision, different USER projection: the captured decision no
+  // longer describes this Host state.
+  web.value = { ...web.value, searchProvider: 'deepseek-search-api' }
+  web.user = { ...web.user, searchProvider: 'deepseek-search-api' }
+  await port.describe()
+  const outcome = await port.web.setSearchProvider('deepseek-official', capture)
+  assert.equal(outcome.kind, 'rejected')
+  assert.match(outcome.reason, /selection changed since the page read it/u)
+  assert.deepEqual(state.mutateCalls, [], 'a same-revision semantic drift never reaches the Host mutate')
+})

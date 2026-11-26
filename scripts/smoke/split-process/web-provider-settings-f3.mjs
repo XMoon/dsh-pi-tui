@@ -503,13 +503,29 @@ async function selectCandidate(client, index, label, candidateLabel) {
     `${label}: the Detail cursor never reached ${JSON.stringify(candidateLabel)}: ${JSON.stringify(frame.split('\n'))}`)
 }
 
+/** Wait for the SELECTED Detail's own settled verdict. A whole-frame `Saved`
+ *  search could match another row's retained receipt; the Detail text is the
+ *  scope of this confirm, and a legitimate zero-write confirm paints
+ *  `No changes` instead of `Saved`. */
+async function waitForDetailVerdict(client, label, timeoutMs = 20_000) {
+  let detail = ''
+  try {
+    await waitForCondition(async () => {
+      detail = pageDetailText(await frameOf(client))
+      return detail.includes('Saved') || detail.includes('No changes')
+    }, label, timeoutMs)
+  } catch (error) {
+    throw new SplitSmokeAssertionError(`${label}: the selected Detail never stated Saved/No changes: ${JSON.stringify(detail)}`, { cause: error })
+  }
+  return detail
+}
+
 /** ONE explicit Detail confirm; the read-back is the authority (a verdict on
  *  its own could still describe an older write of the same row). */
 async function confirmCandidate(client, expectedCurrent, label) {
   client.send('\r')
   await waitForCurrentValue(client, expectedCurrent, `${label} authoritative read-back`)
-  await waitForScreenText(client, 'Saved', `${label} saved verdict`, 20_000)
-  return pageDetailText(await frameOf(client))
+  return await waitForDetailVerdict(client, `${label} saved/no-changes verdict`)
 }
 
 /** Every page row's Host-returned value, read through the real Detail. Each

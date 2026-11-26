@@ -282,8 +282,9 @@ specialist-page contract below).
   stays browsing and a new explicit gesture is required.
 - **Host-configuration save feedback.** The three Host-configuration scalars
   (`Backend`, `Tools · Visual tools`, `Host · Session log upload`), the hosted
-  Agent/Shell/Subagent writers and the `Web UI`/`ACP access` pages project the
-  SAME internal settlement as one short, scope-local result: `Saving…` for a
+  Agent/Shell/Subagent writers, the `Web Search / Fetch` page and the
+  `Web UI`/`ACP access` pages project the SAME internal settlement as one
+  short, scope-local result: `Saving…` for a
   pending save (the Web UI/ACP runtime phase keeps `Waiting for the answer…`
   and their copy phase keeps `Copying the client command…`); `Saved` for a
   verified save; `No changes` for a legitimate no-op;
@@ -299,9 +300,10 @@ specialist-page contract below).
   guard, Retry policy and business writer are unchanged. A clean browse paints
   no persistent saved/verified banner. A retained historical success never
   claims currency. When the source is not ready, the numeric pages, the Root
-  Host-configuration scalars and the Subagent page demote it to `Last-known ·
-  read-only` with `Previous save completed; refresh to review.`; a READY
-  replacement retires the obsolete receipt without a read-only claim. A
+  Host-configuration scalars, the Subagent page and the `Web Search / Fetch`
+  page demote it to `Last-known · read-only` with `Previous save completed;
+  refresh to review.`; a READY replacement retires the obsolete receipt without
+  a read-only claim. A
   known-success receipt is bound to the observation that proved it: a later
   Host/Config observation retires it rather than repainting it as current. No
   settlement surface presents a stale success as a current saved value.
