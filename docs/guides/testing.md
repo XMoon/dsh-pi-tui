@@ -718,13 +718,40 @@ The project's files run with real file parallelism. An explicit
 `SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID` makes the files report a `parallel-ready`
 checkpoint and prove that the other real Scene's Worker (with its live Vitest
 parent edge), Host and Client kernel identities are live at the same time;
-select the project's files together and
-use a fresh private run root per round:
+select the project's files together and use a fresh private run root per round:
 
 ```sh
 SPLIT_VITEST_RUN_ID=process-overlap-r1 \
 SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID=process-overlap-r1 \
-mise exec -- pnpm test:split:process
+mise exec -- pnpm exec vitest run --config vitest.split.config.ts \
+  --project split-process-business \
+  test/integration/split-process/business/host-file-completion.vitest.ts \
+  test/integration/split-process/business/preset-defaults.vitest.ts
+```
+
+The installed-public-entry anchor
+(`test/integration/split-process/business/public-daemon-entry.vitest.ts`) joins
+that same checkpoint explicitly. It drives the packed public
+`dsh --profile ...` CLI under a real PTY and proves the Direct default, the
+daemon cold start, public Session/preset/peer/alias/Settings paths and the
+public refusal boundary; the positive terminal cases are Linux-only and skip
+on Darwin, while the public Client is observed through the real OS
+process tree and the public daemon CLI, never an internal JSONL sink. Its cold
+anchor runs first in the file; the remaining public business cases run after
+the overlap. Select both files in ONE Vitest invocation (the Worker parent-edge
+check requires one real Vitest main), set
+`SPLIT_VITEST_PARALLEL_AUDIT_PAIR=public-daemon-entry`, and use a fresh run id:
+
+```sh
+SPLIT_VITEST_RUN_ID=public-overlap-r1 \
+SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID=public-overlap-r1 \
+SPLIT_VITEST_PARALLEL_AUDIT_PAIR=public-daemon-entry \
+SPLIT_VITEST_TMP_BASE=/absolute/private/run-root \
+SPLIT_VITEST_CANDIDATE_TGZ=/absolute/immutable/candidate.tgz \
+mise exec -- pnpm exec vitest run --config vitest.split.config.ts \
+  --project split-process-business \
+  test/integration/split-process/business/public-daemon-entry.vitest.ts \
+  test/integration/split-process/business/host-file-completion.vitest.ts
 ```
 
 `SPLIT_VITEST_PROCESS_PROBE_POINT` arms the fixed checkpoints the external
@@ -742,7 +769,9 @@ mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-
 `terminal-owner-client-opened-before-ack`, `clients-ready`, `fallback-host-ready`,
 `host-contenders-spawned`,
 `qualification-client-spawned`, `host-artifact-absent-started`,
-`identity-witness-spawned` (Linux only) and `finalize-compensation-started`.
+`identity-witness-spawned` (Linux only), `finalize-compensation-started`,
+`public-daemon-before-registry`, `public-daemon-before-ready-ack` and
+`public-daemon-ownership-refused` (the last three Linux only).
 Each installed-entry window binds one exact business test and only holds after
 the Supervisor registered the real live child identities. `host-contenders-spawned`
 is the batch of concurrent Host contenders, `qualification-client-spawned` a
@@ -768,6 +797,31 @@ already live at its authenticated checkpoint when the target is signalled,
 held across the target's reclaim, then released to continue its own business
 path and finalize. A checkpoint reached without an external signal fails; an
 unrun window is `NOT_RUN`, never a pass.
+
+The two positive public windows bind the cold installed-public positive test
+(`starts one real public daemon Client and Host from the installed CLI`);
+`public-daemon-ownership-refused` binds the separate negative test
+(`refuses an unproven public Host ownership signal and compensates truthfully`).
+The `public-daemon-before-registry` hold is after the detached Host/CLI/Client
+are real but before the product registry is published. The external observer
+rechecks the exact registry absence and the live birth-bound CLI/Client/Host
+edge immediately before SIGKILL; if the registry is already published at that
+point the window is `NOT_VERIFIED`/STOP, never a forced pass. A registry that
+appears naturally after the trigger is handled by the ordinary bounded late
+material reconciliation and official Host authentication; there is no
+probe-owned registry-release flag or wait. The positive receipt must prove the
+startup/close handler settlement join, the same captured identities, native
+session/foreground/Host group terminality, both seats and material terminal,
+a complete root removal, and the external Worker exit.
+`public-daemon-before-ready-ack` holds after registry/authentication/surface but
+before the Client start acknowledgement. The ownership-refused negative control
+supplies a mismatched expected Host birth to the SAME destructive admission
+boundary used by ordinary reclaim: the admission must reject it before any
+TERM/KILL, the external probe must observe the same live target and no signal
+attempt, then the probe releases compensation; the final receipt is
+`NOT_QUIESCED` with a retained diagnostic root and a completed compensation.
+A receipt that claims a signal attempt, loses the live target, or does not
+complete the compensation is not this negative control's pass.
 
 This Project is not the release full lane. `smoke:split-process` and
 `smoke:macos-split` remain the separate distribution-boundary lanes described
