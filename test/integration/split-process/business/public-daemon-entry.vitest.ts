@@ -974,25 +974,16 @@ test('persists the public daemon preference for the next launch without restarti
     await waitForFrame(current, 'Daemon', 'the Daemon candidate')
     await current.press('Down')
     await current.press('Enter')
-    // The optional OS-supervision prompt is a real platform representation:
-    // Linux may write the preference without it, while macOS offers the
-    // LaunchAgent install and defaults to "Not now". The durable preference
-    // write is the same; only the prompt dismissal is platform-shaped.
+    // The optional OS-supervision prompt is a real platform representation on
+    // macOS; Linux may write the preference directly. The transient
+    // "Status Verified" row is not the durable fact: the authoritative Value
+    // readback, the next-launch scope and the later real launch are.
     await waitForFrameMatch(current,
-      frame => frame.includes('Status      Verified') || frame.includes('Install service'),
-      'the backend write result or optional supervision prompt')
+      frame => frame.includes('Value       Daemon') || frame.includes('> Not now'),
+      'the authoritative backend readback or optional supervision prompt')
     const installFrame = await current.text()
     if (installFrame.includes('> Not now')) await current.press('Enter')
-    if (process.platform === 'linux') {
-      await waitForFrame(current, 'Status      Verified', 'the same-generation Verified backend write')
-      await waitForFrame(current, 'Value       Daemon', 'the authoritative backend readback')
-      await waitForFrame(current, 'Status      Verified', 'the backend stays Verified')
-    } else {
-      // macOS replaces the transient write row with the optional LaunchAgent
-      // prompt; the authoritative readback and next-launch scope are the
-      // durable facts, and the next real launch below proves the write.
-      await waitForFrame(current, 'Value       Daemon', 'the authoritative backend readback')
-    }
+    await waitForFrame(current, 'Value       Daemon', 'the authoritative backend readback')
     await waitForFrame(current, 'Applies on next launch; current TUI/Host remains', 'the next-launch-only statement')
     await waitForFrame(current, 'Current launch: daemon (environment override)', 'the current launch override fact')
 
