@@ -306,6 +306,10 @@ export interface SettingsWorkspaceCommitRequest {
 export interface SettingsWorkspaceCommitOutcome {
   readonly outcome: 'verified' | 'not-saved' | 'unverified' | 'indeterminate'
   readonly reason?: string
+  /** The value the verified readback proved, for the Host-configuration
+   *  scalars. A receipt must not bind to a different current value even on
+   *  the same authority revision. */
+  readonly verifiedValue?: string
   /**
    * M6 UX PR2: the ONE verified-transition follow-up the command layer decided
    * this Client may offer in the SAME lease. It is a pure presentation hand-off:
@@ -580,8 +584,10 @@ type SettingsWorkspaceEditPhase =
       readonly reason?: string
       readonly registrationToken?: number
       /** The post-write Host-config observation, captured only while the
-       *  authority still matches the one the write was admitted against. */
+       *  authority still matches the one the write was admitted against and
+       *  the current value is the one the readback proved. */
       readonly observation?: { readonly generation: object; readonly revision?: number }
+      readonly verifiedValue?: string
     }
 
 type SettingsLayout = 'wide' | 'medium' | 'narrow'
@@ -3705,8 +3711,11 @@ export class SettingsWorkspacePanel implements Component {
     }
     if (phase.kind !== 'settled' || phase.field !== field) return undefined
     if (phase.outcome === 'verified') {
+      const currentValue = row.edit?.options.find(option => option.current)?.value
       const observationMatches = hostConfig
         && phase.observation !== undefined
+        && phase.verifiedValue !== undefined
+        && currentValue === phase.verifiedValue
         && row.edit?.generation !== undefined
         && Object.is(phase.observation.generation, row.edit.generation)
         && phase.observation.revision === row.edit.revision
@@ -6167,6 +6176,7 @@ export class SettingsWorkspacePanel implements Component {
       ...outcome.reason === undefined ? {} : { reason: outcome.reason },
       ...registrationToken === undefined ? {} : { registrationToken },
       ...authorityGeneration === undefined ? {} : { authorityGeneration },
+      ...(outcome.verifiedValue === undefined ? {} : { verifiedValue: outcome.verifiedValue }),
     }
     this.editRequestId += 1
     this.choiceOffset = 0
@@ -6191,11 +6201,14 @@ export class SettingsWorkspacePanel implements Component {
     if (settled.kind === 'settled' && settled.field === field) {
       const row = this.snapshot.rows.find(candidate => candidate.edit?.field === field)
       const generation = row?.edit?.generation
+      const currentValue = row?.edit?.options.find(option => option.current)?.value
       // Capture the post-write observation ONLY while the authority is still
-      // the one the write was admitted against. A replacement that landed
-      // before this refresh must not let the receipt bind to the successor.
+      // the one the write was admitted against AND the current value is the
+      // one the readback proved. A replacement or a concurrent value change
+      // that landed before this refresh must not inherit the receipt.
       if (row !== undefined && generation !== undefined
-        && authorityGeneration !== undefined && Object.is(generation, authorityGeneration)) {
+        && authorityGeneration !== undefined && Object.is(generation, authorityGeneration)
+        && outcome.verifiedValue !== undefined && currentValue === outcome.verifiedValue) {
         this.editPhase = {
           ...settled,
           observation: {

@@ -4055,13 +4055,15 @@ function scalarSnapshot(options: {
   readonly revision: number
   readonly generation: object
   readonly warning?: string
+  readonly current?: 'On' | 'Off'
 }): SettingsWorkspaceSnapshot {
+  const current = options.current ?? 'Off'
   const row: SettingsWorkspaceRow = {
     id: 'visual-tools',
     category: 'tools',
     label: 'Visual tools',
-    summary: 'Off',
-    value: 'Off',
+    summary: current,
+    value: current,
     scope: 'Host profile',
     freshness: 'ready',
     description: 'the scalar test row',
@@ -4070,11 +4072,11 @@ function scalarSnapshot(options: {
       primary: 'persisted',
       revision: options.revision,
       generation: options.generation,
-      runtime: 'configured Off',
-      persisted: 'Off',
+      runtime: `configured ${current}`,
+      persisted: current,
       options: [
-        { value: 'Off', label: 'Off', available: true, current: true },
-        { value: 'On', label: 'On', available: true, current: false },
+        { value: 'Off', label: 'Off', available: true, current: current === 'Off' },
+        { value: 'On', label: 'On', available: true, current: current === 'On' },
       ],
       ...(options.warning === undefined ? {} : { confirmationWarning: options.warning }),
     },
@@ -4101,10 +4103,27 @@ test('a verified Host-config receipt does not bind to a replacement admitted dur
   // The Host is replaced AFTER admission and BEFORE the owner settles its
   // verified A readback. The successor exposes the SAME revision.
   generation = {}
-  h.settlements[0]!({ outcome: 'verified' })
+  h.settlements[0]!({ outcome: 'verified', verifiedValue: 'Off' })
   const frame = plain(h)
   assert.match(frame, /Last-known · read-only/u, 'the receipt stays bound to the authority that proved it')
   assert.doesNotMatch(frame, /\bSaved\b/u, 'a successor observation never revives A\'s Saved')
+})
+
+test('a verified Host-config receipt does not bind to a concurrent same-generation value', () => {
+  let current: 'On' | 'Off' = 'Off'
+  const generation = {}
+  const h = setup({ columns: 120, rows: 40, snapshot: () => scalarSnapshot({ revision: 5, generation, current }) })
+  openScalarChoice(h)
+  h.panel.handleInput('\r') // Confirm Off: the ONE commit is now pending
+  assert.equal(h.commits(), 1)
+
+  // Another writer changes the SAME authority's current value before the
+  // owner's post-write refresh. The verified Off value is no longer current.
+  current = 'On'
+  h.settlements[0]!({ outcome: 'verified', verifiedValue: 'Off' })
+  const frame = plain(h)
+  assert.match(frame, /Last-known · read-only/u, 'the receipt is not bound to a different current value')
+  assert.doesNotMatch(frame, /\bSaved\b/u)
 })
 
 test('a same-Host revision change while L2 stays painted refuses Confirm with zero dispatch', () => {

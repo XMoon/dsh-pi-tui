@@ -2080,7 +2080,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           : 'The Host profile now stores Off, but the tools are still active.',
       }
     }
-    return { outcome: 'verified' }
+    return { outcome: 'verified', verifiedValue: expected ? 'On' : 'Off' }
   }
 
   /** Commit the ONE profile-wide switch through the official revision- and
@@ -2315,7 +2315,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }
     // Reset is verified by the accepted official unset + current readback; the
     // effective value may be On again and the USER field may stay materialized.
-    if (value === 'Reset') return { outcome: 'verified' }
+    if (value === 'Reset') {
+      return { outcome: 'verified', verifiedValue: readback.effective.enabled ? 'On' : 'Off' }
+    }
     const expected = value === 'On'
     if (readback.effective.enabled !== expected) {
       // An accepted official write whose fresh readback differs cannot be
@@ -2326,7 +2328,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         reason: `The Host now reads ${readback.effective.enabled ? 'On' : 'Off'}; another writer may have changed it.`,
       }
     }
-    return { outcome: 'verified' }
+    return { outcome: 'verified', verifiedValue: expected ? 'On' : 'Off' }
   }
 
   /**
@@ -2435,7 +2437,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         reason: `The Host now reads ${state.backend === 'daemon' ? 'Daemon' : 'Direct'}.`,
       }
     }
-    return { outcome: 'verified' }
+    return { outcome: 'verified', verifiedValue: expected === 'daemon' ? 'Daemon' : 'Direct' }
   }
 
   /** Commit the next-launch backend through the official revision- and
