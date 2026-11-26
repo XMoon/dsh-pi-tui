@@ -400,7 +400,7 @@ test('keeps the default Direct launch independent of the split backend', async (
     expect(peer.host, 'the warm peer owns a real Host').not.toBeNull()
     expect(peer.client, 'the warm peer owns a real Client').not.toBeNull()
     const peerBefore = await peer.kernelState()
-    expect(peerBefore.hostBirth).not.toBeNull()
+    expect(peerBefore.hostBirth).toMatch(/^(?:linux|darwin):/u)
     const instanceBefore = peer.host?.instanceId
     const registryBefore = fileDigest(join(scene.scopeDir, 'instance.json'))
     const launchBefore = fileDigest(join(scene.scopeDir, 'launch.json'))

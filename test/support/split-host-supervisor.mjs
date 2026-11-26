@@ -919,6 +919,27 @@ async function settlePublicAuthorityProducer(reason) {
   return await producer.settlementPromise
 }
 
+async function waitForPublicAuthoritySettlement(reason, timeoutMs = 45_000) {
+  const settlement = publicAuthoritySettlement
+  if (settlement === undefined) return undefined
+  const timeout = new Promise(resolve => setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs))
+  const result = await Promise.race([settlement.promise, timeout])
+  if (result?.kind !== 'timeout') return result
+  const blocking = [`authority-settlement-timeout:${String(timeoutMs)}`]
+  try {
+    await settlePublicAuthorityProducer(`${reason}: settlement timeout`)
+  } catch (error) {
+    blocking.push(`producer:${boundedErrorText(error)}`)
+  }
+  try {
+    const problems = await terminateAllProcessEntries(`${reason}: settlement timeout`)
+    for (const problem of problems) blocking.push(`termination:${JSON.stringify(problem)}`)
+  } catch (error) {
+    blocking.push(`termination:${boundedErrorText(error)}`)
+  }
+  return { blocking }
+}
+
 async function terminateAllProcessEntries(reason) {
   const problems = []
   const reclaim = async (handle, label) => {
@@ -1970,24 +1991,14 @@ async function cleanup(reason, options = {}) {
       await terminateQualificationClient(reason)
       if (scene?.kind === 'process') {
         try {
-          await settlePublicAuthorityProducer(`${reason}: authority producer`)
-        } catch (error) {
-          clean = false
-          appendNote('public-authority-producer-settlement-failed', { reason: boundedErrorText(error) })
-        }
-        try {
-          const problems = await terminateAllProcessEntries(reason)
-          if (publicAuthorityBlocking.length > 0) {
+          const authorityCleanup = await waitForPublicAuthoritySettlement(reason)
+          if (authorityCleanup?.blocking?.length > 0) {
             clean = false
-            appendNote('public-authority-cleanup-blocking', { blocking: publicAuthorityBlocking })
-          }
-          if (problems.length > 0) {
-            clean = false
-            for (const problem of problems) appendNote('process-entry-termination-failed', problem)
+            appendNote('public-authority-cleanup-blocking', { blocking: authorityCleanup.blocking })
           }
         } catch (error) {
           clean = false
-          appendNote('process-entry-termination-failed', { reason: boundedError(error) })
+          appendNote('public-authority-cleanup-failed', { reason: boundedErrorText(error) })
         }
       }
       // Public daemon launches are REAL installed-CLI PTYs: close every
@@ -7730,6 +7741,7 @@ async function handlePublicDaemonKernelState(message) {
     clientPid: handle.client?.pid ?? null,
     hostPid: handle.host?.pid ?? null,
     hostInstanceId: handle.host?.instanceId ?? null,
+    hostBirth: handle.host?.birth ?? null,
   }
 }
 
@@ -8182,6 +8194,11 @@ async function handlePublicAuthorityControl(message) {
   }
   try {
     publicAuthorityBlocking = []
+    publicAuthoritySettlement = (() => {
+      let resolve
+      const promise = new Promise(settle => { resolve = settle })
+      return { promise, resolve, settled: false }
+    })()
     const split = createSplitTerminal({
       prefix: 'public-authority',
       traceDirectory: join(scene.workDir, 'trace'),
@@ -8472,6 +8489,10 @@ async function handlePublicAuthorityControl(message) {
       throw new Error('PUBLIC_AUTHORITY_CONTROL: the foreign sentinel changed birth')
     }
     return facts
+  } catch (error) {
+    facts.errorName = boundedErrorText(error)
+    facts.errorDetail = error instanceof Error && error.stack !== undefined ? redactText(error.stack).slice(0, 2000) : boundedErrorText(error)
+    throw error
   } finally {
     for (const path of [join(dir, 'spawn-second')]) {
       try { unlinkSync(path) } catch (error) { if (error?.code !== 'ENOENT') closeErrors.push(`trigger ${path}: ${boundedErrorText(error)}`) }
@@ -8488,7 +8509,7 @@ async function handlePublicAuthorityControl(message) {
     }
     const liveHelpers = qualificationHelpers.filter(handle => !handle.exited)
     const unfinishedHelpers = qualificationHelpers.filter(handle => handle.finished !== true)
-    const unknownHelpers = liveHelpers.filter(handle => {
+    const unknownHelpers = qualificationHelpers.filter(handle => {
       const observation = readKernelProcess(handle.child.pid)
       return observation.kind === 'unknown'
     })
@@ -8504,6 +8525,9 @@ async function handlePublicAuthorityControl(message) {
           unregistered.push({ pid, entry: argv.entry })
         }
       }
+    }
+    if (listing.kind !== 'ok') {
+      unregistered.push({ scan: `${listing.kind}/${String(listing.code)}` })
     }
     const producer = publicAuthorityProducer
     if (producer?.closeError !== undefined && !closeErrors.includes(producer.closeError)) {
@@ -8532,12 +8556,18 @@ async function handlePublicAuthorityControl(message) {
       ...(liveHelpers.length > 0 ? [`live-helpers:${liveHelpers.length}`] : []),
       ...(unknownHelpers.length > 0 ? [`unknown-helpers:${unknownHelpers.length}`] : []),
       ...(unregistered.length > 0 ? [`unregistered:${unregistered.length}`] : []),
+      ...(facts.errorName === undefined ? [] : [`primary-error:${facts.errorName}`]),
+      ...(sentinel === undefined ? [] : sentinelGone === true ? [] : [`sentinel-not-gone:${String(sentinelGone)}`]),
       ...(terminationProblems.length > 0 ? terminationProblems.map(problem => `termination:${JSON.stringify(problem)}`) : []),
       ...closeErrors,
       ...(sentinel === undefined ? ['sentinel-not-spawned'] : []),
     ]
     publicAuthorityBlocking = facts.cleanup.blocking
     writeReceipt({ publicAuthorityControl: facts })
+    if (publicAuthoritySettlement !== undefined) {
+      publicAuthoritySettlement.settled = true
+      publicAuthoritySettlement.resolve(facts.cleanup)
+    }
     if (facts.cleanup.blocking.length > 0) {
       throw new Error(`PUBLIC_AUTHORITY_CONTROL: cleanup is not quiesced: ${JSON.stringify(facts.cleanup.blocking)}`)
     }
@@ -9592,6 +9622,7 @@ const ENTRY_REDACTED_KEYS = new Set([
 const qualificationHelpers = []
 let publicAuthorityProducer
 let publicAuthorityBlocking = []
+let publicAuthoritySettlement
 let qualificationHelperSequence = 0
 /**
  * The ONE scoped installed-copy mutation of a process Scene, or undefined.
