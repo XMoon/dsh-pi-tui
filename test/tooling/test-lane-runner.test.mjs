@@ -155,7 +155,7 @@ function copyLaneRunnerSources(scripts) {
   const fixtureRoot = join(scripts, '..')
   const nativeProcess = join(fixtureRoot, 'src', 'runtime', 'native-process')
   mkdirSync(nativeProcess, { recursive: true })
-  for (const name of ['identity.ts', 'darwin.ts']) {
+  for (const name of ['identity.ts', 'installed-dsh.ts', 'darwin.ts']) {
     writeFileSync(join(nativeProcess, name), readFileSync(join(ROOT, 'src', 'runtime', 'native-process', name)))
   }
   // The identity seam resolves node-koffi through the installed DSH anchor.

@@ -334,7 +334,7 @@ function setup(options: {
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: () => {},
     backendKind: 'direct' as const,
-    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
+    hostShellCompletion: { pathAuthority: 'client', pathLiteralDialect: 'bash', complete: async () => ({ kind: 'ok', candidates: [] }) },
     forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
     subscribeSessionScopeInvalidation: () => () => {},
     listScopedCommands: () => [],

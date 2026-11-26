@@ -351,7 +351,7 @@ async function startHarness(options: {
     commandRegistry: undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
+    hostShellCompletion: { pathAuthority: 'host' as const, pathLiteralDialect: 'bash', complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     interaction: {
       questions: {
         onRequest: () => true, subscribe: () => undefined, snapshot: () => undefined,
@@ -467,7 +467,7 @@ async function startHarness(options: {
       hostFile: runnerBase.hostFile,
       webAccess: runnerBase.webAccess,
       acpAccess: runnerBase.acpAccess,
-      hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
+      hostShellCompletion: { pathAuthority: 'host' as const, pathLiteralDialect: 'bash', complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     },
     session: {
       ensureSession: () => runnerBase.ensureSession(),

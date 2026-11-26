@@ -1,3 +1,12 @@
+/**
+ * The ONE Host path completion bridge: it resolves the user's literal path
+ * token through the neutral domain algebra and enumerates the HOST filesystem.
+ * It is shared by the split Host and the Direct Windows Host adapter; despite
+ * living beside the Remote Host feature modules it imports no Remote
+ * composition, transport or Client capability.
+ * @module @xmoon76/dsh-pi-tui/runtime/remote/pi-tui-host-user-shell-host-bridge
+ */
+
 import { accessSync, constants as fsConstants, statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import {
@@ -11,6 +20,7 @@ import {
 import {
   reattachDisplayBase,
   resolvePathQuery,
+  resolveWindowsHostPrefix,
   separatorOfRaw,
   type PathQueryEnvironment,
 } from '../../domain/file-completion/query.ts'
@@ -46,13 +56,16 @@ export function createHostShellPathCompletionBridge(options: {
   return {
     async complete(cwd, prefix, signal) {
       signal.throwIfAborted()
+      let rawPrefix = prefix
       if (environment.windowsHost) {
-        return { kind: 'unavailable', reason: 'Host Bash path completion is unsupported on Windows in this version' }
+        const admitted = resolveWindowsHostPrefix(prefix, environment.homeDir)
+        if (admitted.kind === 'unavailable') return admitted
+        rawPrefix = admitted.prefix
       }
       // The Client already decoded the shell token: `prefix` IS the semantic
       // filename bytes, so leading whitespace or a leading quote is part of
       // the queried path and must not be re-parsed here.
-      const query = resolvePathQuery(prefix, cwd, environment)
+      const query = resolvePathQuery(rawPrefix, cwd, environment)
       if (!isReadableDirectory(query.searchBase)) {
         return { kind: 'unavailable', reason: 'the Host path scope is unavailable' }
       }
@@ -63,7 +76,7 @@ export function createHostShellPathCompletionBridge(options: {
           discovered.map(candidate => reattachDisplayBase(candidate, query)),
           query.searchTerm,
         )
-        const separator = separatorOfRaw(prefix, query.winAbsolute || prefix.includes('\\'))
+        const separator = separatorOfRaw(rawPrefix, query.winAbsolute || rawPrefix.includes('\\'))
         const candidates = ranked.slice(0, MAX_SHELL_CANDIDATES)
           .map(candidate => displayValue(candidate.path, candidate.kind, separator))
         return { kind: 'ok', candidates }

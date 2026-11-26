@@ -74,6 +74,7 @@ const abort = new AbortController().signal
 
 const directShellCompletion: HostShellCompletionPort = {
   pathAuthority: 'client',
+  pathLiteralDialect: 'bash',
   async complete({ request, signal }) {
     if (request.kind === 'paths') return { kind: 'ok', candidates: [] }
     const query: Exclude<HostShellCompletionRequest, { kind: 'paths' }> = request
@@ -1777,6 +1778,7 @@ test('MentionProvider completes every independently complete command line of a m
   const source = (): 'prompt' | 'shell-context' | 'shell-local' => mode
   const port = {
     pathAuthority: 'client' as const,
+    pathLiteralDialect: 'bash',
     async complete({ request }: { request: { kind: string } }) {
       if (request.kind === 'commands') return { kind: 'ok' as const, candidates: ['zoom'] }
       if (request.kind === 'subcommands') return { kind: 'ok' as const, candidates: ['checkout'] }
@@ -1973,6 +1975,7 @@ test('Host path completion inserts literal Shell words before real command execu
   const bridge = createHostShellPathCompletionBridge()
   const hostShell: HostShellCompletionPort = {
     pathAuthority: 'host',
+    pathLiteralDialect: 'bash',
     async complete({ request, signal }) {
       if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
       return await bridge.complete(root, request.prefix, signal)
@@ -2053,6 +2056,7 @@ test('Host path completion inserts literal Shell words at a cursor mid-token', a
   const bridge = createHostShellPathCompletionBridge()
   const hostShell: HostShellCompletionPort = {
     pathAuthority: 'host',
+    pathLiteralDialect: 'bash',
     async complete({ request, signal }) {
       if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
       return await bridge.complete(root, request.prefix, signal)
@@ -2107,6 +2111,7 @@ test('Host mid-token path completion preserves the following separate words', as
   const bridge = createHostShellPathCompletionBridge()
   const hostShell: HostShellCompletionPort = {
     pathAuthority: 'host',
+    pathLiteralDialect: 'bash',
     async complete({ request, signal }) {
       if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
       return await bridge.complete(root, request.prefix, signal)
@@ -2187,6 +2192,7 @@ test('Host path completion starts a new word after an unquoted control operator'
   const bridge = createHostShellPathCompletionBridge()
   const hostShell: HostShellCompletionPort = {
     pathAuthority: 'host',
+    pathLiteralDialect: 'bash',
     async complete({ request, signal }) {
       if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
       return await bridge.complete(root, request.prefix, signal)
@@ -2232,6 +2238,7 @@ test('Host command completion starts a new word after an unquoted control operat
   const requests: HostShellCompletionRequest[] = []
   const hostShell: HostShellCompletionPort = {
     pathAuthority: 'host',
+    pathLiteralDialect: 'bash',
     async complete({ request }) {
       requests.push(request)
       return request.kind === 'commands'
@@ -2281,6 +2288,7 @@ test('Host path completion at a cursor before an opening quote replaces the quot
   const bridge = createHostShellPathCompletionBridge()
   const hostShell: HostShellCompletionPort = {
     pathAuthority: 'host',
+    pathLiteralDialect: 'bash',
     async complete({ request, signal }) {
       if (request.kind !== 'paths') return { kind: 'ok', candidates: [] }
       return await bridge.complete(root, request.prefix, signal)

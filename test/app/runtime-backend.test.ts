@@ -358,7 +358,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   // read-authority facts, the Host Schedule management surface and the
   // read-only Host directory browse. All stay wired and asserted below; none
   // replaces another.
-  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) }, deliveredFileRead, webAccess, acpAccess, sessionWorkspaceFacts, schedule, hostDirectoryBrowse, sessionPolicy, teamMode, teamBoard, mcpServers, cuaAccess)
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, sessionMarkdown, hostCommand, pluginManager, jobObservation, hostUserShell, { pathAuthority: 'client', pathLiteralDialect: 'bash', complete: async () => ({ kind: 'ok', candidates: [] }) }, deliveredFileRead, webAccess, acpAccess, sessionWorkspaceFacts, schedule, hostDirectoryBrowse, sessionPolicy, teamMode, teamBoard, mcpServers, cuaAccess)
   assert.equal(backend.kind, 'direct')
   assert.equal(backend.subagent, subagent)
   assert.equal(backend.sessionReader, sessionReader)

@@ -134,6 +134,60 @@ function isBareScopeForm(raw: string): boolean {
   )
 }
 
+/** Whether a raw token names an unambiguous local Windows NTFS path.
+ * Drive-relative (`C:foo`), PowerShell provider/PSDrive-qualified (`HKLM:`,
+ * `Env:`) and UNC/network (`\\\\server\\share`) spellings are not the promised
+ * local path shape and are refused by the Windows literal-path completion
+ * route rather than guessed. A normal drive-absolute (`C:\\x`), rooted/relative
+ * (`\\x`, `sub\\x`, `.\\x`) or home token is admitted. */
+const WINDOWS_UNC_PREFIX = /^[\\/]{2}/u
+const WINDOWS_DRIVE_RELATIVE = /^[A-Za-z]:(?![/\\])/u
+const WINDOWS_PROVIDER_PATH = /^[A-Za-z][A-Za-z0-9_-]+:/u
+
+export function unsupportedWindowsPathToken(raw: string): boolean {
+  if (raw === '') return false
+  if (WINDOWS_UNC_PREFIX.test(raw)) return true
+  if (WINDOWS_DRIVE_RELATIVE.test(raw)) return true
+  return WINDOWS_PROVIDER_PATH.test(raw)
+}
+
+/** The admission of one Windows Host literal-path token. */
+export type WindowsHostPrefixAdmission =
+  | { readonly kind: 'ok'; readonly prefix: string }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+
+/**
+ * Turn one Windows Host literal token into the token the path query resolves.
+ * Only the promised local NTFS shapes reach the query; an unambiguous
+ * drive-relative (`C:foo`), PowerShell provider/PSDrive-qualified (`HKLM:`,
+ * `Env:`) or UNC/network spelling is a truthful unavailable. An UNQUOTED home
+ * token (`~`, `~/x`, `~\x`) is expanded against the injected home directory and
+ * returned ABSOLUTE, so accepting it as a PowerShell single-quoted literal
+ * cannot change the expansion. A quoted `~` never reaches this function as a
+ * home token (the Client sends the literal `./~...` form instead).
+ * PURE: both the home directory and the host platform are explicit facts.
+ * @param raw - the raw token as typed (quotes already handled by the caller).
+ * @param homeDir - the locality owner's home directory fact.
+ */
+export function resolveWindowsHostPrefix(raw: string, homeDir: string): WindowsHostPrefixAdmission {
+  if (unsupportedWindowsPathToken(raw)) {
+    return {
+      kind: 'unavailable',
+      reason: 'the Windows path form is not an unambiguous local NTFS path (drive-relative, provider or UNC spellings are not supported)',
+    }
+  }
+  if (raw !== '~' && !raw.startsWith('~/') && !raw.startsWith('~\\')) {
+    return { kind: 'ok', prefix: raw }
+  }
+  const tail = raw === '~' ? '' : raw.slice(2)
+  const joined = tail === '' ? homeDir : win32.join(homeDir, tail)
+  const trailing = raw === '~' || tail === '' || tail.endsWith('/') || tail.endsWith('\\')
+  return {
+    kind: 'ok',
+    prefix: trailing ? `${joined.replace(/[\\/]+$/u, '')}\\` : joined,
+  }
+}
+
 /**
  * Resolve ONE raw completion token into the pure path query.
  * @param raw - the token as typed (quotes stripped; leading separator

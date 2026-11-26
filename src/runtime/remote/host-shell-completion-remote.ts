@@ -6,6 +6,10 @@ import type { RemoteConnectionGenerationSource } from './session-reader-remote.t
 /** One read-only completion call through the same authenticated Host namespace as Shell execution. */
 export class RemoteHostShellCompletionPort implements HostShellCompletionPort {
   readonly pathAuthority = 'host' as const
+  /** The currently opened Split Host is the POSIX (Bash) deployment; the
+   * Windows daemon tier is not open in this version. PR3 binds real Host
+   * provenance, never the Client OS. */
+  readonly pathLiteralDialect = 'bash' as const
   private readonly namespace: PiTuiHostUserShellNamespace
   private readonly generation: RemoteConnectionGenerationSource
 

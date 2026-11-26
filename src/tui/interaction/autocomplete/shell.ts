@@ -1,8 +1,14 @@
-/** The `!`/`!!` shell completion grammar and semantic-port adapter. */
+/**
+ * The `!`/`!!` shell completion grammar and semantic-port adapter: the POSIX
+ * Bash word/acceptance grammar plus the bounded Windows PowerShell
+ * literal-path adaptation (single-line literal tokens only; no native
+ * PowerShell grammar, command/variable engine or execution).
+ */
 
 import type { AutocompleteSuggestions } from '@xmoon76/pi-tui'
 import type { HostShellCompletionPort, HostShellCompletionTarget } from '../../../runtime/host-shell-completion-port.ts'
 import { parseShellWords } from '../../../client/shell/words.ts'
+import { unsupportedWindowsPathToken } from '../../../domain/file-completion/query.ts'
 
 const MAX_SHELL_CANDIDATES = 50
 
@@ -333,6 +339,257 @@ export function shellCommandIsOpen(lines: readonly string[]): boolean {
     || declared.length > 0 || bodies.length > 0 || trailingContinuation
 }
 
+
+/**
+ * The PowerShell literal-path adaptation. A PowerShell Host shell has no
+ * command/variable candidate source in this version, so ONLY a clearly
+ * delimited single-line literal path token may reach the Host path bridge.
+ * Backslash is an ordinary filename character in PowerShell; a single-quoted
+ * literal is always literal (`''` is one apostrophe); double-quoted content is
+ * accepted only while it stays literal (no `$` interpolation and no backtick
+ * escape anywhere in the token). Variable/subexpression/backtick/here-string/
+ * mixed quoting and multi-line continuations yield no candidates at all.
+ */
+
+/** One bare PowerShell word delimiter; unquoted whitespace and PowerShell
+ * control operators/commas end the word. */
+function isPowerShellWordDelimiter(character: string): boolean {
+  return character === ' ' || character === '\t' || character === '\n'
+    || character === ';' || character === '|' || character === '&'
+    || character === '(' || character === ')' || character === '{' || character === '}'
+    || character === '<' || character === '>' || character === ','
+}
+
+/** The delimiters that start a new PowerShell command segment. */
+function isPowerShellCommandSeparator(character: string): boolean {
+  return character === ';' || character === '|' || character === '&' || character === '(' || character === '{'
+}
+
+/** Find the closing quote after `from`, honoring PowerShell escapes. */
+function findPowerShellClosingQuote(line: string, from: number, quote: "'" | '"'): number {
+  for (let index = from; index < line.length; index += 1) {
+    const character = line[index]!
+    if (quote === "'") {
+      if (character === "'") {
+        if (line[index + 1] === "'") {
+          index += 1
+          continue
+        }
+        return index
+      }
+      continue
+    }
+    if (character === '`') {
+      index += 1
+      continue
+    }
+    if (character === '"') {
+      if (line[index + 1] === '"') {
+        index += 1
+        continue
+      }
+      return index
+    }
+  }
+  return -1
+}
+
+interface PowerShellWordScan {
+  readonly start: number
+  readonly value: string
+  readonly quote: "'" | '"' | undefined
+  readonly closingQuoteAfterCursor: boolean
+  readonly commandPosition: boolean
+  /** Whether the token STARTED with a quote (its whole value is quoted). */
+  readonly startedQuoted: boolean
+  readonly uncertain: boolean
+  readonly end: number
+}
+
+function scanPowerShellWord(line: string, prefixLength: number, col: number): PowerShellWordScan {
+  let tokenStart = prefixLength
+  let value = ''
+  let rawLength = 0
+  let quote: "'" | '"' | undefined
+  let nextIsCommand = true
+  let wordIsCommand = true
+  let startedQuoted = false
+  let closedQuote = false
+  let uncertain = false
+  let index = prefixLength
+  while (index < col) {
+    const character = line[index]!
+    if (quote === "'") {
+      if (character === "'") {
+        if (line[index + 1] === "'") {
+          value += "'"
+          rawLength += 2
+          index += 2
+          continue
+        }
+        quote = undefined
+        closedQuote = true
+        index += 1
+        continue
+      }
+      value += character
+      rawLength += 1
+      index += 1
+      continue
+    }
+    if (quote === '"') {
+      if (character === '`') {
+        uncertain = true
+        rawLength += 2
+        index += 2
+        continue
+      }
+      if (character === '"') {
+        if (line[index + 1] === '"') {
+          value += '"'
+          rawLength += 2
+          index += 2
+          continue
+        }
+        quote = undefined
+        closedQuote = true
+        index += 1
+        continue
+      }
+      if (character === '$') uncertain = true
+      value += character
+      rawLength += 1
+      index += 1
+      continue
+    }
+    if (isPowerShellWordDelimiter(character)) {
+      tokenStart = index + 1
+      value = ''
+      rawLength = 0
+      quote = undefined
+      startedQuoted = false
+      closedQuote = false
+      if (isPowerShellCommandSeparator(character)) nextIsCommand = true
+      index += 1
+      continue
+    }
+    if (rawLength === 0) {
+      wordIsCommand = nextIsCommand
+      nextIsCommand = false
+    }
+    if (character === "'" || character === '"') {
+      if (rawLength > 0) uncertain = true
+      else startedQuoted = true
+      quote = character
+      rawLength += 1
+      index += 1
+      continue
+    }
+    if (character === '`' || character === '$') {
+      uncertain = true
+      rawLength += 1
+      index += 1
+      continue
+    }
+    if ((character === '@' || character === '[') && rawLength === 0) {
+      uncertain = true
+      rawLength += 1
+      index += 1
+      continue
+    }
+    value += character
+    rawLength += 1
+    index += 1
+  }
+  // A quote that CLOSED before the cursor leaves the cursor outside the
+  // literal word; completing there would have no trustworthy raw range.
+  if (closedQuote && quote === undefined) uncertain = true
+  let end = col
+  if (!uncertain) {
+    if (quote !== undefined) {
+      const closing = findPowerShellClosingQuote(line, col, quote)
+      if (closing === -1) {
+        end = line.length
+      } else {
+        const tail = line.slice(col, closing)
+        if (quote === '"' && (tail.includes('$') || tail.includes('`'))) uncertain = true
+        end = closing + 1
+      }
+    } else {
+      let tailIndex = col
+      while (tailIndex < line.length) {
+        const character = line[tailIndex]!
+        if (isPowerShellWordDelimiter(character)) break
+        if (character === '$' || character === '`' || character === "'" || character === '"') {
+          uncertain = true
+          break
+        }
+        tailIndex += 1
+      }
+      end = tailIndex
+    }
+  }
+  const closingQuoteAfterCursor = quote !== undefined && findPowerShellClosingQuote(line, col, quote) !== -1
+  return {
+    start: tokenStart,
+    value,
+    quote,
+    closingQuoteAfterCursor,
+    commandPosition: rawLength === 0 ? nextIsCommand : wordIsCommand,
+    startedQuoted,
+    uncertain,
+    end,
+  }
+}
+
+/** Whether a decoded PowerShell token is an unambiguous literal PATH word.
+ * A bare command position never fakes a command candidate; an ordinary
+ * argument position always addresses a path (a `-Parameter` word does not). */
+function isPowerShellPathValue(value: string, commandPosition: boolean, startedQuoted: boolean): boolean {
+  if (value === '') return !commandPosition
+  if (!startedQuoted && value.startsWith('-')) return false
+  if (value === '.' || value === '..') return true
+  if (value.startsWith('.\\') || value.startsWith('./') || value.startsWith('..\\') || value.startsWith('../')) return true
+  if (value.startsWith('~')) return true
+  if (/^[A-Za-z]:[\\/]/u.test(value)) return true
+  if (value.includes('\\') || value.includes('/')) return true
+  return !commandPosition
+}
+
+/** Parse one PowerShell `!`/`!!` line for a literal path position. */
+export function powershellCompletionContext(line: string, col: number): ShellCompletionContext | undefined {
+  if (!line.startsWith('!')) return undefined
+  const prefixLength = line.startsWith('!!') ? 2 : 1
+  if (col < prefixLength) return undefined
+  const scan = scanPowerShellWord(line, prefixLength, col)
+  if (scan.uncertain) return undefined
+  if (!isPowerShellPathValue(scan.value, scan.commandPosition, scan.startedQuoted)) return undefined
+  return {
+    kind: 'paths',
+    prefix: line.slice(scan.start, col),
+    priorWords: [],
+    word: {
+      valuePrefix: scan.value,
+      quote: scan.quote,
+      closingQuoteAfterCursor: scan.closingQuoteAfterCursor,
+    },
+  }
+}
+
+/** The RAW range one PowerShell literal-path acceptance replaces: the whole
+ * current token, including a closing quote after the cursor. */
+export function powershellWordRange(line: string, prefixLength: number, col: number): { readonly start: number; readonly end: number } | undefined {
+  const scan = scanPowerShellWord(line, prefixLength, col)
+  if (scan.uncertain) return undefined
+  return { start: scan.start, end: scan.end }
+}
+
+/** Encode one literal path as a PowerShell single-quoted literal; the only
+ * escape is a doubled apostrophe. */
+export function powershellPathLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`
+}
+
 /** The RAW range a WHOLE-WORD acceptance replaces: the raw word start, and the
  * raw word end. A closing quote the cursor is inside is part of the range (the
  * accepted literal stops before it, so keeping it would leave `""`); otherwise
@@ -461,7 +718,9 @@ export async function suggestShellCompletion(
       items: candidates.map(candidate => {
         const directory = candidate.endsWith('/') || candidate.endsWith('\\')
         const value = port.pathAuthority === 'host' && context.word !== undefined
-          ? hostPathLiteral(candidate, context.word, directory)
+          ? port.pathLiteralDialect === 'powershell'
+            ? powershellPathLiteral(candidate)
+            : hostPathLiteral(candidate, context.word, directory)
           : candidate
         return { value, label: candidate }
       }),

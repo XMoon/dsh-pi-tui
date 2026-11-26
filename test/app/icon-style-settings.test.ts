@@ -150,7 +150,7 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
+    hostShellCompletion: { pathAuthority: 'client', pathLiteralDialect: 'bash', complete: async () => ({ kind: 'ok', candidates: [] }) },
     interaction: {
       questions: {
         onRequest: () => true,

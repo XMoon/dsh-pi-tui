@@ -2,12 +2,19 @@
  * The one Host user-shell execution core shared by the Direct adapter and the
  * authenticated split-Host service.
  *
- * Both policies run the raw command through the official subprocess seam as
- * `['bash', '-c', command]` (no wrapper, relay or shell-flag translation):
+ * Both policies run the raw command through one official host local shell
+ * dialect selected by the caller (no wrapper, relay or shell-flag translation):
+ * - a POSIX Host uses `['bash', '-c', command]`;
+ * - a Windows Host uses the exact live official `pwshPath` with the official
+ *   `-NoLogo -NoProfile -NonInteractive -Command <preamble><command>` argv and
+ *   the official environment overrides (one argv element carries the command,
+ *   so no second parse layer exists).
  * - `bypass` spawns that argv directly;
  * - `sandbox` resolves the EXACT Session policy and calls the installed
- *   official `ctx.sandbox.confine` exactly once, requires `enforcement:
- *   'full'`, and spawns the EXACT argv returned by that one call.
+ *   official `ctx.sandbox.confine` exactly once, requires the enforcement the
+ *   selected official backend actually provides (`full` on POSIX; the official
+ *   Windows ACL backend's `partial` or `full`), and spawns the EXACT argv
+ *   returned by that one call.
  *
  * Output is bounded by the subprocess collect/spill dispositions and read only
  * after `done` AND `waitForExit` proved the managed range empty. Cancellation
@@ -42,6 +49,21 @@ import {
 
 export const HOST_USER_SHELL_SPILL_MAX_BYTES = 64 * 1024 * 1024
 export const HOST_USER_SHELL_GRACE_MS = 5_000
+
+/** The Host-local shell dialect already selected for one attempt. The core
+ * never infers a platform: the adapter reads its live official capability and
+ * supplies exactly the argv inputs below. */
+export type HostShellLocal =
+  | { readonly dialect: 'bash' }
+  | {
+      readonly dialect: 'pwsh'
+      /** The live official `ctx.shell.pwshPath`, read once for this attempt. */
+      readonly executable: string
+      /** The official public encoding preamble constant. */
+      readonly encodingPreamble: string
+      /** The official public environment overrides constant. */
+      readonly envOverrides: Readonly<Record<string, string>>
+    }
 
 export interface HostSessionLike {
   readonly id: string
@@ -84,6 +106,8 @@ export interface HostShellExecutionRequest {
   readonly policy: HostUserShellPolicy
   readonly signal: AbortSignal
   readonly subprocess: SubprocessServiceLike
+  /** The Host-local shell dialect and executable inputs for this attempt. */
+  readonly shell: HostShellLocal
   /** The exact live Session; required for the `sandbox` policy. */
   readonly session: HostSessionLike | undefined
   readonly sandboxPolicy: SandboxPolicyServiceLike | undefined
@@ -138,8 +162,10 @@ function collectedOutput(reader: SubprocessOutputReader | undefined): {
  * @returns the bounded semantic result or a truthful refusal/failure.
  */
 export async function executeHostShellOnce(request: HostShellExecutionRequest): Promise<HostShellExecutionOutcome> {
-  const { command, cwd, policy, signal, subprocess } = request
-  const rawArgv = ['bash', '-c', command] as const
+  const { command, cwd, policy, signal, subprocess, shell } = request
+  const rawArgv: readonly string[] = shell.dialect === 'bash'
+    ? ['bash', '-c', command]
+    : [shell.executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `${shell.encodingPreamble}${command}`]
   let confined: ConfinedArgv | undefined
   if (policy === 'sandbox') {
     const prepared = await confineSandbox(rawArgv, request)
@@ -158,6 +184,7 @@ export async function executeHostShellOnce(request: HostShellExecutionRequest): 
     },
     graceMs: HOST_USER_SHELL_GRACE_MS,
     signal,
+    ...(shell.dialect === 'pwsh' ? { env: shell.envOverrides } : {}),
   }
 
   // The caller's final identity/policy gate runs here, synchronously, after
@@ -304,7 +331,12 @@ async function confineSandbox(
     return refused(`Host shell sandbox could not establish confinement: ${hostShellDiagnostic(error)} — nothing was executed`)
   }
   if (confined.enforcement !== 'full') {
-    return refused('Host shell sandbox enforcement is not full — nothing was executed')
+    if (request.shell.dialect === 'bash') {
+      return refused('Host shell sandbox enforcement is not full — nothing was executed')
+    }
+    if (confined.enforcement !== 'partial') {
+      return refused('Host shell sandbox enforcement is neither the official partial nor full result — nothing was executed')
+    }
   }
   return confined
 }

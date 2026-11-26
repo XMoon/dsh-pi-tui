@@ -66,6 +66,16 @@ Consequences that are part of the contract:
   `selectionRevision` is an admission epoch that never crosses the wire. The
   draft external editor stays Client-local; a future Host-filesystem
   editor/open is a separate capability.
+- `!`/`!!` execution is ONE Host-owned one-shot authority on both backends. A
+  POSIX Host keeps the raw Bash argv; a Windows Direct Host uses the live
+  official `ctx.shell.pwshPath` with the official composed PowerShell argv
+  (`-NoLogo -NoProfile -NonInteractive -Command` with the public
+  `ENCODING_PREAMBLE` and `ENV_OVERRIDES`) and accepts the official ACL
+  backend's real `partial` or `full` enforcement. A missing official shell
+  capability refuses before any spawn — never a bare `pwsh`, `cmd`, Git Bash,
+  WSL or sandbox downgrade, and `partial` is never advertised as full. Windows
+  Remote user-shell execution stays closed with the Windows daemon tier; PR3
+  owns real Host dialect provenance and the wire, never a Client-OS guess.
 
 ## Semantic ports and composition
 

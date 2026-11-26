@@ -4442,7 +4442,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           description: 'How Host-side user-shell execution runs your own ! / !! commands: '
             + 'Bypass runs them outside the dsh sandbox (the default when nothing is stored), Sandbox runs them '
             + 'under the DSH shell policy the Host really provides. This is the Host execution policy of the user '
-            + 'shell, not the model\'s tool sandbox policy and not a permission preset. The next ! / !! uses it.',
+            + 'shell, not the model\'s tool sandbox policy and not a permission preset. The next ! / !! uses it. '
+            + 'Windows uses DSH\'s ACL sandbox with partial enforcement; Linux/macOS user-shell sandbox requires full enforcement.',
           // The persist-first writer refuses on a non-ready backend or an
           // unreadable document, so the row offers NO confirmable candidate in
           // those states while still reporting the raw stored fact.
