@@ -669,8 +669,16 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
     }
     const stat = readLinuxTty(pid)
     if (stat.kind !== 'ok') return stat
-    const uid = readLinuxUid(pid)
-    if (!Number.isInteger(uid) || uid <= 0) return unknown('ACCESS_DENIED')
+    let uid = readLinuxUid(pid)
+    if (!Number.isInteger(uid) || uid <= 0) {
+      // A hidepid-style `/proc` can deny another user's status. Use the OS
+      // process table ONLY to prove a foreign UID; same/unknown stays closed.
+      const foreign = readForeignUid(pid)
+      if (foreign !== undefined && foreign !== process.getuid?.()) {
+        return { kind: 'ok', pid, uid: foreign, name: '', comm: '', foreign: true }
+      }
+      return unknown('ACCESS_DENIED')
+    }
     return {
       kind: 'ok',
       pid,
