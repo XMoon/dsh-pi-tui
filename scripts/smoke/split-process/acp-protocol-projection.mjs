@@ -151,6 +151,11 @@ function userText(event) {
   return (event.data?.content ?? []).map(part => (typeof part?.text === 'string' ? part.text : '')).join('')
 }
 
+/** The concatenated text blocks of one durable message payload. */
+function messageText(message) {
+  return (message?.content ?? []).map(part => (typeof part?.text === 'string' ? part.text : '')).join('')
+}
+
 /** Every `session/update` payload a connection received for one Session. */
 function updatesOf(updates, sessionId) {
   // The baseline command catalog is an independent standard notification every
@@ -463,6 +468,29 @@ export async function runAcpProtocolProjection(context) {
     assert(resumeReplayedNothing,
       `PP-08: resume on the same connection replays no conversation history (${JSON.stringify(resumeKinds)})`)
 
+    // Freeze the CANONICAL cut this repeat load must replay, by real durable
+    // message identity: every human user message and every assistant text
+    // message of the Session at the request boundary. The durable log is
+    // write-behind, so the scene's existing stability helper is reused instead
+    // of a fixed sleep.
+    const canonicalCutSize = await stableEventCount(sessionP)
+    const canonicalEvents = eventsOf(sessionP).slice(0, canonicalCutSize)
+    const canonicalText = []
+    for (const event of canonicalEvents) {
+      if (event.type === 'user/message' && event.data?.source?.kind === 'user') {
+        const text = messageText(event.data)
+        if (text.length > 0) canonicalText.push({ kind: 'user_message_chunk', messageId: event.data.id, text })
+      } else if (event.type === 'assistant/message') {
+        const message = event.data?.message
+        const text = messageText(message)
+        if (text.length > 0) canonicalText.push({ kind: 'agent_message_chunk', messageId: message.id, text })
+      }
+    }
+    assert(canonicalText.filter(expected => expected.kind === 'user_message_chunk').length >= 2,
+      `PP-08: the canonical cut owns both real human prompts (${JSON.stringify(canonicalText.map(expected => [expected.kind, expected.messageId]))})`)
+    assert(canonicalText.some(expected => expected.kind === 'agent_message_chunk'),
+      'PP-08: the canonical cut owns at least one assistant answer')
+
     // The repeat load on the SAME connection must replay the COMPLETE canonical
     // history for THIS request, and the real response settles only after every
     // replayed update was decoded by the official client.
@@ -487,9 +515,35 @@ export async function runAcpProtocolProjection(context) {
     const historyMessage = capableHistory.find(update => update.sessionUpdate === 'session_message')
     assert(historyMessage !== undefined && historyMessage.senderSessionId === childId,
       `PP-08: the canonical history replays the real agent message (${JSON.stringify(capableHistoryKinds)})`)
-    // The response was awaited before this cut was read: every replayed update
-    // was already decoded, so the response never preceded its ordered drain.
-    const loadAnsweredAfterDrain = capableHistoryKinds.length > 0
+    // Compare the DECODED frames of THIS repeat load with the frozen canonical
+    // cut by durable message identity, order and merged text. Chunk segmentation
+    // is free; a missing, duplicated or reordered message is not. The slice was
+    // taken at the moment the response was awaited, so nothing below can be
+    // filled in by the follow-up turn.
+    const decodedText = new Map()
+    const decodedOrder = []
+    for (const update of capableHistory) {
+      if (update.sessionUpdate !== 'user_message_chunk' && update.sessionUpdate !== 'agent_message_chunk') continue
+      assert(typeof update.messageId === 'string' && update.messageId.length > 0,
+        `PP-08: every replayed text message carries its durable id (${JSON.stringify(update)})`)
+      assert(update.content?.type === 'text' && typeof update.content.text === 'string',
+        `PP-08: every replayed text chunk is standard text (${JSON.stringify(update)})`)
+      const key = `${update.sessionUpdate}:${update.messageId}`
+      if (!decodedText.has(key)) decodedOrder.push(key)
+      decodedText.set(key, (decodedText.get(key) ?? '') + update.content.text)
+    }
+    const canonicalOrder = canonicalText.map(expected => `${expected.kind}:${expected.messageId}`)
+    assert(JSON.stringify(decodedOrder) === JSON.stringify(canonicalOrder),
+      `PP-08: the repeat load replays exactly the canonical message identities in order (${JSON.stringify({ decodedOrder, canonicalOrder })})`)
+    for (const expected of canonicalText) {
+      const actual = decodedText.get(`${expected.kind}:${expected.messageId}`)
+      assert(actual === expected.text,
+        `PP-08: message ${expected.messageId} replays its complete canonical text (${JSON.stringify({ expected: expected.text.slice(0, 120), actual: String(actual).slice(0, 120) })})`)
+    }
+    const repeatLoadCanonicalComplete = canonicalText.length > 0
+    // The complete canonical comparison above was read from the pre-response
+    // slice: the real response settled only after that ordered drain.
+    const loadAnsweredAfterDrain = repeatLoadCanonicalComplete
 
     // A REAL following operation separates the replay window from later traffic
     // without any sleep: the reattached View still owns the same Host Session.
@@ -713,6 +767,7 @@ export async function runAcpProtocolProjection(context) {
       load: {
         baselineKinds: baselineHistoryKinds,
         capableKinds: capableHistoryKinds,
+        canonicalMessages: canonicalText.map(expected => `${expected.kind}:${expected.messageId}`),
         resumeKinds,
       },
       live: {
@@ -745,7 +800,7 @@ export async function runAcpProtocolProjection(context) {
       scope: 'REAL_SPLIT_PROCESS_L6',
       listAuthorizedRoster: listedIds.includes(sessionP) && !listedIds.includes(childId),
       listReadsWithoutSideEffects,
-      loadReplayedCanonicalHistory: baselineHistoryKinds.includes('user_message_chunk'),
+      loadReplayedCanonicalHistory: repeatLoadCanonicalComplete,
       loadAnsweredAfterDrain,
       resumeReplayedNothing,
       planFromOfficialTodos: firstPlan.plan.entries.length === 2,

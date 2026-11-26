@@ -1660,6 +1660,21 @@ test('an unknown or closed Session answers the standard not-active error on ever
       assert.equal(frame.error?.data?.sessionId, 'ghost')
     }
     assert.deepEqual(fake.sessionHistoryReads(), [], 'a definite not-found load reads no history')
+    // An EMPTY Session id is malformed request shape, never a not-active
+    // Session: the same three methods keep -32602 with no Host dispatch.
+    for (const [id, method, params] of [
+      [10, 'session/prompt', { sessionId: '', prompt: [{ type: 'text', text: 'x' }] }],
+      [11, 'session/set_mode', { sessionId: '', modeId: 'plan' }],
+      [12, 'session/set_config_option', { sessionId: '', configId: 'model', value: '["p1","b"]' }],
+    ] as const) {
+      client.send({ jsonrpc: '2.0', id, method, params })
+      const frame = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string; sessionId?: unknown } } }
+      assert.equal(frame.id, id)
+      assert.equal(frame.error?.code, -32602, `${method} with an empty id keeps the invalid-params class`)
+      assert.equal(frame.error?.data?.code, 'LOCAL_ACP_VIEW_INVALID_REQUEST')
+      assert.equal(frame.error?.data?.sessionId, undefined, 'the malformed request carries no not-active Session id')
+    }
+    assert.equal(fake.prompts.length, 0, 'no empty-id request reached the Host')
     // Malformed requests keep their own -32602 invalid class; an invalid mode
     // is still checked before any ownership lookup.
     client.send({ jsonrpc: '2.0', id: 7, method: 'session/resume', params: { sessionId: '', cwd: '/host/proj' } })
@@ -2148,6 +2163,96 @@ test('a refused competitor during a refresh never poisons the slot request bookk
     fake.access.resolveAgent = originalResolve
   } finally {
     client.close()
+  }
+})
+
+test('a cancelled repeat load retires its fresh generation instead of replaying more history', async t => {
+  const { scope } = newScope(t)
+  const history = {
+    header: { sessionId: 'session-cancel-load', cwd: '/host/cancel' },
+    events: [
+      { seq: 0, type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'old question' }], role: 'user' } },
+      { seq: 1, type: 'assistant/message', data: { message: { id: 'a1', content: [{ type: 'text', text: 'old answer' }] } } },
+      { seq: 2, type: 'user/message', data: { id: 'u2', source: { kind: 'user' }, content: [{ type: 'text', text: 'second question' }], role: 'user' } },
+      { seq: 3, type: 'assistant/message', data: { message: { id: 'a2', content: [{ type: 'text', text: 'second answer' }] } } },
+    ],
+  }
+  const fake = makeFakeAccess({ sessionRead: true, sessionHistory: () => history })
+  fake.seed('session-cancel-load', '/host/cancel')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  const other = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    initialize(other, 1)
+    await other.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/load', params: { sessionId: 'session-cancel-load', cwd: '/host/cancel', mcpServers: [] } })
+    const updatesBeforeCancel = 0
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; method?: string }
+      if (frame.method === 'session/update') continue
+      if (frame.id !== 2) continue
+      break
+    }
+    // The REPEAT load is held on its real canonical read; the client then sends
+    // the official SDK cancellation path.
+    const entered = Promise.withResolvers<void>()
+    const gate = Promise.withResolvers<void>()
+    let armed = false
+    let held = false
+    const originalHistory = fake.access.readSessionHistory
+    fake.access.readSessionHistory = async (sessionId: string, signal?: AbortSignal) => {
+      if (armed && !held) {
+        held = true
+        entered.resolve()
+        await gate.promise
+      }
+      return await originalHistory(sessionId, signal)
+    }
+    armed = true
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/load', params: { sessionId: 'session-cancel-load', cwd: '/host/cancel', mcpServers: [] } })
+    await entered.promise
+    client.send({ jsonrpc: '2.0', method: '$/cancel_request', params: { requestId: 3 } })
+    // The cancelled refresh must already have retired its fresh generation: a
+    // DIFFERENT connection can attach the Session before the held read settles.
+    other.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-cancel-load', cwd: '/host/cancel' } })
+    let otherAttach: { id?: number; result?: unknown; error?: unknown } | undefined
+    for (;;) {
+      const frame = (await other.next()) as { id?: number; method?: string; result?: unknown; error?: unknown }
+      if (frame.method !== undefined) continue
+      otherAttach = frame
+      break
+    }
+    assert.equal(otherAttach.id, 2)
+    assert.equal(otherAttach.error, undefined, 'the cancelled refresh leaves the Session attachable')
+    // Release the held read. Any uncommitted replay would now be written on the
+    // cancelling connection BEFORE this close response (same socket FIFO).
+    gate.resolve()
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/close', params: { sessionId: 'session-cancel-load' } })
+    let cutClose: { id?: number; result?: unknown } | undefined
+    const afterCancel: Array<{ method?: string; params?: { sessionId?: string; update?: { sessionUpdate?: string } } }> = []
+    for (;;) {
+      const frame = (await client.next(5_000)) as { id?: number; method?: string; params?: { sessionId?: string; update?: { sessionUpdate?: string } }; result?: unknown }
+      if (frame.method === 'session/update') afterCancel.push(frame)
+      if (frame.id === 4) {
+        cutClose = frame
+        break
+      }
+    }
+    assert.deepEqual(cutClose?.result, {}, 'the cancelling connection holds no View after the cancellation')
+    assert.deepEqual(afterCancel, [], 'the cancelled replay wrote no uncommitted history after the cancel')
+    assert.equal(updatesBeforeCancel, 0)
+    // The new owner of the Session is untouched by the old generation's late
+    // read settling.
+    other.send({ jsonrpc: '2.0', id: 3, method: 'session/close', params: { sessionId: 'session-cancel-load' } })
+    assert.deepEqual(((await other.next()) as { result?: unknown }).result, {})
+    assert.deepEqual(fake.removedMessageIds, [], 'no Host inbox cancellation was issued')
+    assert.deepEqual(fake.cancelledTurns, [], 'no Host turn cancellation was issued')
+  } finally {
+    client.close()
+    other.close()
   }
 })
 

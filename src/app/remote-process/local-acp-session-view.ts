@@ -2271,8 +2271,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // servers (even the same ones) would require a lease restart, which is the
       // explicit close -> ordinary attach path, never a silent reuse/replacement.
       if ((request.mcpServers?.length ?? 0) > 0) throw this.reattachMcpRefused()
+      // A request that was already cancelled owns no right to replace the held
+      // View: refuse BEFORE the outgoing generation changes in any way.
+      requestSignal?.throwIfAborted()
       previous = this.reattachClaim(state, access, sessionId)
       claim = this.replaceClaim(state, previous)
+      this.watchRefreshAbort(state, claim, requestSignal)
       op = state.op
     } else {
       op = this.beginAttach(state)
@@ -2368,8 +2372,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // Validate-first: a refusal here never touches the outgoing generation.
       validate()
       if (request.mcpServers.length > 0) throw this.reattachMcpRefused()
+      // A request that was already cancelled owns no right to replace the held
+      // View: refuse BEFORE the outgoing generation changes in any way.
+      requestSignal?.throwIfAborted()
       previous = this.reattachClaim(state, access, sessionId)
       claim = this.replaceClaim(state, previous)
+      this.watchRefreshAbort(state, claim, requestSignal)
       op = state.op
     } else {
       op = this.beginAttach(state)
@@ -5937,13 +5945,39 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    */
   retireFailedRefresh(state: ConnectionViewState, sessionId: string): void {
     const claim = this.claims.get(sessionId)
-    if (claim === undefined || claim.connectionIdentity !== state || claim.detachedWithFence === true) return
+    if (claim === undefined || claim.connectionIdentity !== state) return
+    this.retireClaimGeneration(state, claim)
+  }
+
+  /**
+   * Retire ONE exact fresh claim generation (a reattach's post-attach failure or
+   * its request cancellation). The claim identity is re-checked, so a claim
+   * this request did not create — a concurrent close's fence, another
+   * connection's View, a newer generation — is never touched. A held Host
+   * obligation keeps its own fence/terminal retirement.
+   */
+  private retireClaimGeneration(state: ConnectionViewState, claim: ViewClaim): void {
+    if (this.claims.get(claim.sessionId) !== claim || claim.detachedWithFence === true) return
     claim.notifyConfigUpdate = undefined
     this.stopProjectionOutput(claim)
     this.releaseQuestionForms(claim)
-    if (this.claims.get(sessionId) === claim) this.claims.delete(sessionId)
+    this.claims.delete(claim.sessionId)
     if (state.phase === 'attached') state.phase = 'idle'
     this.notifyWorkSettled()
+  }
+
+  /**
+   * Wire ONE reattach request's real cancellation into its exact fresh claim
+   * generation for the request's whole lifetime: the SDK aborts this signal on
+   * `$/cancel_request`, and that abort stops the uncommitted read-only output
+   * (replay/Store reads), invalidates the async result and retires only this
+   * generation — never the old claim and never a Host cancel/close/dispose.
+   * The watcher is created AFTER the fresh claim is committed (a pre-admission
+   * abort never reaches it) and dies with the request signal.
+   */
+  private watchRefreshAbort(state: ConnectionViewState, claim: ViewClaim, signal?: AbortSignal): void {
+    if (signal === undefined) return
+    signal.addEventListener('abort', () => { this.retireClaimGeneration(state, claim) }, { once: true })
   }
 
   /**

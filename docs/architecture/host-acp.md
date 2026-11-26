@@ -1119,12 +1119,16 @@ connection's single write queue precede the refresh; an old async
 read/notification result is dropped by the existing exact-claim/epoch/sink
 fences. `load` replays the complete canonical history again for THIS request (a
 fresh generation keeps no previous dedupe or compaction state) and answers after
-its ordered drain, while `resume` replays nothing. A started refresh that later
-fails — including a failed or aborted post-attach initial config read — or is
-closed retires ONLY its fresh generation (its sink, read IO and reverse Forms;
-no Host cancel, close or rollback) and never resurrects the old one, so the
-Session is not left attached to a request the client never saw succeed and an
-explicit attach may follow.
+its ordered drain, while `resume` replays nothing. A request that is already
+cancelled when it is admitted never replaces the held View. Once the fresh
+generation commits, the request's OWN cancellation — during the official
+resolve, the canonical replay/Store reads or the post-attach initial config
+read — retires exactly that generation: it stops the uncommitted read-only
+output, invalidates late async results and never touches the old claim or a
+fencing claim. A started refresh that later fails or is closed does the same
+(sink, read IO and reverse Forms retired; no Host cancel, close or rollback) and
+never resurrects the old one, so the Session is not left attached to a request
+the client never saw succeed and an explicit attach may follow.
 
 ### Session-scoped error classes
 
@@ -1140,11 +1144,15 @@ definite `session/not-found` (`LOCAL_ACP_VIEW_SESSION_NOT_FOUND`) answers the
 same class; a `session/resume` / `session/load` for a Session this connection
 holds as a transient or detached-with-fence claim instead answers the retryable
 `LOCAL_ACP_VIEW_BUSY` (see "Same-connection reattach"). The requested id is
-never replaced by a Host guess. Malformed parameters (empty id, invalid cwd,
-unsupported mode/config value, malformed MCP declaration) keep their own
-`-32602` invalid-params classes and their existing precedence, and a Session
-held by ANOTHER connection's View keeps the conflict class
-(`LOCAL_ACP_VIEW_ALREADY_ATTACHED`, `-32602`) for `resume`/`load`. An unknown, inactive or foreign
+never replaced by a Host guess. An EMPTY `sessionId` is malformed parameters
+(`-32602`, `LOCAL_ACP_VIEW_INVALID_REQUEST`) for `session/prompt`,
+`session/set_mode` and `session/set_config_option` — a Session id is opaque and
+non-empty, so it is never reported as not-active and never triggers a Host
+lookup. Other malformed parameters (invalid cwd, unsupported mode/config value,
+malformed MCP declaration) keep their own `-32602` invalid-params classes and
+their existing precedence, and a Session held by ANOTHER connection's View keeps
+the conflict class (`LOCAL_ACP_VIEW_ALREADY_ATTACHED`, `-32602`) for
+`resume`/`load`. An unknown, inactive or foreign
 `session/close` remains the standard empty `{}` with no Host side effect, and
 `session/cancel` for such a Session stays a no-op. Real Host failures (internal
 error, writer-held or subagent-owned refusal, replay/attachment failure) keep

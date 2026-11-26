@@ -8721,3 +8721,84 @@ test('a failed refresh retires only its fresh claim and leaves the Session attac
   registry.retireFailedRefresh(other, 'RE10')
   assert.equal(registry.claimCount(), 1, 'another connection cannot retire this claim')
 })
+
+test('a pre-aborted repeat is refused before it can replace the held claim', async () => {
+  const access = new FakeAccess()
+  access.sessionReadReady = true
+  const agent = makeAgent('RE11', '/w')
+  access.seed(agent)
+  access.sessionHistory = { header: { sessionId: 'RE11', cwd: '/w' }, events: [] }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const channels: AcpViewChannels = {
+    capabilities: PR2_CAPABILITIES,
+    notifyProjection: async () => {},
+  }
+  await registry.loadSession(conn, access, { sessionId: 'RE11', cwd: '/w', mcpServers: [] }, channels)
+  assert.equal(registry.phaseOf(conn), 'attached')
+  const resolvesBefore = access.resolveCalls.length
+  const aborted = new AbortController()
+  aborted.abort()
+  const isAbort = (error: unknown): boolean => error instanceof Error && error.name === 'AbortError'
+  await assert.rejects(
+    registry.resumeSession(conn, access, { sessionId: 'RE11', cwd: '/w' }, undefined, aborted.signal, true),
+    isAbort,
+  )
+  await assert.rejects(
+    registry.loadSession(conn, access, { sessionId: 'RE11', cwd: '/w', mcpServers: [] }, undefined, aborted.signal, true),
+    isAbort,
+  )
+  assert.equal(registry.claimCount(), 1, 'the held claim survives both pre-aborted requests')
+  assert.equal(registry.phaseOf(conn), 'attached', 'the held View stays the attached generation')
+  assert.equal(access.resolveCalls.length, resolvesBefore, 'a pre-aborted request reaches no official resolve')
+})
+
+test('a repeat load cancelled during its canonical read retires only the fresh generation', async () => {
+  const access = new FakeAccess()
+  access.sessionReadReady = true
+  const agent = makeAgent('RE12', '/w')
+  access.seed(agent)
+  const history: AcpSessionHistory = {
+    header: { sessionId: 'RE12', cwd: '/w' },
+    events: [
+      { seq: 0, type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'old question' }], role: 'user' } },
+      { seq: 1, type: 'assistant/message', data: { message: { id: 'a1', content: [{ type: 'text', text: 'old answer' }] } } },
+    ],
+  }
+  access.sessionHistory = history
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const delivered: SessionUpdate[] = []
+  const channels: AcpViewChannels = {
+    capabilities: PR2_CAPABILITIES,
+    notifyProjection: async (_sessionId, update) => { delivered.push(update) },
+  }
+  const load = async (signal?: AbortSignal, reattach = false): Promise<Record<string, never>> =>
+    await registry.loadSession(conn, access, { sessionId: 'RE12', cwd: '/w', mcpServers: [] }, channels, signal, reattach)
+  await load()
+  assert.deepEqual(delivered.map(update => update.sessionUpdate), ['user_message_chunk', 'agent_message_chunk'])
+  delivered.length = 0
+  // The cancelled request waits on the REAL canonical read: the abort must stop
+  // its uncommitted replay and retire its fresh claim without waiting for a
+  // provider terminal.
+  const entered = deferred<void>()
+  const gate = deferred<AcpSessionHistory>()
+  access.readSessionHistoryImpl = async () => {
+    entered.resolve()
+    return await gate.promise
+  }
+  const controller = new AbortController()
+  const pending = load(controller.signal, true)
+  await entered.promise
+  controller.abort()
+  gate.resolve(history)
+  await assert.rejects(pending, isViewError('LOCAL_ACP_VIEW_CLOSED'))
+  assert.deepEqual(delivered, [], 'the cancelled replay delivered no uncommitted history')
+  assert.equal(registry.claimCount(), 0, 'only the fresh generation was retired')
+  assert.equal(registry.phaseOf(conn), 'idle')
+  access.readSessionHistoryImpl = async () => access.sessionHistory
+  await registry.resumeSession(conn, access, { sessionId: 'RE12', cwd: '/w' }, channels)
+  assert.equal(registry.phaseOf(conn), 'attached', 'an explicit later attach succeeds on the same connection')
+})

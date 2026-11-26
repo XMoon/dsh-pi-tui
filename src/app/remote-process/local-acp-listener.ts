@@ -876,6 +876,21 @@ function buildAgentApp(
       { sessionId },
     )
     /**
+     * The three View-borrowing methods keep the ACP request-shape contract: a
+     * Session id is opaque and non-empty, so an empty id is malformed
+     * parameters (`-32602`) before any routing or Host lookup — never the
+     * standard not-active Session, which names a real requested id.
+     */
+    const requireSessionId = (sessionId: string): void => {
+      if (sessionId.length === 0) {
+        throw new LocalAcpViewError(
+          'LOCAL_ACP_VIEW_INVALID_REQUEST',
+          'a non-empty sessionId is required',
+          JSONRPC_INVALID_PARAMS,
+        )
+      }
+    }
+    /**
      * The listener-owned lifetime of the wire requests currently dispatched on
      * ONE view slot: from request admission to the handler's `finally`,
      * INCLUDING the post-attach initial config read. It is deliberately not a
@@ -1232,6 +1247,7 @@ function buildAgentApp(
       let view: ConnectionViewState | undefined
       try {
         requireInitialized()
+        requireSessionId(params.sessionId)
         view = routeOwnedView(slots, views, params.sessionId)
         if (view === undefined) throw notOwned(params.sessionId)
         admitSameSlotRequest(view)
@@ -1266,6 +1282,7 @@ function buildAgentApp(
           const invalid = invalidPolicyOption('the requested session mode is not selectable')
           throw new LocalAcpViewError(invalid.code, invalid.message, invalid.rpcCode)
         }
+        requireSessionId(params.sessionId)
         view = routeOwnedView(slots, views, params.sessionId)
         if (view === undefined) throw notOwned(params.sessionId)
         admitSameSlotRequest(view)
@@ -1285,6 +1302,7 @@ function buildAgentApp(
       let view: ConnectionViewState | undefined
       try {
         requireInitialized()
+        requireSessionId(params.sessionId)
         view = routeOwnedView(slots, views, params.sessionId)
         if (view === undefined) throw notOwned(params.sessionId)
         admitSameSlotRequest(view)
