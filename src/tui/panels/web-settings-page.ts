@@ -2241,7 +2241,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         else if (event.x >= listWidth + 2) this.scrollDetail(delta)
         return { handled: true }
       }
-      if (this.region === 'list') this.scrollList(delta)
+      // A passive single-region grant paints the LIST (rail preview), even
+      // when the preserved local region is the Detail. Route the wheel to the
+      // region that is actually on screen.
+      if (this.region === 'list' || !this.focused) this.scrollList(delta)
       else this.scrollDetail(delta)
       return { handled: true }
     }
@@ -2266,7 +2269,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (target === undefined) return undefined
     if (target.kind !== pressed.target.kind || target.id !== pressed.target.id || target.row !== pressed.target.row) return undefined
     this.activateTarget(target)
-    return undefined
+    // The click was admitted against the SAME live painted target: the Root may
+    // treat this as a real child gesture (never a gutter/blank/stale miss).
+    return { handled: true }
   }
 
   /** The wheel over the list scrolls the list by moving the SELECTION: the

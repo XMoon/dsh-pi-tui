@@ -1545,6 +1545,16 @@ test('a settled unknown in the list is not a Detail task seat: a clean parent ch
   await openWebPage(h)
   await openWebRow(h, 4) // Search Billing
   await chooseCandidate(h, 1)
+  // The ACTIVE choice Detail owns the local task seat: a real parent rail click
+  // is refused with no write and no focus transfer.
+  const writesBeforeChoice = h.writes.length
+  const choiceRail = paintedWordCell(h, 'Appearance')
+  pointerClick(h, choiceRail.row, choiceRail.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u,
+    'the active choice Detail keeps the workbench')
+  assert.match(h.view(), /› Account/u, 'the local choice stays selected')
+  assert.equal(h.writes.length, writesBeforeChoice, 'the refused parent click writes nothing')
   // Force the write's verification readback unreadable, so the settled row is a
   // visible unknown rather than a save or a refusal.
   const releasePre = h.holdRead()
@@ -1558,12 +1568,24 @@ test('a settled unknown in the list is not a Detail task seat: a clean parent ch
     () => h.vt.waitForRender(), 'the write readback to be issued')
   await settlePainted(h, 'the settled unknown verdict', frame =>
     frame.includes('Could not confirm save') && !frame.includes('Saving…'))
+  // The visible unknown is a Detail-held task seat: a parent rail click is
+  // refused until the user's own Detail Back ends that seat.
+  const writesBeforeUnknown = h.writes.length
+  await settlePointerClick(h)
+  const unknownRail = paintedWordCell(h, 'Conversation')
+  pointerClick(h, unknownRail.row, unknownRail.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u,
+    'the unknown Detail keeps the workbench')
+  assert.match(h.view(), /Could not confirm save/u, 'the unknown verdict stays visible')
+  assert.equal(h.writes.length, writesBeforeUnknown, 'the refused parent click never replays')
   // The explicit Detail Back ends the local task seat; the warning stays on the
   // list row but the user is now deliberately in the clean list.
   await key(h, ESC)
   assert.match(h.view(), /Could not confirm save/u, 'the list keeps the warning')
   assert.match(h.view(), /Open \[Enter\]/u, 'the list owns the seat again')
   const writesBefore = h.writes.length
+  await settlePointerClick(h)
   const appearance = paintedWordCell(h, 'Appearance')
   pointerClick(h, appearance.row, appearance.column + 1)
   await waitForFrame(() => h.view(),
@@ -3570,4 +3592,97 @@ test('a real Remote A→B replacement refuses an old pointer with no page read, 
   assert.equal(countWrites[0]?.destination, 'B')
   await key(h, '\x1b')
   assert.equal((remote.namespaces.get('web-deepseek-api')!.value as Record<string, unknown>).count, 20)
+})
+
+test('the unpainted rail/child handoff admits only the real Esc and never a second seat transfer', async t => {
+  const h = setup({ columns: 80, rows: 24 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  const readsBefore = h.readCount()
+  // From the painted child list, yield to the rail and send a second Tab BEFORE
+  // any destination frame paints. The awaiting-paint admission must drop it.
+  h.vt.sendInput('\x1b[Z')
+  h.vt.sendInput('\t')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /\[Categories \(10\)\]/u,
+    `the rail seat is the one that paints after the unpainted handoff:\n${h.view()}`)
+  assert.match(h.view(), /Up\/Down select/u, 'the rail bar owns the physical last row')
+  assert.equal(h.readCount(), readsBefore, 'neither seat transfer starts a Host read')
+  // Reverse: from the painted rail, hand the seat to the child and press the
+  // REAL Esc before its frame paints. The logical child seat's Back ladder must
+  // still run (list root -> the real Rows origin).
+  h.vt.sendInput('\r')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Rows/u,
+    `the immediate real Esc ran the child Back ladder:\n${h.view()}`)
+  assert.equal(h.readCount(), readsBefore, 'the Back ladder never re-reads the Host')
+})
+
+test('a rejected child click never steals the rail seat; a real row click does', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await key(h, '\x1b[Z') // painted rail, the child list is the passive preview
+  assert.match(h.view(), /\[Categories \(10\)\]/u)
+  const readsBefore = h.readCount()
+  const rows = h.view().split('\n')
+  const headerRow = rows.findIndex(line => line.includes('Current / Detail'))
+  assert.ok(headerRow >= 0, `the pane header is painted:\n${h.view()}`)
+  const label = rows[headerRow]!.indexOf('Web Search / Fetch')
+  const listStart = rows[headerRow]![label - 1] === '[' ? label - 1 : label
+  const contentRow = headerRow + 1
+  // The 2-cell child gutter and the passive Detail carry no target. Neither a
+  // completed click there nor a row-to-row mismatch may steal the rail seat.
+  pointerClick(h, contentRow, listStart + 34)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /\[Categories \(10\)\]/u, 'the gutter never steals the rail seat')
+  pointerClick(h, contentRow, listStart + 34 + 2 + 10)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /\[Categories \(10\)\]/u, 'the passive Detail has no action target')
+  h.vt.sendInput(`\x1b[<0;${listStart + 2 + 1};${contentRow + 1}M`)
+  h.vt.sendInput(`\x1b[<0;${listStart + 2 + 1};${contentRow + 2}m`)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /\[Categories \(10\)\]/u, 'a row-to-row mismatch never transfers the seat')
+  // A REAL painted list-row click is the only seat transfer. The mismatch
+  // press above used the same cells, so pace past the alt-screen's double-click
+  // word-selection window first.
+  await settlePointerClick(h)
+  pointerClick(h, contentRow, listStart + 2)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /\[Web Search \/ Fetch\]/u, 'the real row click takes the child list seat')
+  assert.match(h.view(), /Open \[Enter\]/u)
+  assert.equal(h.readCount(), readsBefore, 'pointer seat transitions start no Host read')
+})
+
+test('a passive single-region wheel moves the visible list, never the hidden Detail', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 6) // the read-only Search API Override Detail
+  await key(h, ENTER)
+  assert.match(h.view(), /Current: Host YAML: not set/u)
+  // The Tools category re-click is the legal clean-read-only Detail yield: it
+  // keeps the mounted page and the retained Detail region while the rail owns
+  // the keyboard.
+  const tools = paintedWordCell(h, 'Tools')
+  pointerClick(h, tools.row, tools.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /\[Categories \(10\)\]/u, 'the clean read-only Detail yielded to the rail')
+  // At 80 columns the passive projection paints the LIST only.
+  h.vt.resize(80, 24)
+  await h.vt.waitForRender()
+  const passive = h.view()
+  assert.match(passive, /Web Search Provider/u, 'the passive pair paints the visible list')
+  assert.doesNotMatch(passive, /Current: Host YAML: not set/u, 'the hidden Detail is not painted')
+  const rows = h.view().split('\n')
+  const headerRow = rows.findIndex(line => line.includes('Current / Detail') || line.includes('Categories (10)'))
+  assert.ok(headerRow >= 0)
+  const label = headerRow >= 0 ? rows[headerRow]!.indexOf('Web Search / Fetch') : -1
+  const listStart = label >= 0 && rows[headerRow]![label - 1] === '[' ? label - 1 : Math.max(0, label)
+  const contentRow = headerRow + 1
+  h.vt.sendInput(`\x1b[<65;${listStart + 2 + 1};${contentRow + 1}M`)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /> Fetch API Override/u,
+    `the wheel moved the visible list cursor:\n${h.view()}`)
 })

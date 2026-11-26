@@ -4417,6 +4417,10 @@ export class SettingsWorkspacePanel implements Component {
   private focusWebWorkbench(): void {
     if (!this.webWorkbenchActive()) return
     this.focus = 'detail'
+    // The logical seat is committed BEFORE the frame paints: the page's own Esc
+    // ladder must work in the unpainted handoff window. Renderer ink/targets
+    // still come only from the next real frame.
+    if (this.specialistPage !== undefined) this.specialistPage.focused = true
     this.pressedGesture = undefined
     this.specialistPressed = undefined
     this.contentPressed = undefined
@@ -4431,6 +4435,7 @@ export class SettingsWorkspacePanel implements Component {
     if (page === undefined || !this.webWorkbenchActive()) return
     if (page.webWorkbenchCanYieldToRail?.() !== true) return
     page.cancelPointer?.()
+    page.focused = false
     this.focus = 'categories'
     this.pressedGesture = undefined
     this.specialistPressed = undefined
@@ -4574,6 +4579,7 @@ export class SettingsWorkspacePanel implements Component {
     this.specialistPage = page
     this.specialistRow = row.id
     this.webReturnLevel = row.specialist === 'web-settings' ? (webOrigin ?? 'detail') : undefined
+    if (row.specialist === 'web-settings') page.focused = this.focus === 'detail'
     this.pressedGesture = undefined
     this.contentPressed = undefined
     this.bumpRevision()
@@ -5548,6 +5554,20 @@ export class SettingsWorkspacePanel implements Component {
       if (this.chromeGeometryStale() && !matchesKey(data, 'escape')) {
         this.cancelPointerOwners()
         this.intents.requestRender()
+        return
+      }
+      // SUX-06B/RF01: the seat handoff is synchronous, but its destination
+      // frame is not. Until that frame paints, ONLY the real Esc may run — and
+      // it runs against the CURRENT logical seat, never a stale passive paint
+      // flag. This gate precedes the rail Tab fast path and the child forward.
+      if (this.webWorkbenchActive() && this.rootProjectionAwaitingPaint()) {
+        if (!matchesKey(data, 'escape')) return
+        if (this.focus === 'categories') {
+          this.closeWebWorkbench()
+        } else {
+          this.specialistPage.handleInput('\x1b')
+          this.intents.requestRender()
+        }
         return
       }
       if (this.webWorkbenchActive() && this.focus === 'categories') {
@@ -6762,6 +6782,12 @@ export class SettingsWorkspacePanel implements Component {
         // Outside the tenant body the visible parent Categories/Rows keep their
         // OWN wheel owner below (a hidden pane still owns nothing).
       } else if (box !== undefined && inside) {
+        // SUX-06B: the workbench body's PRESS/CLICK are proved by the cell
+        // dispatcher (`onCellPress`/`onCellClick`), which alone owns the Root
+        // seat handoff. Forwarding the same click here would consume it before
+        // that admission and duplicate the press. Only the wheel is this
+        // handler's.
+        if (this.webWorkbenchActive() && event.type !== 'wheel') return undefined
         // A wheel may only scroll a body whose current grant really painted.
         if (this.specialistPage.grantAwaitingPaint?.() === true) {
           return event.type === 'wheel' ? { handled: true } : undefined
@@ -7103,9 +7129,9 @@ export class SettingsWorkspacePanel implements Component {
           || !sameContentBox(pressed.box, box)
           || !contentBoxContains(box, x, y)) return
         if (this.specialistPage.grantAwaitingPaint?.() === true) return
-        this.specialistPage.handleMouse?.({
-          type: 'click',
-          button: 'left',
+        const click = {
+          type: 'click' as const,
+          button: 'left' as const,
           x: x - box.x,
           y: y - box.top,
           screenX: x,
@@ -7115,16 +7141,25 @@ export class SettingsWorkspacePanel implements Component {
           shift: false,
           alt: false,
           ctrl: false,
-        })
-        // SUX-06B: a completed Web-body gesture hands the keyboard to the
-        // child's REAL current region (a row click selected the List) without
-        // opening a Detail or dispatching a write. A click that retired the
-        // child (the credential Models deeplink) leaves its OWN focus intact.
-        if (this.webWorkbenchActive()) {
-          this.focus = 'detail'
-          this.bumpRevision()
         }
-        this.intents.requestRender()
+        if (!this.webWorkbenchActive()) {
+          this.specialistPage.handleMouse?.(click)
+          this.intents.requestRender()
+          return
+        }
+        // SUX-06B/RF02: the child's own click admission decides whether this
+        // gesture really selected a painted target. A gutter/blank/passive
+        // Detail miss, a stale revision or a row-to-row mismatch has NO Root
+        // focus or render side effect. A click that changed the LIVE owner
+        // (the credential Models deeplink) is never overwritten here.
+        const owner = this.specialistPage
+        const seat = this.focus
+        const accepted = owner?.handleMouse?.(click)
+        if (accepted?.handled === true && this.specialistPage === owner && this.focus === seat) {
+          if (seat === 'categories') this.focus = 'detail'
+          this.bumpRevision()
+          this.intents.requestRender()
+        }
         return
       }
       if (!this.detailTenantActive() && !this.webWorkbenchActive()) return
