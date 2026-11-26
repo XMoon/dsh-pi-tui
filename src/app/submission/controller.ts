@@ -1406,17 +1406,19 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         }
         const sessionId = await resolveSession()
         if (deps.isCleanedUp()) return
-        if (deps.history === undefined) {
-          // The Split Client has no file writer: the resolver still ran so
-          // session creation/FIFO/currentness ordering is unchanged.
-        } else if (submittedAgent === undefined || deps.captureMatches(submittedSubject)) {
+        if (deps.history !== undefined) {
           // PR2: the history row's completion boundary is the Host acceptance,
           // never the submission attempt: a proven-unreceived prompt leaves no
           // "sent" row. The row keeps the original submit timestamp and the
-          // FINAL session id.
-          const persist = (): void => persistHistory(sessionId)
-          if (activeHold !== undefined) activeHold.deferAccepted(persist)
-          else persist()
+          // FINAL session id. The Split Client has no file writer, so the
+          // resolver above still ran but this block is skipped.
+          const persist = (): void => {
+            if (deps.isCleanedUp()) return
+            if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) return
+            if (activeHold !== undefined) activeHold.deferAccepted(() => persistHistory(sessionId))
+            else persistHistory(sessionId)
+          }
+          persist()
         }
         if (deps.isCleanedUp()) return
         const agent = deps.liveAgent()
