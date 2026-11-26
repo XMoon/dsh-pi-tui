@@ -20,7 +20,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
-import type { Key, KeyName, Node } from '@stencil-hq/tern'
+import { View, type Key, type KeyName, type Node, type Tree } from '@stencil-hq/tern'
 import type {
   HistoryReadTextRequest,
   HistoryReadTextResponse,
@@ -918,4 +918,69 @@ test('a material partial reorder advances the action identity and refuses the st
     pageRevision: reordered.pageRevision,
   })
   assert.equal(h.copies.length, copiesBefore + 1, 'the current action intent acts on the exact row')
+})
+
+
+test('a same-index material replacement retires the painted Copy id before SDK dispatch', async (t) => {
+  const h = makeSeat(t)
+  h.seat.open()
+  await waitUntil('the first search', () => h.port.pendingSearches() === 1)
+  const first = row(0, 'alpha exact')
+  const second = row(1, 'beta exact')
+  h.port.answerSearch({ kind: 'partial', items: [first, second], progress: { settled: 1, total: 3 } })
+  await waitUntil('the partial page', () => h.seat.renderState()?.status === 'partial')
+  await waitUntil('the selected body read', () => h.port.pendingReads() === 1)
+  h.port.answerRead(body('alpha exact'))
+  await waitUntil('the exact partial body', () => h.seat.renderState()?.actionsEnabled === true)
+  const painted = h.seat.renderState()
+  assert.ok(painted)
+  assert.ok(painted.selectedId?.endsWith('m0'))
+
+  // The next warmup page replaces row 0 with a DIFFERENT identity at the SAME
+  // index and query revision; the old Copy id must disappear from the tree.
+  const replacement = row(2, 'replacement exact')
+  await waitUntil('the progress refresh', () => h.port.pendingSearches() === 1, 3_000)
+  h.port.answerSearch({
+    kind: 'partial',
+    items: [replacement, second],
+    progress: { settled: 2, total: 3 },
+  })
+  await waitUntil('the same-index replacement', () => h.seat.renderState()?.header.includes('2/3') === true)
+  const replaced = h.seat.renderState()
+  assert.ok(replaced)
+  assert.equal(replaced.pageRevision, painted.pageRevision + 1, 'the material page advanced')
+  assert.notEqual(replaced.copyKey, painted.copyKey, 'the action node id changed with the page')
+  assert.equal(replaced.selectedId, replacement.sessionId + '\u0000' + replacement.messageId,
+    'the same-index replacement becomes the current selected row')
+  const flattenTree = (tree: Tree | undefined): Tree[] => {
+    if (tree === undefined) return []
+    return [tree, ...tree.children.flatMap(child => flattenTree(child))]
+  }
+  const oldView = View.from({ dock: historySearchView({ state: painted, onIntent: () => {}, wide: true }) })
+  const newView = View.from({ dock: historySearchView({ state: replaced, onIntent: () => {}, wide: true }) })
+  const oldCopy = oldView.regions.flatMap(region => flattenTree(region)).find(tree => tree.props['role'] === HISTORY_SEARCH_ROLES.copy)
+  assert.ok(oldCopy !== undefined, 'the old Copy node existed with a real SDK id')
+  assert.equal(newView.find(oldCopy.id), undefined,
+    'the SDK cannot resolve the old Copy id in the current tree')
+  const newCopy = newView.regions.flatMap(region => flattenTree(region)).find(tree => tree.props['role'] === HISTORY_SEARCH_ROLES.copy)
+  assert.ok(newCopy !== undefined)
+  assert.notEqual(newCopy.id, oldCopy.id)
+  const copiesBefore = h.copies.length
+  h.seat.handleIntent({
+    kind: 'copy',
+    selectedId: painted.selectedId,
+    serial: painted.serial,
+    revision: painted.revision,
+    pageRevision: painted.pageRevision,
+  })
+  assert.equal(h.copies.length, copiesBefore, 'the stale action intent is refused')
+  await waitUntil('the replacement body read', () => h.port.pendingReads() === 1)
+  h.port.answerRead(body('replacement exact'))
+  await waitUntil('the replacement body', () => h.seat.renderState()?.actionsEnabled === true)
+  const live = h.seat.renderState()
+  assert.ok(live)
+  h.seat.handleIntent({
+    kind: 'copy', selectedId: live.selectedId, serial: live.serial, revision: live.revision, pageRevision: live.pageRevision,
+  })
+  assert.equal(h.copies.at(-1)?.raw, 'replacement exact')
 })

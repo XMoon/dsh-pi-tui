@@ -469,7 +469,8 @@ Client's JSONL files are neither read nor written.
   2048 bytes. It carries no query, path, official id or whole row, and a
   malformed/legacy/re-scoped/rebuilt anchor is `stale`, never a silently
   re-ranked page.
-- **Statuses.** `searching`, `loading` (Host index warmup), `incomplete`,
+- **Statuses.** `searching`, `loading` (Host index warmup), `partial` (the
+  healthy first cold round; see the Remote section), `incomplete`,
   `unavailable` (including `service-missing`), `denied`, `failed`, `stale`,
   `too-long` and `ready` are distinct. A non-ready answer is never rendered as
   an authoritative empty result; a query over 256 UTF-16 units is refused

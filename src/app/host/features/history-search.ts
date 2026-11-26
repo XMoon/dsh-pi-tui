@@ -1456,6 +1456,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.sessionRepairFlights.set(sessionId, { promise: claim, kind: 'rebuild' })
     try {
       return await work()
+    } catch (error) {
+      // A throw after a readable terminal must not leave that permit visible
+      // once the claim is released; a later complete replay re-grants it.
+      this.revokeRoundReadEvidence(sessionId)
+      throw error
     } finally {
       const registered = this.sessionRepairFlights.get(sessionId)
       if (registered?.promise === claim) this.sessionRepairFlights.delete(sessionId)
@@ -1664,7 +1669,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   /** One bounded live-commit step: ONE Session, at most ONE read-batch chunk. */
   private drainOnePendingSession(): void {
     if (this.disposed || this.pending.size === 0) return
-    if (this.state.kind === 'loading') return
+    // Hold ordinary drains for the WHOLE first round, not merely while the
+    // public state says loading: a true fault must not change drain scheduling.
+    if (this.coverage === 'booting') return
     if (this.index === undefined) return
     // The accepted payload must wait for a valid source authority; never
     // consume it against a retired checkpoint while a required service is gone.
@@ -1725,7 +1732,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.drainScheduled = false
     if (this.disposed) return
     if (this.requiredServicesMissing()) return
-    if (this.state.kind === 'loading') return
+    if (this.coverage === 'booting') return
     this.drainOnePendingSession()
     if (this.hasUnheldPending()) this.enqueueDrain()
     this.refreshCompleteness()

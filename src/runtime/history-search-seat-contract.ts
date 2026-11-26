@@ -71,8 +71,8 @@ export type RemoteHistorySeatStatus =
 export interface RemoteHistorySeatView {
   readonly serial: number
   readonly queryRevision: number
-  /** Monotonic material-page identity (rows/order/content or selection shape).
-   *  Progress-only publishes do not advance it. */
+  /** Monotonic material-page identity (row set/order/content identity).
+   *  Progress-only and body-only publishes do not advance it. */
   readonly pageRevision: number
   readonly scope: HistoryScope
   readonly query: string

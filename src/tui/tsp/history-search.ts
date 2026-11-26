@@ -467,13 +467,14 @@ export function createTspHistorySearch(
   const actionKeyOf = (owner: HistorySeatState, token: string): string =>
     `h${owner.openSerial}-r${owner.queryRevision}-p${owner.remoteView?.pageRevision ?? 0}-${token}`
 
-  /** An action cell whose meaning depends on WHICH row is highlighted: the
-   *  selected row's position joins the key, so a repaint that moved the
-   *  selection retires the old cell's identity along with it. */
+  /** An action cell whose meaning depends on WHICH row is highlighted. Both the
+   *  selected position and the MATERIAL page identity join the key, so a stale
+   *  press cannot resolve to the current handler after a refresh replaced the
+   *  row at the same index (even when the query revision did not move). */
   const selectionActionKeyOf = (owner: HistorySeatState, token: string): string => {
     const rows = owner.remoteView?.rows ?? owner.rows
     const index = rows.findIndex((row) => row.id === owner.selectedId)
-    return `h${owner.openSerial}-r${owner.queryRevision}-s${index}-${token}`
+    return `h${owner.openSerial}-r${owner.queryRevision}-p${owner.remoteView?.pageRevision ?? 0}-s${index}-${token}`
   }
 
   /** The state half of every ACTING entry: this exact card, open, admitted by

@@ -6609,8 +6609,10 @@ test('a real source-read failure during the first cold round stops partial publi
       await new Promise(resolve => setTimeout(resolve, 10))
     }
     assert.equal(answer?.kind, 'incomplete', JSON.stringify(answer))
+    if (answer?.kind === 'incomplete') assert.equal(answer.reason, 'source-read-failed')
     const after = await service.search({ scope: 'all', query: 'mutable', limit: 25 }, new AbortController().signal)
     assert.equal(after.kind, 'incomplete', 'a real source failure must not keep publishing a partial page')
+    if (after.kind === 'incomplete') assert.equal(after.reason, 'source-read-failed')
     const body = await service.readText({
       sessionId: 'proof-session',
       messageId: 'msg-1',
