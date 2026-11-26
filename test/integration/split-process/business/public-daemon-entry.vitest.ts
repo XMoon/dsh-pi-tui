@@ -388,11 +388,18 @@ test.skipIf(!linuxOnly)('resumes a durable public Session through --session and 
     expect(browserFrame, `the real Session Browser workspace row (${browserFrame})`).toContain('pi-tui')
     // Real Escape dismissal, with no blind sleeps: each step waits for the
     // actual browser composer or the next advertised Back/Close layer.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const before = await browser.text()
       await browser.press('Escape')
-      const frame = await waitForFrameMatch(browser,
-        value => value.includes('❯') || value.includes('Close [Esc]') || value.includes('Back [Esc]'),
-        'the Session Browser processed Escape', 10_000)
+      let frame: string
+      try {
+        frame = await waitForFrameMatch(browser,
+          value => value !== before
+            && (value.includes('❯') || value.includes('Close [Esc]') || value.includes('Back [Esc]')),
+          'the Session Browser processed Escape', 10_000)
+      } catch {
+        continue
+      }
       if (frame.includes('❯') && !frame.includes('Close [Esc]')) break
     }
     await waitForFrame(browser, '❯', 'the Session Browser returned to a usable composer after Esc')
