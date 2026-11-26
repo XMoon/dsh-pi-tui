@@ -643,6 +643,29 @@ user journey and never claims a real GUI. The same-birth Linux zombie
 classification is a Linux-only case (explicit `N/A` on Darwin); Darwin uses the
 real dead-Host schema-2 recovery path instead of fabricating `/proc` state.
 
+Two further non-PTY contracts are fixed:
+
+- An in-flight authentication cancellation is keyed by the REAL pending
+  `/connect` request, never by a spawn timestamp or sleep. A test-owned loopback
+  origin holds the one expected real `/connect` transaction (the synthetic token
+  is not a product secret), the real installed Client is still unauthenticated
+  and has no Context/Ready/failure, then the test-owned SIGTERM reaches the
+  Supervisor. The Client must exit within five seconds, close the held socket
+  and report the one shutdown cleanup, while the original Host and a real
+  already-mounted peer stay usable.
+- A cross-home profile discovery uses ONE fixed alias `DSH_HOME` whose
+  `profiles/pi-tui` resolves to the SAME canonical installed profile: the scope
+  id (UID + canonical profile) is identical while the discovery root is
+  distinct. Its registry/launch/Host log must start absent. The real detached
+  Host candidate must record exactly the product `host-seat-conflict`
+  (`HOST_ALREADY_OWNED`, same scope) and no Ready/profile boot. The Supervisor
+  must settle the alias obligation (real log, no publication, candidate
+  terminal, alias qualification seat free, primary seat still held) before it
+  releases the primary Host seat or calls the Scene clean. An unproven alias
+  terminal is `NOT_QUIESCED`, never a pass; an abnormal abort with no candidate
+  spawn is the only branch where `ENOENT` Host log plus no live candidate is a
+  valid terminal.
+
 It requires two private inputs:
 
 - `SPLIT_VITEST_TMP_BASE`: an existing absolute canonical directory outside this
@@ -802,10 +825,17 @@ mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-
 `public-daemon-before-registry`, `public-daemon-before-ready-ack` and
 `public-daemon-ownership-refused`. The three public windows run on both Linux
 and macOS; the same-birth zombie window stays Linux-only.
+`--case cross-home-seat-refusal` is accepted ONLY together with
+`--mode process-worker-kill --at qualification-client-spawned`. It binds the
+host-seat cross-home refusal test instead of the default startup/exit test and
+requires the same external kill to end in the alias-settlement/absence/seat
+facts below; any other case value or mode/at combination is refused.
 Each installed-entry window binds one exact business test and only holds after
 the Supervisor registered the real live child identities. `host-contenders-spawned`
 is the batch of concurrent Host contenders, `qualification-client-spawned` a
-registered live qualification Client against the authenticated Host,
+registered live qualification Client against the authenticated Host (with the
+fixed cross-home case, its alias reservation is also registered and its
+registry/launch are still absent),
 `host-artifact-absent-started` a committed scoped installed-copy mutation with a
 live Host attempt, `identity-witness-spawned` the Linux holder registration
 window before its zombie child identity exists, and
@@ -825,8 +855,12 @@ exact Host seat free, the registered kernel identities gone or
 provably reused, and — for `clients-ready` — a separate real sibling Scene
 already live at its authenticated checkpoint when the target is signalled,
 held across the target's reclaim, then released to continue its own business
-path and finalize. A checkpoint reached without an external signal fails; an
-unrun window is `NOT_RUN`, never a pass.
+path and finalize. The `--case cross-home-seat-refusal` run additionally
+requires the settled cross-home facts: the recorded real conflict (or the
+admitted no-spawn branch), alias registry/launch absence, the alias
+qualification seat free, the primary seat held before release, and no live
+detached alias candidate after the root is removed. A checkpoint reached
+without an external signal fails; an unrun window is `NOT_RUN`, never a pass.
 
 The two positive public windows bind the cold installed-public positive test
 (`starts one real public daemon Client and Host from the installed CLI`) on

@@ -104,6 +104,11 @@ const PROCESS_AT_TARGETS = new Map([
   }],
 ])
 const PROCESS_MODES = ['process-worker-kill', 'process-main-signal']
+const CROSS_HOME_CASE = 'cross-home-seat-refusal'
+const CROSS_HOME_CASE_TARGET = {
+  file: 'test/integration/split-process/business/host-seat.vitest.ts',
+  title: 'refuses cross-home discovery for the same canonical profile while the Host seat is owned',
+}
 const VITEST_ENTRY = 'node_modules/vitest/vitest.mjs'
 const PROCESS_TARGET_FILE = 'test/integration/split-process/business/host-file-completion.vitest.ts'
 const PROCESS_SIBLING_FILE = 'test/integration/split-process/business/preset-defaults.vitest.ts'
@@ -455,6 +460,10 @@ async function loadKernelHelpers() {
 }
 
 let publicObservationCache
+/** The observation seam captured while the cross-home Scene root still exists. */
+let crossHomeObservation
+/** The installed Host entry captured while the cross-home root still exists. */
+let crossHomeExpectedEntry
 async function loadPublicObservation(receipt) {
   const anchor = receipt?.installation?.anchor
   if (typeof anchor !== 'string' || anchor === '') fail('the receipt carries no installed DSH anchor')
@@ -910,7 +919,111 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
     }
   }
   if (pidAlive(receipt.supervisor?.pid)) problems.push(`Supervisor PID still alive: ${String(receipt.supervisor?.pid)}`)
+  for (const row of receipt.cleanup?.crossHome ?? []) {
+    if (row.settled !== true) problems.push(`cross-home reservation ${String(row.entryId)} is not settled`)
+    for (const [name, value] of [['alias registry absent', row.aliasRegistryAbsent],
+      ['alias launch absent', row.aliasLaunchAbsent], ['alias seat free', row.aliasSeatFree]]) {
+      if (value !== true) problems.push(`cross-home ${String(row.entryId)} did not prove ${name}`)
+    }
+  }
+  if ((receipt.cleanup?.crossHome ?? []).length > 0 && receipt.cleanup?.crossHomeSeatsFree !== true) {
+    problems.push('the process Scene did not report its cross-home seats free')
+  }
   return problems
+}
+
+/**
+ * The independent terminal proof of the fixed cross-home seat-refusal case:
+ * the real alias material is absent, the alias qualification seat is free, the
+ * possible detached candidate is terminal, and a fresh all-PID observation
+ * finds no live alias Host candidate with the alias DSH_HOME.
+ */
+async function assertCrossHomeProbeTerminal(receipt, kernel, observation) {
+  const rows = Array.isArray(receipt.cleanup?.crossHome) ? receipt.cleanup.crossHome : []
+  if (rows.length !== 1) fail(`cross-home probe: expected one settled reservation, got ${String(rows.length)}`)
+  const row = rows[0]
+  if (row.mode !== CROSS_HOME_CASE || row.settled !== true) fail('cross-home probe: the reservation is not the settled fixed mode')
+  if (receipt.cleanup?.crossHomeSeatsFree !== true) fail('cross-home probe: the receipt did not report the cross-home seats free')
+  if (row.sameCanonicalProfile !== true || row.sameScope !== true || row.distinctDiscoveryRoots !== true) {
+    fail('cross-home probe: the alias discovery facts are not the expected same-profile/distinct-root facts')
+  }
+  if (typeof row.aliasHome !== 'string' || row.aliasHome === '' || row.aliasHome === receipt.installation?.dshHome) {
+    fail('cross-home probe: the alias DSH home is missing or is the main home')
+  }
+  if (row.aliasRegistryAbsent !== true || row.aliasLaunchAbsent !== true || row.aliasSeatFree !== true) {
+    fail('cross-home probe: the Supervisor did not prove the alias material/seat terminal')
+  }
+  const scopeDir = row.aliasScopeDir
+  if (typeof scopeDir !== 'string' || scopeDir === '') fail('cross-home probe: the alias scope directory is missing')
+  exactPathAbsent(join(scopeDir, 'instance.json'), 'cross-home probe alias registry')
+  exactPathAbsent(join(scopeDir, 'launch.json'), 'cross-home probe alias launch')
+  if (!(await hostSeatFree(row.aliasSeat))) fail('cross-home probe: the alias qualification Client seat is still held')
+  if (row.terminal === 'seat-conflict') {
+    if (row.hostLogPresent !== true) fail('cross-home probe: the seat-conflict terminal has no recorded alias Host log')
+    if (row.conflict?.error !== 'HOST_ALREADY_OWNED' || row.conflict?.scopeId !== receipt.scope?.scopeId) {
+      fail('cross-home probe: the alias Host conflict is not the expected product conflict/scope')
+    }
+    const logPath = join(scopeDir, 'host.log')
+    if (existsSync(logPath)) {
+      // A preserved root is checked directly; the normal ABORTED_CLEAN path has
+      // already removed the root, so the recorded Supervisor fact is the only
+      // remaining evidence of the log it read before removal.
+      const text = readFileSync(logPath, 'utf8')
+      if (!text.endsWith('\n')) fail('cross-home probe: the alias Host log has an incomplete trailing record')
+      const records = text.slice(0, -1).split('\n').filter(line => line !== '').map(line => JSON.parse(line))
+      const conflicts = records.filter(record => record?.m4a0 === 'host-seat-conflict')
+      if (conflicts.length !== 1 || conflicts[0]?.processRole !== 'host' || conflicts[0]?.error !== 'HOST_ALREADY_OWNED') {
+        fail('cross-home probe: the alias Host log is not exactly one real seat conflict')
+      }
+      if (records.some(record => record?.m4a0 === 'ready' || record?.m4a0 === 'failure'
+        || record?.m4a0 === 'cleanup-failure' || record?.m4a0 === 'profile-booted')) {
+        fail('cross-home probe: the alias Host log contains a Ready/failure/profile record')
+      }
+    }
+  } else if (row.terminal === 'no-spawn') {
+    if (row.hostLogPresent !== false) fail('cross-home probe: the no-spawn terminal carries an alias Host log')
+    exactPathAbsent(join(scopeDir, 'host.log'), 'cross-home probe no-spawn alias Host log')
+  } else {
+    fail(`cross-home probe: unknown cross-home terminal ${String(row.terminal)}`)
+  }
+  if (row.candidate !== null && row.candidate !== undefined) {
+    const state = identityLiveness(kernel, row.candidate.pid, row.candidate.birth)
+    if (state === 'live' || state === 'unknown' || state === 'unproven') {
+      fail(`cross-home probe: the captured alias candidate is ${state}`)
+    }
+  }
+  // Independent observation of the exact candidate set: every process whose
+  // real command line runs this Scene's installed Host entry. Unreadable
+  // alias-matching candidates are unknown, never absence.
+  const obs = observation ?? await loadPublicObservation(receipt)
+  if (typeof receipt.sceneRoot !== 'string' || receipt.sceneRoot === '') {
+    fail('cross-home probe: the receipt has no Scene root')
+  }
+  const candidates = [...processTable().values()]
+    .filter(row => row.command.includes('local-host.mjs') && row.command.includes(receipt.sceneRoot))
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  const entry = crossHomeExpectedEntry ?? realpathSync(receipt.installation.entries.host)
+  for (const candidate of candidates) {
+    const basic = obs.basic(candidate.pid)
+    if (basic.kind === 'gone') continue
+    if (basic.kind !== 'ok') fail(`cross-home probe: the process basic read for ${String(candidate.pid)} is unknown`)
+    if (uid !== undefined && basic.uid !== uid) continue
+    if (basic.pgid !== candidate.pid) continue
+    const argv = obs.argvEntry(candidate.pid)
+    if (argv.kind === 'unknown') fail(`cross-home probe: the argv read for ${String(candidate.pid)} is unknown`)
+    if (argv.kind !== 'ok' || argv.entry !== entry) continue
+    const captured = obs.capture(candidate.pid, {
+      entry,
+      home: row.aliasHome,
+      profile: 'pi-tui',
+      anchor: receipt.installation.anchor,
+      uid,
+      requireEnv: true,
+      groupLeader: true,
+    })
+    if (captured.kind === 'captured') fail(`cross-home probe: a live alias Host candidate remains: ${String(candidate.pid)}`)
+    if (captured.kind === 'unknown') fail(`cross-home probe: the alias candidate capture for ${String(candidate.pid)} is unknown`)
+  }
 }
 
 /** Wait for the process Scene's terminal receipt and refuse a non-quiesced one. */
@@ -1042,8 +1155,15 @@ async function main() {
 const mode = arg('--mode')
 const signal = arg('--signal') ?? 'SIGTERM'
 const at = arg('--at')
+const probeCase = arg('--case')
 if (!PILOT_MODES.includes(mode) && !UPGRADE_MODES.includes(mode) && !PROCESS_MODES.includes(mode)) {
   fail(`unknown --mode ${JSON.stringify(mode)}`)
+}
+if (probeCase !== undefined) {
+  if (probeCase !== CROSS_HOME_CASE) fail(`unknown --case ${JSON.stringify(probeCase)}`)
+  if (mode !== 'process-worker-kill' || at !== 'qualification-client-spawned') {
+    fail(`--case ${CROSS_HOME_CASE} requires --mode process-worker-kill --at qualification-client-spawned`)
+  }
 }
 if (mode === 'main-signal' && signal !== 'SIGINT' && signal !== 'SIGTERM') {
   fail('--mode main-signal requires --signal SIGINT or SIGTERM')
@@ -1190,7 +1310,7 @@ if (upgradeMode) {
       stdio: 'inherit',
     })
   }
-  const target = PROCESS_AT_TARGETS.get(at)
+  const target = probeCase === CROSS_HOME_CASE ? CROSS_HOME_CASE_TARGET : PROCESS_AT_TARGETS.get(at)
   child = spawn(process.execPath, [
     VITEST_ENTRY,
     'run',
@@ -1521,6 +1641,31 @@ try {
           const host = receipt.host
           if (host === undefined || identityLiveness(kernel, host.pid, host.birth) !== 'live') {
             fail('qualification-client-spawned: the authenticated Host is not live at the checkpoint')
+          }
+          if (probeCase === CROSS_HOME_CASE) {
+            const reserved = clients.find(value => value.crossHome !== undefined)
+            if (reserved === undefined) fail('cross-home case: the live Client carries no fixed alias reservation')
+            const reservation = reserved.crossHome
+            if (reservation.mode !== CROSS_HOME_CASE || reservation.settled !== false) {
+              fail('cross-home case: the alias reservation is not the settled fixed-mode obligation')
+            }
+            if (reservation.sameScope !== true || reservation.sameCanonicalProfile !== true
+              || reservation.distinctDiscoveryRoots !== true) {
+              fail('cross-home case: the alias reservation is not the same canonical profile with a distinct discovery root')
+            }
+            if (reservation.scopeId !== receipt.scope?.scopeId) fail('cross-home case: the alias scope is not the main Host scope')
+            if (typeof reservation.aliasHome !== 'string' || reservation.aliasHome === receipt.installation?.dshHome) {
+              fail('cross-home case: the alias DSH home is missing or is the main home')
+            }
+            for (const path of [join(reservation.aliasScopeDir, 'instance.json'),
+              join(reservation.aliasScopeDir, 'launch.json')]) {
+              exactPathAbsent(path, 'cross-home case at the spawn checkpoint')
+            }
+            if (await hostSeatFree(receipt.scope?.hostSeat)) {
+              fail('cross-home case: the primary Host seat reports free while the primary Host is live')
+            }
+            crossHomeObservation = await loadPublicObservation(receipt)
+            crossHomeExpectedEntry = realpathSync(receipt.installation.entries.host)
           }
         } else if (at === 'identity-witness-spawned') {
           const helper = (receipt.qualificationHelpers ?? []).find(value => value.kind === 'identity-witness')
@@ -2113,6 +2258,9 @@ try {
     }
     if (!(await hostSeatFree(receipt.scope?.qualificationSeat))) {
       fail('the process Scene qualification Client seat is still held after the terminal receipt')
+    }
+    if (probeCase === CROSS_HOME_CASE) {
+      await assertCrossHomeProbeTerminal(receipt, kernel, crossHomeObservation)
     }
     if (mode === 'process-worker-kill' && at === 'clients-ready') {
       if (siblingSnapshot === undefined) fail('the clients-ready sibling snapshot is missing')

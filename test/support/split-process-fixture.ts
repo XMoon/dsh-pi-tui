@@ -466,6 +466,7 @@ export type QualificationClientMode =
   | 'discover-with-pre-profile-failure'
   | 'discovery-refusal'
   | 'identity-changed'
+  | 'cross-home-seat-refusal'
 
 export type DiscoveryRefusal =
   | 'registry-symlink'
@@ -521,6 +522,8 @@ export interface EntryRecordFacts {
   stderrMarkers: EntryStderrMarkers
   stderrBytes: number
   records: EntryRecord[]
+  /** Present only for the fixed cross-home seat-refusal reservation. */
+  crossHome?: Record<string, any>
 }
 
 export interface EntryTerminalFacts {
@@ -1378,6 +1381,9 @@ class ProcessScene implements SplitProcessScene {
       stderrMarkers: payload.stderrMarkers as EntryStderrMarkers,
       stderrBytes: Number(payload.stderrBytes),
       records: (payload.records ?? []) as EntryRecord[],
+      ...(payload.crossHome === null || payload.crossHome === undefined
+        ? {}
+        : { crossHome: payload.crossHome as Record<string, any> }),
     }
   }
 
