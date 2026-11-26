@@ -512,9 +512,12 @@ profile's independent `autoStart` preference enables it (see below).
       consumes none. The 41st record is refused before it reaches SDK
       application dispatch and closes only this connection with
       `LOCAL_ACP_OUTPUT_BACKPRESSURE`, reason `reply-debt-limit` and the fixed
-      limit/count. Direct `ndJsonStream` parser errors bypass this decoded
-      adapter and therefore cannot release a credit they never held. This is a
-      Host transport admission policy, not an ACP standard limit and not a
+      limit/count. A malformed JSON-RPC envelope that is neither a valid
+      notification nor response-shaped is an invalid request: it consumes one
+      credit, and the SDK's own `-32600` response releases it. Direct
+      `ndJsonStream` parser errors bypass this decoded adapter and therefore
+      cannot release a credit they never held. This is a Host transport
+      admission policy, not an ACP standard limit and not a
       replacement for the existing ordinary (8), control (4) and close (8)
       lanes. It bounds pending response-producing records, not total SDK or
       process heap.

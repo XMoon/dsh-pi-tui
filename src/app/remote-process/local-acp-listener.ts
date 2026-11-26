@@ -667,9 +667,13 @@ type ReplyDebtKind = 'request' | 'response' | 'notification'
 
 function replyDebtKind(message: AnyMessage): ReplyDebtKind {
   const record = message as Record<string, unknown>
-  const hasMethod = typeof record.method === 'string'
-  if (hasMethod && !('id' in record)) return 'notification'
-  if (!hasMethod && ('id' in record || 'result' in record || 'error' in record)) return 'response'
+  // Match the pinned SDK's envelope predicates exactly. In particular, a
+  // malformed record that merely contains a method string is NOT a
+  // notification, and a malformed record with a non-string method is NOT
+  // response-shaped. Both are invalid requests that the SDK answers with
+  // -32600, so they must consume one reply credit and release it on that write.
+  if (record.jsonrpc === '2.0' && typeof record.method === 'string' && !('id' in record)) return 'notification'
+  if (!('method' in record) && ('id' in record || 'result' in record || 'error' in record)) return 'response'
   return 'request'
 }
 

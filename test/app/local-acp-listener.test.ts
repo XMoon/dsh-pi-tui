@@ -841,6 +841,21 @@ test('the public SDK Stream reply-debt owner admits 40 and refuses the 41st befo
     send({ jsonrpc: '2.0', id: 4, method: 'test/unknown', params: {} })
     await waitFor(() => frames.some(({ frame }) => frame.id === 4), 'unknown method response')
     assert.equal(frames.find(({ frame }) => frame.id === 4)?.frame.error?.code, -32601)
+
+    // Malformed envelopes that are neither an SDK notification nor a
+    // response-shaped record are invalid requests: the SDK answers -32600, the
+    // decoded adapter must have charged one credit, and the connection must
+    // remain usable rather than hitting a debt underflow.
+    const invalidCount = (): number => frames.filter(({ frame }) =>
+      frame.id === null && frame.error?.code === -32600).length
+    const invalidBefore = invalidCount()
+    send({ method: 'test/echo' })
+    await waitFor(() => invalidCount() === invalidBefore + 1, 'missing jsonrpc invalid record response')
+    const afterFirstInvalid = invalidCount()
+    send({ jsonrpc: '2.0', id: 7, method: 5 })
+    await waitFor(() => invalidCount() === afterFirstInvalid + 1, 'non-string method invalid record response')
+    send({ jsonrpc: '2.0', id: 5, method: 'test/echo', params: {} })
+    await waitFor(() => frames.some(({ frame }) => frame.id === 5), 'echo after malformed envelopes')
     assert.equal(failures.length, 0)
 
     hold = true
