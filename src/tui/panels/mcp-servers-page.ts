@@ -819,8 +819,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (snapshot.configStatus?.kind === 'saving') return
     const stillListed = snapshot.rows.some(row => row.name === target)
     if (stillListed) {
-      if (snapshot.configStatus?.kind === 'saved') return
-      this.detailRemovalTarget = undefined
+      // Keep the intent across the write window. Only a proven refusal ends it;
+      // a pre-dispatch/`saving`/`saved` frame must not clear it before the
+      // roster can prove the target gone.
+      if (snapshot.configStatus?.kind === 'rejected'
+        || snapshot.configStatus?.kind === 'conflict'
+        || snapshot.configStatus?.kind === 'unconfirmed') this.detailRemovalTarget = undefined
       return
     }
     this.detailRemovalTarget = undefined

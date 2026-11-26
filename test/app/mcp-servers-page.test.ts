@@ -1939,6 +1939,9 @@ test('a confirmed Delete returns to the List once the removed target is proven g
   render(page, 100, 16)
   page.handleInput('y')
   assert.deepEqual(controller.calls.filter(call => call === 'answerConfigConfirm:true'), ['answerConfigConfirm:true'])
+  // The dispatch settlement is asynchronous: a pre-dispatch/saving render still
+  // has the target listed and must not discard the removal intent.
+  render(page, 100, 16)
   const before = controller.snapshotValue
   controller.snapshotValue = {
     ...before,
