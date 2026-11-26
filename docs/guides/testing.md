@@ -697,6 +697,25 @@ the cache outside that tree. Do not prune or delete the cache while a run is
 active; a damaged cache is an operator cleanup after every user has stopped,
 with diagnostics preserved first.
 
+The packed npm tarball smoke (`mise exec -- pnpm smoke:pack -- <candidate.tgz>`,
+which `smoke:release` runs as its first packed smoke) uses the same
+test-install-cache owner for only its real npm install branch. It keeps the
+original `npm install --omit=dev --no-save`, registry, lifecycle scripts and
+resolution, and changes only the `--cache` location to
+`<qualified root>/npm-cache`. That child is separate from the pnpm
+`pnpm-store`/`pnpm-cache` children; a root may hold both, but their content is
+never mixed. The default root and the same `DSH_TEST_INSTALL_CACHE_ROOT` override
+rules apply (absolute, existing, canonical, current-user-owned 0700, outside this
+checkout, every candidate input directory and the disposable run root), and this
+entry never reads `SPLIT_VITEST_PNPM_CACHE_ROOT`. Only npm's downloaded content
+and metadata are shared: every smoke still creates its own probe package,
+manifest, `node_modules` and real resolution. npm keeps its own lifecycle and
+integrity handling; the pnpm `copy`/side-effects/virtual-store settings are not
+npm guarantees. Source Mode, `TARBALL_SMOKE_SKIP_INSTALL=1` and the other packed
+smokes never enable the cache. Do not prune or delete the cache while a run is
+active, and an outer runner that deletes its private tree must keep the shared
+cache outside it.
+
 An independent npm-mode smoke uses:
 
 ```sh

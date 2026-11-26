@@ -37,7 +37,7 @@ import {
   assertPostReadCandidateIdentity,
   inspectImmutableSplitCandidate,
 } from '../../scripts/lib/split-smoke-profile.mjs'
-import { prepareInstallCache } from '../../scripts/lib/test-install-cache.mjs'
+import { prepareInstallCache, prepareNpmInstallCache } from '../../scripts/lib/test-install-cache.mjs'
 import {
   assertKernelGroupSignalOwnership,
   kernelGroupLiveMemberPids,
@@ -482,6 +482,73 @@ test('the install cache refuses a case-alias overlap on a case-insensitive volum
   )
   assert.equal(existsSync(sentinel), true)
   assert.equal(existsSync(join(cache, 'pnpm-store')), false)
+})
+
+test('the npm install cache request creates only its npm child and refuses an unsafe existing child', t => {
+  const life = testLifecycle(t)
+  const root = realpathSync(life.tempDir('npm-cache-request-'))
+  const tmpBase = privateBase(life, root, 'base')
+  const inputs = privateBase(life, root, 'inputs')
+  const candidate = join(inputs, 'candidate.tgz')
+  writeFileSync(candidate, 'input fixture\n', { mode: 0o600 })
+
+  // A new shared root gets only the npm child; the pnpm entry keeps ownership
+  // of its own two children.
+  const cache = privateBase(life, root, 'cache')
+  const npmCache = prepareNpmInstallCache({ tmpBase, override: cache, candidateTarballs: [candidate] })
+  assert.equal(npmCache, join(cache, 'npm-cache'))
+  const npmStats = lstatSync(npmCache)
+  assert.equal(npmStats.isDirectory(), true)
+  assert.equal(npmStats.mode & 0o777, 0o700)
+  if (typeof process.getuid === 'function') assert.equal(npmStats.uid, process.getuid())
+  assert.equal(existsSync(join(cache, 'pnpm-store')), false)
+  assert.equal(existsSync(join(cache, 'pnpm-cache')), false)
+
+  // Reuse keeps existing content, and the pnpm entry can coexist on the same
+  // root without changing the npm child.
+  const npmSentinel = join(npmCache, 'sentinel')
+  writeFileSync(npmSentinel, 'npm-owned\n', { mode: 0o600 })
+  assert.equal(prepareNpmInstallCache({ tmpBase, override: cache, candidateTarballs: [candidate] }), npmCache)
+  assert.equal(prepareInstallCache({ tmpBase, override: cache, candidateTarballs: [candidate] }), cache)
+  assert.equal(readFileSync(npmSentinel, 'utf8'), 'npm-owned\n')
+  for (const name of ['pnpm-store', 'pnpm-cache']) {
+    assert.equal(lstatSync(join(cache, name)).isDirectory(), true)
+  }
+  assert.equal(prepareNpmInstallCache({ tmpBase, override: cache, candidateTarballs: [candidate] }), npmCache)
+
+  // An existing symlink or wrong-mode npm child is refused without following,
+  // repairing or deleting it; the pointed-to directory keeps its own content.
+  const symlinkRoot = privateBase(life, root, 'cache-symlink-child')
+  const symlinkTarget = privateBase(life, root, 'foreign-dir')
+  const targetSentinel = join(symlinkTarget, 'sentinel')
+  writeFileSync(targetSentinel, 'foreign-owned\n', { mode: 0o600 })
+  symlinkSync(symlinkTarget, join(symlinkRoot, 'npm-cache'))
+  assert.throws(
+    () => prepareNpmInstallCache({ tmpBase, override: symlinkRoot, candidateTarballs: [candidate] }),
+    /install cache root/u,
+  )
+  assert.equal(lstatSync(join(symlinkRoot, 'npm-cache')).isSymbolicLink(), true)
+  assert.equal(readFileSync(targetSentinel, 'utf8'), 'foreign-owned\n')
+  assert.deepEqual(readdirSync(symlinkTarget), ['sentinel'])
+
+  const unsafeModeRoot = privateBase(life, root, 'cache-unsafe-mode')
+  const unsafeChild = join(unsafeModeRoot, 'npm-cache')
+  mkdirSync(unsafeChild, { mode: 0o700 })
+  chmodSync(unsafeChild, 0o755)
+  const modeSentinel = join(unsafeChild, 'sentinel')
+  writeFileSync(modeSentinel, 'owned\n', { mode: 0o600 })
+  assert.throws(
+    () => prepareNpmInstallCache({ tmpBase, override: unsafeModeRoot, candidateTarballs: [candidate] }),
+    /install cache root/u,
+  )
+  assert.equal(lstatSync(unsafeChild).mode & 0o777, 0o755)
+  assert.equal(readFileSync(modeSentinel, 'utf8'), 'owned\n')
+
+  // The empty explicit override is not the unset default.
+  assert.throws(
+    () => prepareNpmInstallCache({ tmpBase, override: '', candidateTarballs: [candidate] }),
+    /install cache root/u,
+  )
 })
 
 test('the shared official-record reader keeps complete-line strictness and only streams an incomplete tail', async t => {
