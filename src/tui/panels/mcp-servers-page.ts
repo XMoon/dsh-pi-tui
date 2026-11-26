@@ -351,6 +351,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   /** The form's real return origin: Add from the List, Edit from an active
    *  Detail. A width never decides it. */
   private formOrigin: 'list' | 'detail' | undefined
+  /** The exact server an Edit opened from; a fallback selection is not it. */
+  private formTargetName: string | undefined
+  /** A delete that may remove the current Detail target; return to the List. */
+  private detailRemovalTarget: string | undefined
   /** The ACTIVE text input of the form (its row + the value being typed). */
   private formInput: { readonly row: McpFormRow; readonly input: Input; readonly initial: string } | undefined
   /** A pending discard question. `unknown` states that the write may already
@@ -585,7 +589,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         return
       }
       if (data === 'y' || data === 'Y') {
-        if (this.confirmationVerdict(snapshot) === 'ready') this.controller.answerConfigConfirm(true)
+        if (this.confirmationVerdict(snapshot) === 'ready') {
+          if (snapshot.configConfirm?.kind === 'delete') this.detailRemovalTarget = snapshot.configConfirm.name
+          this.controller.answerConfigConfirm(true)
+        }
       }
       return
     }
@@ -712,9 +719,8 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       return
     }
     if (data === 'a' || data === 'A') {
-      if (this.controller.canBeginAdd()) {
+      if (this.region === 'list' && this.controller.canBeginAdd()) {
         this.formOrigin = 'list'
-        this.region = 'list'
         this.controller.beginAdd()
         this.enterEditor()
       }
@@ -769,6 +775,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   // ── FR4: the configuration form ───────────────────────────────────────────
 
   private enterEditor(): void {
+    this.formTargetName = this.formOrigin === 'detail'
+      ? this.controller.snapshot().editor?.name
+      : undefined
     this.region = this.formOrigin === 'list' ? 'list' : 'detail'
     this.formFocus = 0
     this.formOffset = 0
@@ -786,10 +795,38 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private returnFromEditor(unknown: boolean): void {
     const snapshot = this.controller.snapshot()
     const origin = this.formOrigin
+    const targetName = this.formTargetName
     this.formOrigin = undefined
-    this.region = origin === 'detail' && snapshot.selectedName !== undefined ? 'detail' : 'list'
+    this.formTargetName = undefined
+    // An Edit returns only to the SAME target. If a watch removed it, the
+    // controller's nearest fallback selection is NOT that target; stay on the
+    // List with the truthful receipt instead of showing another server.
+    const targetStillSelected = targetName !== undefined
+      && snapshot.selectedName === targetName
+      && snapshot.rows.some(row => row.name === targetName)
+    this.region = origin === 'detail' && targetStillSelected ? 'detail' : 'list'
     this.receiptRegion = this.region
     if (unknown) this.receiptRegion = this.region
+    this.bumpRevision()
+  }
+
+  /** A confirmed Delete is a target-removing action. Once the roster proves the
+   *  old target gone, the Detail has no subject: return to the List with the
+   *  receipt instead of presenting the nearest fallback server. */
+  private reconcileDetailRemoval(snapshot: McpServersSnapshot): void {
+    const target = this.detailRemovalTarget
+    if (target === undefined) return
+    if (snapshot.configStatus?.kind === 'saving') return
+    const stillListed = snapshot.rows.some(row => row.name === target)
+    if (stillListed) {
+      if (snapshot.configStatus?.kind === 'saved') return
+      this.detailRemovalTarget = undefined
+      return
+    }
+    this.detailRemovalTarget = undefined
+    this.region = 'list'
+    this.receiptRegion = 'list'
+    this.detailOffset = 0
     this.bumpRevision()
   }
 
@@ -1072,9 +1109,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       // hidden list selection and Detail offset never move. An active text
       // input owns every input (keyboard or wheel), so it stays put.
       if (this.controller.snapshot().editor !== undefined) {
-        if (this.formInput === undefined) {
-          this.handleEditorInput(event.wheelDelta < 0 ? '\x1b[A' : '\x1b[B', this.controller.snapshot())
-        }
+        this.handleEditorInput(event.wheelDelta < 0 ? '\x1b[A' : '\x1b[B', this.controller.snapshot())
         return { handled: true }
       }
       if (this.allowDual() && event.x >= this.detailX() && event.x < this.detailX() + this.detailWidth()) {
@@ -1209,8 +1244,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         return
       case 'confirm':
         if (this.confirmationVerdict(snapshot) !== 'ready') return
-        if (snapshot.configConfirm !== undefined) this.controller.answerConfigConfirm(true)
-        else if (snapshot.confirmingName !== undefined) this.controller.answerRestart(true)
+        if (snapshot.configConfirm !== undefined) {
+          if (snapshot.configConfirm.kind === 'delete') this.detailRemovalTarget = snapshot.configConfirm.name
+          this.controller.answerConfigConfirm(true)
+        } else if (snapshot.confirmingName !== undefined) this.controller.answerRestart(true)
         return
       case 'discard':
         if (this.discardConfirm !== undefined && this.confirmationVerdict(snapshot) === 'ready') {
@@ -1521,6 +1558,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private renderForGrant(bodyWidth: number, bodyRows: number, rawWidth: number): string[] {
     const snapshot = this.controller.snapshot()
     this.currentBarWidth = this.barWidth(rawWidth)
+    this.reconcileDetailRemoval(snapshot)
     // A saved/retired editor closes itself: return to its REAL origin so the ONE
     // current configuration receipt is visible without an extra key.
     if (snapshot.editor === undefined && this.formOrigin !== undefined && !this.workbenchRequiresFullWidth()) {
@@ -1662,31 +1700,67 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     // The bar's explicit verb is the primary route; when the bar really drops
     // it, the focused row paints its OWN complete verb span (same sink).
     const barDropsVerb = !this.formBarContainsVerb(width, editor)
+    let verbPainted = false
     if (barDropsVerb && snapshot.configStatus?.kind !== 'saving' && snapshot.configOutcomeUnconfirmed !== true
       && this.formInput === undefined && fieldRows > 0) {
       const row = allRows[this.formFocus]
       const verb = row === undefined ? undefined : this.formRowVerb(row, editor)
       const painted = rendered.painted.find(candidate => candidate.row.id === row?.id)
-      if (row !== undefined && verb !== undefined && painted !== undefined && painted.line >= this.formOffset
-        && painted.line < this.formOffset + fieldRows) {
-        const index = fieldTop + (painted.line - this.formOffset)
-        const line = lines[index]
+      if (row !== undefined && verb !== undefined && painted !== undefined) {
+        const first = Math.max(painted.line, this.formOffset)
+        const last = Math.min(painted.lineEnd, this.formOffset + fieldRows - 1)
         const suffix = ` ${verb}`
-        // The form renderer returns width-padded cells; append after the
-        // visible content, never after that padding.
-        const base = line?.replace(/\s+$/u, '')
-        if (base !== undefined && visibleWidth(stripAnsi(base) + suffix) <= width) {
-          const paintedLine = base + color.textMuted(suffix)
-          lines[index] = paintedLine + ' '.repeat(Math.max(0, width - visibleWidth(stripAnsi(paintedLine))))
+        let chosen = -1
+        let chosenBase: string | undefined
+        // A wrapped field may have its only free cells on a continuation line.
+        // Prefer the first visible block line that can hold the whole verb.
+        for (let lineNo = first; lineNo <= last; lineNo += 1) {
+          const index = fieldTop + (lineNo - this.formOffset)
+          const base = lines[index]?.replace(/\s+$/u, '')
+          if (base !== undefined && visibleWidth(stripAnsi(base) + suffix) <= width) {
+            chosen = index
+            chosenBase = base
+            break
+          }
+        }
+        if (chosen >= 0 && chosenBase !== undefined) {
+          const paintedLine = chosenBase + color.textMuted(suffix)
+          lines[chosen] = paintedLine + ' '.repeat(Math.max(0, width - visibleWidth(stripAnsi(paintedLine))))
           const indexField = allRows.findIndex(candidate => candidate.id === row.id)
-          const suffixStart = visibleWidth(stripAnsi(base)) + 1
+          const suffixStart = visibleWidth(stripAnsi(chosenBase)) + 1
           targets.push({
             kind: 'form-verb',
             id: row.id,
             index: indexField,
-            row: index,
+            row: chosen,
             startCol: suffixStart,
             endCol: suffixStart + visibleWidth(verb),
+          })
+          verbPainted = true
+        }
+      }
+      // A long first/continuation line can leave no cell for the suffix. If the
+      // body has a spare row, put the complete verb on its own line rather than
+      // making a pointer-only form depend on a hidden keyboard key.
+      if (!verbPainted && row !== undefined && verb !== undefined && allRows.length > this.formFocus) {
+        let rowIndex = -1
+        for (let lineNo = fieldTop; lineNo < fieldTop + fieldRows; lineNo += 1) {
+          if (stripAnsi(lines[lineNo] ?? '').trim() === '') {
+            rowIndex = lineNo
+            break
+          }
+        }
+        if (rowIndex < 0 && lines.length < rows - statusRows - inputRows) rowIndex = lines.length
+        if (rowIndex >= 0) {
+          const indexField = allRows.findIndex(candidate => candidate.id === row.id)
+          lines[rowIndex] = fit('  ' + color.textMuted(verb), width)
+          targets.push({
+            kind: 'form-verb',
+            id: row.id,
+            index: indexField,
+            row: rowIndex,
+            startCol: 2,
+            endCol: 2 + visibleWidth(verb),
           })
         }
       }
@@ -1708,9 +1782,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     for (const paintedRow of rendered.painted) {
       const index = allRows.findIndex(candidate => candidate.id === paintedRow.row.id)
       if (index < 0) continue
-      const row = fixedRows + (paintedRow.line - this.formOffset)
-      if (row < 0 || row >= rows) continue
-      targets.push({ kind: 'form-row', id: paintedRow.row.id, index, row, startCol: 0, endCol: width })
+      const first = Math.max(paintedRow.line, this.formOffset)
+      const last = Math.min(paintedRow.lineEnd, this.formOffset + fieldRows - 1)
+      for (let lineNo = first; lineNo <= last; lineNo += 1) {
+        const row = fixedRows + (lineNo - this.formOffset)
+        if (row < 0 || row >= rows) continue
+        targets.push({ kind: 'form-row', id: paintedRow.row.id, index, row, startCol: 0, endCol: width })
+      }
     }
     return lines.slice(0, rows)
   }

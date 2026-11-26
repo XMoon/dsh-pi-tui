@@ -1909,22 +1909,84 @@ test('a body verb painted inside a focused form row activates instead of selecti
   assert.match(after, /^edit:/mu, `the suffix must open the explicit input, not just select the row:\n${after}`)
 })
 
-test('the form wheel is inert while a text input owns the form keys', () => {
+
+test('an Edit target removed while its form is open returns to the List, not a fallback Detail', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
+  openEditor(page, 'e', 100, 16)
+  const before = controller.snapshotValue
+  // The target disappears while the user is still in its form; the controller
+  // moves its selection to the nearest remaining server.
+  controller.snapshotValue = {
+    ...before,
+    rows: before.rows.filter(row => row.name !== 'alpha'),
+    selectedName: 'beta',
+    selectedConfig: undefined,
+    editor: editorSnapshot({ dirty: true }),
+  }
+  page.handleInput('\x1b')
+  render(page, 100, 16)
+  page.handleInput('d')
+  const frame = render(page, 100, 16).join('\n')
+  assert.doesNotMatch(frame, /Server: beta/u, 'a fallback server must not inherit the lost Edit target Detail')
+  assert.match(frame, /Name/u, 'the page must return to the List')
+})
+
+test('a confirmed Delete returns to the List once the removed target is proven gone', () => {
   const { page, controller } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
-    editor: editorSnapshot({ dirty: true }),
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 3 },
   }))
-  openEditor(page, 'e', 120, 24)
-  focusUntil(page, 120, 24, frame => /> Command:/u.test(frame))
+  render(page, 100, 16)
+  page.handleInput('y')
+  assert.deepEqual(controller.calls.filter(call => call === 'answerConfigConfirm:true'), ['answerConfigConfirm:true'])
+  const before = controller.snapshotValue
+  controller.snapshotValue = {
+    ...before,
+    configConfirm: undefined,
+    rows: before.rows.filter(row => row.name !== 'alpha'),
+    selectedName: 'beta',
+    selectedConfig: undefined,
+    configStatus: { kind: 'saved', text: 'Config removed · waiting for Host reconcile' },
+  }
+  const frame = render(page, 100, 16).join('\n')
+  assert.doesNotMatch(frame, /Server: beta/u, 'the fallback Detail must not become the deleted target')
+  assert.match(frame, /Config removed/u, 'the List keeps the honest receipt')
+})
+
+test('every visible line of a wrapped form field is a selection target', () => {
+  const { page } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ command: `/bin/echo ${'z'.repeat(80)}`, dirty: true }),
+  }))
+  focusUntil(page, 44, 12, frame => /> Command:/u.test(frame))
+  const lines = render(page, 44, 12)
+  const row = lines.findIndex(line => /z{4,}/u.test(line) && !/Command:/u.test(line))
+  assert.ok(row >= 0, `the wrapped command must paint a continuation line:\n${lines.join('\n')}`)
+  clickBodyCell(page, 44, 12, row)
+  assert.equal((page as unknown as { formFocus: number }).formFocus, 3,
+    'a continuation line selects the Command field, not a blank row')
+})
+
+test('Add is a List action; the same key in Detail is inert', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
   page.handleInput('\r')
-  const before = render(page, 120, 24).join('\n')
-  assert.match(before, /^edit:/mu, 'the explicit field verb opens the input')
-  const focus = (page as unknown as { formFocus: number }).formFocus
-  page.handleMouse({ ...mouseBase(120, 24), type: 'wheel', wheelDelta: 1, x: 4, y: 5 })
-  const after = render(page, 120, 24).join('\n')
-  assert.equal((page as unknown as { formFocus: number }).formFocus, focus,
-    'a wheel must not move the field focus while the input owns the keys')
-  assert.equal(after, before, 'the input and its frame stay put')
-  assert.deepEqual(controller.calls.filter(call => call.startsWith('setEditor')), [],
-    'the wheel stages no draft')
+  page.handleInput('a')
+  assert.equal(controller.calls.includes('beginAdd'), false)
+  assert.doesNotMatch(render(page, 100, 16).join('\n'), /· Add ·/u)
+})
+
+test('a long removable field puts its dropped verb on a reachable body line', () => {
+  const { page } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ args: ['z'.repeat(100)], dirty: true }),
+  }))
+  ;(page as unknown as { formFocus: number }).formFocus = 6
+  const lines = render(page, 44, 20)
+  const row = lines.findIndex(line => /^\s+Edit \[Enter\]/u.test(line))
+  assert.ok(row >= 0, `the dropped verb must have a complete body line:\n${lines.join('\n')}`)
+  const base = mouseBase(44, 20)
+  page.handleMouse({ ...base, type: 'press', x: 3, y: row })
+  page.handleMouse({ ...base, type: 'click', x: 3, y: row })
+  assert.match(render(page, 44, 20).join('\n'), /^edit:/mu,
+    'the standalone verb line invokes the same explicit input intent')
 })

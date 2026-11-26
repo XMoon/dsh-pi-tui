@@ -1703,9 +1703,9 @@ cell stays clickable behind it.
 
 The List paints `Name` and the complete Status at its real width; a long status
 wraps on the item's own physical line(s), never abbreviated into another word.
-The Source is in the readable Detail; a single-region List may add it when the
-34-cell-or-wider grant can hold the whole 17-cell label beside at least 12 name
-cells. Long names may tail-omit in the List, but the Detail, confirmation and
+The Source is in the readable Detail; a single-region List may add it only
+when the grant is at least 56 cells wide and can still hold at least 12 name
+cells, the complete Status column and the whole 17-cell label. Long names may tail-omit in the List, but the Detail, confirmation and
 identity line always carry the complete name. The List scrolls in physical rows.
 
 A row click or keyboard move only SELECTS; `Open [Enter]`/`Enter`/`Right` is the
@@ -1723,6 +1723,59 @@ scrollable Detail body and uses the SAME action sink. Long diagnostics are
 wrapped (hard-splitting an unbreakable token) and remain reachable through the
 physical scroll.
 
+Probe and Restart require a current manager observation, a live (not retained)
+listed entry and no in-flight operation; they do NOT depend on the configuration
+descriptor. Every configuration edit additionally requires the same-generation
+current settings descriptor and that entry's config source; `loading`, `stale`
+and `unavailable` states explain themselves and expose no executable action. A
+write uses ONE official revision-checked settings mutation; its result is
+`Saving configuration…`, `Saved · waiting for Host reconcile`, a revision
+conflict, an unavailable Host, a proven refusal, or `Outcome unconfirmed …` after
+a lost settlement. A saved configuration is NEVER reported as Connected; the
+manager's watch remains the only status authority, and Probe/Restart results
+never overwrite the saved configuration fact. A probe is positive only when the
+official result is `ok` AND cleanup is confirmed; a connected-but-unclean probe
+is its own `cleanup not confirmed` fact. A settled restart says
+`Restart settled · awaiting connected status` and waits for the watch; a lost
+settlement is never retried.
+
+A search is the ONE modal whose filtered RESULT rows stay pointer-selectable: a
+result-row click only selects (the query and search stay open and no Host intent
+runs), a wheel moves that filtered selection only, and the search's
+`Done [Enter]` / the list's `Search [/]` replay the SAME Enter and `/` sinks; the
+single `Cancel [Esc]` is never a second span, it is the Root's physical escape.
+An ACTIVE form input is such a modal too: the body cannot be clicked or wheeled
+behind it, while its own `Apply [Enter]` / `Cancel [Esc]` stay reachable. Every
+env/header value carries an EXPLICIT storage form the user chooses —
+`Credential reference` (the default, written as the official
+`${credential:REF}` token) or `Literal (stored in profile)` — shown on its own
+row and never inferred from the typed text; the disclosure's HTTP target is the
+host alone and fails closed to `Unknown target` when the URL cannot be parsed,
+so no path, query or credential can be echoed. Per-key Remove is offered for
+keys the BASE layer does not own only: the official per-key `unset` on a
+base-owned key RESTORES the inherited value (it cannot delete it), so such rows
+state `Inherited · cannot remove here` and a backspace on them is inert. The
+currently focused removable row also paints a complete `Remove [Backspace]`
+segment beside `s Save` (dropped by the layout only when the row cannot hold it
+whole) whose click is the same Backspace intent; an active input, an open
+question or an unsettled save never offers it. An empty Enter on a `Literal`
+value commits the empty string (the only way to override an inherited value with
+nothing, since a base-owned key cannot be removed); an empty Enter on a
+`Credential reference` keeps the current value.
+
+Keys: list `↑/↓` move, `Enter`/`Right` opens the Detail, `a` begins Add from the
+LIST only, `/` filters by name, `r` re-observes, `Esc` cancels search / returns
+to the real parent; Detail `p` probes, `x` asks the exact Restart question,
+`e` edits, `t` asks Enable/Disable, `d` asks the exact-name Delete, `u` asks
+Reset-to-inherited, `r` refreshes, `Esc` returns to the List. In a form, `↑/↓`
+and `Tab`/`Shift+Tab` move the focused field; a field-row click only selects;
+the complete explicit verb (`Edit [Enter]`, `Switch [Enter]`, `Toggle [Enter]`,
+`Add [Enter]`, `Remove [Backspace]`) activates the existing intent. While an
+input is active every key is text except its own Apply/Cancel. At `44×8` the
+List keeps the selected row, its complete Status and `Back [Esc]`; the form keeps
+the exact identity, current field, its complete status and Save/Back reachable
+(the focused field's verb moves to the body when the bar cannot hold it whole).
+
 For a server the SAME current Host settings descriptor proves config-owned, the
 Detail also offers `Edit`, Enable/Disable, permanent `Delete` (User-added
 entries only) and `Reset to inherited` (entries whose effective configuration
@@ -1735,7 +1788,9 @@ complete explicit verb (`Edit [Enter]`, `Switch [Enter]`, `Toggle [Enter]`,
 `Add [Enter]`, `Remove [Backspace]`) activates the existing intent. Add returns
 to the page's REAL origin, the List; Edit returns to the original server's
 active Detail while that exact target is still listable, otherwise to the List
-with the truthful unavailable/refusal status.
+with the truthful unavailable/refusal status. A confirmed Delete likewise
+returns to the List once the roster proves the deleted target gone; a nearest
+fallback selection is never presented as the original target.
 
 An Edit keeps the name read-only; a rename is two explicit actions. A stored
 plain value is shown only as `Set (hidden)` in a non-editing row, while a
@@ -1786,7 +1841,8 @@ operation.
 
 Pointer ownership is the last painted frame's. A List click, including the
 passive rail preview, only selects and hands the keyboard to the List; a Detail
-click only transfers focus; a form-row click only selects its field. The form's
+body click outside a painted action only transfers focus; a form-row click only
+selects its field. The form's
 body verb, the bar's complete spans and the Detail body fallback all use the ONE
 existing action sink. The wheel reaches only the region under the pointer inside
 the REAL child body box (translated with the child's own width/height): the List
