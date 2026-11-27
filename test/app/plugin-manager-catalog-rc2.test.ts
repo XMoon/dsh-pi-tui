@@ -773,7 +773,7 @@ test('a real Host platform refusal stays out of the default list and never insta
   // before the Source diagnostics, so the Host default-listing fact is read
   // through the existing Detail scroll, then Home returns to the action block.
   let defaultListing = page.frame()
-  for (let page = 0; page < 20 && !/Default listing/u.test(defaultListing); page += 1) {
+  for (let step = 0; step < 20 && !/Default listing/u.test(defaultListing); step += 1) {
     page.harness.vt.sendInput('\x1b[6~')
     await page.harness.waitForFrame()
     defaultListing += `\n${page.frame()}`
