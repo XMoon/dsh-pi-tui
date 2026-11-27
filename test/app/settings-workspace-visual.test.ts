@@ -1939,18 +1939,94 @@ test('100x40 and 76x24 project the medium composition per level and switch categ
   }
 })
 
-test('the wide inline choice keeps the focused pane title as its phase changes', async () => {
-  const h = setup({ columns: 200, rows: 50, doc: { theme: 'dark' } })
-  await h.open()
-  await key(h, '\r') // Categories -> Rows
-  const before = h.rowsPlain()[rowOf(h, 'Rows (4)')]!
-  assert.match(before, /\[Rows \(4\)\]/, 'the Rows pane owns focus before editing')
-  await key(h, '\x1b[C') // Rows -> inline choice
-  const after = h.rowsPlain()[rowOf(h, 'Details')]!
-  assert.match(after, /\[Details\]/, 'the Detail pane remains visibly focused while choosing')
-  assert.ok(h.view().includes('Choose value'), `the choice remains visible:\n${h.view()}`)
-  assert.ok(h.view().includes('> dark'), `the current candidate remains visible:\n${h.view()}`)
-  h.dispose()
+test('the root chrome keeps its rows while an inline choice opens, closes and settles', async () => {
+  // Rows -> inline choice used to drop the metadata and rule rows, so the body
+  // started two rows higher while editing and moved back after Esc. These sizes
+  // span the wide, medium and narrow projections; the equality below is the
+  // actual stability contract (no private chrome-plan values are read).
+  for (const [columns, rows] of [[200, 50], [120, 40], [108, 24], [80, 24], [44, 20]] as const) {
+    // One representative case holds the document write open so the PENDING
+    // choice presentation is observed as well; the other sizes settle normally.
+    const heldWrite = columns === 120 && rows === 40
+    const h = setup({
+      columns,
+      rows,
+      doc: { theme: 'dark' },
+      ...(heldWrite ? { holdFirstReplace: true } : {}),
+    })
+    await h.open()
+    await key(h, '\r') // Categories -> Rows
+    const readChrome = (): {
+      readonly header: string
+      readonly meta: number
+      readonly rule: number
+      readonly pane: number
+      readonly firstContent: number
+      readonly barRow: number
+    } => {
+      const lines = h.rowsPlain()
+      const meta = lines.findIndex(line => line.startsWith('Scope:'))
+      const rule = lines.findIndex(line => /^─+$/u.test(line))
+      // The multi-column pane header is the ONLY line that paints `Rows (…)`
+      // together with `Details`; the narrow projection paints neither.
+      const pane = lines.findIndex(line => line.includes('Rows (') && line.includes('Details'))
+      return {
+        header: lines[0] ?? '',
+        meta,
+        rule,
+        pane,
+        firstContent: Math.max(meta, rule, pane) + 1,
+        barRow: lines.length - 1,
+      }
+    }
+    const browse = readChrome()
+    assert.ok(browse.meta >= 0, `${columns}x${rows}: the Rows frame paints the Scope metadata:\n${h.view()}`)
+    assert.ok(browse.rule >= 0, `${columns}x${rows}: the Rows frame paints the rule:\n${h.view()}`)
+    assert.match(browse.header, /Settings · Appearance · Rows/u, `${columns}x${rows}: the Rows breadcrumb is painted`)
+    const sameRows = (phase: string, next: ReturnType<typeof readChrome>): void => {
+      assert.equal(next.meta, browse.meta, `${columns}x${rows}: ${phase} keeps the metadata row:\n${h.view()}`)
+      assert.equal(next.rule, browse.rule, `${columns}x${rows}: ${phase} keeps the rule row:\n${h.view()}`)
+      assert.equal(next.pane, browse.pane, `${columns}x${rows}: ${phase} keeps the pane-header row:\n${h.view()}`)
+      assert.equal(next.firstContent, browse.firstContent, `${columns}x${rows}: ${phase} keeps the first content row:\n${h.view()}`)
+      assert.equal(next.barRow, browse.barRow, `${columns}x${rows}: ${phase} keeps the physical last row:\n${h.view()}`)
+    }
+
+    await key(h, '\x1b[C') // Rows -> inline choice
+    const choosing = readChrome()
+    assert.match(choosing.header, /Settings · Appearance · Configured theme/u, `${columns}x${rows}: the breadcrumb truthfully names the choice level`)
+    assert.match(h.view(), /Choose value/u, `${columns}x${rows}: the choice is painted:\n${h.view()}`)
+    sameRows('the open choice', choosing)
+    if (columns >= 76) {
+      assert.match(h.rowsPlain()[choosing.pane] ?? '', /\[Details\]/u, `${columns}x${rows}: the Detail pane remains visibly focused while choosing`)
+    } else {
+      assert.ok(!(h.rowsPlain()[choosing.pane] ?? '').includes('Details'), `${columns}x${rows}: the narrow frame paints no pane header`)
+    }
+    assert.ok(h.view().includes('> dark'), `${columns}x${rows}: the current candidate remains visible:\n${h.view()}`)
+
+    await key(h, '\x1b') // cancel the choice back to Rows
+    const restored = readChrome()
+    assert.match(restored.header, /Settings · Appearance · Rows/u, `${columns}x${rows}: Esc returns to the Rows breadcrumb`)
+    sameRows('the cancelled choice', restored)
+
+    // Re-enter and settle: the same chrome rows must survive the pending and
+    // settled presentation too (only the body content changes).
+    await key(h, '\x1b[C')
+    await key(h, '\x1b[B') // dark -> light
+    await key(h, '\r')
+    if (heldWrite) {
+      await h.firstWriteStarted()
+      await h.vt.waitForRender()
+      assert.match(h.view(), /Saving…/u, `${columns}x${rows}: the pending presentation really painted`)
+      sameRows('the pending choice', readChrome())
+      h.releaseFirstReplace()
+    }
+    await settle(h)
+    assert.equal(h.replacements(), 1, `${columns}x${rows}: exactly one explicit confirmation writes`)
+    assert.equal(h.doc.theme, 'light', `${columns}x${rows}: the confirmed value really landed`)
+    const settled = readChrome()
+    sameRows('the settled choice', settled)
+    h.dispose()
+  }
 })
 
 test('a short inline choice exposes only Esc when the pane title consumes the body budget', async () => {
@@ -6195,6 +6271,52 @@ test('a Detail-pane or Change click enters the same one-step inline choice', asy
   h.dispose()
 })
 
+test('a new press against the previous phase frame is refused and a fresh row click still navigates', async () => {
+  const h = setup({ columns: 120, rows: 40, doc: { theme: 'dark' } })
+  await h.open()
+  await key(h, '\r') // Categories -> Rows
+  const row = rowOf(h, 'Configured theme')
+  const col = cellIndexOf(h, row, 'Configured theme')
+  // Enter the choice; the Rows frame is still on screen.
+  h.vt.sendInput('\x1b[C')
+  // A NEW press against the OLD Rows hit map, before the choice frame paints.
+  press(h, row, col)
+  await h.vt.waitForRender()
+  release(h, row, col)
+  await settle(h)
+  assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Configured theme/u,
+    'the stale press did not navigate the choice frame')
+  assert.match(h.view(), /Choose value/u, 'the just-opened choice is still open')
+  assert.equal(h.replacements(), 0, 'the stale press dispatched nothing')
+  // The SAME kind of gesture on a really painted frame is the ordinary row
+  // navigation: a row click selects the row and retires the choice.
+  await clickPainted(h, 'Icon style')
+  assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Rows/u, "the fresh frame's row click navigates")
+  assert.ok(!h.view().includes('Choose value'), 'the fresh row click retires the choice')
+  assert.equal(h.replacements(), 0, 'navigation never writes')
+  h.dispose()
+})
+
+test('a live notice allocation change refuses stale choice navigation until the frame repaints', async () => {
+  const h = setup({ columns: 80, rows: 7, doc: { theme: 'dark' } })
+  await openSelectedRow(h, 'theme')
+  await key(h, '\r') // Rows -> inline choice
+  assert.match(h.view(), /> dark/, 'the current candidate is painted before the notice')
+  // The notice changes the real row allocation (the body grant shrinks); the
+  // choice frame is still the previous one when Down arrives.
+  h.app.notify('live allocation notice', 'info')
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /live allocation notice/u, 'the notice frame really painted')
+  assert.match(h.view(), /> dark/, 'the stale Down did not move the candidate')
+  assert.equal(h.replacements(), 0, 'the stale Down never writes')
+  // The same key against the freshly painted grant works normally.
+  await key(h, '\x1b[B')
+  assert.match(h.view(), /> light/, 'the fresh frame admits the same candidate navigation')
+  assert.equal(h.replacements(), 0)
+  h.dispose()
+})
+
 test('changing category refreshes the row selection and the detail; browsing never writes config', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
@@ -6885,6 +7007,35 @@ test('the 44x8 choice stays reachable, identity-fenced across a resize, and only
   await settle(h)
   assert.equal(h.replacements(), 0, 'a straddling press never confirms')
   assert.match(h.view(), /Choose value/, 'the choice survives the resize with its candidate')
+  // Back at 44x8 the SAME choice is still operable: a fresh candidate click and
+  // the complete painted Confirm write exactly once, with the raw value readback.
+  h.vt.resize(44, 8)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Choose value/u, 'the choice survives the narrowing resize')
+  await key(h, '\x1b[B') // dark -> light; the one-row option viewport reveals it
+  assert.match(h.view(), /> light/u, 'the fresh candidate is really painted at 44x8')
+  await clickPainted(h, 'light')
+  assert.equal(h.replacements(), 0, 'a candidate click only moves the draft')
+  await clickPainted(h, 'Confirm')
+  await settle(h)
+  assert.equal(h.replacements(), 1, 'the fresh painted Confirm writes exactly once')
+  assert.equal(h.doc.theme, 'light', 'the authoritative readback carries the confirmed raw value')
+  assert.equal(h.replaced()[0]?.theme, 'light', 'the dispatched document carried the exact raw choice')
+  h.dispose()
+})
+
+test('the medium 80x8 choice confirms on a fresh pointer gesture exactly once', async () => {
+  const h = setup({ columns: 80, rows: 8, doc: { theme: 'dark' } })
+  await openSelectedRow(h, 'theme')
+  await key(h, '\r') // Rows -> inline choice
+  assert.match(h.view(), /> dark/u, 'the medium 80x8 grant paints the choice candidate')
+  assert.match(h.view(), /Confirm/u, 'the explicit Confirm action is painted')
+  await key(h, '\x1b[B') // dark -> light; the one-row option viewport reveals it
+  assert.match(h.view(), /> light/u, 'the fresh candidate is painted at 80x8')
+  await clickPainted(h, 'Confirm')
+  await settle(h)
+  assert.equal(h.replacements(), 1, 'the medium short grant confirms exactly once')
+  assert.equal(h.doc.theme, 'light')
   h.dispose()
 })
 
@@ -7044,7 +7195,7 @@ test('the source-qualified candidate identity stays visible before 44x8 keyboard
   h.dispose()
 })
 
-test('identity-aware 44x8 allocation shows a full long raw identity with confirm', async () => {
+test('a long identity at 44x8 refuses confirm until a resized grant restores it', async () => {
   const id = 'x'.repeat(80)
   const themes = new ThemeRegistry()
   themes.register({ id, name: 'Long custom theme', palette: darkColors }, 'acme-owner', 'acme')
@@ -7057,22 +7208,35 @@ test('identity-aware 44x8 allocation shows a full long raw identity with confirm
   await key(h, '\x1b[B') // light -> the long source-qualified identity
   const shortText = h.rowsPlain().map(line => line.trim()).join('')
   const initialView = h.view()
-  assert.ok(shortText.includes(value), `the complete raw identity fits at 44x8:\n${initialView}`)
-  assert.ok(initialView.includes('Value'), `the persisted old value remains visible:\n${initialView}`)
-  assert.match(initialView, /Enter confirm/, 'the complete identity and keyboard confirm hint coexist')
-  assert.match(initialView, /Confirm\s+Cancel/, 'the explicit Detail confirm action is painted')
-  assert.ok(!(h.rowsPlain().at(-1) ?? '').includes('PgUp/PgDn'),
-    'the width-constrained Action Bar omits the facts-page hint at 44x8')
+  // 44x8 now keeps the shared root chrome rows; the remaining grant cannot
+  // paint this three-row raw identity in full, so it must not be confirmable.
+  assert.match(initialView, /Scope: TUI settings document/u, 'the stable metadata row is painted')
+  assert.match(initialView, /Value\s+dark/u, 'the persisted old value remains visible')
+  assert.ok(!shortText.includes(value), `the oversized identity is not fully painted at 44x8:\n${initialView}`)
+  assert.ok(!initialView.includes('Enter confirm'), 'confirmation is withheld while identity rows are missing')
+  assert.ok(!initialView.includes('Confirm'), 'no painted Confirm button is granted for a partial identity')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u,
+    'the width-constrained Action Bar keeps its complete safe exit at 44x8')
   assert.equal(h.replacements(), 0, 'reading the long candidate does not write before confirmation')
   await key(h, '\x1b[6~') // PageDown is a facts-region capability even when its hint is elided.
   const afterPageDown = h.view()
   assert.notEqual(afterPageDown, initialView, `PageDown scrolls hidden facts at 44x8:\n${afterPageDown}`)
   assert.ok(afterPageDown.includes('Scope'), `PageDown reveals the next fact row at 44x8:\n${afterPageDown}`)
-  assert.ok(afterPageDown.replace(/\s+/g, '').includes(value),
-    'facts paging leaves the complete selected identity visible')
   assert.equal(h.replacements(), 0, 'reading facts never confirms the candidate')
   await key(h, '\x1b[5~') // PageUp returns to the original facts without changing the candidate.
   assert.equal(h.view(), initialView, 'PageUp restores the first facts page while the hint remains omitted')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.replacements(), 0, 'the incomplete identity cannot confirm on the short grant')
+  assert.equal(h.doc.theme, 'dark', 'the short grant writes nothing')
+
+  // A real resize keeps the SAME choice and restores a sufficient grant: the
+  // complete raw identity becomes visible and the explicit confirm commits it.
+  h.vt.resize(44, 20)
+  await h.vt.waitForRender()
+  assert.ok(h.view().replace(/\s+/g, '').includes(value), `the resized grant paints the complete raw identity:\n${h.view()}`)
+  assert.match(h.view(), /Enter confirm/, 'the restored grant advertises the keyboard confirm')
+  assert.match(h.view(), /Confirm\s+Cancel/, 'the explicit Detail confirm action is painted')
   await key(h, '\r')
   await settle(h)
   assert.equal(h.replacements(), 1, 'one explicit Enter dispatches exactly one write')
@@ -7108,17 +7272,44 @@ test('the wheel really scrolls the candidate list independently of its selection
   await openSelectedRow(h, 'theme')
   await key(h, '\r')
   assert.match(h.view(), /> dark/, 'the current candidate is revealed first')
-  // Two candidate rows are granted at 44x8: the longer list lets the wheel move
-  // the unchanged selection's identity out of view without touching the facts.
-  wheel(h, 4, 10, true)
+  // ONE candidate row is granted at 44x8 (the shared chrome keeps its rows):
+  // the longer list lets the wheel move the unchanged selection's identity out
+  // of view without touching the facts. The wheel is aimed at the painted
+  // candidate row, never at a hardcoded offset derived from the old grant.
+  const candidateRow = rowOf(h, '> dark')
+  const candidateCol = cellIndexOf(h, candidateRow, '> dark')
+  wheel(h, candidateRow, candidateCol, true)
   await h.vt.waitForRender()
-  wheel(h, 4, 10, true)
+  wheel(h, candidateRow, candidateCol, true)
   await h.vt.waitForRender()
   assert.ok(!h.view().includes('> dark'), `the wheel scrolled the highlighted candidate out of the viewport: ${h.view()}`)
-  assert.match(h.view(), /light/, 'and another candidate is visible')
+  assert.ok(h.view().includes('plugin:acme/long0'), `another candidate is visible: ${h.view()}`)
   // Candidate navigation still changes identity and reveals the selected head.
   await key(h, '\x1b[B')
   assert.match(h.view(), /> light/)
+  h.dispose()
+})
+
+test('a wheel from the previous choice phase never scrolls the browse Detail', async () => {
+  const h = setup({ columns: 80, rows: 7, doc: { theme: 'dark' } })
+  await h.open()
+  await key(h, '\r') // L0 -> L1
+  await key(h, '\x1b[C') // Rows -> inline choice
+  const candidateRow = rowOf(h, '> dark')
+  const candidateCol = cellIndexOf(h, candidateRow, '> dark')
+  // Leave the choice; the choice frame is still on screen.
+  h.vt.sendInput('\x1b')
+  // A wheel on the retired option cell before the Rows frame paints.
+  wheel(h, candidateRow, candidateCol, true)
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Rows/u, 'Esc returned to the Rows level')
+  const browseFrame = h.view()
+  assert.match(browseFrame, /Value\s+dark/u, 'the stale wheel did not scroll the browse facts')
+  // The same wheel on the freshly painted browse Detail really scrolls it.
+  const valueRow = rowOf(h, 'Value')
+  wheel(h, valueRow, cellIndexOf(h, valueRow, 'Value'), true)
+  await h.vt.waitForRender()
+  assert.notEqual(h.view(), browseFrame, 'the fresh frame admits the same wheel and moves its viewport')
   h.dispose()
 })
 
