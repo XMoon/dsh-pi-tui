@@ -5,6 +5,7 @@ import test, { type TestContext } from 'node:test'
 import { encodeProgramResumeHandoff } from '../../src/client/program-resume/handoff.ts'
 import {
   clientProgramResumeCapability,
+  daemonProgramResumeCapability,
   directProgramResumeCapability,
   programResumeTarget,
   resolveOfficialCliEntry,
@@ -163,6 +164,16 @@ test('a project/user .env token never grants the capability', t => {
   assert.equal(directProgramResumeCapability(directInput(f, launchFrom({
     OSC7577_TOKEN: { value: TOKEN, source: 'user-env' },
   }))), undefined)
+})
+
+test('an environment preset disables both Direct and daemon capabilities', t => {
+  const f = fixture(t)
+  const inherited = launchFrom({ OSC7577_TOKEN: { value: TOKEN, source: 'process' } })
+  const input = directInput(f, inherited, { env: { DSH_PI_TUI_PRESET: ' standard ' } })
+  assert.equal(directProgramResumeCapability(input), undefined)
+  assert.equal(daemonProgramResumeCapability(input), undefined)
+  // The official launch fallback treats whitespace as absent.
+  assert.ok(directProgramResumeCapability(directInput(f, inherited, { env: { DSH_PI_TUI_PRESET: '   ' } })))
 })
 
 test('launch forms the command cannot express fail closed', t => {

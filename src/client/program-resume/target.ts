@@ -161,6 +161,9 @@ function profileAdmitted(input: {
   if (input.platform !== 'linux' && input.platform !== 'darwin') return false
   if (!input.stdinIsTTY || !input.stdoutIsTTY) return false
   if (input.presetId !== undefined && input.presetId !== '') return false
+  // The official launch path treats a non-empty environment preset exactly like
+  // `--preset`; the frozen resume argv cannot carry either form.
+  if ((input.env.DSH_PI_TUI_PRESET?.trim() ?? '') !== '') return false
   if (input.profileContext.overlays.length !== 0) return false
   if ((input.profileContext.telemetryDisabledEnv ?? '') !== '') return false
   if (input.execArgv.length !== 0) return false

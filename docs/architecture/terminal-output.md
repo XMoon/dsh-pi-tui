@@ -60,8 +60,9 @@ home, backend, launch cwd, Node executable and `@deepseek-ai/dsh` entry; the
 command is exactly
 `/usr/bin/env DSH_HOME=… DSH_PI_TUI_BACKEND=… <node> <dsh-bin.js> --profile <p>
 --session <canonical-id>` with the cwd carried by the protocol field. An
-overlay, explicit preset, telemetry override, special Node option, multiplexer/
-SSH topology, non-TTY launch, an explicit `DSH_PI_TUI_RENDERER=tsp` opt-in
+overlay, explicit preset (`--preset` or a non-empty `DSH_PI_TUI_PRESET`),
+telemetry override, special Node option, multiplexer/SSH topology, non-TTY
+launch, an explicit `DSH_PI_TUI_RENDERER=tsp` opt-in
 (including an SDK decline that later mounts the PiTUI fallback), or a
 non-canonical Session id fails closed and never guesses a target.
 
