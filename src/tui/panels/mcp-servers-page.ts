@@ -675,7 +675,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       const before = this.searchInput.getValue() ?? ''
       this.searchInput.handleInput(data)
       const after = this.searchInput.getValue() ?? ''
-      this.reconcileSelection(snapshot)
+      this.reconcileSelection(snapshot, true)
       if (after !== before) {
         this.revokePointerGesture()
       } else {
@@ -1562,11 +1562,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   }
 
   /** Selection must stay inside the visible (filtered) rows. */
-  private reconcileSelection(snapshot: McpServersSnapshot): void {
+  private reconcileSelection(snapshot: McpServersSnapshot, deliberate = false): void {
     const names = this.visibleNames(snapshot)
     if (names.length === 0) return
     if (snapshot.selectedName === undefined || !names.includes(snapshot.selectedName)) {
       this.controller.select(names[0], names)
+      if (deliberate) this.retireRemovalTargetOnSelectionDeparture()
     }
   }
 
@@ -1593,7 +1594,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private commitSearch(): void {
     this.searching = false
     this.searchInput.focused = false
-    this.reconcileSelection(this.controller.snapshot())
+    this.reconcileSelection(this.controller.snapshot(), true)
     this.bumpRevision()
   }
 

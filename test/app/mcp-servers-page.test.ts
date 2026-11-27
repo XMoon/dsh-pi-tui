@@ -2397,3 +2397,39 @@ test('a pending List publishes Wait, not a clickable Back, at H0', () => {
   assert.match(render(page, 100, 1).join('\n'), /Back \[Esc\]/u,
     'settlement restores the real H0 Back')
 })
+
+test('a filter-induced selection of B retires the saved Delete A return intent', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
+  render(page, 120, 20)
+  page.handleInput('\r')
+  const detail = controller.snapshotValue
+  controller.snapshotValue = {
+    ...detail,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 3 },
+  }
+  render(page, 120, 20)
+  page.handleInput('y')
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    configConfirm: undefined,
+    configStatus: { kind: 'saved', text: 'Config removed · waiting for Host reconcile' },
+  }
+  render(page, 120, 20)
+  page.handleInput('\x1b')
+  page.handleInput('/')
+  for (const char of 'beta') page.handleInput(char)
+  page.handleInput('\r')
+  render(page, 120, 20)
+  assert.equal(controller.snapshotValue.selectedName, 'beta', 'the filter intentionally selects B')
+  page.handleInput('\t')
+  render(page, 120, 20)
+  assert.equal(pageRegion(page), 'detail')
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    rows: controller.snapshotValue.rows.filter(row => row.name !== 'alpha'),
+    selectedName: 'beta',
+  }
+  const frame = render(page, 120, 20).join('\n')
+  assert.equal(pageRegion(page), 'detail', 'A removal does not redirect the filtered B Detail')
+  assert.match(frame, /Server: beta/u)
+})
