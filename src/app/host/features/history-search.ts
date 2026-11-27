@@ -1352,6 +1352,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     return false
   }
 
+  /** Hand a superseded legacy roster record to the existing exact-ID repair owner. */
+  private staleColdLegacyCandidate(sessionId: string): 'stale' {
+    const round = this.coverageRound
+    if (round !== undefined && this.roundSourceCurrent(round)) this.scheduleSessionRepair(sessionId, 'rebuild')
+    return 'stale'
+  }
+
   /**
    * Terminally exclude one cold persisted-only legacy Session from the derived
    * index. The official list's positive format classification is the only
@@ -1366,20 +1373,34 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     sessions: HistorySearchSessionsLike,
     deletionCut: ReadonlyMap<string, HistorySessionCheckpointRow>,
     counters: HistorySearchPhaseCounters,
-  ): Promise<'excluded' | 'ineligible' | 'stale' | 'failed'> {
+  ): Promise<'excluded' | 'settled' | 'ineligible' | 'stale' | 'failed'> {
     if (this.index === undefined) return 'ineligible'
     if (record.live || record.formatStatus !== 'migration-required' || record.location?.kind !== 'jsonl') {
       return 'ineligible'
     }
-    if (sessions.get(sessionId) !== undefined || this.hasColdLegacyExclusionVeto(sessionId)) return 'ineligible'
+    const liveObject = sessions.get(sessionId)
+    if (liveObject !== undefined) return this.staleColdLegacyCandidate(sessionId)
     const checkpoint = this.index.checkpointOf(sessionId)
     if (checkpoint?.sourceState === 'live') return 'ineligible'
-    if (!sameCheckpoint(deletionCut.get(sessionId), checkpoint)) return 'ineligible'
+    if (this.hasColdLegacyExclusionVeto(sessionId)) return this.staleColdLegacyCandidate(sessionId)
     const round = this.coverageRound
     if (round === undefined || !this.roundSourceCurrent(round)) return 'stale'
+    if (!sameCheckpoint(deletionCut.get(sessionId), checkpoint)) {
+      const settled = round.settled.get(sessionId)
+      if (
+        settled !== undefined
+        && settled.liveObject === liveObject
+        && checkpoint !== undefined
+        && (settled.readable || (checkpoint.sourceState === 'persisted' && !checkpoint.dirty && checkpoint.uncertainSources === 0))
+      ) {
+        return 'settled'
+      }
+      return this.staleColdLegacyCandidate(sessionId)
+    }
 
     const witness = this.createWitness(sessionId, persistence, sessions, checkpoint, undefined, true)
     let refused = false
+    let preserved = false
     try {
       const receipt = await this.commitWitness(witness, () => {
         if (!this.roundSourceCurrent(round)) {
@@ -1397,7 +1418,16 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
           return
         }
         const current = this.index?.checkpointOf(sessionId)
-        if (!sameCheckpoint(deletionCut.get(sessionId), current) || current?.sourceState === 'live') {
+        if (!sameCheckpoint(deletionCut.get(sessionId), current)) {
+          const settled = round.settled.get(sessionId)
+          preserved = settled !== undefined
+            && settled.liveObject === sessions.get(sessionId)
+            && current !== undefined
+            && (settled.readable || (current.sourceState === 'persisted' && !current.dirty && current.uncertainSources === 0))
+          refused = true
+          return
+        }
+        if (current?.sourceState === 'live') {
           refused = true
           return
         }
@@ -1407,6 +1437,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         this.settleRoundSession(sessionId, undefined, round, false)
       })
       if (receipt === 'failed') return 'failed'
+      if (preserved) return 'settled'
       if (refused || receipt === 'stale') {
         if (!this.roundSourceCurrent(round)) {
           this.invalidateCoverageBinding()
@@ -2593,7 +2624,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         const exclusion = await this.tryExcludeColdLegacySession(
           sessionId, record, persistence, sessions, deletionCut, counters,
         )
-        if (exclusion === 'excluded') {
+        if (exclusion === 'excluded' || exclusion === 'settled') {
           replayOutcome = 'complete'
         } else if (exclusion === 'stale') {
           replayOutcome = 'stale'
@@ -3272,7 +3303,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
           const exclusion = await this.tryExcludeColdLegacySession(
             sessionId, record, persistence, sessions, deletionCut, counters,
           )
-          if (exclusion === 'excluded') return 'complete'
+          if (exclusion === 'excluded' || exclusion === 'settled') return 'complete'
           if (exclusion !== 'ineligible') return exclusion
           const reconciled = await this.reconcileOfficialSession(
             sessionId, record, persistence, sessions, query, counters, authority,

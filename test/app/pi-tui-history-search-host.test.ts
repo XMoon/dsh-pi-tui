@@ -30,7 +30,7 @@ import { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset, type SessionHeader
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PeerScope } from '@deepseek-ai/dsh-typert-protocol'
 import { createRemoteHostRuntime } from '../support/m3-inprocess/host-runtime.ts'
-import { createRemoteApplicationHostFixture } from '../support/remote-application-fixture.ts'
+import { createRemoteApplicationHostFixture, waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import {
   HISTORY_SEARCH_CURSOR_MAX_BYTES,
@@ -8834,6 +8834,112 @@ test('resuming an excluded Session during an open round schedules only one autho
   }
 })
 
+test('a legacy roster record superseded by resume and disposal preserves the current terminal without stale replay', async (t) => {
+  const life = testLifecycle(t)
+  let fixture: RealLegacyFixture | undefined
+  let seededList: HistorySearchPersistenceLike['list'] | undefined
+  const wire = await historyHost(life, 'history-real-legacy-stale-roster', async (ctx) => {
+    fixture = await seedRealLegacyFixture(ctx)
+    const raw = ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+    seededList = raw.list
+    raw.list = async function (options) {
+      const rows = await seededList!.call(this, options)
+      return [...rows].sort((left, right) => {
+        const leftCurrent = String(left.header.id) === REAL_CURRENT_ID
+        const rightCurrent = String(right.header.id) === REAL_CURRENT_ID
+        return leftCurrent === rightCurrent ? 0 : leftCurrent ? -1 : 1
+      })
+    }
+  })
+  await waitForReady(wire, 'stale-roster legacy exclusion')
+  const before = await wire.search({ scope: 'session', sessionId: REAL_LEGACY_ID, query: REAL_LEGACY_TEXT, limit: 5 })
+  assert.equal(before.kind, 'ready', JSON.stringify(before))
+  assert.ok(before.kind === 'ready' && before.items.length === 0)
+
+  const internals = wire.service() as unknown as {
+    reconcileOfficialSession(sessionId: string, ...args: unknown[]): Promise<unknown>
+    verifySources(): Promise<void>
+    readonly sessionRepairFlights: Map<string, unknown>
+    coverageRound?: { readonly settled: Map<string, { readonly liveObject: object | undefined; readonly readable: boolean }> }
+  }
+  const originalReconcile = internals.reconcileOfficialSession
+  let releaseCurrent!: () => void
+  const currentGate = new Promise<void>(resolve => { releaseCurrent = resolve })
+  let markCurrent!: () => void
+  const currentStarted = new Promise<void>(resolve => { markCurrent = resolve })
+  let armed = true
+  internals.reconcileOfficialSession = async function (sessionId, ...args) {
+    if (armed && sessionId === REAL_CURRENT_ID) {
+      armed = false
+      markCurrent()
+      await currentGate
+    }
+    return originalReconcile.call(this, sessionId, ...args)
+  }
+  let handle: Awaited<ReturnType<Host['ctx']['agentLoop']['resume']>> | undefined
+  let verify: Promise<void> | undefined
+  try {
+    verify = internals.verifySources()
+    await Promise.race([
+      currentStarted,
+      new Promise<never>((_, reject) => {
+        // Bounded failure deadline only; the held current candidate is the authoritative wake-up.
+        const timer = setTimeout(() => reject(new Error('current candidate did not hold the periodic round')), 10_000)
+        currentStarted.finally(() => clearTimeout(timer))
+      }),
+    ])
+    handle = await wire.host.ctx.agentLoop.resume(wire.host.ctx, {
+      resumeSessionId: SessionId(REAL_LEGACY_ID),
+      agentOptions: { provider: 'smoke', model: 'smoke' },
+    })
+    const index = indexOfService(wire.service())
+    await waitFor('legacy live repair terminal', () => {
+      const checkpoint = index.checkpointOf(REAL_LEGACY_ID)
+      const settled = internals.coverageRound?.settled.get(REAL_LEGACY_ID)
+      return checkpoint?.sourceState === 'live' && settled?.readable === true
+    }, 10_000)
+    await handle.dispose()
+    handle = undefined
+    await waitFor('legacy disposal terminal', () => {
+      const checkpoint = index.checkpointOf(REAL_LEGACY_ID)
+      const settled = internals.coverageRound?.settled.get(REAL_LEGACY_ID)
+      return checkpoint?.sourceState === 'persisted'
+        && checkpoint.dirty === false
+        && checkpoint.uncertainSources === 0
+        && !internals.sessionRepairFlights.has(REAL_LEGACY_ID)
+        && settled?.liveObject === undefined
+    }, 10_000)
+    assert.ok(fixture !== undefined)
+    const callsBeforeRelease = [
+      fixture.counters.stat(), fixture.counters.open(), fixture.counters.read(), fixture.counters.close(),
+    ]
+    releaseCurrent()
+    await verify
+    verify = undefined
+    await waitForReady(wire, 'stale-roster current terminal')
+    const restored = await wire.search({ scope: 'session', sessionId: REAL_LEGACY_ID, query: REAL_LEGACY_TEXT, limit: 5 })
+    assert.equal(restored.kind, 'ready', JSON.stringify(restored))
+    assert.ok(restored.kind === 'ready' && restored.items.length === 1)
+    const current = await wire.search({ scope: 'session', sessionId: REAL_CURRENT_ID, query: REAL_CURRENT_TEXT, limit: 5 })
+    assert.equal(current.kind, 'ready', JSON.stringify(current))
+    assert.ok(current.kind === 'ready' && current.items.length === 1)
+    assert.deepEqual(
+      [fixture.counters.stat(), fixture.counters.open(), fixture.counters.read(), fixture.counters.close()],
+      callsBeforeRelease,
+      'the stale legacy roster record must not start another official replay',
+    )
+  } finally {
+    releaseCurrent()
+    if (verify !== undefined) await verify
+    internals.reconcileOfficialSession = originalReconcile
+    const raw = wire.host.ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+    if (seededList !== undefined) raw.list = seededList
+    fixture?.restore()
+    await handle?.dispose()
+    await wire.dispose()
+  }
+})
+
 function legacyMutableSource(root: string, id: string): MutableOfficialSource {
   const source = mutableSource('/repo/legacy', id)
   return {
@@ -8940,6 +9046,88 @@ test('a retained legacy projection and cursor are removed while current, unknown
     assert.ok(!calls.statIds().includes(legacyId))
     assert.ok(!calls.openIds().includes(legacyId))
     assert.ok(!calls.readIds().includes(legacyId))
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a mounted periodic pass deletes a retained legacy projection behind the incomplete barrier and invalidates its cursor', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-legacy-periodic-root-')
+  const profileDir = life.tempDir('dsh-history-legacy-periodic-profile-')
+  const legacyId = 'legacy-periodic'
+  const legacy = legacyMutableSource(root, legacyId)
+  legacy.formatStatus = 'current'
+  legacy.revisionToken = 'rev-legacy-periodic'
+  const authority = proofAuthority(root)
+  seedColdProof(profileDir, legacy, authority.authority, {
+    occurrences: [
+      { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/legacy', content: 'mutable first', hasNonText: false },
+      { messageId: 'msg-2', firstEventSeq: 2, acceptedAt: 1002, effectiveCwd: '/repo/legacy-two', content: 'mutable second', hasNonText: false },
+    ],
+  })
+  const { deps, calls } = mutableDeps(legacy)
+  const ctx = new Context()
+  const service = directService(ctx, {
+    ...deps,
+    revisionAuthority: async () => authority.authority,
+  }, profileDir)
+  try {
+    await waitDirectReady(service)
+    const before = await service.search({ scope: 'session', sessionId: legacyId, query: 'mutable', limit: 1 }, new AbortController().signal)
+    assert.equal(before.kind, 'ready', JSON.stringify(before))
+    assert.ok(before.kind === 'ready' && before.items.length === 1)
+    const oldItem = before.items[0]!
+    const oldCursor = before.nextCursor
+    assert.ok(oldCursor !== undefined)
+
+    legacy.formatStatus = 'migration-required'
+    const index = indexOfService(service)
+    const originalDelete = index.deleteSession
+    let stateAtDelete: string | undefined
+    index.deleteSession = function (sessionId) {
+      if (sessionId === legacyId) {
+        stateAtDelete = (service as unknown as { readonly state: { readonly kind: string } }).state.kind
+      }
+      return originalDelete.call(this, sessionId)
+    }
+    const legacyIoBefore = [
+      calls.statIds().filter(id => id === legacyId).length,
+      calls.openIds().filter(id => id === legacyId).length,
+      calls.readIds().filter(id => id === legacyId).length,
+    ]
+    const beforeVerify = calls.listCalls()
+    await verifyFullPass(service)
+    assert.equal(calls.listCalls(), beforeVerify + 1)
+    assert.equal(stateAtDelete, 'incomplete', 'destructive deletion must first publish the incomplete barrier')
+    assert.deepEqual([
+      calls.statIds().filter(id => id === legacyId).length,
+      calls.openIds().filter(id => id === legacyId).length,
+      calls.readIds().filter(id => id === legacyId).length,
+    ], legacyIoBefore, 'periodic legacy exclusion must not perform per-ID official IO')
+
+    const empty = await service.search({ scope: 'session', sessionId: legacyId, query: 'mutable', limit: 1 }, new AbortController().signal)
+    assert.equal(empty.kind, 'ready', JSON.stringify(empty))
+    assert.ok(empty.kind === 'ready' && empty.items.length === 0)
+    const stale = await service.search({
+      scope: 'session', sessionId: legacyId, query: 'mutable', limit: 1, cursor: oldCursor,
+    }, new AbortController().signal)
+    assert.equal(stale.kind, 'stale')
+    const body = await service.readText({
+      sessionId: oldItem.sessionId,
+      messageId: oldItem.messageId,
+      contentSha256: oldItem.contentSha256,
+      offset: 0,
+      limit: 4096,
+    }, new AbortController().signal)
+    assert.equal(body.kind, 'unavailable')
+    assert.ok(body.kind === 'unavailable' && body.reason === 'not-found')
+    const recall = await service.readSessionRecall({ sessionId: legacyId }, new AbortController().signal)
+    assert.equal(recall.kind, 'loading')
+    assert.equal(index.checkpointOf(legacyId), undefined)
+    assert.equal(index.sourceProofOf(legacyId), undefined)
+    index.deleteSession = originalDelete
   } finally {
     await service.dispose()
     await ctx.fiber.dispose()
