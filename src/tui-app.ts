@@ -1402,9 +1402,9 @@ export interface TuiAppEventsBase {
   onExit: () => void
   /**
    * M6 UX PR1: the LIVE authoritative activity of the exact current Session
-   * for the keyboard exit rule. The default physical Ctrl+C cancels current
-   * work once while `working`, refuses to arm an exit while `unknown`, and
-   * keeps the historical clear-then-double-press exit only when `idle`.
+   * for the keyboard exit rule. The default physical Ctrl+C clears an editable
+   * draft first. Without one it cancels current work once while `working`,
+   * refuses to arm while `unknown`, and confirms exit while `idle`.
    * Optional; absent keeps the historical double-press exit for every state
    * (a composition without a Session authority never claims a busy cancel).
    */
@@ -4619,9 +4619,9 @@ export class TuiApp {
   private exitConfirmAt: number | undefined
   /** The keyboard exit-confirmation window in ms. A too-short window silently
    * misses a human-paced double press (0.6–1s apart), which reads as "the
-   * confirmation doesn't work"; 1.5s covers a natural double press, and the
-   * armed state is announced by the footer. */
-  private static readonly EXIT_CONFIRM_WINDOW_MS = 1500
+   * confirmation doesn't work"; 3s allows time to read the footer prompt
+   * before confirming. */
+  private static readonly EXIT_CONFIRM_WINDOW_MS = 3000
   /** Issue #8: the effective exit window (injectable for tests). */
   private readonly exitConfirmWindowMs: number
   /** Issue #8: the footer instruction reflects the armed effective trigger
@@ -8089,27 +8089,12 @@ export class TuiApp {
         label: formatKeyId(key),
         clearsDraft: key === 'ctrl+c',
       }
-      // M6 UX PR1: the DEFAULT builtin physical Ctrl+C (the ONE exit key with
-      // the clear-draft identity) is the only key with a busy-cancel rule.
-      // While the exact current Session is authoritatively working it cancels
-      // ONCE (the existing Busy Esc path: shell interrupt + exact-scope
-      // session interrupt), never arms an exit and never clears the draft. An
-      // unobservable state refuses to arm the exit and says so. Remapped exit
-      // keys and leader completions keep the ordinary same-key confirmation.
-      if (trigger === undefined && source === 'builtin' && effectiveTrigger.clearsDraft) {
-        const activity = this.events.sessionActivity?.()
-        if (activity === 'working') {
-          this.clearExitConfirmation()
-          this.events.onCancel?.()
-          return true
-        }
-        if (activity === 'unknown') {
-          this.clearExitConfirmation()
-          this.notify("The current session's running state cannot be verified.", 'error')
-          return true
-        }
-      }
-      this.handleExitRequest(effectiveTrigger)
+      // Only the effective builtin physical Ctrl+C consults live activity.
+      // Remapped exit keys and leader completions keep their own semantics.
+      const activity = trigger === undefined && source === 'builtin' && effectiveTrigger.clearsDraft
+        ? this.events.sessionActivity?.()
+        : undefined
+      this.handleExitRequest(effectiveTrigger, activity)
       return true
     }
     // Every other semantic host action is an intervening user action. Clear
@@ -8274,38 +8259,35 @@ export class TuiApp {
     return this.handleInterruptAction(data)
   }
 
-  /** The keyboard exit path (app.exit.request). Every effective exit key
-   * needs a second press of the SAME key within the confirmation window.
-   * Ctrl+C additionally keeps its pi-parity clear-then-confirm behavior;
-   * other exit keys preserve the draft on their first press. */
-  private handleExitRequest(trigger: ExitConfirmationTrigger): void {
-    const isCtrlC = trigger.clearsDraft
-    // Ctrl+C is the only exit key with clear-draft semantics. Check the
-    // draft before same-key confirmation so a programmatic draft mutation
-    // can never make a pending Ctrl+C unexpectedly exit while text remains.
-    if (isCtrlC) {
-      // PR2/RFL008: while a submission attempt holds the composer, Ctrl+C is
-      // pure CANCEL-ACTIVITY — the pre-acceptance document stays exactly as
-      // submitted (the plan forbids a pre-acceptance clear). The exit
-      // confirmation ladder continues below unchanged.
-      if (!this.composerHeld()) {
-      const text = this.seatEditor().getText()
-      // A shell-mode draft is non-empty in its SERIALIZED form: the first
-      // press clears BOTH the body and the mode — an empty `!` / `!!` editor
-      // would otherwise show a stale shell prompt and skip the clear step.
-      if (text !== '' || this.seatInputMode() !== 'prompt') {
-        this.seatEditor().setText('')
-        this.resetEditorMode()
-        this.editorSeatHolder.notifyChanged()
-        this.armExitConfirmation(trigger)
-        // The key is CONSUMED at the app level, so the fork's input path
-        // never reaches the focused editor and never requests its own frame.
-        // Repaint explicitly or the cleared draft would stay on screen until
-        // the next keypress (the stale-clear trap).
-        this.requestRender()
-        return
-      }
-      }
+  /** The keyboard exit path (app.exit.request). An editable Ctrl+C draft
+   * takes precedence over cancel/exit. Idle retains clear-then-confirm;
+   * working/unknown draft clears never arm an exit. */
+  private handleExitRequest(trigger: ExitConfirmationTrigger, activity?: ExitSessionActivity): void {
+    // A held submission belongs to the acceptance transaction, not to the
+    // editable draft. A shell-mode prefix counts even with an empty body.
+    if (trigger.clearsDraft && !this.composerHeld()
+      && (this.seatEditor().getText() !== '' || this.seatInputMode() !== 'prompt')) {
+      this.seatEditor().setText('')
+      this.resetEditorMode()
+      this.editorSeatHolder.notifyChanged()
+      if (activity === 'working' || activity === 'unknown') this.clearExitConfirmation()
+      else this.armExitConfirmation(trigger)
+      // The consumed key never reaches the focused editor's own repaint.
+      this.requestRender()
+      return
+    }
+
+    // No editable draft: preserve the existing authoritative cancel/refusal
+    // paths, including the cancel of an in-flight held submission.
+    if (activity === 'working') {
+      this.clearExitConfirmation()
+      this.events.onCancel?.()
+      return
+    }
+    if (activity === 'unknown') {
+      this.clearExitConfirmation()
+      this.notify("The current session's running state cannot be verified.", 'error')
+      return
     }
 
     const now = Date.now()

@@ -372,9 +372,10 @@ takes the seat dismisses the Client choice with zero business action, and the
 choice can never open on top of an active official modal or the Alt+Q list.
 Ctrl+C inside the choice is `Stay` (it never cancels the background Turn), and
 the Stop-in-flight window accepts no key until the exact-owner idle proof
-settles. Bound raw input keeps the product rule: idle Ctrl+C and empty-draft
-Ctrl+D need the same-key 1.5-second second press, working Ctrl+C cancels once,
-unknown Ctrl+C refuses to arm; the pre-bind Ctrl+C emergency exit is unchanged.
+settles. Bound raw input follows the [shared keyboard rule](../architecture/surface-behavior.md):
+editable draft first, then authoritative cancel/refusal/exit, with a 3-second
+same-key confirmation window. Higher seats, hydration and held submissions
+keep their drafts intact; pre-bind Ctrl+C remains the emergency exit.
 The choice's stop/idle proof, session currentness and final exit commit stay in
 the application coordinator — the renderer never calls a Host cancel itself.
 

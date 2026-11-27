@@ -165,6 +165,8 @@ interface SurfaceHarness {
 
 async function mountSurface(life: { after(fn: () => unknown): void }, options: {
   readonly remote?: boolean
+  readonly onCancel?: () => void
+  readonly sessionActivity?: () => 'idle' | 'working' | 'unknown'
   /** The REAL presentation preset this mount commits (Focus cases need it). */
   readonly preset?: DisplayState['preset']
   /** A custom seed for the composed main Folder (defaults to `seedTurns`). */
@@ -283,6 +285,8 @@ async function mountSurface(life: { after(fn: () => unknown): void }, options: {
     events: {
       onSubmit: () => {},
       onExit: () => {},
+      onCancel: options.onCancel,
+      sessionActivity: options.sessionActivity,
       shouldRememberInput: () => true,
     } as never,
     renderer: rendererMount,
@@ -715,6 +719,22 @@ test('the renderer opens the card against the composed binding and searches the 
   const snapshot = h.binding().snapshot(MAIN_MARKER.toLowerCase())
   assert.equal(snapshot?.matches.length, 1,
     `the composed binding sees the seeded answer :: ${JSON.stringify({ texts: h.texts().slice(-8), matches: snapshot?.matches.length })}`)
+})
+
+test('Ctrl+C from Session Search cancels working activity without clearing the hidden draft', async (t) => {
+  let cancels = 0
+  const h = await mountSurface(t, {
+    sessionActivity: () => 'working',
+    onCancel: () => { cancels += 1 },
+  })
+  h.renderer().composer.setDraft('keep this draft')
+  await h.key(ALT_SHIFT_S)
+  await waitUntil('the search card painted',
+    () => h.texts().some(text => text.includes('Session Search')))
+  await h.key('\x03')
+  await waitUntil('the forwarded cancel reaches its owner', () => cancels === 1)
+  assert.equal(h.renderer().composer.getDraft(), 'keep this draft')
+  assert.equal(cancels, 1)
 })
 
 test('the composed Focus binding reveals only what each semantic hit really hides', async (t) => {

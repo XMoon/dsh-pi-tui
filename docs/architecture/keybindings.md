@@ -498,19 +498,18 @@ the user's live bindings:
   `src/tui-app.ts` and `src/index.ts` carry a header note pointing here.
 - **Keyboard exit requests use same-key confirmation.** Every effective exit
   request that reaches the Host — including full `<leader>X` sequences — arms
-  its own 1.5-second window and must be repeated with the same trigger; a
+  its own 3-second window and must be repeated with the same trigger; a
   different exit key replaces the armed trigger. The default Ctrl+D remains
   editor-owned while the visible editor has content. The footer renders the
   effective trigger label dynamically.
-- **The builtin physical Ctrl+C is the one key with a busy exception.** Only the
+- **The builtin physical Ctrl+C gives an editable draft precedence.** Only the
   effective DEFAULT `app.exit.request` Ctrl+C consults the current Session's
-  authoritative activity: `working` performs ONE existing interrupt-path cancel
-  (no exit confirmation, no draft clear), `unknown` refuses to arm the exit and
-  notifies, and `idle` keeps the historical clear-then-same-key double press.
-  A remapped exit key, a leader completion, or Ctrl+C remapped onto
-  `app.agent.interrupt` keeps its own action semantics; the exception is never
-  hard-coded into the raw input router outside the effective keymap. TSP has no
-  user keymap and applies the same rule to its bound raw keys.
+  authoritative activity. The draft/cancel/exit ladder is defined in
+  [surface behavior](./surface-behavior.md). A remapped exit key, a leader
+  completion, or Ctrl+C remapped onto `app.agent.interrupt` keeps its own action
+  semantics; the exception is never hard-coded into the raw input router outside
+  the effective keymap. TSP has no user keymap and applies the same rule to its
+  bound raw keys.
 - **User-facing strings derive key labels from the keymap**
   (`keyHint()` / `keysFor()` — e.g. the guard notices and the `/settings`
   row descriptions). A remap updates the copy automatically; a disabled

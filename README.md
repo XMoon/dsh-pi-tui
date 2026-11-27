@@ -96,7 +96,7 @@ Daemon 的选择也可以在 `/settings → Host → Backend` 保存，**下一�
 | `Ctrl+F` · `Ctrl+Shift+F` | 已绘制文本 / 可用 Session 历史搜索 |
 | `Ctrl+R` · `Ctrl+G` | 历史输入 / 外部编辑器 |
 | `Ctrl+O` · `Alt+T` | Tool / Context 与 Thinking 折叠 |
-| `Ctrl+C` · `Ctrl+D` | 工作中取消、或空闲时遵循实际键位/确认退出 |
+| `Ctrl+C` · `Ctrl+D` | Ctrl+C 优先清理可编辑草稿，空草稿时取消工作或确认退出；Ctrl+D 保持编辑/退出语义 |
 | `!` · `!!` | Host Shell：结果入 Session / 不入 Session |
 
 这里列出的是默认键位和常见入口；自定义后以 `/keybindings` 显示的**实际生效键位**为准。输入 `/` 可搜索并选择命令与可用的 Skills；需要显式调用某个 Skill（包括与同名命令冲突时）使用 `/skill <name> [args]`，裸 `/skill` 只显示用法。`/transcript` 当前的官方 Markdown 导出路径属于 Direct；`/export` 是独立的 ZIP 归档，产物落在 Client 本地目录。`PI_IMAGE_PROTOCOL=none` 只禁止像素预览，不影响附件发送。
