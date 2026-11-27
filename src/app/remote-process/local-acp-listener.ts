@@ -359,6 +359,13 @@ interface ConnectionState {
   /** Whether THIS connection negotiated standard embedded text/blob resources. */
   resourceEnabled: boolean
   /**
+   * Whether THIS connection was actually advertised the standard client
+   * `systemPrompt` append capability at `initialize`. It is frozen for the whole
+   * connection with the other capabilities and is the ONLY admission fact a
+   * non-null lifecycle `systemPrompt` is checked against.
+   */
+  systemPromptAppend: boolean
+  /**
    * Whether THIS connection declared the standard ACP v1 form-based
    * elicitation capability during its initialize. A connection that did not
    * declare it never receives an `elicitation/create` request: an ACP-owned
@@ -942,6 +949,13 @@ function buildAgentApp(
       state.resourceEnabled = context.sessionAccess !== undefined
         && state.views !== undefined
         && context.sessionAccess.supportsFileInput() === true
+      // The client append capability is frozen ONCE for this connection, exactly
+      // like the resource/image capabilities: the real shared Session View and
+      // the official scoped section seam must both exist, or the capability is
+      // never advertised and every non-null request stays invalid params.
+      state.systemPromptAppend = context.sessionAccess !== undefined
+        && state.views !== undefined
+        && context.sessionAccess.supportsSystemPromptAppend() === true
       if (context.sessionAccess !== undefined && state.views !== undefined) {
         const imageEnabled = await context.sessionAccess.supportsImagePrompts()
         const bounds = imageEnabled ? deriveImageInputBounds(context.sessionAccess.imageLimits()) : undefined
@@ -973,7 +987,12 @@ function buildAgentApp(
           // installed the connection-scoped View; `list` joins it only when the
           // authorized roster and canonical history read seams are ready.
           sessionCapabilities: context.sessionAccess !== undefined
-            ? { resume: {}, close: {}, ...(sessionReadReady ? { list: {} } : {}) }
+            ? {
+              resume: {},
+              close: {},
+              ...(sessionReadReady ? { list: {} } : {}),
+              ...(state.systemPromptAppend ? { systemPrompt: {} } : {}),
+            }
             : {},
         },
         authMethods: [],
@@ -1209,6 +1228,7 @@ function buildAgentApp(
       notifyProjection: projectionNotifierFor(client),
       capabilities: state.capabilities,
       maxOutputFrameBytes: state.maxOutputFrameBytes,
+      systemPromptAppend: state.systemPromptAppend,
       ...state.elicitationForm ? { requestElicitation: requestElicitationFor(client) } : {},
     })
     app.onRequest(methods.agent.session.new, async ({ params, client, signal }) => {
@@ -1217,17 +1237,43 @@ function buildAgentApp(
       try {
         requireInitialized()
         view = createSessionViewSlot(slots, views)
-        beginSlotRequest(view)
+        // The fresh attach owns the slot exclusively through its initial config
+        // read: no same-slot prompt/config can start on a generation whose
+        // attach response the client has not received yet.
+        beginSlotRefresh(view)
         const result = await views.newSession(view, access, params, viewChannelsFor(client), signal)
-        const config = await readConfigStateOrLog(result.sessionId, view)
-        return { ...result, ...config }
+        const sessionId = result.sessionId
+        const attachedView = view
+        const onAbort = (): void => { views.retireFailedAttach(attachedView, sessionId, access) }
+        signal.addEventListener('abort', onAbort, { once: true })
+        try {
+          if (signal.aborted) {
+            views.retireFailedAttach(attachedView, sessionId, access)
+            signal.throwIfAborted()
+          }
+          const config = await readConfigStateOrLog(sessionId, attachedView)
+          if (signal.aborted) {
+            views.retireFailedAttach(attachedView, sessionId, access)
+            signal.throwIfAborted()
+          }
+          return { ...result, ...config }
+        } catch (error) {
+          // A committed fresh attach whose initial config terminal failed also
+          // retires exactly this generation; the client never saw a success.
+          views.retireFailedAttach(attachedView, sessionId, access)
+          throw error
+        } finally {
+          signal.removeEventListener('abort', onAbort)
+        }
       } catch (error) {
         throw asRequestError(error)
       } finally {
         if (view !== undefined) {
-          endSlotRequest(view)
+          if (activityOf(view).refreshing) endSlotRefresh(view)
+          else endSlotRequest(view)
           releaseIdleViewSlot(slots, views, view)
         }
+        views.clearAttachAbort(signal)
         endRequest('control')
       }
     })
@@ -1260,10 +1306,31 @@ function buildAgentApp(
           }
         }
         view = createSessionViewSlot(slots, views)
-        beginSlotRequest(view)
+        beginSlotRefresh(view)
         const result = await views.resumeSession(view, access, params, viewChannelsFor(client), signal)
-        const config = await readConfigStateOrLog(params.sessionId, view)
-        return { ...result, ...config }
+        const attachedView = view
+        const sessionId = params.sessionId
+        const onAbort = (): void => { views.retireFailedAttach(attachedView, sessionId, access) }
+        signal.addEventListener('abort', onAbort, { once: true })
+        try {
+          if (signal.aborted) {
+            views.retireFailedAttach(attachedView, sessionId, access)
+            signal.throwIfAborted()
+          }
+          const config = await readConfigStateOrLog(sessionId, attachedView)
+          if (signal.aborted) {
+            views.retireFailedAttach(attachedView, sessionId, access)
+            signal.throwIfAborted()
+          }
+          return { ...result, ...config }
+        } catch (error) {
+          // A committed fresh attach whose initial config terminal failed also
+          // retires exactly this generation; the client never saw a success.
+          views.retireFailedAttach(attachedView, sessionId, access)
+          throw error
+        } finally {
+          signal.removeEventListener('abort', onAbort)
+        }
       } catch (error) {
         throw asRequestError(error)
       } finally {
@@ -1272,6 +1339,7 @@ function buildAgentApp(
           else endSlotRequest(view)
           releaseIdleViewSlot(slots, views, view)
         }
+        views.clearAttachAbort(signal)
         endRequest('control')
       }
     })
@@ -1312,10 +1380,31 @@ function buildAgentApp(
           }
         }
         view = createSessionViewSlot(slots, views)
-        beginSlotRequest(view)
+        beginSlotRefresh(view)
         const result = await views.loadSession(view, access, params, viewChannelsFor(client), signal)
-        const config = await readConfigStateOrLog(params.sessionId, view)
-        return { ...result, ...config }
+        const attachedView = view
+        const sessionId = params.sessionId
+        const onAbort = (): void => { views.retireFailedAttach(attachedView, sessionId, access) }
+        signal.addEventListener('abort', onAbort, { once: true })
+        try {
+          if (signal.aborted) {
+            views.retireFailedAttach(attachedView, sessionId, access)
+            signal.throwIfAborted()
+          }
+          const config = await readConfigStateOrLog(sessionId, attachedView)
+          if (signal.aborted) {
+            views.retireFailedAttach(attachedView, sessionId, access)
+            signal.throwIfAborted()
+          }
+          return { ...result, ...config }
+        } catch (error) {
+          // A committed fresh attach whose initial config terminal failed also
+          // retires exactly this generation; the client never saw a success.
+          views.retireFailedAttach(attachedView, sessionId, access)
+          throw error
+        } finally {
+          signal.removeEventListener('abort', onAbort)
+        }
       } catch (error) {
         throw asRequestError(error)
       } finally {
@@ -1324,6 +1413,7 @@ function buildAgentApp(
           else endSlotRequest(view)
           releaseIdleViewSlot(slots, views, view)
         }
+        views.clearAttachAbort(signal)
         endRequest('control')
       }
     })
@@ -1520,6 +1610,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
     closed: false,
     imageEnabled: false,
     resourceEnabled: false,
+    systemPromptAppend: false,
     elicitationForm: false,
     capabilities: { plan: false, compaction: false, subagents: false, notices: false, booleanConfigOptions: false },
     inputBounds: TEXT_ONLY_BOUNDS,

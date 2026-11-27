@@ -135,6 +135,9 @@ const SCENARIOS = new Set([
   // real `ctx.subprocess` spawn. The probes are run-owned executables; the
   // scenario exposes no arbitrary command input.
   'host-default-environment',
+  // ACP v1 client system prompt append: only real scripted text answers plus
+  // the sanitized model-facing system facts; the case owns every assertion.
+  'acp-system-prompt',
 ])
 
 /**
@@ -451,6 +454,55 @@ function recordPromptFacts(options) {
     responseSection: systemText.includes('# Response style:'),
     gitSection: systemText.includes('# Git attribution'),
   }) + '\n', { mode: 0o600 })
+}
+
+/**
+ * ACP system prompt append scenario: the case-owned marker suffixes. The model
+ * request is the real sink; a count is kept per marker so a sibling/child or a
+ * retired generation can never pass by sharing one aggregate value.
+ */
+const ACP_SYSTEM_PROMPT_MARKER_IDS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
+
+/** The exact marker text one ACP append case sends for a suffix. */
+function acpSystemPromptMarker(id) {
+  return `ACP_SYSTEM_PROMPT_APPEND_${id}_MARKER`
+}
+
+/** Sanitized model-facing facts of ONE real request in this scenario. */
+function acpSystemPromptRequestFacts(options, sessionId) {
+  // The exact current authored user prompt correlates this sample with the
+  // case-owned turn/step that triggered it; the digest is not user data.
+  const reversed = [...(options.messages ?? [])].reverse()
+  // Runtime-context injections are also user-role messages; prefer the
+  // user-authored source exactly like the durable prompt facts do.
+  const authored = reversed.find(message => message?.role === 'user' && message?.source?.kind === 'user')
+    ?? reversed.find(message => message?.role === 'user')
+  const userPrompt = authored === undefined ? '' : allUserText([authored])
+  // The case owns its prompt tags; the official TUI may append runtime-context
+  // injections to the same user message, so the tag (not the whole digest) is
+  // the stable correlation fact.
+  const promptTag = /(asp-[a-z0-9-]+)/u.exec(userPrompt)?.[1]
+  const systemChannel = textOf(options.system)
+  const historyChannel = (options.messages ?? [])
+    .filter(message => message?.role === 'system')
+    .map(message => textOf(message.content)).join('\n')
+  const systemText = [systemChannel, historyChannel].join('\n')
+  const perChannel = channel => Object.fromEntries(ACP_SYSTEM_PROMPT_MARKER_IDS
+    .map(id => [id, channel.split(acpSystemPromptMarker(id)).length - 1]))
+  return {
+    sessionId,
+    markers: perChannel(systemText),
+    systemChannelMarkers: perChannel(systemChannel),
+    historyChannelMarkers: perChannel(historyChannel),
+    systemChannelLength: systemChannel.length,
+    historyChannelLength: historyChannel.length,
+    systemLength: systemText.length,
+    systemSha256: createHash('sha256').update(systemText).digest('hex'),
+    harnessIdentity: systemText.includes('You are an AI agent powered by DeepSeek Harness.'),
+    literalPreserved: systemText.includes('{{literal}}'),
+    promptTag,
+    afterTool: Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool',
+  }
 }
 
 /** G-ACP1B/B0 prompt markers and the official MCP public tool names. */
@@ -1467,6 +1519,42 @@ class C1Model extends LlmAdapter {
     if (registry !== undefined) this.record('live-registry', registry)
     const afterTool = Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool'
     const token = `${this.scenario}-${sessionId}`
+
+    // ACP v1 system prompt append: record the exact model-facing system facts
+    // of the real request (both channels), then answer with ordinary text. The
+    // markers are case-owned literals; no prompt text selects a behavior.
+    if (this.scenario === 'acp-system-prompt') {
+      // The trigger is THIS step's authored user prompt, never the joined
+      // conversation history: a later turn must not replay a delegated child
+      // or re-enter the hold branch because an older user message mentions it.
+      const lastUser = reversedMessages.find(message => message?.role === 'user')
+      const lastUserText = lastUser === undefined ? '' : allUserText([lastUser])
+      // B5: hold ONE real foreign request while the ACP View detaches. The
+      // already-sampled request keeps its append; after the detach the SAME
+      // turn's next step (the tool-result step below) must carry none.
+      if (lastUserText.includes('asp-hold') && afterTool !== true) {
+        this.record('acp-system-prompt-held', acpSystemPromptRequestFacts(options, sessionId))
+        await waitForBarrier(process.env.C1_SYSTEM_PROMPT_HOLD, signal)
+        this.record('acp-system-prompt-released', { sessionId })
+        yield* this.toolCall('todo_write', `asp-hold-todo-${sessionId}`, {
+          todos: [{ content: 'held step', status: 'in_progress' }],
+        })
+        return
+      }
+      // B2: delegate ONE real formal child. The child has its own Agent scope,
+      // so the parent's scoped append must never reach the child's request.
+      if (lastUserText.includes('asp-child-parent') && afterTool !== true) {
+        this.record('acp-system-prompt-request', acpSystemPromptRequestFacts(options, sessionId))
+        yield* this.toolCall('subagent', `asp-child-${sessionId}`, {
+          description: 'asp child probe',
+          prompt: 'asp-child-task',
+        })
+        return
+      }
+      this.record('acp-system-prompt-request', acpSystemPromptRequestFacts(options, sessionId))
+      yield* this.textAnswer(`acp-system-prompt answer ${sessionId}`)
+      return
+    }
 
     if (this.scenario === 'host-default-environment') {
       // The ONLY authored markers this scenario accepts. Each maps to a fixed
@@ -3153,6 +3241,44 @@ export async function apply(ctx) {
   }, neverSetup, imageProbe, markdownFileProbe, po4eFileProbe, po4c, po4d, probeRegistry, subprocessProbe)
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
+
+  // The ACP system-prompt scenario needs ONE real blank-session preset switch
+  // (complete minimal preset) through the SAME official `agentPresets.select`
+  // the TUI command uses. The case writes a narrow control action; the fixture
+  // invokes only that official service and records its real result.
+  const systemPromptControl = process.env.C1_SYSTEM_PROMPT_CONTROL
+  if (scenario === 'acp-system-prompt' && typeof systemPromptControl === 'string' && systemPromptControl !== '') {
+    let handled
+    const timer = setInterval(() => {
+      if (!existsSync(systemPromptControl)) return
+      let request
+      try {
+        request = JSON.parse(readFileSync(systemPromptControl, 'utf8'))
+      } catch {
+        return
+      }
+      if (request?.actionId === handled) return
+      handled = request?.actionId
+      const agentPresets = ctx.reflect.get('agentPresets')
+      const agent = request?.sessionId === undefined ? undefined : ctx.agents.get(String(request.sessionId))
+      if (request?.action !== 'select-preset' || agentPresets === undefined || agent === undefined) {
+        record('acp-system-prompt-control', {
+          actionId: request?.actionId, action: request?.action, ok: false, reason: 'unavailable',
+        })
+        return
+      }
+      agentPresets.select(agent, String(request.preset)).then(selected => {
+        record('acp-system-prompt-control', {
+          actionId: request.actionId, action: request.action, ok: true, sessionId: agent.id, preset: selected,
+        })
+      }, error => {
+        record('acp-system-prompt-control', {
+          actionId: request.actionId, action: request.action, ok: false, reason: String(error?.code ?? error?.message ?? error).slice(0, 200),
+        })
+      })
+    }, 25)
+    ctx.effect(() => () => clearInterval(timer), 'acp-system-prompt-control')
+  }
 
   if (scenario === 'acp-scoped-mcp-b0') {
     createScopedMcpB0Workload(ctx, { root, record })

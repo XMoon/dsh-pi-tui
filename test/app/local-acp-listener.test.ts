@@ -485,7 +485,194 @@ test('an image-widened raw frame never widens the legacy embedded-resource budge
   await listener.close()
 })
 
+test('initialize advertises the client system prompt append only for the real scoped seam, and a valid append reaches the exact Agent', async t => {
+  for (const [seam, expected] of [[true, true], [false, false]] as const) {
+    const { scope } = newScope(t)
+    const fake = makeFakeAccess({ systemPromptAppend: seam })
+    const agent = fake.seed('session-system-prompt', '/host')
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access, views: registry })
+    t.after(() => listener.close())
+    const client = await RawClient.open(listener.socketPath)
+    try {
+      initialize(client, 1)
+      const init = (await client.next()) as {
+        result?: { agentCapabilities: { sessionCapabilities: Record<string, unknown> } }
+      }
+      const capability = init.result?.agentCapabilities.sessionCapabilities.systemPrompt
+      assert.equal(capability !== undefined, expected,
+        seam
+          ? 'a real scoped append seam must advertise the systemPrompt capability'
+          : 'a Host without the scoped append seam must not advertise it')
+      if (seam) assert.deepEqual(capability, {}, 'append mode is advertised, override is never offered')
+      client.send({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/resume',
+        params: {
+          sessionId: 'session-system-prompt',
+          cwd: '/host',
+          systemPrompt: {
+            mode: 'append',
+            content: [{ type: 'text', text: 'LISTENER_APPEND' }, { type: 'text', text: '{{literal}}' }],
+          },
+        },
+      })
+      const reply = (await client.next()) as { result?: unknown; error?: { code: number; data?: { code?: string } } }
+      if (seam) {
+        assert.deepEqual(reply.result, {})
+        assert.equal(fake.systemPromptAppendRegistrations.length, 1)
+        const registration = fake.systemPromptAppendRegistrations[0]
+        assert.equal(registration?.agent, agent, 'the seam must receive the exact borrowed Agent')
+        assert.equal(registration?.session, agent.session, 'the seam must receive the exact borrowed Session')
+        assert.equal(registration?.text, 'LISTENER_APPEND\n\n{{literal}}',
+          'the listener must forward the literal two-newline normalized append')
+        assert.equal(registration?.stillCurrent(), true, 'the committed View provider gate is live')
+        client.send({ jsonrpc: '2.0', id: 3, method: 'session/close', params: { sessionId: 'session-system-prompt' } })
+        assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+        assert.equal(registration?.disposeCalls, 1, 'the real close boundary must run the exact disposer')
+        assert.equal(registration?.stillCurrent(), false, 'the provider gate must fail closed before release')
+      } else {
+        assert.equal(reply.error?.code, -32602)
+        assert.equal(reply.error?.data?.code, 'LOCAL_ACP_VIEW_INVALID_REQUEST')
+        assert.equal(fake.systemPromptAppendRegistrations.length, 0)
+        assert.equal(registry.hasClaim('session-system-prompt'), false)
+      }
+    } finally {
+      client.close()
+    }
+    await listener.close()
+  }
+})
+
+test('a cancelled fresh attach during its initial config read retires the append and releases the reservation', async t => {
+  const { scope } = newScope(t)
+  let releaseConfig: (() => void) | undefined
+  let configReads = 0
+  const fake = makeFakeAccess({
+    systemPromptAppend: true,
+    modelOptions: async () => {
+      configReads += 1
+      if (configReads === 1) {
+        return await new Promise<never[]>(resolve => {
+          releaseConfig = () => resolve([])
+        })
+      }
+      return []
+    },
+  })
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access, views: registry })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/new',
+      params: {
+        cwd: '/host/proj',
+        mcpServers: [],
+        systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'CANCELLED_APPEND' }] },
+      },
+    })
+    await waitForFact(() => fake.systemPromptAppendRegistrations.length === 1 ? true : undefined, 'the committed append registration')
+    await waitForFact(() => configReads === 1 ? true : undefined, 'the held initial config read')
+    assert.equal(registry.hasClaim('session-1'), true, 'the fresh claim is attached while the config read is held')
+    // A real SDK request cancellation during the held post-commit config read.
+    client.send({ jsonrpc: '2.0', method: '$/cancel_request', params: { requestId: 2 } })
+    await waitForFact(() => fake.systemPromptAppendRegistrations[0]?.disposeCalls === 1 ? true : undefined, 'the cancelled append retirement')
+    assert.equal(registry.hasClaim('session-1'), false, 'the cancelled attach leaves no live claim')
+    releaseConfig?.()
+    // The SAME Session is immediately attachable: no phantom claim, no stale BUSY slot.
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/resume', params: { sessionId: 'session-1', cwd: '/host/proj' } })
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; result?: unknown; error?: { code?: number; data?: { code?: string } } }
+      if (frame.id !== 3) continue
+      assert.equal(frame.error, undefined, `the cancelled Session must be attachable again: ${JSON.stringify(frame.error)}`)
+      assert.equal(typeof frame.result, 'object', 'the recovery attach settles with a real result')
+      break
+    }
+  } finally {
+    client.close()
+  }
+})
+
+test('a cancelled initial config retires the continued Form of a resumed claim and its stale answer', async t => {
+  const { scope } = newScope(t)
+  let releaseConfig: (() => void) | undefined
+  let configReads = 0
+  const fake = makeFakeAccess({
+    questionService: true,
+    modelOptions: async () => {
+      configReads += 1
+      if (configReads === 1) {
+        return await new Promise<never[]>(resolve => { releaseConfig = () => resolve([]) })
+      }
+      return []
+    },
+    questionSnapshot: () => ({
+      kind: 'current',
+      continued: [{ callId: 'call-resumed', questions: [{ id: 'native', question: 'still answerable?', options: [{ label: 'yes' }] }] }],
+      settled: new Set(),
+    }),
+    answerContinued: () => ({ kind: 'queued' }),
+  })
+  fake.seed('S-resume', '/host/proj')
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access, views: registry })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1, 1, { elicitation: { form: {} } })
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'S-resume', cwd: '/host/proj' } })
+    let formId: number | undefined
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; method?: string }
+      if (frame.method === ELICITATION_CREATE) {
+        formId = frame.id
+        break
+      }
+    }
+    assert.equal(configReads, 1, 'the resumed claim is attached with its Form outstanding and the initial config held')
+    assert.equal(registry.hasClaim('S-resume'), true)
+    client.send({ jsonrpc: '2.0', method: '$/cancel_request', params: { requestId: 2 } })
+    await waitForFact(() => registry.hasClaim('S-resume') === false ? true : undefined, 'the cancelled resumed claim retirement')
+    // The exact outstanding reverse Form was CANCELLED on the wire, not merely
+    // answered with a currentness rejection later.
+    const cancelled = await nextUntil(client, message => {
+      const params = message['params'] as { requestId?: number } | undefined
+      if (message['method'] === '$/cancel_request' && params?.requestId === formId) return 'form-cancel'
+      return undefined
+    }, ['form-cancel'])
+    assert.equal((cancelled['form-cancel']!.params as { requestId?: number }).requestId, formId)
+    // A late answer to the retired Form must not reach the durable question
+    // projection: the abort removed the reverse request, not just the UI.
+    client.send({ jsonrpc: '2.0', id: formId, result: { action: 'accept', content: { q0: 'yes' } } })
+    releaseConfig?.()
+    // A successor attach is accepted: no phantom claim, BUSY slot or orphaned Form.
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/resume', params: { sessionId: 'S-resume', cwd: '/host/proj' } })
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; result?: unknown; error?: { code?: number; data?: { code?: string } } }
+      if (frame.id !== 3) continue
+      assert.equal(frame.error, undefined, `the successor attach must settle: ${JSON.stringify(frame.error)}`)
+      assert.equal(typeof frame.result, 'object')
+      break
+    }
+    // The stale response was written before the successor request on the same
+    // connection; the successor result proves the connection processed it, and
+    // the retired Form must never submit an answer.
+    assert.deepEqual(fake.continuedAnswers, [], 'a stale Form answer is never submitted')
+  } finally {
+    client.close()
+  }
+})
+
 test('two connections reuse JSON-RPC id 1 independently and one closing does not affect the other', async t => {
+
   const { scope } = newScope(t)
   const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
   t.after(() => listener.close())
@@ -1487,6 +1674,7 @@ test('a stale PRIVATE bind socket left by SIGKILL is recovered on the next start
 /** A minimal in-memory Host Session access that keeps EXACT object identity. */
 function makeFakeAccess(options: {
   readonly fileInput?: boolean
+  readonly systemPromptAppend?: boolean
   readonly imageLimits?: AcpImageLimits
   readonly supportsImagePrompts?: () => Promise<boolean>
   readonly readOutputImage?: (ref: AcpStoredImageRef, signal: AbortSignal) => Promise<AcpStoredImage>
@@ -1532,6 +1720,13 @@ function makeFakeAccess(options: {
   readonly sessionTodosValue?: unknown
 } = {}): {
   access: HostAcpSessionAccess
+  systemPromptAppendRegistrations: Array<{
+    readonly agent: LiveAgentViewIdentity
+    readonly session: object
+    readonly text: string
+    readonly stillCurrent: () => boolean
+    disposeCalls: number
+  }>
   seed: (id: string, cwd: string) => LiveAgentViewIdentity
   agentOf: (id: string) => LiveAgentViewIdentity | undefined
   prompts: AcpSessionPromptRequest[]
@@ -1563,10 +1758,26 @@ function makeFakeAccess(options: {
   let sessionListReads = 0
   const sessionHistoryReads: string[] = []
   const resolveCalls: string[] = []
+  const systemPromptAppendRegistrations: Array<{
+    readonly agent: LiveAgentViewIdentity
+    readonly session: object
+    readonly text: string
+    readonly stillCurrent: () => boolean
+    disposeCalls: number
+  }> = []
   return {
     access: {
       supportsFileInput() {
         return options.fileInput === true
+      },
+      supportsSystemPromptAppend() {
+        return options.systemPromptAppend === true
+      },
+      registerSystemPromptAppend(agent: LiveAgentViewIdentity, session: object, text: string, stillCurrent: () => boolean) {
+        if (options.systemPromptAppend !== true) throw new Error('systemPrompt append is not configured for this listener test')
+        const registration = { agent, session, text, stillCurrent, disposeCalls: 0 }
+        systemPromptAppendRegistrations.push(registration)
+        return { dispose: () => { registration.disposeCalls += 1 } }
       },
       async stageFile() {
         throw new Error('file staging is not configured for this listener test')
@@ -1770,6 +1981,7 @@ function makeFakeAccess(options: {
       },
     },
     prompts,
+    systemPromptAppendRegistrations,
     facts: () => facts,
     observeCalls: () => observeCalls,
     sessionListReads: () => sessionListReads,
@@ -2932,6 +3144,12 @@ test('session/new carries the authoritative created session id in JSON-RPC error
   const access: HostAcpSessionAccess = {
     supportsFileInput() {
       return false
+    },
+    supportsSystemPromptAppend() {
+      return false
+    },
+    registerSystemPromptAppend() {
+      throw new Error('systemPrompt append is not configured for this listener test')
     },
     async stageFile() {
       throw new Error('file staging is not configured for this listener test')

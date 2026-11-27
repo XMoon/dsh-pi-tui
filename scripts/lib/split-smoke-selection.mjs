@@ -95,6 +95,7 @@ import { runAcpPo3bCancelApproval } from '../smoke/split-process/acp-po3b-cancel
 import { runAcpPo4aContentInput } from '../smoke/split-process/acp-po4a-content-input.mjs'
 import { runAcpPo4cContentOutput } from '../smoke/split-process/acp-po4c-content-output.mjs'
 import { runAcpSdkContentInteroperability } from '../smoke/split-process/acp-sdk-content-interoperability.mjs'
+import { runAcpSystemPromptAppend } from '../smoke/split-process/acp-system-prompt-append.mjs'
 import { runAcpScopedMcpB0 } from '../smoke/split-process/acp-scoped-mcp-b0.mjs'
 import { runAcpScopedMcpB1 } from '../smoke/split-process/acp-scoped-mcp-b1.mjs'
 import { runAcpMultiSessionB2 } from '../smoke/split-process/acp-multi-session-b2.mjs'
@@ -703,6 +704,14 @@ const CASE_REGISTRY = Object.freeze([
     id: 'acp.sdk-content-interoperability',
     title: 'an independent standard ACP v1 SDK client consumes real split Host input, Markdown, image and tool output across two sequential scenes with exact turns, verified stored content and a closed View that leaves the TUI Session live',
     run: runAcpSdkContentInteroperability,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.system-prompt-append',
+    title: 'a standard ACP v1 client append is one ordinary scoped section in the exact shared Agent, reaches the TUI and ACP model sinks, stays sibling-isolated, is retired by close/reattach/null/Off, has no cold-load carrier, and remains suppressed by a complete preset',
+    platforms: LINUX_DARWIN,
+    run: runAcpSystemPromptAppend,
   }),
   Object.freeze({
     suite: 'acp',

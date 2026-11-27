@@ -880,6 +880,61 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the ACP committed content-output verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.system-prompt-append') {
+    const evidence = result?.evidence
+    const zero = request => ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
+      .every(id => (request?.markers?.[id] ?? 0) === 0)
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.officialSdkClient === true
+      && result?.appendAdvertised === true
+      && result?.overrideNotAdvertised === true
+      && result?.invalidValuesRejected === true
+      && result?.tuiSharedAgent === true
+      && result?.acpOwnedPrompt === true
+      && result?.siblingIsolated === true
+      && result?.closeRetired === true
+      && result?.foreignTurnHeld === true
+      && result?.formalChildIsolated === true
+      && result?.reattachReplaced === true
+      && result?.nullCleared === true
+      && result?.coldLoadNoCarrier === true
+      && result?.explicitResendApplied === true
+      && result?.coldHostRestart === true
+      && result?.coldResumeNoCarrier === true
+      && result?.coldResendOnce === true
+      && result?.completePresetSuppressed === true
+      && result?.offRetired === true
+      && result?.onFreshView === true
+      && result?.hostIdentityKept === true
+      && evidence?.sharedA?.markers?.A === 1
+      && evidence.sharedA.literalPreserved === true
+      && evidence.sharedA.harnessIdentity === true
+      && evidence?.acpA?.markers?.A === 1
+      && evidence?.requestB?.markers?.B === 1
+      && evidence.requestB.markers.A === 0
+      && evidence?.afterClose?.markers?.A === 0
+      && evidence?.requestC?.markers?.C === 1
+      && evidence.requestC.markers.A === 0
+      && evidence?.heldRequest?.markers?.A === 1
+      && zero(evidence?.postHold)
+      && zero(evidence?.childRequest)
+      && evidence?.requestH?.markers?.H === 1
+      && evidence.requestH.markers.C === 0
+      && zero(evidence?.cleared)
+      && zero(evidence?.coldRequest)
+      && evidence?.resendRequest?.markers?.D === 1
+      && evidence?.coldBootRequest?.sessionId === result?.sessionA
+      && zero(evidence?.coldBootRequest)
+      && evidence.coldBootRequest.harnessIdentity === true
+      && evidence?.coldResendRequest?.markers?.I === 1
+      && evidence.coldResendRequest.markers.A === 0
+      && evidence?.completeRequest?.markers?.E === 0
+      && evidence.completeRequest.harnessIdentity === false
+      && evidence?.offRequest?.markers?.G === 1,
+    `selected ${caseId}: the ACP system-prompt-append verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
   if (caseId === 'acp.sdk-content-interoperability') {
     const evidence = result?.evidence
     const input = evidence?.input

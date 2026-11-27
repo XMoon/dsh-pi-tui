@@ -9,6 +9,7 @@
 
 ### 新增
 
+- **ACP v1 客户端系统提示追加**：兼容的本地 ACP v1 客户端可以在 `session/new` / `session/resume` / `session/load` 中以标准 `systemPrompt` 的 append 模式为本次 View 追加普通系统提示。`sessionCapabilities.systemPrompt` 只在真实共享 Session View 与官方作用域的 SystemPrompt seam 同时装配时公布；文本按字面量拼接并受 1 MiB 上限约束，只作用于该精确 Agent 的已提交 View，并在 close、同连接重新附加、null、EOF/Off、失败与 Agent 释放时由官方 disposer 退役。官方组合保留最终文本权力，完整 persona 可以合法覆盖普通追加（已接受的 ACP v1 一致性限制）；工具、权限与当前模型不受影响。
 - **终端恢复记录（OSC 7577 v0.5 发送端）**：当运行终端注入 `OSC7577_TOKEN` 时，Direct 与 Daemon Client 会把已提交主 Session 的精确恢复命令作为 OSC 7577 记录提供给终端；Daemon 记录使用稳定的 supervisor PID，Client 重载不会丢失记录身份，旧版替换目标会在接受 reload 时撤销旧记录。手工退出会撤销记录，信号、终端丢失、崩溃、HMR 与 Client reload 不撤销；Token 不进入 argv、Session、日志或独立的 Host/manager/ACP 子进程；Direct 同进程 snapshot 按 same-UID 信任边界保留。终端 ACK 与真实 Rex 互操作尚未验证。
 
 - **ACP 设置统一到 Host · ACP access 页**：PiTui 的 `/acp` 与 `/settings → Host → ACP access` 现在打开同一个 Settings 页面，集中展示当前 Host 的本地 ACP Listener 状态、Enable/Disable（关闭前二次确认）、一键复制当前已验证 Profile 的 `acp stdio` 客户端命令、下次 Host 启动的 `Start automatically` 偏好以及客户端接入说明。运行状态只影响当前 Host，偏好只影响下次启动，两者互不改变；原 `/settings → Tools → ACP Server` 与 `Host → Start ACP automatically` 两行以及旧 `/acp` 弹出菜单已退役。

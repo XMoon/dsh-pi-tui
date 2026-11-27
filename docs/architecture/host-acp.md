@@ -214,13 +214,12 @@ profile's independent `autoStart` preference enables it (see below).
   Session Controller authorization, Session Query canonical-history/title and
   Session-projection read seams are all bound (see
   [Official session facts on the stable v1 wire](#official-session-facts-on-the-stable-v1-wire)).
-  It never advertises `delete`, `fork`, `additionalDirectories`, `systemPrompt` or
-  `options`, and it does not expose client `fs`/`terminal` capabilities or issue
-  those reverse requests. A `session/new`/`session/resume`/`session/load`
-  request that still carries a non-null `systemPrompt` is refused before any
-  Host Workspace/Session create, Agent borrow, MCP mount or history replay
-  (`-32602` / `LOCAL_ACP_VIEW_INVALID_REQUEST`); omission and `null` keep the
-  Host's own default instructions. MCP capability is explicit and follows the
+  It adds `sessionCapabilities.systemPrompt: {}` ONLY when the Host also
+  composed the official scoped SystemPrompt section seam (see
+  [Client system prompt append](#client-system-prompt-append-session-lifecycle));
+  `override` is never advertised. It never advertises `delete`, `fork`,
+  `additionalDirectories` or `options`, and it does not expose client
+  `fs`/`terminal` capabilities or issue those reverse requests. MCP capability is explicit and follows the
   REAL Session View composition: `mcpCapabilities.http` is `true` only when this
   Host installed the shared Session access and the connection's View slots, and
   false otherwise; `mcpCapabilities.sse` is always `false`. Standard stdio and
@@ -1205,6 +1204,71 @@ fencing claim. A started refresh that later fails or is closed does the same
 (sink, read IO and reverse Forms retired; no Host cancel, close or rollback) and
 never resurrects the old one, so the Session is not left attached to a request
 the client never saw succeed and an explicit attach may follow.
+
+### Client system prompt append (session lifecycle)
+
+`session/new`, `session/resume` and `session/load` accept the standard
+`systemPrompt` request only on a connection whose `initialize` actually
+advertised `sessionCapabilities.systemPrompt: {}`. That capability is
+advertised ONLY when the installed Host composed the shared Session access and
+connection View slots AND the official scoped `systemPrompt.section()` seam; it
+is frozen for the connection. `override` and every other mode, unsupported
+content blocks, an empty content array and malformed values are `-32602` /
+`LOCAL_ACP_VIEW_INVALID_REQUEST` BEFORE any Host Workspace/Session create,
+Agent borrow, MCP mount or history replay; a request the pinned SDK schema
+already rejects keeps its SDK error.
+
+A valid value is `mode:'append'` with one or more standard text blocks. The
+texts are literal: no trim, interpolation, Markdown rewrite, URI fetch or
+Unicode normalization, and the ordered blocks are joined with exactly two
+newlines between them. A single empty string is a legal text block but
+contributes nothing. The ONE aggregate UTF-8 budget of the normalized section
+(including the separators) is 1 MiB, independent of the image-widened transport
+frame; the guard accumulates before the single join, a breach is the same
+`-32602`, and the raw frame is never widened. Omitted and `null` are equivalent
+and mean THIS View carries no client append — never a reuse of an earlier value.
+
+The append is ONE ordinary (never `complete`) official section named
+`pi-tui:acp-system-prompt-append`, placed after the ordinary official sections,
+registered through the EXACT borrowed Agent's own Cordis context with
+`interpolate:false` and the official `section()` effect. Its provider contributes
+ONLY while the assembly scope is that exact Agent and the registration's own
+committed View generation is current; a sibling/child scope or a retired
+generation receives nothing. Registration happens after the official
+create/resolve and any optional MCP mount succeeded and BEFORE the View commits;
+a registration failure is a failed attach (`-32603` /
+`LOCAL_ACP_VIEW_HOST_ERROR` with the stable `system-prompt-unavailable` /
+`system-prompt-registration-failed` reason), never a silent success, and a
+Session the Host already created keeps its id in the error data.
+
+Retirement rides every REAL detach/replacement/failure boundary: a normal close
+settles its scoped cancellation first and retires the contribution at the
+detach commit; a same-connection reattach makes the outgoing provider invisible
+and retires its exact handle before the fresh generation registers, so an
+omitted/`null` reattach clears the old value; EOF/Off, Agent disposal, a failed
+attach, a failed load and a replaced generation use the same ONE exact
+responsibility. A cancelled fresh attach (`session/new`, `session/resume` or
+`session/load`) owns no successful View: only its own generation is released
+(an exact MCP lease keeps its fence), so a request the client cancelled can
+never leave a live append or a phantom claim behind. The provider fails closed
+BEFORE the exact disposer runs, so no
+assembly after detachment can consume the contribution. The exact official
+disposer (or the destruction of its exact owning scope) is the retirement
+terminal: the scoped undo runs before the official change notification, so a
+synchronously thrown notification after that undo is observed with a stable
+diagnostic and never reported as a clean call, while the responsibility is
+already cleared and a successor may attach. There is no separate
+"unproven retirement" state.
+
+The official composition keeps final text authority: a real `complete` persona
+or a custom assembly waterfall can legitimately suppress or transform the
+ordinary append. This Host therefore records the Owner-accepted
+`OWNER_ACCEPTED_ACP_V1_CONFORMANCE_LIMITATION` and never claims unconditional
+application of every advertised append: the ACP v1 "reject before
+creating/loading/resuming" clause cannot be honored without an official
+pre-admission composition seam. The append is never a tool, permission, policy
+or tool-availability change, and omission/`null` keeps the Host's own default
+instructions.
 
 ### Session-scoped error classes
 
