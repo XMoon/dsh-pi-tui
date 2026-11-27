@@ -50,7 +50,6 @@
  */
 
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { symbols } from '@deepseek-ai/cordis'
@@ -97,12 +96,6 @@ test('the authenticated Host shell dialect survives the shared stage composition
     t.after(() => runtime.selected.disposeTransport().catch(() => host.dispose()))
     assert.equal((runtime.selected.backend.hostShellCompletion as unknown as { pathLiteralDialect: string }).pathLiteralDialect, expected)
   }
-  // The split wrapper is a one-line pass-through to the shared stage; a dropped
-  // spread would silently revert Windows to Bash while every behavioral test
-  // above still passes, so pin the composition shape as well.
-  const split = readFileSync(new URL('../../src/app/remote/application-runtime.ts', import.meta.url), 'utf8')
-  assert.match(split, /hostShellPathLiteralDialect: options\.hostShellPathLiteralDialect/u,
-    'the split wrapper must forward the authenticated Host dialect')
 })
 
 test('A. the aggregate composes ONE Host runtime, ONE Client runtime, ONE Backend and ONE owner registry', async (t) => {

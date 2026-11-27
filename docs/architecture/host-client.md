@@ -139,7 +139,7 @@ runner and does not compose through that facade:
 - **Direct (production default).** `src/index.ts -> app/bootstrap.ts` boots one
   Direct runtime over the caller's Host Context. No Remote module participates.
   This is one of the two `app/bootstrap.ts` roots.
-- **Split Client (internal, local Linux/macOS split).** `local-client-entry.ts ->
+- **Split Client (internal, local split).** `local-client-entry.ts ->
   app/bootstrap.ts` owns its OWN Client Context, the official B1 transport and
   the one official Client Domain mount (`app/remote/client-runtime.ts`, mounted
   in two stages so the interaction owner exists before the Gateway's first
@@ -149,7 +149,7 @@ runner and does not compose through that facade:
   `app/remote/application-stage.ts`, and adopts that pre-built core through the
   selection seam instead of constructing a second graph. This is the second
   `app/bootstrap.ts` root.
-- **Split Host (internal, local Linux/macOS split).** `local-host-entry.ts` boots the official
+- **Split Host (internal, local split).** `local-host-entry.ts` boots the official
   profile through `runProfile()` with the Host-only overlay; it does NOT enter
   `app/bootstrap.ts`. The overlay's single built-in
   `@xmoon76/dsh-pi-tui/host-runtime` row owns the package's ONE private Typert
@@ -218,12 +218,15 @@ public `sessionLaunch` value resolved Client-locally by the existing
 resume) — never an exact-id bypass. It is dropped on Client reexec so the
 confirmed exact Session is restored instead of re-running the public intent.
 
-The daemon backend is the LOCAL split process on Linux and macOS: it requires a
-real interactive TTY, and any other OS or a non-interactive launch fails closed.
-A real public-managed start uses the platform's supervision path when one
-exists: Linux delegates to the verified systemd user unit, and macOS to the
-verified user-level LaunchAgent; in BOTH cases the strict-absence detached Host
-process remains the fallback only when no service definition is installed. The
+The daemon backend is the LOCAL split process on Linux, macOS and native
+Windows (the supported Windows domain is the ordinary local user with a local
+fixed-NTFS Profile): it requires a real interactive TTY, and any unsupported OS
+or a non-interactive launch fails closed. A real public-managed start uses the
+platform's supervision path when one exists: Linux delegates to the verified
+systemd user unit, and macOS to the verified user-level LaunchAgent; on Windows
+no service unit is used and the detached Host starts directly. In both
+supervised cases the strict-absence detached Host process remains the fallback
+only when no service definition is installed. The
 public `dsh daemon status/start/stop/restart/logs/install/uninstall`
 management verbs cover both the launchd job and the independent macOS Host
 process (see the management section below). Selection is cold-launch only: writing the Profile value shows "applies on next
@@ -440,16 +443,19 @@ truthfully unavailable on Windows.
   seat or business
   object; a termination signal addressed to that PID is forwarded to the
   replacement child, and a signal arriving after the handoff was accepted but
-  before the child spawned cancels the handoff without spawning. Windows has no
-  catchable POSIX termination signal for a console close: the supervisor and
-  the Client's direct child are forcibly terminated by the OS, and only their
-  ACTUAL exit inside the bounded shutdown budget is observed — the Host is
-  never addressed, signalled or stopped by that path. Windows `/reload-client`
-  is not available: the refusal is decided before any reexec intent,
-  surface release or stop, the current Client/Host/Session/draft are kept, and
-  the fixed notice tells the user to exit and relaunch. The Windows normal exit
-  plus relaunch path is the supported way to adopt an updated build. On
-  Linux/macOS the replacement re-authenticates the expected Host, which is
+  before the child spawned cancels the handoff without spawning. On Windows a
+  normal Client exit follows the same natural stop path as `/exit`. An explicit
+  supervisor disposal may request termination of its direct child (the Win32
+  TerminateProcess path) and waits for that child's ACTUAL exit inside the
+  bounded shutdown budget; the Host is never addressed, signalled or stopped by
+  that path. An abnormal console/terminal loss is not a graceful stop and the
+  implementation does not assert a specific process exit order for that case.
+  Windows `/reload-client` is not available: the refusal is decided before any
+  reexec intent, surface release or stop, the current Client/Host/Session/draft
+  are kept, and the fixed notice tells the user to exit and relaunch. The
+  Windows normal exit plus relaunch path is the supported way to adopt an
+  updated build. On Linux/macOS the replacement re-authenticates the expected
+  Host, which is
   discovered with a no-spawn expectation (`HOST_HANDOFF_UNAVAILABLE` when the expected instance
   is absent/dead, `HOST_IDENTITY_MISMATCH` when another live instance owns the
   scope) and must reopen the same Session against the current generation;

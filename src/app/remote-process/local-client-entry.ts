@@ -2402,9 +2402,9 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // is mutually exclusive with the T34/T36 SIGUSR2 qualification modes.
       if (process.env.SPLIT_PROCESS_CLIENT_HMR_PROBE === '1') {
         // Windows has no catchable POSIX SIGUSR2; a fake signal registration
-        // would never fire. The real native reload path is `/reload-client`.
+        // would never fire, and `/reload-client` is unavailable on Windows.
         if (process.platform === 'win32') {
-          throw new Error('local client entry: the SIGUSR2 surface HMR qualification is unavailable on Windows; use the real /reload-client path')
+          throw new Error('local client entry: the SIGUSR2 surface HMR qualification is unavailable on Windows')
         }
         if (process.env.SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF === '1'
           || process.env.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1'
@@ -2468,8 +2468,9 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           if (accepted.targetProgramResumeHandoff !== true) programResumeHandle?.unsupportedReloadAccepted()
         },
       })
-      // The qualification reexec trigger is POSIX-only; Windows uses the real
-      // `/reload-client` command and never registers a signal that cannot fire.
+      // The qualification reexec trigger is POSIX-only; Windows never registers
+      // a signal that cannot fire. `/reload-client` is intentionally unavailable
+      // on Windows (reload deferral).
       if (reexecProbe && process.platform !== 'win32') {
         process.on('SIGUSR2', () => { reexecHandler?.request('qualification') })
       }
