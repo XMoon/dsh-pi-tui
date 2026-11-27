@@ -941,6 +941,25 @@ test('a material partial reorder advances the action identity and refuses the st
   })
   assert.equal(h.copies.length, copiesBefore + 1, 'the current action intent acts on the exact row')
 
+  // A same-id material change on the FIRST incoming row keeps that row selected
+  // (the seat's first-row fallback), so the TSP material branch is publicly
+  // reachable: it must reveal and reset the Preview.
+  await waitUntil('the third progress refresh', () => h.port.pendingSearches() === 1, 3_000)
+  const changedFirst = row(0, 'alpha changed exact')
+  h.port.answerSearch({ kind: 'ready', generation: 'gen-1', items: [changedFirst, second], nextCursor: null })
+  await waitUntil('the changed selected body read', () => h.port.pendingReads() === 1)
+  assert.equal(h.port.lastReadRequest().messageId, 'm0', 'the materially changed first row reads its new body')
+  h.port.answerRead(body('alpha changed exact'))
+  await waitUntil('the changed exact body', () => h.seat.renderState()?.actionsEnabled === true)
+  const changed = h.seat.renderState()
+  assert.ok(changed)
+  assert.equal(changed.selectedId, painted.selectedId, 'the same row identity remains selected')
+  assert.ok(changed.pageRevision > reordered.pageRevision, 'a same-id material replacement advances the page')
+  assert.equal(changed.rows[0]?.summary, 'alpha changed exact')
+  assert.equal(changed.preview?.text, 'alpha changed exact')
+  commitFrame()
+  assert.equal(h.reveals.length, revealBase + 2, 'the material change reveals the selected row')
+  assert.equal(h.scrolls.length, scrollBase + 1, 'the material change resets the Preview anchor')
 })
 
 
