@@ -27,7 +27,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installedPackageRootFromEntry, readInstalledDshVersion } from './local-scope.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { createEntryDiag } from './entry-control.ts'
-import { shellQuoteProfileFor, type TuiAcpControlStartup, type TuiAcpStdioStartup, type TuiDaemonClientStartup, type TuiDaemonControlStartup, type TuiDaemonStartupValues, type TuiWebControlStartup } from '../../startup.ts'
+import type { TuiAcpControlStartup, TuiAcpStdioStartup, TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues, TuiWebControlStartup } from '../../startup.ts'
 import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
 import { daemonProgramResumeCapability } from '../../client/program-resume/target.ts'
 import { admitProgramResume } from '../program-resume-admission.ts'
@@ -221,6 +221,22 @@ export function buildAcpStdioEnvironment(
   return env
 }
 
+/** POSIX-safe single-argument quoting for the copy-paste fatal line. */
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
+  return `'${value.replace(/'/gu, `'\\''`)}'`
+}
+
+/** PowerShell single-quoted literal: every recognized single-quote class
+ *  (ASCII and U+2018/2019/201A/201B) is doubled; `$`, backtick and the
+ *  smart-double-quote classes are literal inside it. Kept local so the daemon
+ *  Client plugin never pulls the startup compatibility island (and its
+ *  `@deepseek-ai/dsh-cmdline` import) into its runtime graph. */
+function powershellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
+  return `'${value.replace(/['\u2018\u2019\u201a\u201b]/gu, character => character + character)}'`
+}
+
 /**
  * The one copy-pasteable re-run command for a Client spawn failure. POSIX keeps
  * its environment-assignment form; Windows gets the PowerShell-equivalent form
@@ -231,16 +247,15 @@ function daemonClientRerunCommand(
   profile: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const profileArg = shellQuoteProfileFor(profile, platform)
+  const profileArg = platform === 'win32' ? powershellQuote(profile) : shellQuote(profile)
   return platform === 'win32'
     ? `$env:DSH_PI_TUI_BACKEND='daemon'; dsh --profile ${profileArg}`
     : `DSH_PI_TUI_BACKEND=daemon dsh --profile ${profileArg}`
 }
 
-/** The copy-paste Profile literal for the ACTUAL CLI shell; the startup
- *  compatibility island owns the one POSIX/PowerShell quoting rule. */
+/** The copy-paste Profile literal for the ACTUAL CLI shell. */
 function platformProfileQuote(value: string): string {
-  return shellQuoteProfileFor(value, process.platform)
+  return process.platform === 'win32' ? powershellQuote(value) : shellQuote(value)
 }
 
 /** The child-exit mapping: a real code, or 128+signal when the child was signalled. */

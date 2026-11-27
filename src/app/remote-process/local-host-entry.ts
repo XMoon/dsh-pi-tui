@@ -34,6 +34,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlChannel } from './entry-control.ts'
+import { isAbsolutePath } from './local-acp-projections.ts'
 import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
 import { initializeHostEnvironment } from './host-environment.ts'
 import { HostActivityObserver } from './host-activity.ts'
@@ -1584,7 +1585,7 @@ export function createHostAcpSessionAccess(
       const registry = readSkillRegistry(agent, agentPresets, skills)
       if (registry === undefined) return { kind: 'absent' }
       const cwd = workingDirectory.get(session)
-      if (typeof cwd !== 'string' || cwd.length === 0 || !cwd.startsWith('/')) {
+      if (!isAbsolutePath(cwd)) {
         throw new AcpHostCommandError('unavailable', 'the exact Session has no effective working directory')
       }
       let observed: Awaited<ReturnType<SkillRegistryLike['snapshot']>>

@@ -24,7 +24,7 @@
  */
 
 import type { AcpAccessStatus } from '../../runtime/acp-access-port.ts'
-import { shellQuoteProfileFor, type AcpControlIntent } from '../../startup.ts'
+import type { AcpControlIntent } from '../../startup.ts'
 import { observeAuthenticatedLocalAcpStatus } from './local-acp-status.ts'
 import {
   LOCAL_ACP_CONTROL_MAX_RESPONSE_BYTES,
@@ -47,6 +47,24 @@ import {
   type VerifiedLocalHost,
 } from './local-discovery.ts'
 import { inspectInstalledProfileScope, type LocalScope } from './local-scope.ts'
+
+/** POSIX-safe single-argument profile literal for the headless hints. */
+function shellQuoteProfile(profile: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(profile)) return profile
+  return `'${profile.replace(/'/gu, `'\\''`)}'`
+}
+
+/** PowerShell single-quoted profile literal; all recognized single-quote
+ *  classes are doubled and smart double quotes stay literal. Kept local so
+ *  this control module never value-imports the startup compatibility island. */
+function powershellQuoteProfile(profile: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(profile)) return profile
+  return `'${profile.replace(/['\u2018\u2019\u201a\u201b]/gu, character => character + character)}'`
+}
+
+function shellQuoteProfileFor(profile: string, platform: NodeJS.Platform): string {
+  return platform === 'win32' ? powershellQuoteProfile(profile) : shellQuoteProfile(profile)
+}
 
 /** The fixed failure vocabulary of the headless ACP CLI. */
 export type AcpControlErrorCode =

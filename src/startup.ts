@@ -262,7 +262,7 @@ function shellQuoteProfile(profile: string): string {
 
 /** The same profile literal for the TARGET shell: PowerShell doubles an
  *  embedded single quote instead of the POSIX close-reopen sequence. */
-export function shellQuoteProfileFor(profile: string, platform: NodeJS.Platform): string {
+function shellQuoteProfileFor(profile: string, platform: NodeJS.Platform): string {
   if (platform !== 'win32') return shellQuoteProfile(profile)
   if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(profile)) return profile
   // A PowerShell single-quoted literal: every recognized single-quote class
