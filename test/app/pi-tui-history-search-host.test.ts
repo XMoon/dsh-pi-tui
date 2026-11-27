@@ -8591,7 +8591,7 @@ async function seedRealLegacyFixture(ctx: Context): Promise<RealLegacyFixture> {
     { type: 'session/title', data: { title: 'continue', source: { kind: 'fallback' }, messageSeqs: [5] } },
     { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } },
   ].map((event, seq) => ({ ...event, seq, time: seq + 10 }))
-  const header = { type: 'session', version: 3, id: REAL_LEGACY_ID, createdAt: 1, cwd: REAL_LEGACY_CWD, isSeeded: false, delegationDepth: 0 }
+  const header = { type: 'session', version: 3, id: REAL_LEGACY_ID, createdAt: 2, cwd: REAL_LEGACY_CWD, isSeeded: false, delegationDepth: 0 }
   const first = `${JSON.stringify(header)}\n`
   const body = `${rows.map(row => JSON.stringify(row)).join('\n')}\n`
   const legacyBytes = currentPath.endsWith('.zstd')
@@ -8749,6 +8749,79 @@ test('a real cold legacy Session is excluded without per-ID IO and re-enters aft
     disposeListener?.()
     await handle?.dispose()
     fixture?.restore()
+    await wire.dispose()
+  }
+})
+
+test('resuming an excluded Session during an open round schedules only one authoritative rebuild', async (t) => {
+  const life = testLifecycle(t)
+  let fixture: RealLegacyFixture | undefined
+  let seededList: HistorySearchPersistenceLike['list'] | undefined
+  let releaseList!: () => void
+  const listGate = new Promise<void>(resolve => { releaseList = resolve })
+  const wire = await historyHost(life, 'history-real-legacy-single-repair', async (ctx) => {
+    fixture = await seedRealLegacyFixture(ctx)
+    const raw = ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+    seededList = raw.list
+    raw.list = async function (options) {
+      await listGate
+      return seededList!.call(this, options)
+    }
+  })
+  let handle: Awaited<ReturnType<Host['ctx']['agentLoop']['resume']>> | undefined
+  const internals = wire.service() as unknown as {
+    commitWitness(witness: { readonly sessionId?: unknown }, action: () => void): Promise<unknown>
+  }
+  const originalCommit = internals.commitWitness
+  let releaseCurrent!: () => void
+  const currentGate = new Promise<void>(resolve => { releaseCurrent = resolve })
+  let markCurrent!: () => void
+  const currentStarted = new Promise<void>(resolve => { markCurrent = resolve })
+  let armed = true
+  internals.commitWitness = async function (witness, action) {
+    if (armed && witness.sessionId === REAL_CURRENT_ID) {
+      armed = false
+      markCurrent()
+      await currentGate
+    }
+    return originalCommit.call(this, witness, action)
+  }
+  const rawQuery = wire.host.ctx.sessionQuery
+  const originalObserve = rawQuery.observeSession
+  let legacyObserveCalls = 0
+  rawQuery.observeSession = function (id, options) {
+    if (String(id) === REAL_LEGACY_ID) legacyObserveCalls += 1
+    return originalObserve.call(this, id, options)
+  }
+  try {
+    releaseList()
+    await Promise.race([
+      currentStarted,
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => reject(new Error('current candidate did not reach the held writer')), 10_000)
+        currentStarted.finally(() => clearTimeout(timer))
+      }),
+    ])
+    handle = await wire.host.ctx.agentLoop.resume(wire.host.ctx, {
+      resumeSessionId: SessionId(REAL_LEGACY_ID),
+      agentOptions: { provider: 'smoke', model: 'smoke' },
+    })
+    releaseCurrent()
+    await waitForReady(wire, 'single-repair legacy round')
+    const restored = await wire.search(
+      { scope: 'session', sessionId: REAL_LEGACY_ID, query: REAL_LEGACY_TEXT, limit: 5 })
+    assert.equal(restored.kind, 'ready', JSON.stringify(restored))
+    assert.ok(restored.kind === 'ready' && restored.items.length === 1)
+    assert.equal(legacyObserveCalls, 1, 'the same registration must not manufacture a second full rebuild')
+  } finally {
+    releaseList()
+    releaseCurrent()
+    rawQuery.observeSession = originalObserve
+    internals.commitWitness = originalCommit
+    const raw = wire.host.ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+    if (seededList !== undefined) raw.list = seededList
+    fixture?.restore()
+    await handle?.dispose()
     await wire.dispose()
   }
 })
@@ -8950,7 +9023,13 @@ test('a live registration and accepted event during legacy exclusion veto the st
   }
   try {
     releaseList()
-    await candidateStarted
+    await Promise.race([
+      candidateStarted,
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => reject(new Error('legacy exclusion candidate did not reach the held writer')), 10_000)
+        candidateStarted.finally(() => clearTimeout(timer))
+      }),
+    ])
     legacy.live = true
     const liveObject = deps.sessions()!.get(legacyId)
     assert.ok(liveObject !== undefined)

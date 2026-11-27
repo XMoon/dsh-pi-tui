@@ -1497,10 +1497,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     // A created/restored registration is a real source-identity producer even
     // when the restored preexisting history emits no session/event. Revoke only
     // this round's evidence; the existing per-ID repair owns re-proof.
-    this.revokeRoundSourceIdentity(sessionId, session as object)
+    const repairScheduled = this.revokeRoundSourceIdentity(sessionId, session as object)
     const firstLiveSeq = (session as { readonly firstLiveSeq?: unknown }).firstLiveSeq
     if (
       remembered
+      && !repairScheduled
       && this.index !== undefined
       && this.index.checkpointOf(sessionId) === undefined
       && this.deps.sessions()?.get(sessionId) === session
@@ -3961,14 +3962,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
    * different exact source identity. One affected ID; no synchronous official
    * I/O and no new listener/loop.
    */
-  private revokeRoundSourceIdentity(sessionId: string, liveObject: object | undefined): void {
+  private revokeRoundSourceIdentity(sessionId: string, liveObject: object | undefined): boolean {
     const round = this.coverageRound
     const settled = round?.settled.get(sessionId)
-    if (round === undefined || settled === undefined || settled.liveObject === liveObject) return
+    if (round === undefined || settled === undefined || settled.liveObject === liveObject) return false
     round.settled.delete(sessionId)
     this.markRoundInvalidating()
     this.reconcilePending.add(sessionId)
     this.scheduleSessionRepair(sessionId, 'rebuild')
+    return true
   }
 
   /**
