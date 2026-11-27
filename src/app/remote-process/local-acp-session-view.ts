@@ -1111,8 +1111,6 @@ interface ViewClaim {
    * claim then lives ONLY for that fact and is deleted when it settles.
    */
   detachedWithFence?: boolean
-  /** One-shot truthful resource error for this detached close. */
-  closeResourceFailure?: LocalAcpViewError
   /** Set synchronously while an async MCP admission crosses this claim. */
   mcpMountPending?: boolean
   /** Cancels a pending MCP Fiber startup on Close/EOF/Off/Agent disposal. */
@@ -3517,7 +3515,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         if (flight.fileCleanupUnconfirmed === true) throw this.fileCleanupUnconfirmedError()
       }
       if (flight?.fileCleanupUnconfirmed === true) throw this.fileCleanupUnconfirmedError()
-      if (claim.closeResourceFailure !== undefined) throw claim.closeResourceFailure
+      if (flight?.resourceFailure !== undefined) throw flight.resourceFailure
       if (claim.unclaimedHostObligation !== undefined) {
         throw promptError(
           'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED',
@@ -3662,7 +3660,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (flight.fileCleanupUnconfirmed === true || flight.resourceFailure !== undefined) {
         resourceFailure ??= flight.resourceFailure ?? this.fileCleanupUnconfirmedError()
       }
-      if (claim.closeResourceFailure !== undefined) resourceFailure ??= claim.closeResourceFailure
       if (outcome !== 'ok') {
         // A prompt failure is not a close proof (R701-04): only a real Host
         // terminal (its own turn/end, an Agent disposal, or a definite
@@ -4553,6 +4550,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           )
         }
       }
+      // Re-read the SAME synchronous authority after the final catalog read;
+      // no catalog call or other reentrant boundary may sit between this and
+      // the actual Controller invocation.
+      if (requestSignal.aborted || claim.connectionIdentity.phase !== 'attached'
+        || claim.inflight !== flight || claim.closing !== undefined
+        || flight.cancelRequested || flight.deliveryClosed
+        || !Object.is(access.currentAgent(request.sessionId), claim.exactAgent)
+        || !Object.is(access.currentSession(request.sessionId), claim.exactSession)) {
+        throw promptError(
+          'LOCAL_ACP_PROMPT_ABORTED',
+          'the prompt authority changed after the final Skill catalog boundary',
+          JSONRPC_INTERNAL_ERROR,
+        )
+      }
       // The actual call is now adjacent. No later local check is allowed.
       called = true
     }
@@ -4637,7 +4648,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // that retirement. Successful acceptance transfers authority to the
     // official message even if this View has not observed the insertion yet.
     if (outcome.kind === 'not-called') flight.definiteNoDispatch = true
-    if (flight.resourceFailure !== undefined) claim.closeResourceFailure ??= flight.resourceFailure
     const d5Owned = flight.cancelKind === 'queued-removed'
     if (outcome.kind === 'accepted') {
       flight.stagedReceipts = undefined
