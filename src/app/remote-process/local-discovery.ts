@@ -17,6 +17,7 @@ import {
   fchmodSync,
   fstatSync,
   fsyncSync,
+  lstatSync,
   openSync,
   readFileSync,
   renameSync,
@@ -38,7 +39,9 @@ import {
   type DarwinKernelProcessIdentity,
   type KernelObservation,
   type KernelProcessIdentity,
+  type Win32KernelProcessIdentity,
 } from '../../runtime/native-process/identity.ts'
+import { win32PrivateFileStatus } from '../../runtime/native-process/win32.ts'
 import { spawnHostCandidate, startManagedHostCandidate } from './local-host-manager.ts'
 
 /** Registry file name inside the private scope directory. */
@@ -92,13 +95,20 @@ export interface DarwinLocalInstanceRecord extends LocalInstanceSharedFields {
   readonly hostKernelIdentity: DarwinKernelProcessIdentity
 }
 
+/** The Win32 registry schema: SID + creation FILETIME, never a Linux starttime. */
+export interface Win32LocalInstanceRecord extends LocalInstanceSharedFields {
+  readonly schema: 3
+  readonly hostKernelIdentity: Win32KernelProcessIdentity
+}
+
 /** One published Host identity record (no secret material). */
-export type LocalInstanceRecord = LinuxLocalInstanceRecord | DarwinLocalInstanceRecord
+export type LocalInstanceRecord = LinuxLocalInstanceRecord | DarwinLocalInstanceRecord | Win32LocalInstanceRecord
 
 /** The identity material one Host publishes for its OWN platform. */
 export type HostProcessIdentity =
   | { readonly schema: 1; readonly hostStarttime: string }
   | { readonly schema: 2; readonly hostKernelIdentity: DarwinKernelProcessIdentity }
+  | { readonly schema: 3; readonly hostKernelIdentity: Win32KernelProcessIdentity }
 
 /** The private launch material that carries the Host's official token. */
 export interface LocalLaunchMaterial {
@@ -193,6 +203,24 @@ const DARWIN_IDENTITY_KEYS = [
   'state',
 ] as const
 
+/** Exact Win32 registry keys; `hostKernelIdentity` replaces `hostStarttime`. */
+const WIN32_RECORD_KEYS = [
+  'schema',
+  'scopeId',
+  'profileRealpath',
+  'instanceId',
+  'hostPid',
+  'hostKernelIdentity',
+  'origin',
+  'protocol',
+  'bundleVersion',
+  'dshVersion',
+  'buildId',
+] as const
+
+/** Exact Win32 kernel-identity keys. */
+const WIN32_IDENTITY_KEYS = ['platform', 'pid', 'ownerSid', 'creationFiletime'] as const
+
 /** Exact launch-material keys. */
 const LAUNCH_KEYS = ['schema', 'instanceId', 'connectUrl'] as const
 
@@ -259,6 +287,21 @@ export function buildHostInstanceRecord(
   shared: HostInstanceSharedFields,
   hostIdentity: HostProcessIdentity,
 ): LocalInstanceRecord {
+  if (hostIdentity.schema === 3) {
+    return {
+      schema: 3,
+      scopeId: shared.scopeId,
+      profileRealpath: shared.profileRealpath,
+      instanceId: shared.instanceId,
+      hostPid: shared.hostPid,
+      hostKernelIdentity: hostIdentity.hostKernelIdentity,
+      origin: shared.origin,
+      protocol: shared.protocol,
+      bundleVersion: shared.bundleVersion,
+      dshVersion: shared.dshVersion,
+      buildId: shared.buildId,
+    }
+  }
   if (hostIdentity.schema === 1) {
     return {
       schema: 1,
@@ -348,6 +391,28 @@ function parseDarwinKernelIdentity(value: unknown, hostPid: number): DarwinKerne
   }
 }
 
+/** Parse the complete Win32 kernel identity. `ownerSid` is canonical SID text
+ *  and `creationFiletime` is an exact unsigned 64-bit decimal string. */
+function parseWin32KernelIdentity(value: unknown, hostPid: number): Win32KernelProcessIdentity {
+  const identity = assertExactObject(value, WIN32_IDENTITY_KEYS, 'registry.hostKernelIdentity')
+  if (identity.platform !== 'win32') {
+    throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'local discovery: registry.hostKernelIdentity.platform must be win32')
+  }
+  const pid = requirePositiveInteger(identity, 'pid', 'registry.hostKernelIdentity')
+  if (pid !== hostPid) {
+    throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'local discovery: registry.hostKernelIdentity.pid must equal registry.hostPid')
+  }
+  const ownerSid = requireString(identity, 'ownerSid', 'registry.hostKernelIdentity')
+  if (!/^S-\d+-\d+(?:-\d+)+$/u.test(ownerSid)) {
+    throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'local discovery: registry.hostKernelIdentity.ownerSid must be a canonical SID')
+  }
+  const creationFiletime = requireDecimal(identity, 'creationFiletime', 'registry.hostKernelIdentity')
+  if (BigInt(creationFiletime) > 0xffffffffffffffffn) {
+    throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'local discovery: registry.hostKernelIdentity.creationFiletime exceeds uint64')
+  }
+  return { platform: 'win32', pid, ownerSid, creationFiletime }
+}
+
 function requireDecimalInteger(record: Record<string, unknown>, key: string, label: string): number {
   const value = record[key]
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
@@ -420,6 +485,23 @@ function parseRecord(value: unknown, scope: RecordScope): LocalInstanceRecord {
       buildId: shared.buildId,
     }
   }
+  if (schema === 3) {
+    const record = assertExactObject(value, WIN32_RECORD_KEYS, 'registry')
+    const shared = parseSharedRecord(record, scope)
+    return {
+      schema: 3,
+      scopeId: shared.scopeId,
+      profileRealpath: shared.profileRealpath,
+      instanceId: shared.instanceId,
+      hostPid: shared.hostPid,
+      hostKernelIdentity: parseWin32KernelIdentity(record.hostKernelIdentity, shared.hostPid),
+      origin: shared.origin,
+      protocol: shared.protocol,
+      bundleVersion: shared.bundleVersion,
+      dshVersion: shared.dshVersion,
+      buildId: shared.buildId,
+    }
+  }
   if (schema === 2) {
     const record = assertExactObject(value, DARWIN_RECORD_KEYS, 'registry')
     const shared = parseSharedRecord(record, scope)
@@ -449,6 +531,9 @@ function assertRecordSchemaPlatform(record: LocalInstanceRecord): void {
   }
   if (record.schema === 2 && process.platform !== 'darwin') {
     throw new LocalScopeError('HOST_PROTOCOL_INCOMPATIBLE', 'local discovery: schema 2 is a macOS Host publication')
+  }
+  if (record.schema === 3 && process.platform !== 'win32') {
+    throw new LocalScopeError('HOST_PROTOCOL_INCOMPATIBLE', 'local discovery: schema 3 is a Windows Host publication')
   }
 }
 
@@ -484,6 +569,14 @@ export function sameLocalInstanceRecord(left: LocalInstanceRecord, right: LocalI
       && a.sid === b.sid
       && a.uid === b.uid
       && a.state === b.state
+  }
+  if (left.schema === 3 && right.schema === 3) {
+    const a = left.hostKernelIdentity
+    const b = right.hostKernelIdentity
+    return a.platform === b.platform
+      && a.pid === b.pid
+      && a.ownerSid === b.ownerSid
+      && a.creationFiletime === b.creationFiletime
   }
   return false
 }
@@ -522,6 +615,28 @@ export function assertHostPublicationIdentity(record: LocalInstanceRecord, scope
  * failure.
  */
 function readPrivateJsonFile(path: string, maxBytes: number, label: string): unknown | undefined {
+  if (process.platform === 'win32') {
+    const status = win32PrivateFileStatus(path)
+    if (status === 'missing') return undefined
+    if (status !== 'private') {
+      throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${label} must be a private regular file`)
+    }
+    let info
+    try {
+      info = lstatSync(path)
+    } catch (error) {
+      throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${label} is not readable`, error)
+    }
+    if (info.size > maxBytes) {
+      throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${label} exceeds ${String(maxBytes)} bytes`)
+    }
+    const text = readFileSync(path, 'utf8')
+    try {
+      return JSON.parse(text) as unknown
+    } catch (error) {
+      throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${label} is not valid JSON`, error)
+    }
+  }
   let fd: number
   try {
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
@@ -611,8 +726,8 @@ export function inspectHostProcess(
   readKernel: (pid: number) => KernelObservation = readKernelProcess,
 ): 'alive' | 'dead' {
   assertRecordSchemaPlatform(record)
-  if (record.schema === 2) {
-    // PR-1 kernel identity, never a numeric pid alone. `unknown` is a hard
+  if (record.schema === 2 || record.schema === 3) {
+    // Exact kernel identity, never a numeric pid alone. `unknown` is a hard
     // failure (it cannot authorize a spawn around a possibly live Host);
     // `gone`/`different` are a stale registry candidate, never a kill permit.
     const observed = readKernel(record.hostPid)
@@ -791,7 +906,7 @@ export function assertRecordedHostKernelIdentityCurrent(
   readKernel: (pid: number) => KernelObservation = readKernelProcess,
 ): void {
   assertRecordSchemaPlatform(record)
-  if (record.schema === 2) {
+  if (record.schema === 2 || record.schema === 3) {
     const observed = readKernel(record.hostPid)
     if (observed.kind === 'unknown') {
       throw new LocalScopeError('PROCESS_STARTTIME_UNAVAILABLE', 'local discovery: the Host kernel identity is unavailable')
@@ -825,6 +940,13 @@ export function readHostProcessIdentity(pid: number = process.pid): HostProcessI
       throw new LocalScopeError('PROCESS_STARTTIME_UNAVAILABLE', 'local discovery: the Host kernel identity is unavailable')
     }
     return { schema: 2, hostKernelIdentity: observed.identity }
+  }
+  if (process.platform === 'win32') {
+    const observed = readKernelProcess(pid)
+    if (observed.kind !== 'alive' || observed.identity.platform !== 'win32') {
+      throw new LocalScopeError('PROCESS_STARTTIME_UNAVAILABLE', 'local discovery: the Host kernel identity is unavailable')
+    }
+    return { schema: 3, hostKernelIdentity: observed.identity }
   }
   throw new LocalScopeError(
     'B1_PLATFORM_UNSUPPORTED',
@@ -917,6 +1039,37 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
 function writePrivateJsonFile(path: string, value: unknown): void {
   const text = `${JSON.stringify(value)}\n`
   const temp = join(dirname(path), `.${basename(path)}.${String(process.pid)}.${randomUUID()}.tmp`)
+  if (process.platform === 'win32') {
+    if (win32PrivateFileStatus(path) === 'unsafe') {
+      throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} has a foreign or non-private existing target`)
+    }
+    let fd: number | undefined
+    let renamed = false
+    try {
+      fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+      if (win32PrivateFileStatus(temp) !== 'private') {
+        throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} cannot inherit a private file boundary`)
+      }
+      writeFileSync(fd, text, 'utf8')
+      fsyncSync(fd)
+      closeSync(fd)
+      fd = undefined
+      renameSync(temp, path)
+      renamed = true
+      if (win32PrivateFileStatus(path) !== 'private') {
+        throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} lost its private boundary`)
+      }
+    } catch (error) {
+      if (fd !== undefined) closeSync(fd)
+      try { unlinkSync(temp) } catch { /* the temp file may not exist */ }
+      if (renamed) {
+        try { unlinkSync(path) } catch { /* the published file may already be gone */ }
+      }
+      if (error instanceof LocalScopeError) throw error
+      throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} could not be written atomically`, error)
+    }
+    return
+  }
   let fd: number | undefined
   try {
     fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
@@ -965,6 +1118,7 @@ export function cleanupOwnedFiles(scope: LocalScope, instanceId: string): void {
   for (const file of [REGISTRY_FILE, LAUNCH_FILE]) {
     const path = join(scope.dir, file)
     try {
+      if (process.platform === 'win32' && win32PrivateFileStatus(path) !== 'private') continue
       const value = JSON.parse(readFileSync(path, 'utf8')) as { readonly instanceId?: unknown }
       if (value.instanceId === instanceId) unlinkSync(path)
     } catch {

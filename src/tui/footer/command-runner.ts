@@ -88,8 +88,10 @@ function captureWitnesses(identity: KernelIdentitySource, pgid: number): KernelP
 /** Whether one captured witness is still the SAME kernel process inside the
  * same group and session. */
 function witnessStillOwns(identity: KernelIdentitySource, witness: KernelProcessIdentity, pgid: number): boolean {
+  if (witness.platform === 'win32') return false
   const current = identity.read(witness.pid)
   return current.kind === 'alive'
+    && current.identity.platform !== 'win32'
     && current.identity.pgid === pgid
     && current.identity.sid === pgid
     && identity.same(witness, current) === 'same'
@@ -393,7 +395,8 @@ export class FooterCommandRunner {
     // handle observes the exit), so its pid slot is still allocated.
     const leaderUnreaped = child.exitCode === null && child.signalCode === null
     const observed = identity.read(pgid)
-    const leader = leaderUnreaped && observed.kind === 'alive' && observed.identity.ppid === process.pid
+    const leader = leaderUnreaped && observed.kind === 'alive' && observed.identity.platform !== 'win32'
+      && observed.identity.ppid === process.pid
       ? observed.identity
       : undefined
     if (!leaderUnreaped && leader === undefined) {
@@ -413,6 +416,7 @@ export class FooterCommandRunner {
       const current = identity.read(pgid)
       const leaderStillOwns = leader !== undefined
         && current.kind === 'alive'
+        && current.identity.platform !== 'win32'
         && current.identity.ppid === process.pid
         && identity.same(leader, current) === 'same'
       const witnessStillOwnsGroup = witnesses?.some(witness => witnessStillOwns(identity, witness, pgid)) ?? false

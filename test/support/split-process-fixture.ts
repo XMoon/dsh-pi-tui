@@ -1980,7 +1980,7 @@ class ProcessScene implements SplitProcessScene {
     assert(other.worker !== undefined, 'the parallel Scene receipt has no Worker identity')
     const worker = this.#liveKernelIdentity(other.worker.pid, other.worker.birth,
       'the parallel Scene Worker')
-    if (worker === undefined) return false
+    if (worker === undefined || worker.platform === 'win32') return false
     assert(other.worker.ppid === process.ppid && worker.ppid === process.ppid,
       'the parallel Scene Worker is not a live child of this Vitest main')
     let live: boolean

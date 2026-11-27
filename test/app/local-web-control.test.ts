@@ -538,9 +538,9 @@ test('open reports an immediately observable non-zero opener exit as a failure',
 
 // ── unsupported platform ───────────────────────────────────────────────────
 
-test('a non-Linux/macOS platform fails closed with exit 3', async (t) => {
+test('a genuinely unsupported platform fails closed with exit 3', async (t) => {
   const fx = fixture(t)
-  const result = await runLocalWebControl({ verb: 'status' }, fx.profile, { platform: 'win32' })
+  const result = await runLocalWebControl({ verb: 'status' }, fx.profile, { platform: 'aix' })
   assert.equal(result.code, 3)
   assert.equal(result.stdout, '')
   assert.match(result.stderr, /UNSUPPORTED_PLATFORM/u)

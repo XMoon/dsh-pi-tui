@@ -51,6 +51,7 @@ import {
   type DarwinKernelProcessIdentity,
   type KernelObservation,
   type KernelProcessIdentity,
+  type Win32KernelProcessIdentity,
 } from '../../src/runtime/native-process/identity.ts'
 import {
   assertClientHostCompatible,
@@ -818,7 +819,7 @@ test('a real unreaped child zombie is dead and the kernel Host seat is claimable
         'the real zombie was classified alive',
       )
       // The zombie holds no socket: the one kernel Host seat is free for a new Host.
-      const seat = await bindProcessSeat(scope.hostSocketName, 'HOST_ALREADY_OWNED')
+      const seat = await bindProcessSeat(scope.hostSocketName!, 'HOST_ALREADY_OWNED')
       await seat.close()
     } finally {
       holder.kill('SIGKILL')
@@ -1465,6 +1466,96 @@ test('the schema 1 publication builder keeps the frozen key order', t => {
   } finally {
     cleanup(value.root)
   }
+})
+
+test('the schema 3 publication carries the exact Windows identity', t => {
+  const value = fixture(t)
+  try {
+    const scope = scopeFor(value)
+    const identity: Win32KernelProcessIdentity = {
+      platform: 'win32',
+      pid: process.pid,
+      ownerSid: 'S-1-5-21-2700234447-2327860756-1933734059-1009',
+      creationFiletime: '134401342315540557',
+    }
+    const record = buildHostInstanceRecord({
+      scopeId: scope.scopeId,
+      profileRealpath: scope.profileRealpath,
+      instanceId: randomUUID(),
+      hostPid: process.pid,
+      origin: 'http://127.0.0.1:41001',
+      protocol: LOCAL_PROTOCOL as typeof LOCAL_PROTOCOL,
+      bundleVersion: scope.bundleVersion,
+      dshVersion: scope.dshVersion,
+      buildId: scope.buildId,
+    }, { schema: 3, hostKernelIdentity: identity })
+    assert.deepEqual(JSON.parse(JSON.stringify(record)).hostKernelIdentity, identity)
+    if (record.schema !== 3) throw new Error('the schema 3 builder returned another schema')
+    assert.equal(sameLocalInstanceRecord(record, { ...record, hostKernelIdentity: { ...identity } }), true)
+    assert.equal(sameLocalInstanceRecord(record, {
+      ...record,
+      hostKernelIdentity: { ...identity, creationFiletime: '134401342315540558' },
+    }), false)
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('the schema 3 registry rejects wrong fields, overflow and foreign identities', t => {
+  const value = fixture(t)
+  try {
+    const scope = scopeFor(value)
+    const valid = {
+      schema: 3,
+      scopeId: scope.scopeId,
+      profileRealpath: scope.profileRealpath,
+      instanceId: randomUUID(),
+      hostPid: process.pid,
+      hostKernelIdentity: {
+        platform: 'win32',
+        pid: process.pid,
+        ownerSid: 'S-1-5-21-2700234447-2327860756-1933734059-1009',
+        creationFiletime: '134401342315540557',
+      },
+      origin: 'http://127.0.0.1:41001',
+      protocol: LOCAL_PROTOCOL,
+      bundleVersion: scope.bundleVersion,
+      dshVersion: scope.dshVersion,
+      buildId: scope.buildId,
+    }
+    const write = (record: Record<string, unknown>): void => {
+      writeFileSync(join(scope.dir, 'instance.json'), `${JSON.stringify(record)}\n`, { mode: 0o600 })
+    }
+    write(valid)
+    assert.equal(readLocalRecord(scope)?.schema, 3)
+    const cases: [string, Record<string, unknown>][] = [
+      ['unknown field', { ...valid, extra: 1 }],
+      ['wrong platform', { ...valid, hostKernelIdentity: { ...valid.hostKernelIdentity, platform: 'darwin' } }],
+      ['wrong owner SID', { ...valid, hostKernelIdentity: { ...valid.hostKernelIdentity, ownerSid: 'not-a-sid' } }],
+      ['uint64 overflow', { ...valid, hostKernelIdentity: { ...valid.hostKernelIdentity, creationFiletime: '18446744073709551616' } }],
+      ['pid mismatch', { ...valid, hostKernelIdentity: { ...valid.hostKernelIdentity, pid: process.pid + 1 } }],
+    ]
+    for (const [label, record] of cases) {
+      write(record)
+      assert.throws(() => readLocalRecord(scope), (error: unknown) => error instanceof LocalScopeError && error.code === 'LOCAL_FILE_UNSAFE', label)
+    }
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('sameKernelProcess distinguishes Win32 SID and creation FILETIME exactly', () => {
+  const identity: Win32KernelProcessIdentity = {
+    platform: 'win32',
+    pid: 1234,
+    ownerSid: 'S-1-5-21-2700234447-2327860756-1933734059-1009',
+    creationFiletime: '134401342315540557',
+  }
+  assert.equal(sameKernelProcess(identity, { kind: 'alive', identity }), 'same')
+  assert.equal(sameKernelProcess(identity, { kind: 'alive', identity: { ...identity, ownerSid: 'S-1-5-21-1-2-3-1009' } }), 'different')
+  assert.equal(sameKernelProcess(identity, { kind: 'alive', identity: { ...identity, creationFiletime: '134401342315540558' } }), 'different')
+  assert.equal(sameKernelProcess(identity, { kind: 'gone' }), 'gone')
+  assert.equal(sameKernelProcess(identity, { kind: 'unknown', code: 'ACCESS_DENIED' }), 'unknown')
 })
 
 test('the schema 1 registry persists the frozen key order', { skip: process.platform !== 'linux' ? 'Linux schema 1 is the frozen Linux-only bytes contract' : false }, t => {

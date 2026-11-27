@@ -55,6 +55,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
 import { installedPackageRootFromEntry, LocalScopeError, type LocalScope } from './local-scope.ts'
+import { win32PrivateFileStatus } from '../../runtime/native-process/win32.ts'
 import {
   inspectOwnedLaunchdUnit,
   startLaunchdService,
@@ -1530,6 +1531,11 @@ export async function startManagedHostCandidate(
   options: HostStartOptions,
   deps: HostManagerDeps = {},
 ): Promise<HostStartObservation> {
+  if (process.platform === 'win32') {
+    // Windows has no OS service-manager owner in PR2: the public start is the
+    // same detached process path as the internal qualification/peer path.
+    return spawnHostCandidate(options)
+  }
   if (process.platform === 'darwin') {
     if (options.hostStartPolicy !== 'public') return spawnHostCandidate(options)
     const launchdDeps = deps.launchd ?? {}
@@ -1596,7 +1602,18 @@ export function spawnHostCandidate(options: HostStartOptions): HostStartObservat
   const logPath = join(options.scope.dir, 'host.log')
   let fd: number | undefined
   try {
-    fd = openSync(logPath, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW, 0o600)
+    let logFlags = constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND
+    if (process.platform === 'win32') {
+      if (win32PrivateFileStatus(logPath) === 'unsafe') {
+        throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'managed Host: the existing Host log is not a private regular file')
+      }
+    } else {
+      logFlags |= constants.O_NOFOLLOW
+    }
+    fd = openSync(logPath, logFlags, 0o600)
+    if (process.platform === 'win32' && win32PrivateFileStatus(logPath) !== 'private') {
+      throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'managed Host: the Host log did not inherit a private boundary')
+    }
     const env = hostCandidateEnvironment(options)
     const child = spawn(process.execPath, [options.hostEntryPath], {
       cwd: options.scope.profileRealpath,

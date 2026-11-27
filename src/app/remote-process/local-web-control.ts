@@ -172,7 +172,7 @@ function toWebControlError(error: unknown): WebControlError {
   const code = (error as { readonly code?: unknown } | undefined)?.code
   switch (code) {
     case 'B1_PLATFORM_UNSUPPORTED':
-      return new WebControlError('UNSUPPORTED_PLATFORM', 'the web CLI is only supported on Linux and macOS')
+      return new WebControlError('UNSUPPORTED_PLATFORM', 'the web CLI is only supported on Linux, macOS and Windows')
     case 'SCOPE_DIRECTORY_UNSAFE':
     case 'LOCAL_FILE_UNSAFE':
     case 'HOST_PROTOCOL_INCOMPATIBLE':
@@ -400,8 +400,8 @@ export async function runLocalWebControl(
 ): Promise<DaemonControlResult> {
   try {
     const platform = platformOf(deps)
-    if (platform !== 'linux' && platform !== 'darwin') {
-      throw new WebControlError('UNSUPPORTED_PLATFORM', 'the web CLI is only supported on Linux and macOS')
+    if (platform !== 'linux' && platform !== 'darwin' && platform !== 'win32') {
+      throw new WebControlError('UNSUPPORTED_PLATFORM', 'the web CLI is only supported on Linux, macOS and Windows')
     }
     const scope = inspectInstalledProfileScope({
       dshHome: profile.home,

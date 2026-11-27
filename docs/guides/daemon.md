@@ -1,9 +1,12 @@
 # Run dsh-pi-tui in daemon mode
 
-Daemon mode gives one DSH Profile an independently running local Host and a
-terminal Client that attaches to it. The Host can keep sessions and turns alive
-after the terminal Client disconnects. It is a **local** Linux/macOS mode,
-not a remote-network login or a second session authority.
+Daemon mode gives one DSH Profile an independently running local Host and, on
+Linux/macOS, a terminal Client that attaches to it. The Host can keep sessions
+and turns alive after the terminal Client disconnects. It is a **local** mode,
+not a remote-network login or a second session authority. On Windows the
+independent headless Host, `daemon` management and the official Web frontend
+are available; the interactive TUI Client, service install/uninstall and ACP
+remain unavailable.
 
 ## Select a backend
 
@@ -19,8 +22,10 @@ it does not change the backend of a Client already running. A one-launch
 `DSH_PI_TUI_BACKEND` override has precedence over the Profile setting and
 does not write it back.
 
-Daemon mode requires a real interactive TTY and a supported Linux or macOS
-system. A supported daemon launch authenticates or starts the Profile's one
+On Linux and macOS daemon mode requires a real interactive TTY. Windows
+currently supports the headless management commands only: `daemon start` brings
+up the independent Host without a TTY, and the interactive daemon backend stays
+refused. A supported daemon launch authenticates or starts the Profile's one
 Host as necessary; it does **not** automatically install a system service.
 
 ## Leave a Client or stop the Host
@@ -45,8 +50,8 @@ All commands below select the same Profile explicitly:
 | Stop the verified Profile Host | `dsh --profile pi-tui daemon stop` |
 | Restart with manager/identity checks | `dsh --profile pi-tui daemon restart` |
 | Inspect available Host logs | `dsh --profile pi-tui daemon logs` |
-| Install the optional user service definition | `dsh --profile pi-tui daemon install` |
-| Remove the owned user service definition | `dsh --profile pi-tui daemon uninstall` |
+| Install the optional user service definition (Linux/macOS only) | `dsh --profile pi-tui daemon install` |
+| Remove the owned user service definition (Linux/macOS only) | `dsh --profile pi-tui daemon uninstall` |
 
 `status` and `logs` are read-only observations: they neither create nor
 start a Host or service definition. A manager's “running” state alone is
@@ -58,6 +63,13 @@ build remains manageable on both Linux and macOS; the recorded install build is
 provenance, not an ownership requirement. `status` reports
 `compatibility=other-build` when the observed build differs from the installed
 profile.
+
+On Windows `daemon status`, `start`, `stop`, `restart` and `logs` operate on
+the independent process: an authenticated Host reports `manager=process`; no
+Host reports `manager=unmanaged`. `user-manager=not-checked`, `unit=none`, no
+`systemctl`/`launchctl`, and `acp=unavailable`. `install` and
+`uninstall` exit 3 before any scope or manager work because Windows has no
+service manager in this contract.
 
 `daemon logs` selects Host-process output only. A Split Client surface that
 fails reports its own controlled line in the terminal and writes a private
@@ -77,8 +89,9 @@ dsh --profile pi-tui web enable
 dsh --profile pi-tui web url
 ~~~
 
-`web status` prints `web=enabled`, `web=disabled`, `web=changing` or
-`web=unavailable`; `web disable` withdraws the Web frontend again; `web open`
+The `web` verbs are supported on Linux, macOS and Windows. `web status` prints
+`web=enabled`, `web=disabled`, `web=changing` or `web=unavailable`; `web
+disable` withdraws the Web frontend again; `web open`
 asks the default browser opener on the machine that runs the CLI to open the
 authenticated URL. `web enable` never starts a Host: if the Host is not
 running, every `web` command fails with `HOST_NOT_RUNNING` and asks you to run
@@ -115,8 +128,8 @@ profile details; do not publish them.
 
 Without a service definition, daemon mode can still use the independent
 Host process. `daemon install` is an **explicit** opt-in to profile-scoped
-supervision: a verified systemd user unit on Linux or a user LaunchAgent on
-macOS. Installing the definition is not an implicit start, enable or
+supervision on Linux (verified systemd user unit) or macOS (user LaunchAgent);
+Windows has no service definition and refuses `install`/`uninstall`. Installing the definition is not an implicit start, enable or
 restart, and does not migrate a live Host into a new manager.
 
 The `daemon stop`, `restart` and `uninstall` operations can interrupt
@@ -240,7 +253,10 @@ The split Host can expose an optional Host-owned ACP v1 listener, which is
 default-off. It is not a Direct-backend listener or a second Host authority. Its Profile auto-start preference and the **current**
 running listener state are separate controls. `daemon status` shows a
 socket address only for a listener that has been positively verified as
-enabled; never guess a socket from the home/profile path.
+enabled; never guess a socket from the home/profile path. The ACP listener,
+`acp` CLI and stdio bridge remain Linux/macOS only for now; Windows honestly
+reports `acp=unavailable` and creates no socket, pipe or adapter until the
+Windows ACP transport is separately designed and qualified.
 
 From an attached Split Client, `/acp` can inspect or change the current
 listener state without creating a Session or updating the next-launch

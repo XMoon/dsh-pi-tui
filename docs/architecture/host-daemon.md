@@ -14,18 +14,34 @@ supervision, never the Host business services, the authenticated carrier, the
 Session/Writer authority or readiness. Linux supports the verified systemd user
 unit; macOS supports an explicit user-level launchd LaunchAgent when one is
 installed for this Profile. Both managers are optional: with no installed
-service definition a cold start keeps the basic detached Host. Windows is not a
-supported Daemon platform in this contract.
+service definition a cold start keeps the basic detached Host. Windows supports
+only the independent process: `status`, `start`, `stop`, `restart` and `logs`
+are available, there is no Windows service manager, and `install`/`uninstall`
+are explicitly `UNSUPPORTED_PLATFORM` before any scope or manager work. The
+Windows Host is headless; the interactive Client remains unsupported, and ACP
+remains truthfully unavailable on Windows.
 
 - **Manager vs. authentication authority.** The manager answers "how is the Host
   OS process supervised", never "is a Host ready". When a live Host is already
   reusable it is authenticated and reused before any manager work; the manager
   never replaces, adopts, kills or migrates a live Host (including a compatible
   different build or one without a product service definition). Readiness remains the official
-  `/connect` Cookie + authenticated identity echo + `/proc` starttime handshake.
+  `/connect` Cookie + authenticated identity echo + the platform's exact kernel
+  identity handshake (Linux schema 1 `/proc` starttime, macOS schema 2 Darwin
+  identity, Windows schema 3 token SID + creation FILETIME).
   A systemd `ActiveState=active` / `systemctl start` returning 0, or a launchd
   job whose `launchctl print` reports `state = running` / `kickstart` returning
   0, is only a submitted request, never `Ready`.
+- **Windows is process-only, with kernel seats and a per-instance stop Event.**
+  The Host and the short-lived management seat are `Global\` named mutexes
+  derived from the scope, created with a protected owner-only DACL; the same
+  canonical profile under another DSH home competes for the same Host seat.
+  `stop` opens the authenticated instance's exact process handle (token SID +
+  creation FILETIME must match the registry), opens that instance's native stop
+  Event, calls `SetEvent` once, and proves the original held handle terminal
+  before reporting `stopped`. There is no SIGTERM, `taskkill`,
+  `TerminateProcess`, PID lookup or second shutdown owner: the Event only
+  delivers the existing `requestStop`/official `runProfile.shutdown` path.
 - **The installed service definition is the ONLY manager-IO admission.** A
   public cold start first authenticates and reuses a live Host. Only when it
   must start one does it inspect whether THIS Profile has an installed service
@@ -241,14 +257,17 @@ and the current terminal state never select, block or redirect a management
 command. A management command publishes one typed intent to the same
 `tuiDaemonStartup` service and the same launcher row; it resolves no Client
 artifact, opens no Direct/Remote TUI, creates no Session/Agent/Writer and starts
-no Host unless `start`/`restart` asks for one. The verbs are supported on Linux
-and macOS. Linux attributes OS supervision through the verified systemd user
-unit; macOS attributes it through an explicit user-level launchd LaunchAgent
-when this Profile has one installed, and otherwise manages the independent Host
-process. Neither platform requires a service manager for the basic daemon. On
-macOS the supported domain is the current user's `gui/<uid>` domain: system
-LaunchDaemons, `sudo`, login items and automatic `enable`/`disable` are not
-used. `--help` provides neither startup service.
+no Host unless `start`/`restart` asks for one. `status`, `start`, `stop`,
+`restart` and `logs` are supported on Linux, macOS and Windows. Linux attributes
+OS supervision through the verified systemd user unit; macOS attributes it
+through an explicit user-level launchd LaunchAgent when this Profile has one
+installed, and otherwise manages the independent Host process. Windows has no
+service manager: every verified Host is `manager=process`, and `install` /
+`uninstall` are unsupported before any scope or manager work (exit 3). Neither
+POSIX platform requires a service manager for the basic daemon. On macOS the
+supported domain is the current user's `gui/<uid>` domain: system LaunchDaemons,
+`sudo`, login items and automatic `enable`/`disable` are not used. `--help`
+provides neither startup service.
 
 The exit and error taxonomy is fixed: `0` success (including a confirmed
 `stopped`, an idempotent stop and an uninstall with no owned unit), `2` CLI usage,
@@ -265,9 +284,9 @@ Web control grammar. It is nested under the same command, needs no interactive
 TTY, publishes one typed `web-control` intent to the same launcher row, and
 never resolves a Client artifact, opens a Direct/Remote TUI, creates a
 Session/Agent/Writer, replaces a Host or starts a Host. `web` and `web --help`
-are pure help and publish no service. The verbs are supported on Linux and
-macOS; `--session`, `--continue` and `--preset` are refused before any Host
-probe, in either argument position.
+are pure help and publish no service. The verbs are supported on Linux, macOS
+and Windows; `--session`, `--continue` and `--preset` are refused before any
+Host probe, in either argument position.
 
 Every verb operates on the official `profileContext` Profile and the current
 same-scope authenticated Host only: the read-only scope facts, official
@@ -322,7 +341,11 @@ state authority and the only mutation writer.
   `manager=launchd` only when the printed source is that plist's canonical
   target, the three profile anchors match and the real job PID equals the
   authenticated Host PID. A loaded job in flux or a foreign/stale source is
-  never attributed and stays fail-closed. `manager`
+  never attributed and stays fail-closed. On Windows there is no service
+  definition or manager query at all: `status` always reports
+  `user-manager=not-checked`, `unit=none`, `unit-state=not-found`; an
+  authenticated Host is `manager=process`, and no Host is `manager=unmanaged`.
+  It never invokes `systemctl` or `launchctl`. `manager`
   names the VERIFIED supervision attribution: `systemd` only when the loaded
   unit's `MainPID` equals the authenticated Host PID, `launchd` only when the
   printed job source/anchors match and its real PID equals the authenticated Host
@@ -381,10 +404,20 @@ state authority and the only mutation writer.
   same bounded kernel-identity wait; a loaded job with no live Host is booted
   out without any signal. The bounded wait then requires that recorded kernel identity to
   become `gone`/`different`; `unknown` stays uncertainty and is never treated as
-  stopped. No platform invokes `readLinuxStarttime`/`/proc` or a Linux abstract
-  admin seat on macOS. The Host's existing `SIGTERM` process-lifetime admission
-  still runs the one official `runProfile` `shutdownOwner.shutdown()`; the
-  management command adds no second shutdown owner, RPC or SIGKILL.
+  stopped. On Windows an independent authenticated Host is stopped only through
+  its exact per-instance native Event: the command opens the recorded PID with
+  `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`, proves the same token SID
+  and creation FILETIME, verifies the instance Event's owner-only descriptor,
+  calls `SetEvent` once, and waits on the ORIGINAL held handle to become
+  terminal; it never sends SIGTERM, `taskkill` or `TerminateProcess`. A
+  `gone`/`different`/`unknown` observation, a replaced registry instance, a
+  missing Event or a different process identity is refused without a signal.
+  No platform invokes `readLinuxStarttime`/`/proc` or a Linux abstract admin
+  seat on macOS, and Windows never invokes a POSIX `/proc`, UID or signal path.
+  The Host's existing `SIGTERM` process-lifetime admission (POSIX) or native
+  Event admission (Windows) still runs the one official `runProfile`
+  `shutdownOwner.shutdown()`; the management command adds no second shutdown
+  owner, RPC or SIGKILL.
   No process group and no `pkill`. A live Host beside an active unit with a
   different `MainPID`, a unit in flux, a foreign or wrong-scope unit, or an
   unreadable manager is refused instead of being signalled. A timeout is exit 5
@@ -493,7 +526,10 @@ state authority and the only mutation writer.
   most recent Host: `daemon logs` returns `LOG_SOURCE_UNAVAILABLE` and reads
   neither. A live independent Host keeps the bounded/sanitized scope `host.log`
   tail; with no plist, no live Host and no retained launchd stream, `host.log`
-  is the only remaining source. A stale log from another process is
+  is the only remaining source. On Windows the only source is the scope
+  `host.log`; the file must be a non-reparse regular file with the product's
+  owner-only boundary, and a foreign/public/final-reparse file is an explicit
+  log-source failure rather than a guessed tail. A stale log from another process is
   never presented as the current record. Output is bounded and
   best-effort
   sanitized (ANSI/control sequences, token/cookie/Authorization and
@@ -504,10 +540,11 @@ state authority and the only mutation writer.
   seat. Linux holds the abstract socket name
   (`\0dsh-pi-tui-admin-<scope prefix>`); macOS holds the existing Darwin `admin`
   `O_EXLOCK` seat file in the account-home seat chain beside the Host singleton
-  (`seat-admin-<scopeId>.lock`), claimed through `bindDarwinKernelSeat`. `status`
-  and `logs` take no seat and create no directory. The kernel releases the claim
-  when the command exits, so there is no persistent lock file or second state
-  machine. A second
+  (`seat-admin-<scopeId>.lock`), claimed through `bindDarwinKernelSeat`;
+  Windows holds a separate purpose-derived `Global\` named mutex with the same
+  owner-only boundary as the Host seat. `status` and `logs` take no seat and
+  create no directory. The kernel releases the claim when the command exits, so
+  there is no persistent lock file or second state machine. A second
   concurrent mutating command for the same Profile gets `DAEMON_CONTROL_BUSY`
   and exit 5 before any Host/service mutation; another Profile is unaffected. A
   normal Client cold start keeps its existing Host kernel-singleton semantics

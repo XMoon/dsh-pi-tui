@@ -37,6 +37,7 @@ import {
   ensureLocalHost,
   inspectHostProcess,
   readLocalRecord,
+  sameLocalInstanceRecord,
   type EnsureLocalHostOptions,
   type LocalInstanceRecord,
   type VerifiedLocalHost,
@@ -44,6 +45,7 @@ import {
 import {
   bindDarwinKernelSeat,
   bindProcessSeat,
+  bindProfileKernelSeat,
   darwinHostProfileSeatDir,
   inspectInstalledProfileScope,
   LocalScopeError,
@@ -84,6 +86,14 @@ import {
 } from './local-host-launchd.ts'
 import { darwinAcpSocketPaths } from './local-acp-listener.ts'
 import { observeAuthenticatedLocalAcpStatus } from './local-acp-status.ts'
+import {
+  closeWin32Handle,
+  openWin32Process,
+  openWin32StopSignal,
+  waitWin32Handle,
+  win32PrivateFileStatus,
+  type Win32StopSignal,
+} from '../../runtime/native-process/win32.ts'
 
 /** The public management verbs (the fixed M6-2C set). */
 export type DaemonControlVerb = 'status' | 'start' | 'stop' | 'restart' | 'logs' | 'install' | 'uninstall'
@@ -299,7 +309,7 @@ function toDaemonControlError(error: unknown): DaemonControlError {
   if (error instanceof LocalScopeError) {
     switch (error.code) {
       case 'B1_PLATFORM_UNSUPPORTED':
-        return new DaemonControlError('UNSUPPORTED_PLATFORM', 'this daemon command requires Linux or macOS')
+        return new DaemonControlError('UNSUPPORTED_PLATFORM', 'this daemon command requires Linux, macOS or Windows')
       case 'HOST_MANAGER_UNIT_CONFLICT':
       case 'HOST_IDENTITY_MISMATCH':
       case 'HOST_PROTOCOL_INCOMPATIBLE':
@@ -354,8 +364,8 @@ function uidOf(deps: DaemonControlDeps): number {
 /** Compute the read-only scope; no directory is created. */
 function inspectScope(profile: DaemonControlProfile, deps: DaemonControlDeps): LocalScope {
   const platform = platformOf(deps)
-  if (platform !== 'linux' && platform !== 'darwin') {
-    throw new DaemonControlError('UNSUPPORTED_PLATFORM', 'this daemon command requires Linux or macOS')
+  if (platform !== 'linux' && platform !== 'darwin' && platform !== 'win32') {
+    throw new DaemonControlError('UNSUPPORTED_PLATFORM', 'this daemon command requires Linux, macOS or Windows')
   }
   try {
     return inspectInstalledProfileScope({
@@ -811,14 +821,18 @@ export function formatDaemonStatus(status: DaemonControlStatus): string {
 async function withAdminSeat<T>(scope: LocalScope, deps: DaemonControlDeps, operation: () => Promise<T>): Promise<T> {
   let seat
   try {
-    seat = platformOf(deps) === 'linux'
-      ? await bindProcessSeat(`${ADMIN_SEAT_PREFIX}${scope.scopeId.slice(0, 40)}`, 'DAEMON_CONTROL_BUSY')
-      : await bindDarwinKernelSeat(
+    if (platformOf(deps) === 'linux') {
+      seat = await bindProcessSeat(`${ADMIN_SEAT_PREFIX}${scope.scopeId.slice(0, 40)}`, 'DAEMON_CONTROL_BUSY')
+    } else if (platformOf(deps) === 'win32') {
+      seat = await bindProfileKernelSeat(scope, 'admin', 'DAEMON_CONTROL_BUSY')
+    } else {
+      seat = await bindDarwinKernelSeat(
         darwinHostProfileSeatDir(scope.scopeId, deps.darwinAccountHome),
         scope.scopeId,
         'admin',
         'DAEMON_CONTROL_BUSY',
       )
+    }
   } catch (error) {
     throw toDaemonControlError(error)
   }
@@ -1062,6 +1076,7 @@ async function stopFromSnapshot(
   snapshot: Snapshot,
   deps: DaemonControlDeps,
 ): Promise<void> {
+  if (platformOf(deps) === 'win32') return await stopWin32FromSnapshot(snapshot, deps)
   if (platformOf(deps) === 'darwin') return await stopDarwinFromSnapshot(snapshot, deps)
   const { unit, unitState, unitActiveState, unitMainPid, record, processAlive } = snapshot
   const systemctl = deps.systemctl ?? runSystemctl
@@ -1108,6 +1123,77 @@ async function stopFromSnapshot(
     }
   }
   // No live Host and no loaded unit: already stopped (idempotent no-op).
+}
+
+/**
+ * The Windows stop route: one exact held process handle and one exact
+ * per-instance Event. The original handle is the terminal authority; the
+ * Event only delivers the existing stop(0) request to the Host entry.
+ */
+async function stopWin32FromSnapshot(snapshot: Snapshot, deps: DaemonControlDeps): Promise<void> {
+  const record = snapshot.record
+  if (!snapshot.processAlive || record === undefined) {
+    // No live Host is already stopped (idempotent no-op).
+    return
+  }
+  if (record.schema !== 3) {
+    throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host registry is not a Windows kernel identity')
+  }
+  const authenticated = snapshot.authenticated
+  if (authenticated === undefined || authenticated.identity.instanceId !== record.instanceId
+    || authenticated.identity.hostPid !== record.hostPid) {
+    throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the authenticated Host is not the recorded instance')
+  }
+  const opened = openWin32Process(record.hostPid)
+  if (opened.kind === 'gone') {
+    throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the recorded Host process is no longer alive')
+  }
+  if (opened.kind === 'unknown') {
+    throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the recorded Host process identity cannot be verified')
+  }
+  const capture = opened.capture
+  try {
+    if (capture.identity.ownerSid !== record.hostKernelIdentity.ownerSid
+      || capture.identity.creationFiletime !== record.hostKernelIdentity.creationFiletime) {
+      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the opened process is not the recorded Host instance')
+    }
+    // Re-read the registry and the held handle immediately before dispatch.
+    const currentRecord = (deps.readRecord ?? readLocalRecord)(snapshot.scope)
+    if (currentRecord === undefined || !sameLocalInstanceRecord(currentRecord, record)) {
+      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host registry changed before the stop dispatch')
+    }
+    const live = await waitWin32Handle(capture.handle, 0)
+    if (live.kind !== 'timeout') {
+      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the recorded Host process is not alive for the stop dispatch')
+    }
+    assertNotAborted(deps.signal)
+    let event: Win32StopSignal
+    try {
+      event = openWin32StopSignal(snapshot.scope.scopeId, record.instanceId)
+    } catch (error) {
+      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the per-instance stop event is unavailable', error)
+    }
+    try {
+      event.setOnce()
+    } finally {
+      event.close()
+    }
+    const terminal = await waitWin32Handle(capture.handle, deps.stopTimeoutMs ?? 20_000)
+    if (terminal.kind !== 'terminal') {
+      throw afterCommittedAction(new DaemonControlError('TRANSITION_UNCERTAIN', 'the old Host process did not reach its original handle terminal within the bounded window'), 'Host stop')
+    }
+    try {
+      const postRecord = (deps.readRecord ?? readLocalRecord)(snapshot.scope)
+      if (postRecord !== undefined && (deps.inspectProcess ?? inspectHostProcess)(postRecord) === 'alive') {
+        throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the Host registry still reports a live process after stop')
+      }
+    } catch (error) {
+      if (error instanceof DaemonControlError) throw afterCommittedAction(error, 'Host stop')
+      throw afterCommittedAction(toDaemonControlError(error), 'Host stop')
+    }
+  } finally {
+    closeWin32Handle(capture.handle)
+  }
 }
 
 /** The Darwin stop route: verified LaunchAgent bootout or one verified SIGTERM. */
@@ -1196,6 +1282,7 @@ export type AcpStdioTarget =
  * malformed path is never sanitized into a fake connectable address.
  */
 function acpSocketPathOf(scope: LocalScope, deps: DaemonControlDeps): string | undefined {
+  if (platformOf(deps) === 'win32') return undefined
   const path = platformOf(deps) === 'darwin'
     ? darwinAcpSocketPaths(scope, uidOf(deps)).publicPath
     : join(scope.dir, 'acp.sock')
@@ -1210,6 +1297,7 @@ function acpSocketPathOf(scope: LocalScope, deps: DaemonControlDeps): string | u
  * change the original exit code, stderr or manager/Host classification.
  */
 async function observeAcpFacts(snapshot: Snapshot, deps: DaemonControlDeps): Promise<ObservedAcpFacts> {
+  if (platformOf(deps) === 'win32') return { acp: 'unavailable' }
   if (snapshot.authenticated === undefined || snapshot.status.host !== 'ready') {
     return { acp: 'unavailable' }
   }
@@ -1244,6 +1332,7 @@ export async function readAcpStdioTarget(
 ): Promise<AcpStdioTarget> {
   signal?.throwIfAborted()
   const effectiveDeps: DaemonControlDeps = signal === undefined ? deps : { ...deps, signal }
+  if (platformOf(effectiveDeps) === 'win32') return { kind: 'acp-unavailable' }
   const scope = inspectScope(profile, effectiveDeps)
   signal?.throwIfAborted()
   const snapshot = await readSnapshot(profile, effectiveDeps, scope)
@@ -1781,22 +1870,34 @@ function runJournalctl(unit: string, lines: number): Promise<{ code: number; std
 }
 
 /**
- * Read the tail of the scope `host.log`. The read is bounded and never follows
- * a final symlink, but it does not judge the user's existing owner/mode: an
- * existing 0644 log chosen by the user is readable. New logs are still created
- * 0600 by `spawnHostCandidate`.
+ * Read a bounded tail of the scope `host.log`. POSIX never follows a final
+ * symlink and preserves the existing owner/mode read policy; Windows admits
+ * only the product's private regular file. The bounded read itself is shared.
  */
 async function tailHostLog(path: string, lines: number): Promise<string | undefined> {
   let fd: number
-  try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code
-    // A missing log, or an existing final symlink (never followed), means there
-    // is no readable source. Any other failure is a real read failure and is
-    // reported instead of being disguised as "no log".
-    if (code === 'ENOENT' || code === 'ELOOP') return undefined
-    throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the Host log could not be opened')
+  if (process.platform === 'win32') {
+    const status = win32PrivateFileStatus(path)
+    if (status === 'missing') return undefined
+    if (status !== 'private') {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the Host log is not a private regular file')
+    }
+    try {
+      fd = openSync(path, constants.O_RDONLY)
+    } catch {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the Host log could not be opened')
+    }
+  } else {
+    try {
+      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      // A missing log, or an existing final symlink (never followed), means there
+      // is no readable source. Any other failure is a real read failure and is
+      // reported instead of being disguised as "no log".
+      if (code === 'ENOENT' || code === 'ELOOP') return undefined
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the Host log could not be opened')
+    }
   }
   try {
     const info = fstatSync(fd)
@@ -1979,6 +2080,16 @@ async function runLogs(profile: DaemonControlProfile, intent: DaemonControlInten
   const scope = inspectScope(profile, deps)
   const snapshot = await readSnapshot(profile, deps, scope)
   if (platformOf(deps) === 'darwin') return await runDarwinLogs(scope, intent, deps, snapshot)
+  if (platformOf(deps) === 'win32') {
+    const lines = intent.lines ?? 100
+    const path = join(scope.dir, 'host.log')
+    const tail = deps.hostLogTail ?? tailHostLog
+    const value = await tail(path, lines)
+    if (value === undefined || value.trim() === '') {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'no Host log is available for this profile')
+    }
+    return { code: 0, stdout: `${sanitizeLogText(value)}`, stderr: LOG_SANITIZATION_NOTICE }
+  }
   if (snapshot.unitInspectionFailure !== undefined) throw snapshot.unitInspectionFailure
   if (snapshot.unitQueryFailure !== undefined) {
     // A manager channel failure is a log-source failure; a unit-identity refusal
@@ -2041,6 +2152,9 @@ export async function runDaemonControl(
   deps: DaemonControlDeps = {},
 ): Promise<DaemonControlResult> {
   try {
+    if (platformOf(deps) === 'win32' && (intent.verb === 'install' || intent.verb === 'uninstall')) {
+      throw new DaemonControlError('UNSUPPORTED_PLATFORM', `daemon ${intent.verb} is not supported on Windows; there is no Windows service manager`)
+    }
     switch (intent.verb) {
       case 'status':
         return await runStatus(profile, deps)
