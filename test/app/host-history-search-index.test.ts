@@ -540,21 +540,24 @@ test('session recall reads one exact Session in Host order with the stored ident
       occurrence('m-blank', '   ', 4500, '/repo/a', 1),
       occurrence('m-shell', '!ls -la', 4000, '/repo/a', 2),
       occurrence('m-unicode', '部署 ✓ deploy', 3000, '/repo/b', 3),
-      occurrence('m-oversize', 'x'.repeat(8193), 2000, '/repo/a', 4),
+      occurrence('m-long-ascii', 'x'.repeat(8193), 2000, '/repo/a', 4),
+      occurrence('m-preover', 'y'.repeat(65_537), 1500, '/repo/a', 5),
       occurrence('m-rpc', 'correlated prompt', 1000, '/repo/a', 6, 'rpc-1'),
       composite,
     ])
     seed(index, 's-other', [occurrence('m-other', 'other session newest', 6000, '/repo/a', 0)])
 
-    const rows = index.sessionRecallRows('s-recall', 100, 8192)
+    const rows = index.sessionRecallRows('s-recall', 100, 64 * 1024)
     assert.deepEqual(rows.map(row => row.messageId), [
-      'm-newest', 'm-blank', 'm-shell', 'm-unicode', 'm-rpc',
-    ], 'exact session + non-text/oversize excluded BEFORE the limit, Host order preserved')
+      'm-newest', 'm-blank', 'm-shell', 'm-unicode', 'm-long-ascii', 'm-rpc',
+    ], 'exact session + non-text/absolute-preover excluded BEFORE the limit; long ASCII is admitted')
     assert.equal(rows[0]?.rpcId, 'rpc-newest')
     assert.equal('rpcId' in (rows[1] as object), false, 'optional correlation is absent, not null/empty')
     assert.equal(rows[3]?.effectiveCwd, '/repo/b')
-    assert.equal(index.sessionRecallRows('s-recall', 2, 8192).length, 2, 'the candidate batch cap is independent of the cap')
-    assert.deepEqual(index.sessionRecallRows('missing', 100, 8192), [], 'an absent target returns no rows')
+    assert.equal(index.sessionRecallRows('s-recall', 2, 64 * 1024).length, 2, 'the candidate batch cap is independent of the cap')
+    assert.equal(rows.find(row => row.messageId === 'm-long-ascii')?.content.length, 8193,
+      'a long ASCII row is admitted whole, never truncated by the old 8192 prefilter')
+    assert.deepEqual(index.sessionRecallRows('missing', 100, 64 * 1024), [], 'an absent target returns no rows')
     assert.equal(index.occurrence('s-recall', 'm-rpc')?.rpcId, 'rpc-1')
   } finally {
     index.close()

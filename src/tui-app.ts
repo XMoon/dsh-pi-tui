@@ -8958,6 +8958,15 @@ export class TuiApp {
     this.restoreEditorRecall(true)
   }
 
+  /** A real recall-root scope change: replace the disposable editor mirror
+   *  with the (already cleared) root projection and DROP any outgoing browse
+   *  bookmark. Unlike a same-scope seed reseat this never restores the old
+   *  carrier's draft. */
+  resetInputRecallScope(): void {
+    if (this.memoryRecall === undefined || this.disposed) return
+    this.restoreEditorRecall(false)
+  }
+
   /** The selected recall authority's newest-first projection. */
   private recallSnapshot(): readonly string[] {
     return this.memoryRecall?.snapshot() ?? this.historyRecall!.snapshot()
@@ -25730,8 +25739,12 @@ export class TuiApp {
       // remember FIRST (the text is still available), then the clear.
       if (hold.remember) {
         if (this.memoryRecall !== undefined) {
+          // A root merge can REMOVE a previously projected Host row (the same
+          // official rpcId). Rebuild the disposable editor mirror from the
+          // authoritative root instead of independently unshifting the new
+          // text, or ↑ would still consume the obsolete row.
           this.memoryRecall.remember(hold.text, officialRequestId)
-          this.editor.addToHistory(hold.text.trim())
+          this.restoreEditorRecall(false)
         } else {
           this.editor.addToHistory(hold.text.trim())
           this.historyRecall!.rememberAccepted(hold.text)

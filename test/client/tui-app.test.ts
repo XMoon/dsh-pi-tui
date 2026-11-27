@@ -6562,6 +6562,18 @@ test('PR2-C: the Host seed and an official rpcId merge through the real editor m
     assert.deepEqual([...app.getInputHistory()], ['Local original', 'Host older'])
     assert.equal(app.getDraft(), '', 'the accepted settlement cleared the draft once')
 
+    // The REAL ↑ sink must consume the rebuilt mirror BEFORE any later seed:
+    // the local original is newest, then the older Host row. The replaced Host
+    // projection must not survive in the editor and duplicate itself.
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'Local original', 'the accepted local original is the first ↑')
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'Host older',
+      'the replaced Host projection is gone; the next ↑ is the older Host row')
+    app.setDraft('')
+
     // A late async same-scope seed re-projects the authority into the real
     // ↑ sink; no Client file and no duplicated Host row is involved.
     recall.applySeed([

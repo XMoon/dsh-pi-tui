@@ -409,7 +409,7 @@ export function parseHistorySessionRecallItem(value: unknown): HistorySessionRec
   if (typeof record.text !== 'string' || record.text.length === 0
     || record.text.length > HISTORY_SESSION_RECALL_MAX_TEXT_CHARS) {
     throw new TypeError(
-      `${RECALL_ITEM_LABEL}: text must be a non-empty string of at most ${HISTORY_SESSION_RECALL_MAX_TEXT_CHARS} characters`,
+      `${RECALL_ITEM_LABEL}: text must be a non-empty string of at most ${HISTORY_SESSION_RECALL_MAX_TEXT_CHARS} characters (the response envelope owns the actual fit)`,
     )
   }
   const rpcId = record.rpcId === undefined

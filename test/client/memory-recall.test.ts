@@ -48,17 +48,17 @@ test('a fresh process memory is empty and normalizes each locally accepted input
 
 test('the scope is the exact carrier+Session; a different one clears and a same one is not a reset', () => {
   const memory = createInputMemoryRecall()
-  memory.bindScope(SCOPE_A)
+  assert.equal(memory.bindScope(SCOPE_A), true, 'the first bind is a real scope change')
   memory.remember('A input')
-  memory.bindScope({ ...SCOPE_A })
+  assert.equal(memory.bindScope({ ...SCOPE_A }), false, 'a remount of the same scope is not a reset')
   assert.deepEqual([...memory.snapshot()], ['A input'], 'the same carrier+Session scope (a remount) keeps the list')
 
-  memory.bindScope(SCOPE_B)
+  assert.equal(memory.bindScope(SCOPE_B), true)
   assert.deepEqual([...memory.snapshot()], [], 'a different Session clears the outgoing list')
 
   memory.remember('B input')
   const newCarrier = { connection: { id: 'conn-2' }, binding: { id: 'binding-2' } }
-  memory.bindScope({ carrier: newCarrier, sessionId: 'session-b' })
+  assert.equal(memory.bindScope({ carrier: newCarrier, sessionId: 'session-b' }), true)
   assert.deepEqual([...memory.snapshot()], [], 'a different authenticated carrier clears even with the same Session id')
   assert.deepEqual([...memory.snapshot()], [], 'a same-id A→B→A publish is a different scope, never inferred from the value')
 })
@@ -120,6 +120,41 @@ test('a stale seed for another/previous scope never applies', () => {
   memory.bindScope(SCOPE_B)
   memory.applySeed(seeded([{ messageId: 'a1', text: 'stale A host row', rpcId: 'ra' }]), 'session-a')
   assert.deepEqual([...memory.snapshot()], [], 'an A response after B publication mutates nothing')
+})
+
+test('adjacent display compression never drops an identity a later seed still correlates', () => {
+  // Local-first arrival: two distinct local occurrences share display text.
+  // Their rpcIds must survive inside the bounded candidate window so BOTH Host
+  // projections are associated later, even though the visible list already
+  // collapsed the adjacent pair.
+  const memory = createInputMemoryRecall()
+  memory.bindScope(SCOPE_A)
+  memory.remember('Local original', 'rpc-1')
+  memory.remember('Local original', 'rpc-2')
+  assert.deepEqual([...memory.snapshot()], ['Local original'])
+  memory.applySeed(seeded([
+    { messageId: 'host-2', rpcId: 'rpc-2', text: 'Host projected second' },
+    { messageId: 'host-x', text: 'peer row' },
+    { messageId: 'host-1', rpcId: 'rpc-1', text: 'Host projected first' },
+  ]), 'session-a')
+  assert.deepEqual([...memory.snapshot()], ['Local original', 'peer row'],
+    'both correlated Host rows are removed; the unassociated peer row remains')
+
+  // Reverse arrival: the Host rows are projected first, then the two local
+  // originals arrive one by one. The visible coalescence at each step must not
+  // erase the still-unassociated identity of the other occurrence.
+  const reverse = createInputMemoryRecall()
+  reverse.bindScope(SCOPE_A)
+  reverse.applySeed(seeded([
+    { messageId: 'host-1', rpcId: 'rpc-1', text: 'Host projected first' },
+    { messageId: 'host-x', text: 'peer row' },
+    { messageId: 'host-2', rpcId: 'rpc-2', text: 'Host projected second' },
+  ]), 'session-a')
+  reverse.remember('Local original', 'rpc-1')
+  reverse.remember('Local original', 'rpc-2')
+  assert.deepEqual([...reverse.snapshot()], ['Local original', 'peer row'],
+    'reverse arrival ends with the same local-first, peer-preserving projection')
+  assert.deepEqual([...memory.snapshot()], [...reverse.snapshot()])
 })
 
 test('distinct repeated text survives when non-adjacent and the shared cap evicts only the oldest', () => {

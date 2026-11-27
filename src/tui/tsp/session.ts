@@ -4505,6 +4505,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (disposed) return
       if (historyRecall === undefined) composer.reseatRecallAfterReseed()
     },
+    resetInputRecallScope() {
+      // A real carrier/Session scope change invalidates the composer's
+      // positional recall browse before a new seed exists. The live entries
+      // getter already reads the cleared root; no second memory is created.
+      if (disposed) return
+      composer.invalidateRecallNavigation()
+    },
     beginInputHistoryScope(owner) {
       // TSP I-A: the formal Session publication the application already owns.
       // Pure kernel state; nothing here is inferred from a received Session id.

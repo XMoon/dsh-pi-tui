@@ -31,6 +31,7 @@ export function displaySeamStub(overrides: Partial<SurfaceDisplaySeam> = {}): Su
     resetInputHistory: () => {},
     beginInputHistoryScope: () => {},
     reseedInputRecall: () => {},
+    resetInputRecallScope: () => {},
     settleScopeInput: () => {},
     setSearchResult: () => {},
     notify: () => {},

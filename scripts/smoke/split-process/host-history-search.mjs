@@ -171,26 +171,89 @@ function composerDraftOf(lines) {
   return row.slice(at + '❯'.length).trim()
 }
 
-/** Press the REAL ↑ sink until the async Host seed has committed one of the
- *  expected original texts into the composer. A committed seed is the only
- *  success signal; the loop is bounded by the caller deadline. */
-async function waitForSeededComposerDraft(client, allowed, label, timeoutMs = 120_000) {
+/** The visible recall projection (newest first) from accepted texts oldest-first. */
+function visibleRecall(texts) {
+  const out = []
+  for (let index = texts.length - 1; index >= 0; index -= 1) {
+    if (out.length > 0 && out[out.length - 1] === texts[index]) continue
+    out.push(texts[index])
+    if (out.length >= 100) break
+  }
+  return out
+}
+
+/** All accepted user texts of one Session in durable event order (IDs unique). */
+function acceptedTextsOf(dshHome, sessionId) {
+  const seen = new Set()
+  const out = []
+  for (const event of hostSessionEvents(dshHome, sessionId) ?? []) {
+    const messages = event.type === 'agent/inbox/spliced'
+      ? (event.data.inserted ?? [])
+      : event.type === 'user/message' ? [event.data] : []
+    for (const message of messages) {
+      if (!isAcceptedUserMessage(message) || seen.has(message.id)) continue
+      seen.add(message.id)
+      out.push(textOfMessage(message))
+    }
+  }
+  return out
+}
+
+/** All accepted user message IDs of one Session, sorted for before/after proof. */
+function acceptedIdsOf(dshHome, sessionId) {
+  const ids = new Set()
+  for (const event of hostSessionEvents(dshHome, sessionId) ?? []) {
+    if (event.type === 'agent/inbox/spliced') {
+      for (const message of event.data.inserted ?? []) {
+        if (isAcceptedUserMessage(message)) ids.add(message.id)
+      }
+    } else if (event.type === 'user/message' && isAcceptedUserMessage(event.data)) {
+      ids.add(event.data.id)
+    }
+  }
+  return [...ids].sort()
+}
+
+/** The FIRST non-empty ↑ must be exactly the expected newest row. An empty
+ *  draft means the async seed has not committed yet, so the real key is sent
+ *  again; any other text is an immediate failure (never skipped). */
+async function waitForFirstExpectedRecall(client, expectedNewest, label, timeoutMs = 120_000) {
   const started = Date.now()
   for (;;) {
     const draft = composerDraftOf(await client.viewport())
-    if (draft !== undefined && allowed.includes(draft)) return draft
-    assert(Date.now() - started < timeoutMs,
-      `${label}: the ↑ sink never recalled a Host-seeded row; draft=${JSON.stringify(draft)}`)
+    if (draft === expectedNewest) return
+    assert(draft === undefined || draft === '',
+      `${label}: first non-empty ↑ was ${JSON.stringify(draft)}, expected ${JSON.stringify(expectedNewest)}`)
+    assert(Date.now() - started < timeoutMs, `${label}: the Host seed never became recallable`)
     client.send('\x1b[A')
-    await new Promise(resolve => setTimeout(resolve, 100))
+    await new Promise(resolve => setTimeout(resolve, 60))
   }
 }
 
-/** Walk the real ↓ sink back to the saved empty draft after a recall seed.
- *  The newest row may have been skipped by the allowed-text wait, so one ↓ is
- *  not enough in general. */
-async function clearSeededComposerDraft(client, label) {
-  for (let step = 0; step < 20; step += 1) {
+/** Walk the ENTIRE expected ordered ↑ window (including a non-adjacent
+ *  duplicate), then one step past it: a hidden/wrong row fails immediately. */
+async function assertRecallBrowse(client, expected, label) {
+  assert(expected.length >= 1, `${label}: empty expected window`)
+  await waitForFirstExpectedRecall(client, expected[0], `${label} first`)
+  for (let index = 1; index < expected.length; index += 1) {
+    client.send('\x1b[A')
+    await new Promise(resolve => setTimeout(resolve, 80))
+    const draft = composerDraftOf(await client.viewport())
+    assert(draft === expected[index],
+      `${label}: browse position ${String(index)} is ${JSON.stringify(draft)}, expected ${JSON.stringify(expected[index])}`)
+  }
+  client.send('\x1b[A')
+  await new Promise(resolve => setTimeout(resolve, 80))
+  const edge = composerDraftOf(await client.viewport())
+  assert(edge === expected[0] || edge === expected[expected.length - 1],
+    `${label}: a row beyond the expected window appeared: ${JSON.stringify(edge)}`)
+}
+
+/** Walk the real ↓ sink from a recall browse position back to the saved empty
+ *  draft. Ctrl+U is deliberately not used here: it can leave the base editor's
+ *  browse mode while keeping the recalled text as a live draft. */
+async function clearRecallComposer(client, label) {
+  for (let step = 0; step < 30; step += 1) {
     if ((composerDraftOf(await client.viewport()) ?? '') === '') return
     client.send('\x1b[B')
     await new Promise(resolve => setTimeout(resolve, 50))
@@ -198,22 +261,25 @@ async function clearSeededComposerDraft(client, label) {
   await waitForComposerDraft(client, '', label, 5_000)
 }
 
-/** Walk the REAL ↑ sink from an empty draft through every distinct recalled
- *  row (wrap-safe), so the caller can assert the COMPLETE browse membership,
- *  not just the one row the wait helper happened to accept. */
-async function browseAllRecallDrafts(client, label) {
-  const drafts = []
-  const seen = new Set()
-  for (let step = 0; step < 100; step += 1) {
-    client.send('\x1b[A')
-    await new Promise(resolve => setTimeout(resolve, 60))
-    const draft = composerDraftOf(await client.viewport())
-    if (!draft || seen.has(draft)) break
-    seen.add(draft)
-    drafts.push(draft)
+/** Clear a real `/resume` command draft before the first recall key. No browse
+ *  position exists yet, so Ctrl+U is safe here. */
+async function clearResumeDraft(client, label) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    client.send('\x15')
+    await new Promise(resolve => setTimeout(resolve, 50))
+    if ((composerDraftOf(await client.viewport()) ?? '') === '') return
   }
-  assert(drafts.length >= 1, `${label}: the ↑ sink recalled no row`)
-  return drafts
+  await waitForComposerDraft(client, '', label, 5_000)
+}
+
+/** Switch the SAME Client to a Session, wait for its real frame, then clear
+ *  the `/resume` command draft before any recall key. */
+async function resumeRecallSession(client, sessionId, marker, label) {
+  client.send(`/resume ${sessionId}\r`)
+  await client.waitForScreen(sessionId, `${label} header`, 120_000)
+  await client.waitForScreen(marker, `${label} own content`, 120_000)
+  await clearResumeDraft(client, `${label} /resume draft`)
+  await waitForComposerDraft(client, '', `${label} empty draft`, 120_000)
 }
 
 async function waitForComposerDraft(client, target, label, timeoutMs = 30_000) {
@@ -1350,101 +1416,69 @@ export async function runHostHistorySearch(context) {
     await scene.awaitSceneSeatFree()
     host = undefined
 
-    // ── W04b: after the Host process restarts, FRESH Clients' real editor ↑/↓
-    // restore the Host-seeded Session once; their submit creates exactly ONE new
-    // official occurrence. A separate Client per Session proves no old row
-    // leaks into the new scope. This runs after the cold-proof assertions so the
-    // accepted submit cannot invalidate their unchanged-source evidence.
+    // ── W04b: after the Host process restarts, ONE fresh Client attaches to A
+    // and its REAL editor ↑ proves the complete ordered Host seed. The SAME
+    // Client then publishes B (submit + non-adjacent duplicate), publishes A
+    // again, and each scope's complete browse is checked against its own
+    // official occurrences. The Host stays the same process throughout.
     const logE = join(workDir, 'host-history-search-recall-editor.log')
     const recallHost = await scene.startC1Host('history-search', 'history recall host', {
       DSH_PI_TUI_LOG: logE,
       DSH_PI_TUI_LOG_LEVEL: 'debug',
     })
     host = recallHost.host
-    const targetRecallTexts = (hostSessionEvents(dshHome, sessionId) ?? []).flatMap((event) => {
-      if (event.type === 'agent/inbox/spliced') {
-        return (event.data.inserted ?? []).filter(isAcceptedUserMessage).map(textOfMessage)
-      }
-      if (event.type === 'user/message' && isAcceptedUserMessage(event.data)) return [textOfMessage(event.data)]
-      return []
-    })
-    const recallAStart = await scene.startC1Client('history recall client A', {
+    const targetTexts = acceptedTextsOf(dshHome, sessionId)
+    const expectedA = visibleRecall(targetTexts)
+    assert(expectedA.length >= 1, 'W04b: A has no accepted recall window')
+    const recallClientResult = await scene.startC1Client('history recall client', {
       SPLIT_PROCESS_CLIENT_SESSION: sessionId,
       SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
     })
-    const recallA = recallAStart.client
-    await recallA.waitForScreen('❯', 'W04b fresh A Client mounted', 120_000)
-    await waitForComposerDraft(recallA, '', 'W04b fresh A editor starts empty', 120_000)
-    const recalledText = await waitForSeededComposerDraft(recallA, targetRecallTexts, 'W04b A seed')
-    // ↑ is the ONLY input; ↓ restores the exact pre-browse empty draft.
-    await clearSeededComposerDraft(recallA, 'W04b ↓ returns to the empty draft')
-    const aAllowed = [...new Set([...targetRecallTexts, recalledText])]
-    const aDrafts = await browseAllRecallDrafts(recallA, 'W04b A complete browse')
-    assert(aDrafts.every(text => aAllowed.includes(text)),
-      `W04b: A browse carried a foreign row: ${JSON.stringify(aDrafts)}`)
-    await clearSeededComposerDraft(recallA, 'W04b A browse cleared')
-    const countAcceptedText = (text) => {
-      const ids = new Set()
-      for (const event of hostSessionEvents(dshHome, sessionId) ?? []) {
-        if (event.type === 'agent/inbox/spliced') {
-          for (const message of event.data.inserted ?? []) {
-            if (isAcceptedUserMessage(message) && textOfMessage(message) === text) ids.add(message.id)
-          }
-        } else if (event.type === 'user/message' && isAcceptedUserMessage(event.data) && textOfMessage(event.data) === text) {
-          ids.add(event.data.id)
-        }
-      }
-      return ids.size
-    }
-    const beforeSubmit = countAcceptedText(recalledText)
-    recallA.send('\x1b[A')
-    await waitForComposerDraft(recallA, recalledText, 'W04b ↑ recalls the same seed again', 120_000)
-    recallA.send('\r')
-    const submitDeadline = Date.now() + 120_000
-    while (countAcceptedText(recalledText) < beforeSubmit + 1 && Date.now() < submitDeadline) {
+    const recallClient = recallClientResult.client
+    await recallClient.waitForScreen(sessionId, 'W04b fresh Client mounted A', 120_000)
+    await waitForComposerDraft(recallClient, '', 'W04b fresh A editor starts empty', 120_000)
+    const idsABefore = acceptedIdsOf(dshHome, sessionId)
+    await assertRecallBrowse(recallClient, expectedA, 'W04b A complete seed')
+    assert(JSON.stringify(acceptedIdsOf(dshHome, sessionId)) === JSON.stringify(idsABefore),
+      'W04b: browsing A never submits an occurrence')
+    await clearRecallComposer(recallClient, 'W04b A browse cleared')
+
+    // Same Client → B. The initial Host seed is proven by its expected newest
+    // row, then one real B submission creates a NON-ADJACENT duplicate marker.
+    await resumeRecallSession(recallClient, sentinelId, appendedText, 'W04b switch to B')
+    const expectedBSeed = visibleRecall([...sentinelTexts, appendedText])
+    await assertRecallBrowse(recallClient, expectedBSeed, 'W04b B complete seed')
+    await clearRecallComposer(recallClient, 'W04b B seed browse cleared')
+    const bIdsBeforeSubmit = acceptedIdsOf(dshHome, sentinelId)
+    const bAlphaBefore = acceptedTextsOf(dshHome, sentinelId).filter(text => text === sentinelTexts[0]).length
+    recallClient.send(`${sentinelTexts[0]}\r`)
+    const bSubmitDeadline = Date.now() + 120_000
+    while (acceptedTextsOf(dshHome, sentinelId).filter(text => text === sentinelTexts[0]).length
+      < bAlphaBefore + 1 && Date.now() < bSubmitDeadline) {
       await new Promise(resolve => setTimeout(resolve, 25))
     }
-    assert(countAcceptedText(recalledText) === beforeSubmit + 1,
-      `W04b: the recalled submit did not create exactly one official occurrence (before=${String(beforeSubmit)}): ${JSON.stringify(await recallA.viewport())}`)
-    await scene.exitC1Client(recallA, 'history recall client A exit')
-    // B's own seed is the only recalled row in a fresh B Client.
-    const recallBStart = await scene.startC1Client('history recall client B', {
-      SPLIT_PROCESS_CLIENT_SESSION: sentinelId,
-      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
-    })
-    const recallB = recallBStart.client
-    await recallB.waitForScreen('❯', 'W04b fresh B Client mounted', 120_000)
-    await waitForComposerDraft(recallB, '', 'W04b fresh B editor starts empty', 120_000)
-    const sentinelRecallText = await waitForSeededComposerDraft(recallB, sentinelTexts, 'W04b B seed')
-    assert(targetRecallTexts.includes(sentinelRecallText) === false, 'W04b: A history leaked into B')
-    await clearSeededComposerDraft(recallB, 'W04b B ↓ empty')
-    const bAllowed = [...new Set([...sentinelTexts, appendedText])]
-    const bDrafts = await browseAllRecallDrafts(recallB, 'W04b B complete browse')
-    assert(bDrafts.every(text => bAllowed.includes(text)),
-      `W04b: B browse carried a foreign row: ${JSON.stringify(bDrafts)}`)
-    assert(bDrafts.some(text => targetRecallTexts.includes(text)) === false,
-      'W04b: an A row appeared anywhere in B\'s complete browse')
-    await clearSeededComposerDraft(recallB, 'W04b B browse cleared before exit')
-    await scene.exitC1Client(recallB, 'history recall client B exit')
-    // Back to A in a NEW Client: B's history never leaks into the restored A.
-    const recallA2Start = await scene.startC1Client('history recall client A again', {
-      SPLIT_PROCESS_CLIENT_SESSION: sessionId,
-      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
-    })
-    const recallA2 = recallA2Start.client
-    await recallA2.waitForScreen('❯', 'W04b fresh A Client returns', 120_000)
-    await waitForComposerDraft(recallA2, '', 'W04b fresh A editor starts empty again', 120_000)
-    const backToA = await waitForSeededComposerDraft(recallA2, targetRecallTexts, 'W04b A reseed')
-    assert(sentinelTexts.includes(backToA) === false, 'W04b: B history leaked into the restored A')
-    await clearSeededComposerDraft(recallA2, 'W04b A ↓ empty')
-    const a2Drafts = await browseAllRecallDrafts(recallA2, 'W04b A complete browse again')
-    assert(a2Drafts.every(text => aAllowed.includes(text)),
-      `W04b: restored A browse carried a foreign row: ${JSON.stringify(a2Drafts)}`)
-    const bOnly = [...new Set([...sentinelTexts, appendedText])]
-    assert(a2Drafts.some(text => bOnly.includes(text)) === false,
-      'W04b: a B row appeared anywhere in the restored A browse')
-    await clearSeededComposerDraft(recallA2, 'W04b A browse cleared before exit')
-    await scene.exitC1Client(recallA2, 'history recall client A again exit')
+    assert(acceptedTextsOf(dshHome, sentinelId).filter(text => text === sentinelTexts[0]).length === bAlphaBefore + 1,
+      'W04b: the B submit created exactly one official occurrence')
+    const expectedB = visibleRecall([...sentinelTexts, appendedText, sentinelTexts[0]])
+    assert(expectedB[0] === sentinelTexts[0], 'W04b: the newest B row is the local original')
+    assert(expectedB.at(-1) === sentinelTexts[0],
+      'W04b: the B window keeps the non-adjacent older duplicate at its oldest end')
+    const bIdsBeforeBrowse = acceptedIdsOf(dshHome, sentinelId)
+    await assertRecallBrowse(recallClient, expectedB, 'W04b B complete window')
+    assert(JSON.stringify(acceptedIdsOf(dshHome, sentinelId)) === JSON.stringify(bIdsBeforeBrowse),
+      'W04b: the recalled submit is the only new B occurrence, never added by browse')
+    assert(acceptedIdsOf(dshHome, sentinelId).length > bIdsBeforeSubmit.length)
+    await clearRecallComposer(recallClient, 'W04b B window cleared')
+
+    // Same Client → A again: the A window is exactly the original ordered set;
+    // no B row appears at any browsed position.
+    await resumeRecallSession(recallClient, sessionId, targetTexts[0], 'W04b switch back to A')
+    const idsABackBefore = acceptedIdsOf(dshHome, sessionId)
+    await assertRecallBrowse(recallClient, expectedA, 'W04b A complete window again')
+    assert(JSON.stringify(acceptedIdsOf(dshHome, sessionId)) === JSON.stringify(idsABackBefore),
+      'W04b: returning to A browses only, never submits')
+    await clearRecallComposer(recallClient, 'W04b A window cleared before exit')
+    await scene.exitC1Client(recallClient, 'history recall client exit')
     await scene.stopC1Host(recallHost.host)
     await scene.awaitSceneSeatFree()
     host = undefined

@@ -446,8 +446,10 @@ authority (`src/client/history/memory-recall.ts`) created by
   remaining Host rows follow in Host order. A same-scope repeated seed REPLACES
   the previous seed rows instead of appending them; a seed for another/previous
   scope never applies. Text is never an identity: only an exact official
-  correlation dedupes; only ADJACENT equal display text collapses, and the
-  shared 100-entry cap evicts only the oldest.
+  correlation dedupes; only ADJACENT equal display text collapses. The bounded
+  100-entry candidate window retains the occurrence identity needed by a later
+  seed, so the visible projection may be shorter when adjacent rows coalesce;
+  the shared cap evicts only the oldest candidate.
 - **Projections.** Both renderers consume the SAME store snapshot. The PiTui
   editor stack is a disposable mirror rebuilt from that snapshot (publication,
   mount and asynchronous reseat); ordinary local recordings update the store

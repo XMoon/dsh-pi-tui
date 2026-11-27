@@ -882,6 +882,32 @@ test('a Host recall answer stays within the actual 64 KiB envelope, dropping a w
   }
 })
 
+test('a long ASCII occurrence that fits the actual envelope is recalled whole, never prefiltered', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-recall-long-ascii')
+  try {
+    const sessionId = 'history-recall-long-ascii'
+    await wire.host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    // 8193 ASCII code units fit the 64 KiB answer comfortably; the old 8192
+    // per-row prefilter silently lost this legal occurrence.
+    const longAscii = 'a'.repeat(8193)
+    await prompt(wire, sessionId, 'req-recall-long-ascii', longAscii)
+    await waitForReady(wire, 'long ASCII recall corpus')
+    let answer = await wire.readSessionRecall({ sessionId })
+    const deadline = Date.now() + 20_000
+    while (answer.kind === 'loading' && Date.now() < deadline) {
+      // Bounded observation window: the projection may commit after the prompt.
+      await new Promise(resolve => setTimeout(resolve, 25))
+      answer = await wire.readSessionRecall({ sessionId })
+    }
+    assert.equal(answer.kind, 'ready', JSON.stringify(answer))
+    if (answer.kind !== 'ready') throw new Error('expected ready recall')
+    assert.deepEqual(answer.items.map(item => item.text), [longAscii])
+    assert.ok(Buffer.byteLength(JSON.stringify(answer), 'utf8') <= 64 * 1024)
+  } finally {
+    await wire.dispose()
+  }
+})
+
 test('a real Agent followup without rpcId is ONE accepted occurrence and non-user sources stay excluded', async (t) => {
   const wire = await historyHost(testLifecycle(t), 'history-search-uncorrelated')
   try {

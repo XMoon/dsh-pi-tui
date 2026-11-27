@@ -19,11 +19,13 @@
  * (local-only recall may be lost), and no Client file or durable cache exists.
  * The official Session log/index remains the Host authority.
  *
- * Normalization matches the editor mirror: trim, skip an empty input, collapse
- * CONSECUTIVE duplicates (a non-consecutive repeat is legal history), newest
- * first, and the shared cap ({@link INPUT_RECALL_LIMIT}). Identity is never
- * derived from the text: a local occurrence is matched to a Host seed row only
- * by its exact official rpcId.
+ * The bounded candidate window keeps up to {@link INPUT_RECALL_LIMIT} recent
+ * occurrences with their identity before any display compression. The visible
+ * snapshot trims, drops empty input, collapses only CONSECUTIVE equal text
+ * (a non-consecutive repeat is legal history), stays newest-first and remains
+ * capped. Identity is never derived from the text: a local occurrence is
+ * matched to a Host seed row only by its exact official rpcId, including when
+ * adjacent display text has already coalesced before a later seed arrives.
  *
  * @module @xmoon76/dsh-pi-tui/client/history/memory-recall
  */
@@ -61,8 +63,10 @@ export interface InputMemoryRecall {
    * official request id replaces the matching Host seed row (local text wins).
    */
   remember(text: string, officialRequestId?: string): void
-  /** Bind the exact carrier+Session scope; a different scope clears the list. */
-  bindScope(scope: InputRecallScope): void
+  /** Bind the exact carrier+Session scope; a different scope clears the list.
+   *  Returns true only when the scope actually changed (the caller must then
+   *  retire the renderer's disposable projection). */
+  bindScope(scope: InputRecallScope): boolean
   /**
    * Commit the Host seed of the CURRENT Session: local occurrences stay first,
    * Host rows already represented by a local rpcId are dropped, and the
@@ -81,14 +85,29 @@ interface RecallRow {
 
 const EMPTY_CARRIER = { connection: undefined, binding: undefined } as const
 
-/** Trim, drop blank rows, collapse only ADJACENT duplicates and cap the list. */
-function normalizeRows(rows: readonly RecallRow[]): RecallRow[] {
+/**
+ * The bounded candidate window (newest first). Normalization here is ONLY
+ * trim/drop-blank/cap: adjacent display compression must NOT erase the identity
+ * a later seed still has to correlate by official rpcId.
+ */
+function candidateRows(rows: readonly RecallRow[]): RecallRow[] {
   const out: RecallRow[] = []
   for (const row of rows) {
     const text = row.text.trim()
     if (text === '') continue
-    if (out.length > 0 && out[out.length - 1]!.text === text) continue
     out.push(text === row.text ? row : { ...row, text })
+    if (out.length >= INPUT_RECALL_LIMIT) break
+  }
+  return out
+}
+
+/** The visible newest-first projection: adjacent equal text collapses only at
+ *  this display boundary; non-adjacent repeats survive. */
+function visibleTexts(rows: readonly RecallRow[]): string[] {
+  const out: string[] = []
+  for (const row of rows) {
+    if (out.length > 0 && out[out.length - 1] === row.text) continue
+    out.push(row.text)
     if (out.length >= INPUT_RECALL_LIMIT) break
   }
   return out
@@ -101,34 +120,35 @@ export function createInputMemoryRecall(): InputMemoryRecall {
   let scope: InputRecallScope = { carrier: EMPTY_CARRIER, sessionId: undefined }
 
   return {
-    snapshot: () => entries.map(row => row.text),
+    snapshot: () => visibleTexts(entries),
     remember: (text: string, officialRequestId?: string): void => {
       const trimmed = text.trim()
       if (trimmed === '') return
       // The Host may have projected the accepted occurrence already. Only an
       // EXACT official correlation identifies it; the local original text wins.
-      const withoutHostMatch = officialRequestId === undefined
+      const withoutSameIdentity = officialRequestId === undefined
         ? entries
-        : entries.filter(row => !(row.source === 'host' && row.rpcId === officialRequestId))
-      entries = normalizeRows([
+        : entries.filter(row => row.rpcId !== officialRequestId)
+      entries = candidateRows([
         {
           text: trimmed,
           source: 'local',
           ...(officialRequestId === undefined ? {} : { rpcId: officialRequestId }),
         },
-        ...withoutHostMatch,
+        ...withoutSameIdentity,
       ])
     },
-    bindScope: (next: InputRecallScope): void => {
+    bindScope: (next: InputRecallScope): boolean => {
       const same = scope.sessionId === next.sessionId
         && Object.is(scope.carrier.connection, next.carrier.connection)
         && Object.is(scope.carrier.binding, next.carrier.binding)
-      if (same) return
+      if (same) return false
       scope = next
       // A different Session or a different authenticated carrier must never
       // expose the outgoing list: a new Host identity is not inferred from an
       // equal Session id string.
       entries = []
+      return true
     },
     applySeed: (items: readonly InputRecallSeedItem[], sessionId: string): void => {
       if (scope.sessionId !== sessionId) return
@@ -146,8 +166,10 @@ export function createInputMemoryRecall(): InputMemoryRecall {
           messageId: item.messageId,
         }))
       // The previous seed rows are REPLACED, never appended again; a same-scope
-      // duplicate seed therefore cannot duplicate Host history.
-      entries = normalizeRows([...local, ...host])
+      // duplicate seed therefore cannot duplicate Host history. Keep the whole
+      // bounded candidate window here; only the snapshot compresses adjacent
+      // text for display.
+      entries = candidateRows([...local, ...host])
     },
   }
 }

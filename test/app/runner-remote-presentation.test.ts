@@ -788,6 +788,8 @@ test('a resumed Remote Session recalls only this process\'s accepted inputs, nev
     fixture.vt.sendInput('\x1b[A')
     await waitFor('↑ recalls the process input', () => editor.getDraft() === submitted, 5_000)
     assert.equal(userRowsFor(mainId, submitted), 1, 'a recalled draft is never submitted by ↑')
+    fixture.vt.sendInput('\x1b[B')
+    await waitFor('↓ restores the empty draft before the carrier rollover', () => editor.getDraft() === '', 5_000)
 
     // DECISIVE source → sink chain: the accepted submission is durable in the
     // Host with an official request correlation; a reconnect DISCARDS the local
@@ -997,6 +999,71 @@ test('an unavailable recall read leaves the current local recall intact', async 
       'the unavailable Host read contributes nothing and never clears the local list')
     fixture.vt.sendInput('\x1b[A')
     await waitFor('↑ recalls the local input', () => editor.getDraft() === submitted, 5_000)
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('a carrier rollover retires the outgoing recall mirror before an unavailable new seed', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2c-rollover-clear'
+  const presetId = 'm3-4-pr2c-rollover-clear-preset'
+  const host = await mountRemotePresentationHost(life, presetId, { pluginManagerProfile: true })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  seedTurns(host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }, 1, 1, 'rollover')
+  let unavailable = false
+  let recallPort: {
+    readSessionRecall(request: { readonly sessionId: string }, signal: AbortSignal): Promise<unknown>
+  } | undefined
+  const fixture = await mountRemoteRunner(life, {
+    presetId,
+    resumeSessionId: mainId,
+    host,
+    productionSerializer: true,
+    beforeRunnerMount: (presentation) => {
+      const port = presentation.historySearch as unknown as NonNullable<typeof recallPort>
+      const real = port.readSessionRecall
+      recallPort = port
+      port.readSessionRecall = async function heldScope(
+        this: unknown,
+        request: { readonly sessionId: string },
+        signal: AbortSignal,
+      ): Promise<unknown> {
+        if (unavailable) return { kind: 'unavailable', reason: 'service-missing' }
+        return await real.call(this, request, signal)
+      }
+    },
+  })
+  const editor = fixture.runnerApp() as unknown as {
+    getDraft(): string
+    getInputHistory(): readonly string[]
+  }
+  const viewport = (): string => fixture.vt.getViewport().join('\n')
+  try {
+    await waitFor('the original carrier seeded its Session', () =>
+      [...editor.getInputHistory()].includes('rollover prompt 1'), 20_000)
+    fixture.vt.sendInput('\x1b[A')
+    await waitFor('the original mirror recalls its Host row', () =>
+      editor.getDraft() === 'rollover prompt 1', 5_000)
+    fixture.vt.sendInput('\x1b[B')
+    await waitFor('the original browse returns to the empty draft', () => editor.getDraft() === '', 5_000)
+
+    // The NEW carrier's read is unavailable: the root scope clears at the
+    // generation/init boundary, and the mounted editor must follow at once.
+    assert.ok(recallPort !== undefined)
+    unavailable = true
+    const connection = fixture.aggregate.wire.client.connection as unknown as { reconnect(): void }
+    connection.reconnect()
+    await waitFor('the root recall scope cleared', () => editor.getInputHistory().length === 0, 20_000)
+    await waitFor('the replacement carrier re-hydrated the Session', () =>
+      viewport().includes('rollover answer 1'), 20_000)
+    fixture.vt.sendInput('\x1b[A')
+    await fixture.vt.waitForRender()
+    assert.equal(editor.getDraft(), '',
+      'the old carrier row must be gone from the REAL ↑ sink even when the new seed is unavailable')
+    assert.deepEqual([...editor.getInputHistory()], [])
   } finally {
     await fixture.dispose()
   }

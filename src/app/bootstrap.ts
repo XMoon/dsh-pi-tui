@@ -1207,9 +1207,8 @@ export function applyRunnerWithRuntime(
         binding: token?.binding,
       }
     }
-    const bindRecallScope = (owner: string | undefined): void => {
-      inputRecall?.bindScope({ sessionId: owner, carrier: recallCarrierOf(owner) })
-    }
+    const bindRecallScope = (owner: string | undefined): boolean =>
+      inputRecall?.bindScope({ sessionId: owner, carrier: recallCarrierOf(owner) }) ?? false
     /**
      * The lazy Direct-only accessor: the Direct helpers below read the ONE
      * Direct runtime the selection seam constructed. On the Direct branch
@@ -2378,9 +2377,9 @@ export function applyRunnerWithRuntime(
         const sessionId = ownership.currentSessionId()
         if (cleanedUp || lifecycleController.signal.aborted) return
         // A carrier rollover is a DIFFERENT scope even while sessionless: the
-        // old carrier's local rows are discarded before the new generation is
-        // read (never inferred same Host).
-        bindRecallScope(sessionId)
+        // old carrier's local rows and the mounted mirror are discarded before
+        // the new generation is read (never inferred same Host).
+        if (bindRecallScope(sessionId)) surface.display.resetInputRecallScope()
         if (sessionId !== undefined && remoteIngressHandle !== undefined) scheduleRemoteRecallSeed(sessionId)
       })
     }
@@ -2523,7 +2522,7 @@ export function applyRunnerWithRuntime(
       // Re-bind the root scope with the CURRENT carrier (a reconnect may have
       // replaced it) before this init reads anything.
       ensureRemoteRecallGenerationWatch()
-      bindRecallScope(sessionId)
+      if (bindRecallScope(sessionId)) surface.display.resetInputRecallScope()
       // §6.5 lifecycle fence (subscribe side): the token is captured BEFORE
       // the hydrate await; a superseded owner (switch/new/fork or a same-id
       // rollover — every commit shape bumps the generation) must not install
