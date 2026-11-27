@@ -2354,6 +2354,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       this.resetIdleIfCurrent(state, op)
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_WORKSPACE_UNAVAILABLE', 'the Host could not register the workspace; the outcome is unconfirmed', JSONRPC_INTERNAL_ERROR)
     }
+    // A cancellation that landed while the Workspace create was in flight owns
+    // no Session create: the workspace outcome stays real, the attach does not.
+    if (this.attachAborted(requestSignal)) {
+      this.resetIdleIfCurrent(state, op)
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP attach request was cancelled after the Host created the workspace', JSONRPC_INVALID_PARAMS)
+    }
     if (!this.isCurrentOp(state, op)) {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP connection closed before the session was created', JSONRPC_INVALID_PARAMS)
     }
@@ -6905,9 +6911,22 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const claim = this.claims.get(sessionId)
     if (claim === undefined || claim.connectionIdentity !== state) return
     const op = state.op
-    this.releaseClaimWithMcp(state, claim, access)
+    this.retireFailedClaim(state, claim, access)
     if (state.op === op && (state.phase === 'attaching' || state.phase === 'attached')) state.phase = 'idle'
     this.notifyWorkSettled()
+  }
+
+  /**
+   * The ONE failed-claim retirement: retire this request's exact local
+   * visibility, request-owned reverse Forms and read IO through the same hooks
+   * close/Off use, then release the exact claim (an MCP lease keeps its fence).
+   * It never touches the Host Session/Agent or another generation.
+   */
+  private retireFailedClaim(state: ConnectionViewState, claim: ViewClaim, access: HostAcpSessionAccess): void {
+    claim.notifyConfigUpdate = undefined
+    this.stopProjectionOutput(claim)
+    this.releaseQuestionForms(claim)
+    this.releaseClaimWithMcp(state, claim, access)
   }
 
   /**
@@ -6920,17 +6939,22 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private retireClaimGeneration(state: ConnectionViewState, claim: ViewClaim): void {
     if (this.claims.get(claim.sessionId) !== claim || claim.detachedWithFence === true) return
     const op = state.op
-    const append = this.retireSystemPromptAppend(claim)
-    if (this.claims.get(claim.sessionId) !== claim) return
-    claim.notifyConfigUpdate = undefined
-    this.stopProjectionOutput(claim)
-    this.releaseQuestionForms(claim)
-    if (append === 'pending') {
-      claim.detachedWithFence = true
-      this.notifyWorkSettled()
-      return
+    const access = this.access
+    if (access !== undefined) {
+      this.retireFailedClaim(state, claim, access)
+    } else {
+      const append = this.retireSystemPromptAppend(claim)
+      if (this.claims.get(claim.sessionId) !== claim) return
+      claim.notifyConfigUpdate = undefined
+      this.stopProjectionOutput(claim)
+      this.releaseQuestionForms(claim)
+      if (append === 'pending') {
+        claim.detachedWithFence = true
+        this.notifyWorkSettled()
+        return
+      }
+      this.claims.delete(claim.sessionId)
     }
-    this.claims.delete(claim.sessionId)
     // A cancellation can land while the fresh claim is still ATTACHING (the
     // official resolve is a real Host await): the connection must return to
     // idle in that phase too, otherwise the listener's slot release and the

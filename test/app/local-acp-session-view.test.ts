@@ -925,7 +925,39 @@ test('an already-cancelled ordinary attach performs no Host effect and returns t
   assert.equal(registry.phaseOf(conn), 'idle')
 })
 
+test('a cancellation during a held Workspace create performs no Session create or append registration', async () => {
+  const access = new FakeAccess()
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  const controller = new AbortController()
+  const entered = deferred<void>()
+  const gate = deferred<AcpCreateWorkspaceOutcome>()
+  access.createWorkspaceImpl = async () => {
+    entered.resolve()
+    return await gate.promise
+  }
+  const attaching = registry.newSession(conn, access, {
+    ...NEW,
+    systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'WS_ABORT' }] },
+  }, { systemPromptAppend: true }, controller.signal)
+  await entered.promise
+  controller.abort()
+  gate.resolve({ kind: 'created', workspaceId: 'ws:held', path: NEW.cwd })
+  await assert.rejects(attaching, isViewError('LOCAL_ACP_VIEW_CLOSED'))
+  assert.deepEqual(access.createSessionCalls, [], 'a cancelled attach never creates a Session after its held workspace returns')
+  assert.equal(registry.claimCount(), 0)
+  assert.equal(registry.phaseOf(conn), 'idle')
+  // The real Workspace outcome is kept; the connection recovers immediately.
+  const agent = makeAgent('S-recovered', '/work/a')
+  access.createWorkspaceImpl = async path => ({ kind: 'created', workspaceId: `ws:${path}`, path })
+  access.createSessionImpl = async () => { access.seed(agent); return { kind: 'created', sessionId: 'S-recovered' } }
+  const recovered = await registry.newSession(conn, access, NEW)
+  assert.equal(recovered.sessionId, 'S-recovered')
+  assert.equal(registry.phaseOf(conn), 'attached')
+})
+
 test('a cancelled ordinary attach releases its reservation and never registers the append', async () => {
+
   const access = new FakeAccess()
   access.createSessionImpl = async () => {
     access.seed(makeAgent('S51', '/work/a'))

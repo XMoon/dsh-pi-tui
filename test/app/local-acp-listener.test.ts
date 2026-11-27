@@ -600,7 +600,71 @@ test('a cancelled fresh attach during its initial config read retires the append
   }
 })
 
+test('a cancelled initial config retires the continued Form of a resumed claim and its stale answer', async t => {
+  const { scope } = newScope(t)
+  let releaseConfig: (() => void) | undefined
+  let configReads = 0
+  const fake = makeFakeAccess({
+    questionService: true,
+    modelOptions: async () => {
+      configReads += 1
+      if (configReads === 1) {
+        return await new Promise<never[]>(resolve => { releaseConfig = () => resolve([]) })
+      }
+      return []
+    },
+    questionSnapshot: () => ({
+      kind: 'current',
+      continued: [{ callId: 'call-resumed', questions: [{ id: 'native', question: 'still answerable?', options: [{ label: 'yes' }] }] }],
+      settled: new Set(),
+    }),
+    answerContinued: () => ({ kind: 'queued' }),
+  })
+  fake.seed('S-resume', '/host/proj')
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access, views: registry })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1, 1, { elicitation: { form: {} } })
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'S-resume', cwd: '/host/proj' } })
+    let formId: number | undefined
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; method?: string }
+      if (frame.method === ELICITATION_CREATE) {
+        formId = frame.id
+        break
+      }
+    }
+    assert.equal(configReads, 1, 'the resumed claim is attached with its Form outstanding and the initial config held')
+    assert.equal(registry.hasClaim('S-resume'), true)
+    client.send({ jsonrpc: '2.0', method: '$/cancel_request', params: { requestId: 2 } })
+    await waitForFact(() => registry.hasClaim('S-resume') === false ? true : undefined, 'the cancelled resumed claim retirement')
+    // A late answer to the retired Form must not reach the durable question
+    // projection: the abort removed the reverse request, not just the UI.
+    client.send({ jsonrpc: '2.0', id: formId, result: { action: 'accept', content: { q0: 'yes' } } })
+    releaseConfig?.()
+    // A successor attach is accepted: no phantom claim, BUSY slot or orphaned Form.
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/resume', params: { sessionId: 'S-resume', cwd: '/host/proj' } })
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; result?: unknown; error?: { code?: number; data?: { code?: string } } }
+      if (frame.id !== 3) continue
+      assert.equal(frame.error, undefined, `the successor attach must settle: ${JSON.stringify(frame.error)}`)
+      assert.equal(typeof frame.result, 'object')
+      break
+    }
+    // The stale response was written before the successor request on the same
+    // connection; the successor result proves the connection processed it, and
+    // the retired Form must never submit an answer.
+    assert.deepEqual(fake.continuedAnswers, [], 'a stale Form answer is never submitted')
+  } finally {
+    client.close()
+  }
+})
+
 test('two connections reuse JSON-RPC id 1 independently and one closing does not affect the other', async t => {
+
   const { scope } = newScope(t)
   const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
   t.after(() => listener.close())
