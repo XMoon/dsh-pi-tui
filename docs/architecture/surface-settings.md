@@ -891,6 +891,16 @@ specialist-page contract below).
 - The screen lease/currentness mechanics are owned by
   [overlay-focus.md](./overlay-focus.md).
 
+The normal Root Detail browse is the Settings owner of the cross-surface
+body-action proximity rule in
+[design-language.md](./design-language.md#74-body-actions-and-proximity).
+Root-specific: ordinary fields wrap at 64 cells and prose at 72; a settlement
+reason keeps the pane's full width as primary exception information, while long
+identities/commands may use the whole grant; every published body action carries
+the row it really painted (only the LAST frame's row is a pointer target), and
+choice/dirty confirmation/service-install/risk seen-tracking keep their own
+pinned/visibility contracts.
+
 ### Host numeric pages, Session log upload and the Host category
 
 `/settings → Agent → Parallel tool calls` is the first real single-value DETAIL
@@ -905,9 +915,10 @@ as `single` (one Confirm = stage + save) and the Shell route as `grouped`
 Bar and the ONE Esc affordance, and a painted control delegates to the SAME
 page/controller path a key press uses. The Shell row keeps its internal
 `shell-execution` id, category, order, scope, freshness,
-`shell-execution-settings` tag and the Host-served effective caps/executor
-summary; it is entered only through its explicit forward action (`Enter`/`Right`
-from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
+`shell-execution-settings` tag and the Host-served effective caps summary (the
+executor identity is painted in the page's source heading); it is entered only
+through its explicit forward action (`Enter`/`Right` from Rows, or the Detail
+preview's `Open…`), never by a row click or Tab.
 
 - **Grouped browse presentation.** The grouped page paints the Host heading, the
   settlement/current facts and the field group first, then the existing
@@ -1122,20 +1133,6 @@ scientific text are legal, and the browse paints the canonical number).
   presents a stale On/Off as the current Host state. Retaining a historical row
   is a TUI presentation choice, not a requirement of the official namespace
   lifecycle.
-
-- **Normal Detail action placement.** A browse projection whose complete content
-  plus its existing action row fits the grant paints the primary facts, then the
-  row's existing action row, then the secondary Scope/Freshness/Description
-  prose, padding last. A projection that does not fit keeps the bounded reserved
-  action row and its scroll extent; the physical Action Bar is still the ONE last
-  row. Every published button carries the body row it really painted, so a click
-  only reaches the LAST frame's action; the old bottom-row coordinate, gaps and
-  gutters carry no business target. Choice, dirty confirmation, the
-  service-install follow-up and risk seen-tracking keep their own pinned and
-  visibility contracts. Ordinary value fields wrap at most 64 cells and
-  explanatory prose at most 72; a settlement reason keeps the pane's full width
-  because it is primary exception information, and long identities/commands may
-  use the whole grant.
 
 ### Web UI page (Host)
 
@@ -1380,9 +1377,9 @@ copy in that frame:
 
 | Phase | Body / actions | Confirm and `Esc` |
 |---|---|---|
-| enabled Host | `Copy client command`, `Disable ACP…` (`Disconnects active ACP clients`), `Refresh` | `Esc` performs the clean parent leave |
-| disabled Host | `Enable ACP`, `Copy client command`, `Refresh` | `Esc` performs the clean parent leave |
-| changing / unavailable / unreadable | `Copy client command` when the Profile is proven, `Refresh` only, never a Host write | `Esc` performs the clean parent leave |
+| enabled Host | `Disable ACP…` (`Disconnects active ACP clients`), `Refresh` | `Esc` performs the clean parent leave |
+| disabled Host | `Enable ACP`, `Refresh` | `Esc` performs the clean parent leave |
+| changing / unavailable / unreadable | `Refresh` only, never a Host write | `Esc` performs the clean parent leave |
 | `confirm-disable` | the exact sentence `Disable the local ACP listener? All connected ACP clients will be disconnected. Host sessions, Agents and this TUI will keep running.` FIRST, then `Disable ACP` and `Cancel` | the accept row and the `Confirm [Enter]` bar segment exist ONLY while the whole risk sentence shares the painted viewport; a short grant paints no accept word and Enter is inert, while `Cancel`/`Esc` always performs zero writes. A selected `Cancel` never advertises an Enter confirm |
 | `Next Host Start` choice | the complete `On`/`Off` candidates; choosing/`Select [Enter]` stages only; no write | `Esc` steps back with zero writes |
 | `confirm-save` | the complete `Save the next Host start preference as On/Off?`, the `Applies on the next Host start; the running Host is unchanged.` lifetime sentence, `Confirm save` and `Cancel` | only `Confirm save` calls the writer and only while the question and lifetime sentence are complete in the SAME frame; `Esc` steps back with zero writes |
@@ -1390,19 +1387,21 @@ copy in that frame:
 | `pending-config` | `Saving…`, no second action | the page's own `Back [Esc]` leaves while the dispatched write keeps settling in its OWN owner (never cancelled, replayed or repainted); parent clicks/Tab are refused |
 | `pending-copy` | `Copying the client command…`, no second action | the page's own `Back [Esc]` leaves while the copy keeps settling in its OWN owner; parent clicks/Tab are refused |
 
-The first focus is the enabled Host's `Copy client command` (else
-`Disable ACP…`), the disabled Host's `Enable ACP`, otherwise the Client-local
-`Copy client command` when the Profile is proven, else the editable
-`Start automatically` row when its preference can really be written, else
-`Refresh`. Label/value cells that do not fit are WRAPPED, never truncated into a
+The Client-local `Copy client command` row is NOT part of the runtime action
+group: it sits after the Client Setup facts/command and exists whenever the
+Profile is proven. The first focus is the enabled Host's `Disable ACP…`, the
+disabled Host's `Enable ACP`, otherwise the `Copy client command` row when the
+Profile is proven, else the editable `Start automatically` row when its
+preference can really be written, else `Refresh`. Keyboard order follows the
+painted order. Label/value cells that do not fit are WRAPPED, never truncated into a
 different writable-looking value, and a complete action verb is never painted
 partially; a short frame scrolls ONE Detail column and a scroll/resize back to a
 sufficient grant restores the complete confirmation without any automatic
 confirmation.
 
 The Action Bar paints `Refresh [R] · Back [Esc]`,
-`Copy [Enter] · Refresh [R] · Back [Esc]` (or the selected row's own
-`Enable`/`Disable`/`Change` verb), `Confirm [Enter] · Cancel [Esc]`,
+`Disable [Enter] · Refresh [R] · Back [Esc]` (or the selected row's own
+`Enable`/`Copy`/`Change` verb), `Confirm [Enter] · Cancel [Esc]`,
 `Select [Enter] · Cancel [Esc]` or `Confirm save [Enter] · Cancel [Esc]` as the
 phase decides; only the ROOT owns the physical last row and every segment is
 dropped WHOLE. Every pointer-capable target is the last-painted row/bar geometry
@@ -1772,13 +1771,14 @@ may yield to the rail and return to the SAME List. `Tab` is inert in a
 one-region projection. `Esc`/`Left` returns Detail → List and List → the REAL
 initiating level (Rows or Detail); a form or question owns its own Back ladder.
 
-The Detail Action Bar carries `Probe [P] · Restart [X] · Edit [E] ·
-Enable/Disable [T] · Delete [D] · Reset [U] · Refresh [R] · Back [Esc]`, with only
-the actions the controller really admits. Whole segments are dropped, never cut;
-a secondary action the bar had to drop moves as its complete label into the
-scrollable Detail body and uses the SAME action sink. Long diagnostics are
-wrapped (hard-splitting an unbreakable token) and remain reachable through the
-physical scroll.
+The physical Action Bar carries ONE primary business verb and `Back [Esc]`:
+`Edit [E]` when the configuration entry is editable, else `Probe [P]` when it is
+operable, else `Refresh [R]`. Every other admitted business verb is a complete
+label in the scrollable Detail body (`Probe`, `Restart`, `Edit`,
+`Enable/Disable`, `Delete`, `Reset`, `Refresh`), uses the SAME action sink
+exactly once, and only a really painted span is a pointer target. Whole segments
+are dropped, never cut, and long diagnostics remain wrapped and reachable
+through the physical scroll.
 
 Probe and Restart require a current manager observation, a live (not retained)
 listed entry and no in-flight operation; they do NOT depend on the configuration

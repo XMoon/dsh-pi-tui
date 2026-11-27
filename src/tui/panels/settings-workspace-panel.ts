@@ -3467,6 +3467,9 @@ export class SettingsWorkspacePanel implements Component {
         ...content.slice(actionRow),
       ]
       while (lines.length < viewport) lines.push('')
+      // A fit grant has no scroll extent. Do not carry a previous short
+      // grant's offset back into the next shrinking frame.
+      this.detailOffset = 0
       return {
         lines,
         content,

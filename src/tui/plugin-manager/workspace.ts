@@ -4314,7 +4314,15 @@ function detailLines(detail: PluginDetailView, width: number, focused: boolean, 
     lines.push('')
     lines.push(color.textDim(group.title === 'Status' ? '‣ Status' : group.title))
     for (const fact of group.facts) {
-      lines.push(...factLines(fact.label, fact.value, fact.tone, width))
+      // Ordinary facts read in at most 64 cells and explanatory prose in at
+      // most 72; a long Source identity keeps the real grant. Wrapping never
+      // truncates the value.
+      const factWidth = group.title === 'Description'
+        ? Math.min(width, 72)
+        : fact.label === 'Source'
+          ? width
+          : Math.min(width, 64)
+      lines.push(...factLines(fact.label, fact.value, fact.tone, factWidth))
     }
   }
   const status = detail.groups.find(group => group.title === 'Status')

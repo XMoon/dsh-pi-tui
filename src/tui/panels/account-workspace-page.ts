@@ -858,10 +858,10 @@ export class AccountWorkspacePage implements Component {
         content.push('', color.textDim(`Remote/SSH: the callback listener is bound to ${target}:${port} on the Host.`))
         const template = this.sshTemplate()
         if (template !== undefined) content.push(...this.wrapText(template, width))
-        content.push(color.textDim('Create that tunnel from your local machine, then open the authorization URL locally. The port is random per process; re-read it after a restart.'))
+        content.push(...this.prose('Create that tunnel from your local machine, then open the authorization URL locally. The port is random per process; re-read it after a restart.', width, color.textDim))
       }
     } else {
-      content.push('', color.textDim('The browser is authorized on the Host; no token or grant is shown here.'))
+      content.push('', ...this.prose('The browser is authorized on the Host; no token or grant is shown here.', width, color.textDim))
     }
     if (this.signOutConfirm) {
       content.push('', color.textStrong('Sign out confirmation'))
@@ -877,9 +877,9 @@ export class AccountWorkspacePage implements Component {
       } else {
         content.push(color.error('Could not verify whether running account tasks will be cancelled.'))
       }
-      content.push(color.textDim('The provider revokes the grant in the background; a remote failure never restores the local credential.'))
+      content.push(...this.prose('The provider revokes the grant in the background; a remote failure never restores the local credential.', width, color.textDim))
     }
-    content.push(color.textDim('The Account token is never shown. Profile and balance are independent Host queries; a failure is stated on its own line.'))
+    content.push(...this.prose('The Account token is never shown. Profile and balance are independent Host queries; a failure is stated on its own line.', width, color.textDim))
     if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
     if (this.busy !== undefined) content.push('', color.textMuted(`${this.busy} — the Host has not confirmed yet`))
     const actions: ActionLine[] = []
@@ -918,13 +918,21 @@ export class AccountWorkspacePage implements Component {
   }
 
   private fact(label: string, value: string, width: number): string[] {
-    const bodyWidth = Math.max(1, width - LABEL_WIDTH)
+    // Ordinary fields read in at most 64 cells; long identities still wrap
+    // COMPLETELY inside that width (no truncation).
+    const bodyWidth = Math.max(1, Math.min(width, 64) - LABEL_WIDTH)
     const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(value), bodyWidth)
     const parts = wrapped.length === 0 ? [''] : wrapped
     return [
       `${fit(color.textDim(sanitizedPhysicalLine(label)), LABEL_WIDTH)}${color.text(parts[0]!)}`,
       ...parts.slice(1).map(extra => `${' '.repeat(LABEL_WIDTH)}${color.text(extra)}`),
     ]
+  }
+
+  /** Ordinary explanatory prose wraps at no more than 72 cells; the exact
+   *  authorization URL/template and necessary risk/error copy keep their grant. */
+  private prose(value: string, width: number, ink: (text: string) => string): string[] {
+    return wrapTextWithAnsi(sanitizedPhysicalLine(value), Math.max(1, Math.min(width, 72))).map(line => ink(line))
   }
 
   private wrapText(value: string, width: number): string[] {

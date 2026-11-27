@@ -2049,6 +2049,28 @@ test('render and pre-repaint input hand the page the identical body grant', () =
   assert.equal(page.clicked.length, 1, 'a click inside the live frame still reaches the page')
 })
 
+test('a short Detail scroll offset never leaks back in after a fit grant', () => {
+  const h = setup({ columns: 120, rows: 10, initial: { initialRowId: 'theme' } })
+  plain(h, 120)
+  h.panel.handleInput('\t') // Rows -> Detail
+  h.panel.handleInput('\x1b[F') // End: the short Detail scrolls to its last fact
+  const scrolled = plain(h, 120)
+  assert.doesNotMatch(scrolled, /Value\s+dark/u, 'the short Detail really left its primary facts')
+
+  // A tall grant paints the COMPLETE content and therefore carries no scroll.
+  h.resize(200, 50)
+  const fit = plain(h, 200)
+  assert.match(fit, /Value\s+dark/u, 'the fit grant paints the primary facts')
+  assert.match(fit, /Description/u, 'the fit grant paints the secondary facts too')
+
+  // Shrinking again must start from the primary facts/action row, never from
+  // the old short-grant offset.
+  h.resize(120, 10)
+  const short = plain(h, 120)
+  assert.match(short, /Value\s+dark/u, 'the shrinking grant restarts at the primary facts')
+  assert.match(short, /Change…/u, 'the action row is visible with the facts')
+})
+
 test('one- and two-row frames paint only the truthful bar and publish no body target', () => {
   for (const rows of [1, 2] as const) {
     const h = setup({ columns: 100, rows })

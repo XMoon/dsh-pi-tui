@@ -620,7 +620,7 @@ test('offline Account refresh and an ended watch each restore one live subscript
   const fail = [...state.watchFailures!][0]
   fail!(new Error('transport closed'))
   await flush()
-  assert.match(text(page), /Host Account watch stopped; Refresh to read current state/u)
+  assert.match(text(page), /Host Account watch stopped; Refresh to read\s+current state/u)
   assert.equal(state.watchActive, 0, 'the failed stream releases its old subscription')
 
   page.handleInput('r')
@@ -681,7 +681,7 @@ test('a watch retry keeps a last-known credential fail-closed until its initial 
   const firstFailure = [...state.watchFailures!][0]
   firstFailure!(new Error('carrier ended'))
   await flush()
-  assert.match(text(page), /Host Account watch stopped; Refresh to read current state/u)
+  assert.match(text(page), /Host Account watch stopped; Refresh to read\s+current state/u)
   assert.equal(state.watchActive, 0)
   page.handleInput('\r')
   await flush()
@@ -876,7 +876,7 @@ test('a terminal signed-out watch failure blocks SignIn until Refresh restores i
   const fail = [...state.watchFailures!][0]
   fail!(new Error('Host watch unavailable'))
   await flush()
-  assert.match(text(page), /Host Account watch stopped; Refresh to read current state/u)
+  assert.match(text(page), /Host Account watch stopped; Refresh to read\s+current state/u)
   page.handleInput('\r')
   await flush()
   assert.equal(state.calls.includes('signIn'), false,
@@ -908,7 +908,7 @@ test('a terminal Account watch failure disables Cancel and hides its stale autho
   const fail = [...state.watchFailures!][0]
   fail!(new Error('Host watch unavailable'))
   await flush()
-  assert.match(text(page), /Host Account watch stopped; Refresh to read current state/u)
+  assert.match(text(page), /Host Account watch stopped; Refresh to read\s+current state/u)
   assert.match(text(page), /Last known: signed out · Host state not current/u)
   assert.doesNotMatch(text(page), /https:\/\/platform\.example\/dsh\/authorize/u,
     'a stale authorize URL is not presented after its Host observation is invalidated')
