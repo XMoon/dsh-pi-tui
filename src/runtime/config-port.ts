@@ -741,6 +741,24 @@ export interface SessionLogUploadConfig {
   ): Promise<SectionMutationOutcome>
 }
 
+/**
+ * ONE current Host authority that produced the effective preset default
+ * (SUX-08 §6.4). Process-local and never serialized: the opaque settings
+ * authority plus the exact `agent-preset-registry` descriptor revision. A
+ * guarded write may only dispatch while BOTH still describe the live
+ * authority; a replaced authority or a moved revision is a definite
+ * pre-dispatch refusal with zero mutation.
+ */
+export interface PresetDefaultDecision {
+  /** Opaque Host settings authority (Direct service identity / Remote
+   *  Connection generation); never serialized. */
+  readonly generation: object
+  /** The exact `agent-preset-registry` descriptor revision that was read. */
+  readonly revision: number
+  /** The effective default at that observation (saved value or roster default). */
+  readonly value: string | undefined
+}
+
 /** The saved agent-preset default sub-domain (`/preset default`): the
  * persisted default (settings `agent-preset-registry.selectedDefault`),
  * falling back to the roster's own default. */
@@ -752,6 +770,22 @@ export interface PresetDefaultConfig {
   get(): string | undefined
   /** Persist the default preset for future sessions. */
   set(id: string): Promise<void>
+  /**
+   * SUX-08: the Computer Use-only guarded decision read. `undefined` means the
+   * current authority cannot prove the settings generation, the exact
+   * descriptor revision and the effective default, so a caller must not offer
+   * a write. Never a fabricated default or a last-known value presented as
+   * current.
+   */
+  readDecision?(): PresetDefaultDecision | undefined
+  /**
+   * SUX-08: the Computer Use-only guarded write. Dispatches ONE
+   * `agent-preset-registry.selectedDefault` mutation against the EXACT captured
+   * decision; a replaced settings authority or a moved revision refuses before
+   * dispatch (zero mutation, no CAS rebase). The one-argument `set(id)`
+   * contract and its callers are unchanged.
+   */
+  setGuarded?(id: string, decision: PresetDefaultDecision, stillCurrent?: () => boolean): Promise<SectionMutationOutcome>
 }
 
 /**

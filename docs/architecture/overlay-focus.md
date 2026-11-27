@@ -966,25 +966,31 @@ owns only the lease, focus and write-lifecycle mechanics.
   The Agent single value (`Agent → Parallel tool calls`), the Shell group
   (`Tools → Shell execution`, two fields), the Subagent group
   (`Agent → Subagent settings`, four fields across two official namespaces),
-  the Web UI page (`Host → Web UI` / `/web`) and the ACP access page
-  (`Host → ACP access` / `/acp`) are mounted INSIDE the real Detail pane
+  the Web UI page (`Host → Web UI` / `/web`), the ACP access page
+  (`Host → ACP access` / `/acp`) and the Computer Use `Overview`
+  (`Tools → Computer Use`) are mounted INSIDE the real Detail pane
   instead of taking the whole body: the parent Categories/Rows stay painted,
   the tenant's own painted bar becomes the ONE physical last row at column 0,
   and only the tenant's body cells belong to the child (its painted body box is
   the admission for every body press; the parent gutters/header/blank bar stay
   inert). This is the documented exception to
   "a mounted specialist owns the whole body": it is not a second screen, lease
-  or focus owner. The `Web Search / Fetch` and `MCP servers` Adaptive
-  Workbench pages are the SECOND documented exception (one shared workbench
-  contract): a page is mounted in the SAME lease while the REAL Categories rail
+  or focus owner. The `Web Search / Fetch`, `MCP servers` and the Computer Use
+  `Applications` Adaptive Workbench pages are the SECOND documented exception
+  (one shared workbench contract); the Computer Use page switches between its
+  Standard Detail tenant and this workbench projection on the SAME instance, and
+  its workbench rail Back is a LOCAL return to that tenant: a page is mounted in the SAME lease while the REAL Categories rail
   stays painted beside its own local List/Detail grant; the Root's ONE focus
   state seats either the rail or the child's current region, and only the
   page's last-painted body box admits a body press. A workbench page may also
-  declare its CURRENT sub-view FULL-WIDTH (the MCP configuration form and every
-  risk question): the Root then paints no rail/List/Detail background and
-  publishes no target outside that child. While such a full-width transition,
-  a focus transfer or a grant change has not painted, only the real Esc is
-  admitted; no business action may run against the previous frame. A
+  declare its CURRENT sub-view FULL-WIDTH (the MCP configuration form, every
+  risk question, and the Computer Use confirmation are the shared rule): the
+  Root then paints no rail/List/Detail background and publishes no target
+  outside that child. While such a full-width transition, a page projection
+  change, a focus transfer or a grant change has not painted, only the real Esc
+  is admitted; no business action may run against the previous frame (the
+  Computer Use rail Back in that window still runs the page's local return, or
+  keeps the seat when the page's own confirmation owns the pending projection). A
   legitimate MCP explicit read-only `R` re-observation is a page action only
   when its current List/Detail or its current recovery question is actually
   painted, never during that transition. The exact geometry, active device, explicit

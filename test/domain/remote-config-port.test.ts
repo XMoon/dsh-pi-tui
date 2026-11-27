@@ -27,6 +27,9 @@ import type { WebProviderSettings } from '../../src/runtime/config-port.ts'
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
 import { RemoteConfigWriteLifetime } from '../../src/runtime/remote/config-write-lifetime.ts'
 import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
+import { CuaAccessSettingsController, CUA_BUNDLE_NAME } from '../../src/app/command/cua-access-settings.ts'
+import type { CuaAccessPort, CuaSystemStatus } from '../../src/runtime/cua-access-port.ts'
+import type { PluginManagerPort } from '../../src/runtime/plugin-manager-port.ts'
 
 /* ------------------------------------------------------------------------- *
  * Fake structural wire backend.
@@ -928,6 +931,243 @@ test('presetDefault falls back to the roster default and round-trips the saved v
   })
   // The authoritative refresh committed the persisted value.
   assert.equal(port.presetDefault.get(), 'alpha')
+})
+
+test('presetDefault readDecision is current-only and setGuarded dispatches ONE exact revision', async () => {
+  const { port, state, generation } = createBackend(current => {
+    current.presetRoster.push({ id: 'alpha', isDefault: true })
+    current.namespaces.set('agent-preset-registry', {
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'beta' },
+      revision: 1,
+    })
+  })
+  // A merely readable mirror with no current committed authority proves nothing.
+  assert.equal(port.presetDefault.readDecision!(), undefined)
+  await port.describe()
+  const decision = port.presetDefault.readDecision!()
+  assert.notEqual(decision, undefined)
+  assert.equal(decision!.value, 'beta')
+  assert.equal(decision!.revision, 1)
+
+  assert.deepEqual(await port.presetDefault.setGuarded!('ptc', decision!), { kind: 'accepted' })
+  assert.deepEqual(state.mutateCalls.filter(call => call.ns === 'agent-preset-registry'), [{
+    ns: 'agent-preset-registry',
+    ops: [{ op: 'set', path: ['selectedDefault'], value: 'ptc' }],
+    revision: 1,
+  }])
+  // The authoritative post-write refresh is the ONLY new read.
+  assert.equal(port.presetDefault.get(), 'ptc')
+
+  // A lost connection has no current authority to offer a guarded decision.
+  generation.set(undefined)
+  assert.equal(port.presetDefault.readDecision!(), undefined)
+})
+
+test('a guarded preset decision queued behind a predecessor dispatches nothing after a Host generation replacement', async () => {
+  const { port, state, generation } = createBackend(current => {
+    current.presetRoster.push({ id: 'alpha', isDefault: true })
+    current.namespaces.set('agent-preset-registry', {
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'beta' },
+      revision: 1,
+    })
+  })
+  await port.describe()
+  const decision = port.presetDefault.readDecision!()!
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  state.mutateGate = async () => { await held }
+  const predecessor = port.presetDefault.set('alpha')
+  await tick()
+  const guarded = port.presetDefault.setGuarded!('ptc', decision)
+  await tick()
+  // The Host behind the connection is replaced while this decision is queued.
+  generation.set({ id: 'gen-2' })
+  release()
+  await predecessor.catch(() => {})
+  const outcome = await guarded
+  assert.equal(outcome.kind, 'rejected')
+  assert.deepEqual(
+    state.mutateCalls.filter(call => call.ns === 'agent-preset-registry'
+      && call.ops.some(op => op.path[0] === 'selectedDefault' && op.value === 'ptc')),
+    [],
+    'the queued decision must not be rebased onto the replacement Host',
+  )
+})
+
+test('a guarded preset decision queued behind a predecessor is a conflict, not a rebase, when the revision moved', async () => {
+  const { port, state } = createBackend(current => {
+    current.presetRoster.push({ id: 'alpha', isDefault: true })
+    current.namespaces.set('agent-preset-registry', {
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'beta' },
+      revision: 1,
+    })
+  })
+  await port.describe()
+  const decision = port.presetDefault.readDecision!()!
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  state.mutateGate = async () => { await held }
+  const predecessor = port.presetDefault.set('alpha')
+  await tick()
+  const guarded = port.presetDefault.setGuarded!('ptc', decision)
+  await tick()
+  // Another writer moves the same section while this decision is queued.
+  const entry = state.namespaces.get('agent-preset-registry')!
+  entry.revision = 2
+  release()
+  await predecessor.catch(() => {})
+  const outcome = await guarded
+  assert.equal(outcome.kind, 'conflict')
+  assert.deepEqual(
+    state.mutateCalls.filter(call => call.ns === 'agent-preset-registry'
+      && call.ops.some(op => op.path[0] === 'selectedDefault' && op.value === 'ptc')),
+    [],
+    'a moved revision dispatches nothing',
+  )
+})
+
+test('the controller preset predicate reaches the REAL mirror queue head with an unrelated predecessor', async () => {
+  const { port, state } = createBackend(current => {
+    current.presetRoster.push({ id: 'alpha', isDefault: true })
+    current.namespaces.set('agent-preset-registry', {
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'beta' },
+      revision: 1,
+    })
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS, theme: 'dark' }, revision: 1 })
+  })
+  await port.describe()
+  let basis = 1
+  const system: CuaSystemStatus = {
+    platform: 'darwin',
+    accessibility: false,
+    screenRecording: false,
+    helper: { pid: 7, name: 'DSH Computer Use' },
+    parent: { pid: 1, path: '/sbin/launchd' },
+  }
+  const cuaAccess: CuaAccessPort = {
+    observation: { readSnapshot: () => basis, subscribe: () => () => {} },
+    readSystemStatus: async () => system,
+    readApplications: async () => ({ allowedApps: [], blockedApps: [], persistentAvailable: true }),
+    readApplicationIcons: async () => ({}),
+    readPtcConfiguration: async () => ({ persistent: false, writable: true }),
+    requestPermission: async () => system,
+    openSettings: async () => {},
+    enablePersistentPtc: async () => {},
+    revoke: async () => {},
+    retryApproval: async () => {},
+  }
+  const pluginManager = {
+    snapshot: async () => ({
+      bundles: [{
+        name: CUA_BUNDLE_NAME,
+        official: true,
+        availability: 'installation',
+        enabled: true,
+        installed: false,
+        optional: true,
+        removable: false,
+        rows: [],
+        overrides: [],
+        version: '0.2.2-rc.5',
+      }],
+      plugins: [],
+      registries: {},
+      exemptions: [],
+      exemptionWarnings: [],
+    }),
+  } as unknown as PluginManagerPort
+  const controller = new CuaAccessSettingsController({
+    cuaAccess,
+    pluginManager,
+    presetDefault: port.presetDefault,
+    locale: () => 'en-US',
+    diag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} },
+  })
+  await controller.refresh()
+  assert.equal(controller.getSnapshot().preset.value, 'beta')
+  const ptcMutations = (): unknown[] => state.mutateCalls.filter(call => call.ns === 'agent-preset-registry'
+    && call.ops.some(op => op.path[0] === 'selectedDefault' && op.value === 'ptc'))
+  // A real unrelated settings write holds the shared mirror queue.
+  let release!: () => void
+  state.mutateGate = () => new Promise<void>(resolve => { release = resolve })
+  const settings = port.tuiSettings!
+  const predecessor = settings.replace({ ...settings.get(), theme: 'light' })
+  await tick()
+  const write = controller.setPtcDefault({ epoch: controller.getSnapshot().epoch, kind: 'preset' })
+  await tick()
+  // The Computer Use observation is superseded while the guarded decision waits
+  // at the REAL mirror queue head; the settings generation/revision stay put.
+  basis = 2
+  release()
+  await predecessor
+  await write
+  assert.deepEqual<unknown>(ptcMutations(), [], 'the controller predicate stops the queued ptc write')
+  assert.equal(controller.getSnapshot().action?.state, 'failed')
+  assert.match(controller.getSnapshot().action?.text ?? '', /^Could not save/u, 'the zero-write refusal is definite')
+  assert.equal(controller.getSnapshot().preset.value, 'beta', 'nothing is painted as saved')
+  // A fresh valid observation/write dispatches exactly once.
+  await controller.refresh(true)
+  await controller.setPtcDefault({ epoch: controller.getSnapshot().epoch, kind: 'preset' })
+  const mutations = ptcMutations()
+  assert.equal(mutations.length, 1, 'the fresh decision reaches the same official section once')
+  await controller.dispose()
+})
+
+test('a guarded preset decision queued behind an unrelated write re-proves the caller observation at the queue head', async () => {
+  const { port, state } = createBackend(current => {
+    current.presetRoster.push({ id: 'alpha', isDefault: true })
+    current.namespaces.set('agent-preset-registry', {
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'beta' },
+      revision: 1,
+    })
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS, theme: 'dark' }, revision: 1 })
+  })
+  await port.describe()
+  const decision = port.presetDefault.readDecision!()!
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  state.mutateGate = async () => { await held }
+  // An UNRELATED settings write holds the shared queue; the preset namespace
+  // revision and the connection generation both stay unchanged.
+  const settings = port.tuiSettings!
+  const predecessor = settings.replace({ ...settings.get(), theme: 'light' })
+  await tick()
+  let current = true
+  const guarded = port.presetDefault.setGuarded!('ptc', decision, () => current)
+  await tick()
+  // The Computer Use observation is superseded while the decision is queued.
+  current = false
+  release()
+  await predecessor
+  const outcome = await guarded
+  assert.equal(outcome.kind, 'rejected')
+  assert.deepEqual(
+    state.mutateCalls.filter(call => call.ns === 'agent-preset-registry'
+      && call.ops.some(op => op.path[0] === 'selectedDefault' && op.value === 'ptc')),
+    [],
+    'no stale CUA decision may dispatch even at an unchanged settings pair',
+  )
+})
+
+test('a dispatched guarded preset write it cannot confirm is outcome-unconfirmed, never success', async () => {
+  const { port, state } = createBackend(current => {
+    current.presetRoster.push({ id: 'alpha', isDefault: true })
+    current.namespaces.set('agent-preset-registry', {
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'beta' },
+      revision: 1,
+    })
+  })
+  await port.describe()
+  const decision = port.presetDefault.readDecision!()!
+  state.mutateFailure = { code: 'settings/rejected', message: 'loader reconcile failed' }
+  const outcome = await port.presetDefault.setGuarded!('ptc', decision)
+  assert.equal(outcome.kind, 'outcome-unconfirmed')
 })
 
 // Typed subagent section behavior is covered by the owner-layer

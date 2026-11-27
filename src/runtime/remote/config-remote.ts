@@ -88,6 +88,7 @@ import type {
   FooterCustomItemsRaw,
   PermissionConfig,
   PresetDefaultConfig,
+  PresetDefaultDecision,
   ProviderConfigGuide,
   ProviderCatalogSnapshot,
   ProviderProfileConfig,
@@ -1727,6 +1728,53 @@ class RemotePresetDefaultConfig implements PresetDefaultConfig {
     await this.mirror.mutate(PRESET_REGISTRY_NS, [
       { op: 'set', path: ['selectedDefault'], value: id },
     ])
+  }
+
+  /**
+   * SUX-08: the guarded decision read for the Computer Use page. Only a
+   * CURRENT committed mirror read owns a writable authority identity; a
+   * merely readable last-known value (or a connection without settings) is
+   * Unavailable, never a write authorization.
+   */
+  readDecision(): PresetDefaultDecision | undefined {
+    if (this.mirror.readiness() !== 'ready') return undefined
+    const generation = this.mirror.readyGeneration()
+    if (generation === undefined) return undefined
+    const view = this.mirror.namespace(PRESET_REGISTRY_NS)
+    if (view === undefined || !validRemoteSettingsRevision(view.revision)) return undefined
+    const value = this.get()
+    if (value === undefined) return undefined
+    return { generation, revision: view.revision, value }
+  }
+
+  /**
+   * SUX-08: ONE guarded `selectedDefault` mutation through the shared mirror
+   * queue. `mutateRemoteSection` re-proves the captured generation and the
+   * exact revision before queue admission AND again at the queue head before
+   * the official mutation, so a queued decision whose Host/revision changed
+   * behind a predecessor dispatches nothing and is never rebased.
+   */
+  async setGuarded(id: string, decision: PresetDefaultDecision, stillCurrent?: () => boolean): Promise<SectionMutationOutcome> {
+    if (this.mirror.namespace(PRESET_REGISTRY_NS) === undefined) {
+      return { kind: 'rejected', reason: `settings namespace "${PRESET_REGISTRY_NS}" is not available in this deployment` }
+    }
+    return mutateRemoteSection(
+      this.mirror,
+      PRESET_REGISTRY_NS,
+      [{ op: 'set', path: ['selectedDefault'], value: id }],
+      decision.revision,
+      decision.generation,
+      // The shared mirror queue may hold this write behind an unrelated
+      // settings mutation; the caller's CUA observation must still be current
+      // at the ACTUAL queue head, not merely when the decision was painted.
+      stillCurrent === undefined ? undefined : {
+        beforeDispatch: () => {
+          if (!stillCurrent()) {
+            throw Object.assign(new Error('the Computer Use observation changed before dispatch'), { code: 'settings/writer-superseded' })
+          }
+        },
+      },
+    )
   }
 }
 

@@ -981,6 +981,117 @@ test('presetDefault degrades without the registry or the settings surface', () =
   assert.equal(port({}).presetDefault.get(), undefined)
 })
 
+test('presetDefault readDecision refuses to offer a write without a provable settings authority and revision', () => {
+  // No settings surface at all.
+  assert.equal(port({}).presetDefault.readDecision!(), undefined)
+  // The settings surface exists but the descriptor is absent.
+  const noDescriptor = { describe: () => [{ ns: 'other', value: {}, user: {}, revision: 1 }], mutate: async () => {} }
+  assert.equal(port({ settings: noDescriptor, agentPresets: { get defaultId() { return 'code' } } }).presetDefault.readDecision!(), undefined)
+  // A non-integer revision is never a CAS token.
+  const badRevision = { describe: () => [{ ns: 'agent-preset-registry', value: {}, user: {}, revision: 1.5 }], mutate: async () => {} }
+  assert.equal(port({ settings: badRevision, agentPresets: { get defaultId() { return 'code' } } }).presetDefault.readDecision!(), undefined)
+})
+
+test('presetDefault setGuarded dispatches ONE exact revision and refuses a moved authority or revision with zero writes', async () => {
+  const writes: Array<{ ns: string; ops: unknown; expected: number | undefined }> = []
+  let revision = 3
+  let settingsObject = {
+    describe: () => [{
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'code' },
+      user: { selectedDefault: 'code' },
+      revision,
+    }],
+    mutate: async (ns: string, ops: unknown, expected: number | undefined) => {
+      writes.push({ ns, ops, expected })
+    },
+  }
+  const host = {
+    get: (name: string): unknown => name === 'settings'
+      ? settingsObject
+      : name === 'agentPresets' ? { get defaultId() { return 'code' } } : undefined,
+    on: (() => false) as unknown as HostContextLike['on'],
+  }
+  const preset = new DirectConfigPort(host, undefined, () => undefined).presetDefault
+  const decision = preset.readDecision!()
+  assert.notEqual(decision, undefined)
+  assert.equal(decision!.value, 'code')
+  assert.equal(decision!.revision, 3)
+
+  // Accepted: ONE official path mutation at the exact captured revision.
+  assert.deepEqual(await preset.setGuarded!('ptc', decision!), { kind: 'accepted' })
+  assert.deepEqual<unknown>(writes, [{
+    ns: 'agent-preset-registry',
+    ops: [{ op: 'set', path: ['selectedDefault'], value: 'ptc' }],
+    expected: 3,
+  }])
+
+  // Same authority, moved revision: a definite conflict BEFORE dispatch.
+  writes.length = 0
+  revision = 4
+  const conflict = await preset.setGuarded!('ptc', decision!)
+  assert.equal(conflict.kind, 'conflict')
+  assert.equal(writes.length, 0, 'a moved revision dispatches nothing')
+
+  // Replaced settings authority (a new service object, even at the same
+  // revision/value): a definite rejection BEFORE dispatch.
+  settingsObject = {
+    describe: () => [{ ns: 'agent-preset-registry', value: { selectedDefault: 'code' }, user: { selectedDefault: 'code' }, revision: 3 }],
+    mutate: async (ns: string, ops: unknown, expected: number | undefined) => { writes.push({ ns, ops, expected }) },
+  }
+  const replaced = await preset.setGuarded!('ptc', decision!)
+  assert.equal(replaced.kind, 'rejected')
+  assert.equal(writes.length, 0, 'a replaced authority dispatches nothing')
+})
+
+test('presetDefault setGuarded re-proves the caller observation immediately before the official write', async () => {
+  const writes: unknown[] = []
+  const settingsObject = {
+    describe: () => [{
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'code' },
+      user: { selectedDefault: 'code' },
+      revision: 3,
+    }],
+    mutate: async (ns: string, ops: unknown, expected: number | undefined) => { writes.push({ ns, ops, expected }) },
+  }
+  const host = {
+    get: (name: string): unknown => name === 'settings'
+      ? settingsObject
+      : name === 'agentPresets' ? { get defaultId() { return 'code' } } : undefined,
+    on: (() => false) as unknown as HostContextLike['on'],
+  }
+  const preset = new DirectConfigPort(host, undefined, () => undefined).presetDefault
+  const decision = preset.readDecision!()!
+  let current = false
+  const refused = await preset.setGuarded!('ptc', decision, () => current)
+  assert.deepEqual(refused, { kind: 'rejected', reason: 'the Computer Use observation changed; refresh before saving' })
+  assert.equal(writes.length, 0, 'the caller observation is an independent authority with zero write on refusal')
+  current = true
+  assert.deepEqual(await preset.setGuarded!('ptc', decision, () => current), { kind: 'accepted' })
+  assert.equal(writes.length, 1)
+})
+
+test('presetDefault setGuarded reports an unconfirmed outcome when the official mutation throws after dispatch', async () => {
+  const settingsObject = {
+    describe: () => [{ ns: 'agent-preset-registry', value: { selectedDefault: 'code' }, user: { selectedDefault: 'code' }, revision: 3 }],
+    mutate: async () => { throw new Error('loader reconcile failed') },
+  }
+  const host = {
+    get: (name: string): unknown => name === 'settings'
+      ? settingsObject
+      : name === 'agentPresets' ? { get defaultId() { return 'code' } } : undefined,
+    on: (() => false) as unknown as HostContextLike['on'],
+  }
+  const preset = new DirectConfigPort(host, undefined, () => undefined).presetDefault
+  const decision = preset.readDecision!()!
+  const outcome = await preset.setGuarded!('ptc', decision)
+  assert.equal(outcome.kind, 'outcome-unconfirmed')
+  assert.match((outcome as { reason: string }).reason, /loader reconcile failed/u)
+})
+
+// ── event wiring ──────────────────────────────────────────────────────────
+
 // ── event wiring ──────────────────────────────────────────────────────────
 
 test('credential onChanged subscribes both reference- and record-updated', async () => {

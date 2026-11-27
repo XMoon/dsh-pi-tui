@@ -1164,6 +1164,40 @@ value as current; `false` is a real value and the row is absent when the Host
 does not serve the namespace. Page drafts, dirty state and pointer state remain
 Client-local.
 
+### Saved agent-preset default authority
+
+`ConfigPort.presetDefault` answers two different questions and never merges
+them. The registry's effective default (deployment default merged with the
+saved `agent-preset-registry.selectedDefault` user value and the chooser policy)
+is a read; the one-argument `set(id)` is the ordinary `/preset default` write,
+which dispatches ONE revision-checked official Settings mutation for FUTURE
+Sessions and never starts, switches or mutates the current Session. An accepted
+write is not an effective-value readback: the caller needs a fresh read.
+
+The Computer Use page uses the confined guarded seam on the same sub-domain.
+`readDecision()` returns the live settings-authority generation, the exact
+`agent-preset-registry` revision and the effective default, or `undefined` when
+the current authority cannot prove all three; a caller without that proof offers
+no write (never a fallback to the unguarded `set`). `setGuarded(id, decision)`
+dispatches ONE `selectedDefault` path mutation at that captured pair and refuses
+BEFORE dispatch when the authority was replaced or the revision moved — Direct
+checks the live settings service, and Remote re-checks inside the ONE serialized
+settings-mirror queue with the same before-dispatch fence every typed section
+uses, so a decision queued behind another write is never rebased onto the new
+Host. The caller's own Computer Use observation is an independent authority at
+that boundary: `setGuarded` carries the caller's FULL captured-eligibility
+predicate (observation identity, provider/platform and the exact painted preset
+decision) and both adapters re-prove it at the actual dispatch (Direct
+immediately before the official mutation, Remote inside the queue head), so a
+superseded observation or an independently settling read that makes the captured
+action ineligible dispatches nothing even at an unchanged settings pair. A
+proven same-authority readback still attributes the accepted preset write even
+when unrelated Computer Use UI changes afterwards. `accepted` means the official mutation settled; only a later same-authority
+observation that serves the target value confirms the change, and an
+unobservable settlement is `outcome-unconfirmed`, never retried or painted as
+saved. There is no second preset store, optimistic Client value or Session
+side-effect.
+
 ### Per-package extension configuration authority
 
 `ConfigPort.extensionConfigs` is the narrow semantic sub-domain for one
