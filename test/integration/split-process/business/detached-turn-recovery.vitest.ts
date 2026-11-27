@@ -960,11 +960,12 @@ test('ignores a stale authenticated question peer result', async () => {
     await fresh.type('1')
     await waitFrame(fresh, 'Review your answer before submit', 't51-c2 Question review', 30_000)
     await fresh.press('Enter')
-    await fixtureHelpers.waitForC1WorkEvent(
+    const settled = await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'question-settled' && event.sessionId === sessionId,
       't51 Question settlement',
     )
+    expect(settled.answers?.[0]?.selected?.[0]).toBe('Proceed')
     await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/end', 't51 turn/end')
     await exitClientNormally(fresh, 't51-c2')
 
