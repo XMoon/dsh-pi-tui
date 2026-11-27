@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
@@ -160,6 +160,15 @@ function expectHumanPromptCount(events: SessionEvent[], text: string, expected: 
   ).toEqual([])
 }
 
+function expectNoInboxToken(events: SessionEvent[], token: string, label: string): void {
+  // Durable acceptance evidence only: this does not claim zero network dispatch.
+  const stale = events
+    .filter(event => event.type === 'agent/inbox/spliced')
+    .flatMap(event => Array.isArray(event.data?.inserted) ? event.data.inserted : [])
+    .filter(message => messageText(message).includes(token))
+  expect(stale, `${label}: no accepted Inbox occurrence contains the stale token`).toEqual([])
+}
+
 function assistantText(event: SessionEvent): string {
   return messageText(event.data?.message)
 }
@@ -184,6 +193,25 @@ function composerOf(frame: string): string | undefined {
   const bottom = rules.find(index => index > marker)
   if (top === undefined || bottom === undefined) return undefined
   return lines.slice(top + 1, bottom).join('\n')
+}
+
+function composerDraftOf(frame: string): string | undefined {
+  const composer = composerOf(frame)
+  if (composer === undefined) return undefined
+  const lines = composer.split('\n')
+  const marker = lines.findIndex(line => line.includes('❯'))
+  if (marker < 0 || lines.some((line, index) => index !== marker && line.trim() !== '')) return undefined
+  const row = lines[marker]!
+  const promptAt = row.indexOf('❯')
+  const afterPrompt = row.slice(promptAt + '❯'.length)
+  if (afterPrompt === '') return ''
+  if (!afterPrompt.startsWith(' ')) return undefined
+  let draft = afterPrompt.slice(1)
+  // A live transport notice can share the captured physical row. It is chrome,
+  // not draft text; any other suffix remains part of the exact draft assertion.
+  const noticeAt = draft.search(/\[connection\] connection lost, retry #\d+/u)
+  if (noticeAt >= 0) draft = draft.slice(0, noticeAt)
+  return draft.trimEnd()
 }
 
 async function exitChat(client: SplitProcessClient, label: string): Promise<void> {
@@ -493,10 +521,9 @@ test('a dropped prompt ACK reconciles once through the live Host without replayi
     const started = Date.now()
     while (Date.now() - started < 120_000) {
       const frame = await client.text()
-      const composer = composerOf(frame)
-      if (composer === undefined) throw new Error('ACK-drop: the current frame has no composer')
+      const draft = composerDraftOf(frame)
+      if (draft === undefined) throw new Error('ACK-drop: the current frame has no single-line composer draft')
       const pending = frame.includes('Submitting…') || frame.includes('Queued…')
-      const draft = composer.replace(/❯/gu, '').trim()
       if (!pending && draft === '') {
         expect(frame.includes('indeterminate')).toBe(false)
         disposition = 'accepted'
@@ -668,14 +695,10 @@ test('public Clients keep private launch workspaces and one resumed writer appen
 async function waitForComposerDraft(client: SplitProcessClient, text: string, label: string): Promise<string> {
   const started = Date.now()
   for (;;) {
-    const frame = await client.text()
-    const composer = composerOf(frame)
-    if (composer !== undefined) {
-      const occurrences = composer.split(text).length - 1
-      if (occurrences === 1) return composer
-    }
+    const draft = composerDraftOf(await client.text())
+    if (draft === text) return draft
     if (Date.now() - started >= 120_000) {
-      throw new Error(`${label}: the exact draft was not restored once; frame=${JSON.stringify(frame.slice(-2000))}`)
+      throw new Error(`${label}: the exact single-line draft ${JSON.stringify(text)} was not restored; frame=${JSON.stringify((await client.text()).slice(-2000))}`)
     }
     await sleep(50)
   }
@@ -692,17 +715,11 @@ async function waitForComposerSettled(client: SplitProcessClient, label: string)
 }
 
 async function proveDraftEditableAndClear(client: SplitProcessClient, text: string, label: string): Promise<void> {
+  expect(await waitForComposerDraft(client, text, `${label}: exact restored draft`)).toBe(text)
   await client.type('x')
-  const edited = await waitForComposerDraft(client, `${text}x`, `${label}: editable draft`)
-  expect(edited.split(text).length - 1, `${label}: original draft occurrence count`).toBe(1)
+  expect(await waitForComposerDraft(client, `${text}x`, `${label}: editable draft`)).toBe(`${text}x`)
   await client.press('Ctrl+U')
-  const started = Date.now()
-  for (;;) {
-    const composer = composerOf(await client.text())
-    if (composer !== undefined && !composer.includes(text)) return
-    if (Date.now() - started >= 120_000) throw new Error(`${label}: the restored draft did not clear`)
-    await sleep(50)
-  }
+  expect(await waitForComposerDraft(client, '', `${label}: cleared draft`)).toBe('')
 }
 
 test('the mounted private Namespaces read the Session Workspace and official file authorities', async () => {
@@ -883,6 +900,7 @@ test('closing writer admission while serialization is held restores the draft wi
     await waitForComposerSettled(client, 'serializer stop: settled cancellation')
     expect((await client.text()).includes('indeterminate')).toBe(false)
     await proveDraftEditableAndClear(client, stale, 'serializer stop')
+    expectNoInboxToken(scene.sessionEvents(sessionId) ?? [], stale, 'serializer stop: settled stale write')
     await exitChat(client, 'serializer stop: held Client')
     client = undefined
 
@@ -892,8 +910,10 @@ test('closing writer admission while serialization is held restores the draft wi
     assertClientHost(client, host)
     expect(client.ready.sessionOpen).toBe(true)
     expect(client.ready.openSessionId).toBe(sessionId)
+    expectNoInboxToken(scene.sessionEvents(sessionId) ?? [], stale, 'serializer stop: before fresh submit')
     const positive = await submitSettledPrompt(scene, client, sessionId, 'after admission stop', 'long-turn answer', 'serializer stop: positive write')
     const finalEvents = scene.sessionEvents(sessionId) ?? []
+    expectNoInboxToken(finalEvents, stale, 'serializer stop: after fresh settlement')
     expectHumanPromptCount(finalEvents, stale, 0)
     expectHumanPromptCount(finalEvents, 'after admission stop', 1)
     expect(finalEvents.filter(event => event.type === 'turn/start'
@@ -952,11 +972,14 @@ test('a generation rollover refuses the held stale write and accepts one fresh w
     await waitForComposerSettled(client, 'rollover: settled cancellation')
     expect((await client.text()).includes('indeterminate')).toBe(false)
     await proveDraftEditableAndClear(client, stale, 'rollover')
+    expectNoInboxToken(scene.sessionEvents(sessionId) ?? [], stale, 'rollover: settled stale write')
 
     const liveBoundary = (scene.sessionEvents(sessionId) ?? []).length
+    expectNoInboxToken(scene.sessionEvents(sessionId) ?? [], stale, 'rollover: before fresh submit')
     const live = await submitSettledPrompt(scene, client, sessionId, 'fresh generation token', 'long-turn answer', 'rollover: fresh write')
     const finalEvents = scene.sessionEvents(sessionId) ?? []
     const afterLive = finalEvents.slice(liveBoundary)
+    expectNoInboxToken(finalEvents, stale, 'rollover: after fresh settlement')
     expectHumanPromptCount(finalEvents, stale, 0)
     expectHumanPromptCount(finalEvents, 'fresh generation token', 1)
     expect(afterLive.filter(event => event.type === 'turn/start' && event.data?.turn === live.turn.start.data?.turn)).toHaveLength(1)
@@ -1009,6 +1032,82 @@ test('refuses an absent installed Client Domain module and restores the same Hos
     throw error
   } finally {
     await disposeScene(scene, primary, 'missing Client Domain module')
+  }
+})
+
+test('compensates a Client Domain fault registration failure after the physical rename', async () => {
+  const previousFailurePoint = process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT
+  process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT = 'client-domain-set-fault-post-rename'
+  let scene: SplitProcessScene
+  try {
+    scene = await createSplitProcessScene()
+  } finally {
+    if (previousFailurePoint === undefined) delete process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT
+    else process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT = previousFailurePoint
+  }
+  let host: SplitProcessHostHandle | undefined
+  let primary: unknown
+  try {
+    host = await scene.startHost()
+    await expect(scene.setInstallationFault('client-domain-module-absent'))
+      .rejects.toThrow(/fault registration failed after rename/u)
+    const client = await scene.startClient({
+      label: 'set-fault-compensated', ...clientDirectories(scene, 'set-fault-compensated'),
+    })
+    expect(client.ready.surfaceMounted).toBe(true)
+    assertClientHost(client, host)
+    await exitChat(client, 'set-fault compensation')
+    expect((await scene.hostStatus(host)).localHost.instanceId).toBe(host.ready.localHost.instanceId)
+    await scene.stopHost(host)
+    host = undefined
+  } catch (error) {
+    primary = error
+    throw error
+  } finally {
+    await disposeScene(scene, primary, 'Client Domain set-fault compensation')
+  }
+})
+
+test('a failed Client Domain restore verification stays owned through joined cleanup', async () => {
+  const previousFailurePoint = process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT
+  process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT = 'client-domain-restore-mode'
+  let scene: SplitProcessScene
+  try {
+    scene = await createSplitProcessScene()
+  } finally {
+    if (previousFailurePoint === undefined) delete process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT
+    else process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT = previousFailurePoint
+  }
+  let primary: unknown
+  let cleanupError: unknown
+  let disposeAttempted = false
+  try {
+    const host = await scene.startHost()
+    await scene.setInstallationFault('client-domain-module-absent')
+    await expect(scene.restoreInstallation()).rejects.toThrow(/failed bytes\/mode\/resolve verification/u)
+    await expect(scene.setInstallationFault('client-domain-module-absent')).rejects.toThrow(/already active/u)
+    disposeAttempted = true
+    await expect(scene.dispose()).rejects.toThrow(/installed-copy mutation client-domain-module-absent is not restored/u)
+    const receipt = await scene.readSupervisorReceipt()
+    expect(receipt.phase).toBe('NOT_QUIESCED')
+    expect(receipt.installationMutation?.fault).toBe('client-domain-module-absent')
+    expect(receipt.notes?.some(note => note?.event === 'installation-mutation-restore-failed'
+      && note.detail?.fault === 'client-domain-module-absent')).toBe(true)
+    expect(receipt.notes?.some(note => note?.event === 'installation-mutation-restored'
+      && note.detail?.fault === 'client-domain-module-absent')).toBe(false)
+  } catch (error) {
+    primary = error
+    throw error
+  } finally {
+    if (!disposeAttempted) {
+      try { await scene.dispose() } catch (error) { cleanupError = error }
+    }
+    if (existsSync(scene.workDir)) rmSync(scene.workDir, { recursive: true })
+    if (primary !== undefined) {
+      if (cleanupError !== undefined) throw new AggregateError([primary, cleanupError], 'restore failure negative control and cleanup both failed')
+      throw primary
+    }
+    if (cleanupError !== undefined) throw cleanupError
   }
 })
 

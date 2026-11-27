@@ -12990,7 +12990,7 @@ async function handleSetInstallationFault(message) {
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
     }
-    const original = { bytes: readFileSync(resolved), mode: targetStat.mode & 0o777 }
+    const original = { bytes: readFileSync(resolved), mode: targetStat.mode & 0o777, uid: targetStat.uid, gid: targetStat.gid }
     const sha256 = createHash('sha256').update(original.bytes).digest('hex')
     const mutation = {
       ...base,
@@ -13003,26 +13003,35 @@ async function handleSetInstallationFault(message) {
       sha256,
       renamed: false,
       restore: async () => {
-        if (!mutation.renamed) return
-        try {
-          lstatSync(resolved)
-          throw new Error('RESTORE_INSTALLATION: a foreign replacement occupies the original Client Domain path')
-        } catch (error) {
-          if (error?.code !== 'ENOENT') throw error
+        // `renamed` tracks only the physical rename. Every call must verify the
+        // exact restored path, including compensation after a post-rename failure.
+        if (mutation.renamed) {
+          try {
+            lstatSync(resolved)
+            throw new Error('RESTORE_INSTALLATION: a foreign replacement occupies the original Client Domain path')
+          } catch (error) {
+            if (error?.code !== 'ENOENT') throw error
+          }
+          const backupStat = lstatSync(absent)
+          if (!backupStat.isFile() || backupStat.isSymbolicLink()
+            || backupStat.uid !== original.uid || backupStat.gid !== original.gid
+            || (backupStat.mode & 0o777) !== original.mode
+            || !readFileSync(absent).equals(original.bytes)) {
+            throw new Error('RESTORE_INSTALLATION: the Client Domain backup does not match the reserved bytes/mode')
+          }
+          renameSync(absent, resolved)
+          mutation.renamed = false
         }
-        const backupStat = lstatSync(absent)
-        if (!backupStat.isFile() || backupStat.isSymbolicLink()
-          || (backupStat.mode & 0o777) !== original.mode
-          || !readFileSync(absent).equals(original.bytes)) {
-          throw new Error('RESTORE_INSTALLATION: the Client Domain backup does not match the reserved bytes/mode')
+        if (process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT === 'client-domain-restore-mode') {
+          chmodSync(resolved, original.mode ^ 0o100)
         }
-        renameSync(absent, resolved)
-        mutation.renamed = false
         const restoredStat = lstatSync(resolved)
+        const restoredBytes = readFileSync(resolved)
         if (!restoredStat.isFile() || restoredStat.isSymbolicLink()
+          || restoredStat.uid !== original.uid || restoredStat.gid !== original.gid
           || (restoredStat.mode & 0o777) !== original.mode
-          || !readFileSync(resolved).equals(original.bytes)
-          || createHash('sha256').update(readFileSync(resolved)).digest('hex') !== sha256
+          || !restoredBytes.equals(original.bytes)
+          || createHash('sha256').update(restoredBytes).digest('hex') !== sha256
           || realpathSync(profileRequire.resolve(moduleName)) !== resolved) {
           throw new Error('RESTORE_INSTALLATION: the restored Client Domain module failed bytes/mode/resolve verification')
         }
@@ -13032,6 +13041,9 @@ async function handleSetInstallationFault(message) {
     try {
       renameSync(resolved, absent)
       mutation.renamed = true
+      if (process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT === 'client-domain-set-fault-post-rename') {
+        throw new Error('SPLIT_VITEST_INTENTIONAL_FAILURE: Client Domain fault registration failed after rename')
+      }
       let resolutionError
       try {
         profileRequire.resolve(moduleName)
