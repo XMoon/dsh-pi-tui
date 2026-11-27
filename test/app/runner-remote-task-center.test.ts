@@ -69,13 +69,15 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { MessageId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { MessageId, ToolCallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { RemoteTransportLifetime } from '../../src/app/application-runtime.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import { mountRemotePresentationHost, mountRemoteRunner } from './runner-remote-presentation.test.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
+import { findFocusHeaderRow, findLastFocusHeaderRow } from '../support/focus-header.ts'
+import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -96,6 +98,8 @@ const CHILD_C_DIR = 'c-ws'
 const LABEL_A = `child A ${CHILD_A_ID}`
 const LABEL_B = `child B ${CHILD_B_ID}`
 const LABEL_C = `child C ${CHILD_C_ID}`
+const ALPHA_MARKER = 'boundary-body-alpha'
+const BETA_MARKER = 'boundary-body-beta'
 
 /** The LLM endpoint stand-in whose turn can be HELD open: the Host agent
  *  enters its official `running` status and stays there until released. */
@@ -158,6 +162,77 @@ function seedTurns(append: Append, from: number, to: number, label: string): voi
   }
 }
 
+/** One settled tool Activity. The result text is a body-only marker plus CJK:
+ *  collapsed headers may name the path, but never this unique payload. */
+function seedActivityGroup(append: Append, turn: number, step: number, marker: string): void {
+  const callId = ToolCallId(`call-${marker}`)
+  append('tool/call', {
+    turn, step, callId, name: 'activity_probe', arguments: JSON.stringify({ path: `${marker.replace('boundary-body-', 'source-')}.txt` }),
+  })
+  append('tool/result', {
+    turn, step,
+    message: {
+      id: MessageId(`result-${marker}`), role: 'tool', toolCallId: callId,
+      content: [{ type: 'text', text: `${marker}\n${marker === ALPHA_MARKER ? '边界对照' : '兄弟对照'}` }],
+      source: { kind: 'tool', callId },
+    },
+  }, { surfaceOp: 'append' })
+}
+
+/** A short completed turn with two independent Activities separated by visible
+ *  narration. Opening one leaves the other as a same-turn negative control. */
+function seedActivityTurn(append: Append, turn: number): void {
+  append('turn/start', { turn })
+  append('step/start', { turn, step: 0 })
+  append('user/message', {
+    id: MessageId(`u-activity-${turn}`), role: 'user',
+    content: [{ type: 'text', text: `inspect two activities ${turn}` }], source: { kind: 'user' },
+  }, { surfaceOp: 'append' })
+  seedActivityGroup(append, turn, 0, ALPHA_MARKER)
+  append('step/end', { turn, step: 0 })
+  append('step/start', { turn, step: 1 })
+  append('assistant/message', {
+    turn, step: 1,
+    message: {
+      id: MessageId(`narration-activity-${turn}`), role: 'assistant',
+      content: [{ type: 'text', text: 'between the two activities' }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+    },
+    stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+  }, { surfaceOp: 'append' })
+  append('step/end', { turn, step: 1 })
+  append('step/start', { turn, step: 2 })
+  seedActivityGroup(append, turn, 2, BETA_MARKER)
+  append('step/end', { turn, step: 2 })
+  append('assistant/message', {
+    turn, step: 3,
+    message: {
+      id: MessageId(`a-activity-${turn}`), role: 'assistant',
+      content: [{ type: 'text', text: `childb answer ${turn}` }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+    },
+    stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+  }, { surfaceOp: 'append' })
+  append('step/end', { turn, step: 3 })
+  append('turn/end', { turn, reason: { kind: 'completed' } })
+}
+
+/** Whether one durable fixture event belongs to child A's seeded transcript. */
+function isChildAEvent(event: unknown): boolean {
+  const data = (event as { readonly data?: { readonly id?: unknown; readonly message?: { readonly id?: unknown } } }).data
+  return [data?.id, data?.message?.id].some(id => typeof id === 'string' && /^(?:u|a)-childa-/u.test(id))
+}
+
+function isChildAAnswerEvent(event: unknown, turn: number): boolean {
+  const data = (event as { readonly data?: { readonly id?: unknown; readonly message?: { readonly id?: unknown } } }).data
+  return data?.id === `a-childa-${turn}` || data?.message?.id === `a-childa-${turn}`
+}
+
+/** Exact painted-turn witness: answer 1 must not match answers 10–19. */
+function hasPaintedChildAAnswer1(view: string): boolean {
+  return /\bchilda answer 1\b/u.test(view)
+}
+
 /** The structural faces this suite drives on the mounted TuiApp / Client. */
 interface MountedApp {
   setDraft(text: string): void
@@ -166,6 +241,10 @@ interface MountedApp {
   getViewerGeneration(): number
   pendingInputForTest(): { queued: ReadonlyArray<{ text?: string }>; tail: ReadonlyArray<{ row?: { text?: string } }> }
   setFullscreen(on: boolean): void
+  setDisplayPreset(preset: 'full' | 'compact' | 'focus'): unknown
+  expandedWorkOwnersForTest(): ReadonlySet<object>
+  focusExpandedTurnsForTest(): ReadonlySet<number>
+  fullscreenScrollForTest(): { scrollTop: number; isFollowingEnd: boolean; viewportHeight: number; contentHeight: number; maxScrollTop: number } | undefined
   scrollToTop(options?: { disableFollow?: boolean }): void
   /** The private presentation-scope provider (read through the structural escape
    *  hatch; the same value a child thumbnail would be stamped with). */
@@ -256,7 +335,8 @@ async function mountTaskCenterFixture(
   // Child A carries enough turns that the official opening window truncates
   // (the child-viewer paging proof needs a real older page).
   seedTurns(aAppend, 1, 30, 'childa')
-  seedTurns(appenderOf(host.ctx, CHILD_B_ID), 1, 2, 'childb')
+  seedTurns(appenderOf(host.ctx, CHILD_B_ID), 1, 1, 'childb')
+  seedActivityTurn(appenderOf(host.ctx, CHILD_B_ID), 2)
   seedTurns(appenderOf(host.ctx, CHILD_C_ID), 1, 2, 'childc')
   // The parent-owned discovery facts: direct children A and B on the parent,
   // the nested C on child A (the recursive-walk input).
@@ -430,38 +510,97 @@ test('`/tasks` renders the REAL Remote descendant tree and the child row opens t
   assert.equal(pendingTexts(app.pendingInputForTest()).includes('parent pending echo'), false,
     'the parent pending echo is NOT in the child viewer pending pane')
 
-  // ── Optional plan §14.11: PageUp extends the CHILD window, not the main one.
+  // ── Plan V4: PageUp extends the CHILD window, the newly admitted oldest row
+  // becomes actually browsable, and page settlement cannot replace that same
+  // committed cut a second time.
   const reader = fixture.aggregate.presentation.presentationReader
   const beforeChild = await reader.read(CHILD_A_ID)
   const beforeMain = await reader.read(PARENT_ID)
   assert.ok(beforeChild !== undefined && beforeMain !== undefined)
   assert.equal(beforeChild.hasMore, true,
     'the fixture must provide a truncating child window for the paging proof')
+  assert.equal(beforeChild.durableEvents.some(event => isChildAAnswerEvent(event, 1)), false,
+    'the oldest answer must not already be loaded before PageUp')
   const beforeMainFirst = beforeMain.durableEvents[0]!.seq
   const beforeMainCount = beforeMain.durableEvents.length
-  app.setFullscreen(true)
-  await new Promise(resolve => setTimeout(resolve, 50))
-  const pageStarted = Date.now()
-  for (;;) {
-    const now = await reader.read(CHILD_A_ID)
-    if (now !== undefined && now.durableEvents.length > beforeChild.durableEvents.length) break
-    if (Date.now() - pageStarted > 15_000) throw new Error('PageUp inside the viewer never extended the CHILD window')
-    app.scrollToTop({ disableFollow: true })
-    await new Promise(resolve => setTimeout(resolve, 30))
-    fixture.vt.sendInput('\x1b[57421u') // PageUp at the loaded floor
-    await new Promise(resolve => setTimeout(resolve, 60))
+
+  // Limit the replacement witness to folds that actually contain child A's
+  // seeded events. This is an observable owner identity, not a process-wide
+  // construction-count contract.
+  const childFoldOwners: TranscriptFolder[] = []
+  const originalHydrate = TranscriptFolder.prototype.hydrate
+  TranscriptFolder.prototype.hydrate = function (events) {
+    if (events.some(isChildAEvent)) childFoldOwners.push(this)
+    return originalHydrate.call(this, events)
   }
+  life.defer(() => { TranscriptFolder.prototype.hydrate = originalHydrate })
+
+  // Hold the reader's return AFTER the real official loadOlder has published.
+  // The ingress must make the new old row visible while the page promise is
+  // still pending; releasing that promise must not rebuild the same cut.
+  let releasePage!: () => void
+  let pagePublished = false
+  let markPageReturned!: () => void
+  const pageGate = new Promise<void>(resolve => { releasePage = resolve })
+  const pageReturned = new Promise<void>(resolve => { markPageReturned = resolve })
+  const originalLoadOlder = reader.loadOlder
+  reader.loadOlder = async (sessionId, signal) => {
+    const result = await originalLoadOlder.call(reader, sessionId, signal)
+    pagePublished = true
+    await pageGate
+    markPageReturned()
+    return result
+  }
+  life.defer(() => { releasePage() })
+  life.defer(() => { reader.loadOlder = originalLoadOlder })
+
+  app.setFullscreen(true)
+  await fixture.vt.waitForRender()
+  for (let attempt = 0; attempt < 3 && !pagePublished; attempt += 1) {
+    app.scrollToTop({ disableFollow: true })
+    await fixture.vt.waitForRender()
+    fixture.vt.sendInput('\x1b[57421u') // real PageUp at the loaded floor
+    await fixture.vt.waitForRender()
+  }
+  await waitFor('the official older page published', () => pagePublished, 15_000)
+
   const afterChild = await reader.read(CHILD_A_ID)
   const afterMain = await reader.read(PARENT_ID)
   assert.ok(afterChild !== undefined && afterMain !== undefined)
   assert.equal(afterChild.sessionId, CHILD_A_ID, 'the viewed subject is unchanged')
   assert.equal(afterChild.durableEvents[0]!.seq < beforeChild.durableEvents[0]!.seq, true,
     'the CHILD window front extended toward older history')
+  assert.ok(afterChild.durableEvents.some(event => isChildAAnswerEvent(event, 1)),
+    'the official child cut now contains the previously unloaded oldest answer')
   assert.equal(afterMain.durableEvents[0]!.seq, beforeMainFirst,
     'the MAIN session window must NOT be paged while the child viewer is open')
   assert.equal(afterMain.durableEvents.length, beforeMainCount,
     'the MAIN session window length must be unchanged while the child viewer is open')
-  await waitFor('the viewer visibly scrolled into the child history', () => viewport().includes('↓ Latest'), 10_000)
+
+  app.scrollToTop({ disableFollow: true })
+  await waitFor('the newly loaded oldest child answer is actually painted', () =>
+    hasPaintedChildAAnswer1(viewport()), 10_000)
+  await fixture.vt.waitForRender()
+  const publishedFoldCount = childFoldOwners.length
+  const publishedFoldOwner = childFoldOwners.at(-1)
+  assert.ok(publishedFoldCount > 0 && publishedFoldOwner !== undefined,
+    'the official publication must have committed a child-A fold')
+  const publishedScroll = app.fullscreenScrollForTest()
+  assert.ok(publishedScroll !== undefined)
+  assert.equal(publishedScroll.scrollTop, 0, 'the new oldest row is browsable at the true top')
+
+  releasePage()
+  await pageReturned
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await fixture.vt.waitForRender()
+  assert.equal(childFoldOwners.length, publishedFoldCount,
+    'page settlement must not hydrate a second child-A fold for the committed cut')
+  assert.equal(childFoldOwners.at(-1), publishedFoldOwner,
+    'page settlement must preserve the canonical child-A fold owner')
+  assert.ok(hasPaintedChildAAnswer1(viewport()),
+    `the newly loaded old row must remain painted after settlement:\n${viewport()}`)
+  assert.deepEqual(app.fullscreenScrollForTest(), publishedScroll,
+    'page settlement must not move the committed history anchor')
 
   // ── §14.12 Esc restores the main transcript/status/queue anchor.
   fixture.vt.sendInput('\x1b')
@@ -477,6 +616,205 @@ test('`/tasks` renders the REAL Remote descendant tree and the child row opens t
   assert.equal(pendingTexts(app.pendingInputForTest()).includes('child A pending echo'), false,
     'the child pending echo must not leak onto the restored main surface')
 })
+
+const boundaryCases = [
+  { preset: 'compact', columns: 80, rows: 24, pointer: false },
+  { preset: 'focus', columns: 80, rows: 24, pointer: false },
+  { preset: 'compact', columns: 44, rows: 20, pointer: true },
+] as const
+
+for (const { preset, columns, rows, pointer } of boundaryCases) {
+  test(`${preset} ${columns}x${rows}: a true history-floor boundary preserves the opened Activity owner, body and anchor`, async (t) => {
+    const life = testLifecycle(t)
+    const { fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
+    fixture.vt.resize(columns, rows)
+    const reader = fixture.aggregate.presentation.presentationReader
+    app.setDisplayPreset(preset)
+    app.setFullscreen(true)
+    if (pointer) await openTaskRowByPointer(fixture, app, viewport, 'child B')
+    else await openTaskRow(fixture, app, viewport, LABEL_B)
+    await waitFor('the short child B viewer hydrated', () => viewport().includes('childb answer 2'), 20_000)
+    await fixture.vt.waitForRender()
+
+    const floor = await reader.read(CHILD_B_ID)
+    assert.ok(floor !== undefined)
+    assert.equal(floor.openState, 'open')
+    assert.equal(floor.hasMore, false)
+    assert.equal(floor.loadingOlder, false)
+    assert.equal(floor.sessionId, CHILD_B_ID)
+
+    const activityRow = (expanded: boolean): number => viewport().split('\n').findIndex(line =>
+      new RegExp(`^\\s*${expanded ? '▾' : '▸'} Activity(?: | ·|$)`).test(line))
+    if (preset === 'focus') {
+      const thoughtRow = findLastFocusHeaderRow(viewport().split('\n'), false)
+      assert.ok(thoughtRow >= 0, `the short child Focus Thought must be painted:\n${viewport()}`)
+      fixture.vt.sendInput(`\x1b[<0;3;${thoughtRow + 1}M`)
+      fixture.vt.sendInput(`\x1b[<0;3;${thoughtRow + 1}m`)
+      await fixture.vt.waitForRender()
+      assert.ok(findFocusHeaderRow(viewport().split('\n'), true) >= 0,
+        `the real header click must open the outer Thought:\n${viewport()}`)
+    }
+
+    const collapsedActivity = activityRow(false)
+    assert.ok(collapsedActivity >= 0, `an Activity header must be painted:\n${viewport()}`)
+    fixture.vt.sendInput(`\x1b[<0;3;${collapsedActivity + 1}M`)
+    fixture.vt.sendInput(`\x1b[<0;3;${collapsedActivity + 1}m`)
+    await fixture.vt.waitForRender()
+    for (let attempt = 0; attempt < 5 && !viewport().includes('Tool call activity_probe'); attempt += 1) {
+      fixture.vt.sendInput('\x1b[<65;12;12M')
+      await fixture.vt.waitForRender()
+    }
+    let toolRow = viewport().split('\n').findIndex(line => line.includes('Tool call activity_probe'))
+    assert.ok(toolRow >= 0, `the opened Activity must expose its compact tool card:\n${viewport()}`)
+    const separatorRow = viewport().split('\n').findIndex(line => line.startsWith('────'))
+    if (separatorRow >= 0 && toolRow >= separatorRow - 2) {
+      fixture.vt.sendInput('\x1b[<65;12;12M')
+      await fixture.vt.waitForRender()
+      toolRow = viewport().split('\n').findIndex(line => line.includes('Tool call activity_probe'))
+    }
+    assert.ok(toolRow >= 0, `the compact tool card must remain painted after reveal:\n${viewport()}`)
+    fixture.vt.sendInput(`\x1b[<0;3;${toolRow + 1}M`)
+    fixture.vt.sendInput(`\x1b[<0;3;${toolRow + 1}m`)
+    await fixture.vt.waitForRender()
+    assert.ok(viewport().includes(ALPHA_MARKER),
+      `the real Activity click must reveal its unique body marker:\n${viewport()}`)
+    for (let attempt = 0; attempt < 3 && !viewport().includes('边界对照'); attempt += 1) {
+      fixture.vt.sendInput('\x1b[<65;12;12M')
+      await fixture.vt.waitForRender()
+    }
+    assert.ok(viewport().includes('边界对照'),
+      `the expanded body must paint the CJK narrow-frame witness:\n${viewport()}`)
+    assert.equal(viewport().includes(BETA_MARKER), false,
+      `the same-turn sibling Activity must remain collapsed:\n${viewport()}`)
+    const openedOwner = [...app.expandedWorkOwnersForTest()][0]
+    assert.ok(openedOwner !== undefined, 'the painted expansion must own one canonical Work object')
+    const openedThoughts = [...app.focusExpandedTurnsForTest()]
+    if (preset === 'focus') assert.ok(openedThoughts.includes(2), 'the outer Thought remains manually open')
+
+    // Observe the REAL paging operation only as a path/settlement witness. A
+    // valid implementation may skip a meaningless Reader call entirely, so the
+    // acceptance oracle is the unchanged official cut plus painted owner/anchor.
+    const originalLoadOlder = reader.loadOlder
+    let pageCalls = 0
+    let markPageSettled!: () => void
+    const pageSettled = new Promise<void>(resolve => { markPageSettled = resolve })
+    reader.loadOlder = async (sessionId, signal) => {
+      pageCalls += 1
+      try {
+        return await originalLoadOlder.call(reader, sessionId, signal)
+      } finally {
+        markPageSettled()
+      }
+    }
+    life.defer(() => { reader.loadOlder = originalLoadOlder })
+    const binding = sessions.binding(SessionId(CHILD_B_ID))
+    assert.ok(binding !== undefined)
+    const officialFace = binding.session as typeof binding.session & { loadOlder?: () => Promise<void> }
+    const originalOfficialLoadOlder = officialFace.loadOlder
+    assert.ok(originalOfficialLoadOlder !== undefined, 'the official child face exposes loadOlder')
+    let officialPageCalls = 0
+    officialFace.loadOlder = async () => {
+      officialPageCalls += 1
+      await originalOfficialLoadOlder.call(officialFace)
+    }
+    life.defer(() => { officialFace.loadOlder = originalOfficialLoadOlder })
+
+    app.scrollToTop({ disableFollow: true })
+    await fixture.vt.waitForRender()
+    assert.ok([...app.expandedWorkOwnersForTest()].includes(openedOwner),
+      `the opened Work owner must still be live at the true top:\n${viewport()}`)
+    let anchorBefore = app.fullscreenScrollForTest()
+    assert.ok(anchorBefore !== undefined)
+    assert.equal(anchorBefore.scrollTop, 0, 'the boundary oracle starts at the true top')
+    assert.equal(anchorBefore.isFollowingEnd, false, 'history browsing must not follow the end')
+
+    // When the expanded short child overflows, exercise the real auto-scrollbar
+    // track back to the top as well. Non-overflowing frames have no target and
+    // remain N/A rather than fabricating invisible geometry.
+    if (anchorBefore.maxScrollTop > 0) {
+      for (let attempt = 0; attempt < 5 && (app.fullscreenScrollForTest()?.scrollTop ?? 0) === 0; attempt += 1) {
+        fixture.vt.sendInput('\x1b[<65;12;12M')
+        await fixture.vt.waitForRender()
+      }
+      assert.ok((app.fullscreenScrollForTest()?.scrollTop ?? 0) > 0,
+        'the overflow fixture must be scrollable before the scrollbar gesture')
+      fixture.vt.sendInput(`\x1b[<35;${columns};3M`)
+      await fixture.vt.waitForRender()
+      fixture.vt.sendInput(`\x1b[<0;${columns};3M`)
+      fixture.vt.sendInput(`\x1b[<32;${columns};2M`)
+      fixture.vt.sendInput(`\x1b[<0;${columns};2m`)
+      await fixture.vt.waitForRender()
+      anchorBefore = app.fullscreenScrollForTest()
+      assert.ok(anchorBefore !== undefined)
+      assert.equal(anchorBefore.scrollTop, 0, 'the real scrollbar track must return to the top')
+      assert.ok([...app.expandedWorkOwnersForTest()].includes(openedOwner),
+        `the opened Work owner must survive the scrollbar return to top:\n${viewport()}`)
+    }
+
+    const beforeFrame = viewport()
+    for (let wheel = 0; wheel < 3; wheel += 1) {
+      fixture.vt.sendInput('\x1b[<64;12;12M')
+    }
+    fixture.vt.sendInput('\x1b[57421u') // real no-op PageUp at the same true floor
+    await new Promise<void>(resolve => setImmediate(resolve))
+    if (pageCalls > 0) await pageSettled
+    await new Promise<void>(resolve => setImmediate(resolve))
+    await fixture.vt.waitForRender()
+    const after = await reader.read(CHILD_B_ID)
+    assert.ok(after !== undefined)
+    assert.equal(officialPageCalls, 0, 'hasMore=false must dispatch no official older-page RPC')
+    assert.equal(after.revision, floor.revision, 'the authoritative window cut is unchanged')
+    assert.equal(after.durableEvents.length, floor.durableEvents.length, 'no older events joined the window')
+    assert.deepEqual(app.fullscreenScrollForTest(), anchorBefore,
+      'the unchanged cut must preserve the exact fullscreen scroll anchor')
+    assert.equal(app.expandedWorkOwnersForTest().size, 1,
+      'the unchanged window must keep exactly the manually opened Work owner')
+    assert.ok([...app.expandedWorkOwnersForTest()].includes(openedOwner),
+      'the unchanged window must preserve the canonical Work object identity')
+    if (preset === 'focus') {
+      assert.ok(findFocusHeaderRow(viewport().split('\n'), true) >= 0,
+        `the outer Thought must remain expanded:\n${viewport()}`)
+      assert.deepEqual([...app.focusExpandedTurnsForTest()], openedThoughts,
+        'the true-floor boundary must preserve the manual Thought disclosure')
+    }
+
+    // The marker can be below an overflowing narrow viewport even while its
+    // owner stays live at the top. Reveal it through the real transcript pager
+    // and prove the body itself survived, without moving the top-anchor oracle.
+    for (let attempt = 0; attempt < 5 && !viewport().includes(ALPHA_MARKER); attempt += 1) {
+      fixture.vt.sendInput('\x1b[<65;12;12M')
+      await fixture.vt.waitForRender()
+    }
+    if (!viewport().includes(ALPHA_MARKER)) {
+      // At the bottom the right-aligned Latest hint can share/truncate the
+      // marker row. Step back once so the complete body line is observable.
+      fixture.vt.sendInput('\x1b[<64;12;12M')
+      await fixture.vt.waitForRender()
+    }
+    assert.ok(viewport().includes(ALPHA_MARKER),
+      `the opened Activity body must survive the true-floor wheel/PageUp:\nbefore:\n${beforeFrame}\nafter reveal:\n${viewport()}`)
+    assert.equal(viewport().includes(BETA_MARKER), false,
+      `the boundary input must not expand the sibling Activity:\n${viewport()}`)
+
+    app.scrollToTop({ disableFollow: true })
+    await fixture.vt.waitForRender()
+    const expandedActivity = activityRow(true)
+    assert.ok(expandedActivity >= 0, `the opened Activity must remain painted:\n${viewport()}`)
+    fixture.vt.sendInput(`\x1b[<0;4;${expandedActivity + 1}M`)
+    fixture.vt.sendInput(`\x1b[<0;4;${expandedActivity + 1}m`)
+    await fixture.vt.waitForRender()
+    assert.equal(viewport().includes(ALPHA_MARKER), false,
+      `a fresh explicit header click must still collapse the Activity:\n${viewport()}`)
+    if (pointer) {
+      const backRow = viewport().split('\n').findIndex(line => line.includes('‹ back'))
+      assert.ok(backRow >= 0, `the pointer Back affordance must be painted:\n${viewport()}`)
+      fixture.vt.sendInput(`\x1b[<0;3;${backRow + 1}M`)
+      fixture.vt.sendInput(`\x1b[<0;3;${backRow + 1}m`)
+      await waitFor('the pointer Back restored the parent transcript', () =>
+        viewport().includes('parent answer 2'), 20_000)
+    }
+  })
+}
 
 test('the RENDERED /tasks row and badge follow the official Client Session running fact for an UNRETAINED child, with no Direct Host read', async (t) => {
   const life = testLifecycle(t)
@@ -1642,6 +1980,33 @@ async function openTaskRow(
   throw new Error(`the Task Center never selected ${rowLabel}:\n${viewport()}`)
 }
 
+/** Open a Task-Center child through its real painted row hit target. The typed
+ *  `/tasks` entry remains the existing command route; row activation and the
+ *  viewer Back glyph are pointer actions. */
+async function openTaskRowByPointer(
+  fixture: { readonly vt: { sendInput(data: string): void; waitForRender(): Promise<void> } },
+  app: MountedApp,
+  viewport: () => string,
+  rowNeedle: string,
+): Promise<void> {
+  submit(app, '/tasks')
+  await waitFor('the Task Center mounted', () =>
+    viewport().includes('child A') || viewport().includes('child B'), 20_000)
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await fixture.vt.waitForRender()
+    if (viewport().split('\n').some(line => line.includes(rowNeedle))) break
+    fixture.vt.sendInput('\x1b[<65;10;10M') // real panel wheel toward the child row
+  }
+  await waitFor(`the Task Center rendered ${rowNeedle}`, () =>
+    viewport().split('\n').some(line => line.includes(rowNeedle)), 20_000)
+  await fixture.vt.waitForRender()
+  const row = viewport().split('\n').findIndex(line => line.includes(rowNeedle))
+  assert.ok(row >= 0, `the pointer target row must be painted:\n${viewport()}`)
+  fixture.vt.sendInput(`\x1b[<0;10;${row + 1}M`)
+  fixture.vt.sendInput(`\x1b[<0;10;${row + 1}m`)
+  await fixture.vt.waitForRender()
+}
+
 test('a main-Session switch fences the in-flight child open — no stale child operation reaches the replacement surface', async (t) => {
   const life = testLifecycle(t)
   const { host, fixture, app, viewport } = await mountTaskCenterFixture(life)
@@ -1840,7 +2205,7 @@ test('sink: the MOUNTED Remote child viewer converges its committed subject and 
   // Every OTHER status-commit path for this child is suppressed with a witness:
   // durable events (`routeSessionEvent` → `beginTurn`/`endTurn` + `refreshFooter`),
   // coalesced projection events (`onProjectionsChanged` → `refreshStatus`), and
-  // the window sinks (`rehydrateViewedChild` → `target.activity` + `refreshStatus`).
+  // the window-refold pump (`target.activity` + `refreshStatus`).
   // The Direct Host firehose that also feeds `routeSessionEvent` is registered ONLY
   // when `remoteSources` is absent (bootstrap.ts), and Remote events arrive through
   // this ingress alone. Hence `viewing.activity` has exactly two writers — the open
@@ -1855,7 +2220,7 @@ test('sink: the MOUNTED Remote child viewer converges its committed subject and 
   // produce a projection change — so the snapshot counter (not the projection
   // counter) is the witness that the flip really arrived and was re-derived.
   let snapshotNotifications = 0
-  // The window sinks drive `rehydrateViewedChild`, which ALSO re-derives the
+  // The window-refold pump ALSO re-derives the
   // subject status (`deps.refreshStatus()` + `target.activity` from the binding).
   // They are suppressed and counted too: if they ever fired inside the measured
   // window the causality claim below would be false, so a non-zero count fails

@@ -86,7 +86,7 @@ test('the viewer dispose drops the ingress BEFORE the child reference, exactly o
     'the child handle is released through the ONE release path')
   assert.ok(dispose.includes('viewerSessionAbort?.abort()'),
     'an in-flight follow-up of the dying viewer is cancelled')
-  const release = span('const releaseViewHandle = (): void => {', 'const runDetachedViewerRehydrate')
+  const release = span('const releaseViewHandle = (): void => {', '/** S3-R0: the ONE child re-fold pump.')
   assert.ok(release.includes('runSyncDisposalSteps('),
     'the ingress + binding release is ONE non-truncating batch')
   assert.ok(release.indexOf('viewHandle = undefined') < release.indexOf('() => live?.dispose()'),
@@ -255,6 +255,9 @@ test('child re-folds are serialized, and a refused commit never overwrites the n
         revision,
         commit: (write: () => void): boolean => {
           if (revision === 1) { writes.push({ revision, accepted: false }); return false }
+          // A notification already covered by this successful read must be
+          // consumed by its acknowledgement, not start a redundant third fold.
+          if (revision === 2) capturedSinks?.onWindowRefoldRequired()
           write()
           writes.push({ revision, accepted: true })
           return true
@@ -311,6 +314,130 @@ test('child re-folds are serialized, and a refused commit never overwrites the n
   assert.deepEqual(writes.map(write => write.accepted), [false, true],
     'the refused older fold wrote nothing; the newer fold committed')
   assert.equal(reads, 2, 'exactly one follow-up read ran (the coalesced requirement)')
+  // A genuinely new notification AFTER that acknowledgement is not covered by
+  // the old proof and must queue the next fold.
+  capturedSinks!.onWindowRefoldRequired()
+  await pumpSettled
+  assert.equal(reads, 3, 'a post-acknowledgement notification starts one new read')
+  assert.deepEqual(writes.map(write => write.accepted), [false, true, true],
+    'only the two current proofs commit; the refused older fold wrote nothing')
+  viewer.dispose()
+})
+
+test('a pending refold from child A cannot retarget a same-id child B or reopened A viewer', async (t) => {
+  interface ControlledView {
+    readonly view: ViewerChildView<SessionPresentationEvent>
+    readonly sinks: { current?: ViewerChildLiveSinks<SessionPresentationEvent> }
+    reads: number
+    releaseRead?: () => void
+    started?: () => void
+  }
+  const views: ControlledView[] = []
+  const childView: ViewerChildSource<SessionPresentationEvent> = {
+    open: async () => {
+      let controlled!: ControlledView
+      const view: ViewerChildView<SessionPresentationEvent> = {
+        childSessionId: 'child-1',
+        parentSessionId: 'parent-1',
+        snapshot: { durableEvents: [], liveInputs: [], activity: 'inactive', cwd: '', revision: 1 },
+        rehydrate: async () => {
+          controlled.reads += 1
+          if (views.length === 1) {
+            controlled.started?.()
+            await new Promise<void>(resolve => { controlled.releaseRead = resolve })
+          }
+          return {
+            durableEvents: [], liveInputs: [], activity: 'inactive', cwd: '', revision: controlled.reads,
+            commit: (write: () => void): boolean => { write(); return true },
+          }
+        },
+        loadOlder: async () => {},
+        currentActivity: () => 'inactive',
+        subscribe: sinks => {
+          controlled.sinks.current = sinks
+          return { dispose() {} }
+        },
+        release: () => {},
+      }
+      controlled = { view, sinks: {}, reads: 0 }
+      views.push(controlled)
+      return view
+    },
+    childWriterSubject: () => undefined,
+  }
+  let repaints = 0
+  const surface = {
+    routeSessionEvent: () => {},
+    repaint: () => { repaints += 1 },
+    refreshPendingInput: () => {},
+    display: displaySeamStub(),
+    app: {
+      enterFocusViewerScope: () => {},
+      exitFocusViewerScope: () => {},
+      clearNotify: () => {},
+      setViewerMode: () => {},
+    },
+  } as unknown as SurfaceRuntime<SessionPresentationEvent>
+  const pumps: Promise<void>[] = []
+  const settlePumps = async (): Promise<void> => {
+    while (pumps.length > 0) await pumps.shift()
+  }
+  const viewer = createViewerRuntime<SessionPresentationEvent>({
+    surface,
+    isCleanedUp: () => false,
+    summaryKeys: toolSummaryKeys,
+    currentSessionId: () => 'parent-1',
+    liveParentSessionId: () => 'parent-1',
+    childView,
+    refreshStatus: () => {},
+    restoreMainTranscriptAnchor: () => {},
+    runDetached: (_name, run) => { pumps.push(run()) },
+  } satisfies ViewerRuntimeDeps<SessionPresentationEvent>)
+  t.after(() => { views[0]?.releaseRead?.() })
+
+  await viewer.enterView('child-1', 'child A', 'one-shot', 'parent-1', 'inactive')
+  const a = views[0]!
+  const aStarted = new Promise<void>(resolve => { a.started = resolve })
+  a.sinks.current!.onWindowRefoldRequired()
+  a.sinks.current!.onWindowRefoldRequired()
+  await aStarted
+  assert.equal(a.reads, 1, 'child A owns the held read')
+
+  assert.equal(viewer.exitView(), true)
+  await viewer.enterView('child-1', 'child B', 'one-shot', 'parent-1', 'inactive')
+  const b = views[1]!
+  const bFolder = viewer.read()!.folder
+  repaints = 0
+  // The retired callback still fires, but its exact acquired handle is no
+  // longer current even though the child Session id is identical.
+  a.sinks.current!.onWindowRefoldRequired()
+  a.releaseRead?.()
+  await settlePumps()
+  assert.equal(a.reads, 1, 'the retired child A read is not retried into child B')
+  assert.equal(b.reads, 0, 'child A pending work dispatches no child B read')
+  assert.equal(viewer.read()!.folder, bFolder, 'child A cannot replace child B fold identity')
+  assert.equal(repaints, 0, 'child A cannot repaint the child B surface')
+
+  b.sinks.current!.onWindowRefoldRequired()
+  await settlePumps()
+  assert.equal(b.reads, 1, 'child B own notification still drives its pump')
+  assert.equal(repaints, 1, 'child B current proof commits and repaints once')
+
+  assert.equal(viewer.exitView(), true)
+  await viewer.enterView('child-1', 'child A reopened', 'one-shot', 'parent-1', 'inactive')
+  const reopenedA = views[2]!
+  const reopenedFolder = viewer.read()!.folder
+  repaints = 0
+  a.sinks.current!.onWindowRefoldRequired()
+  await settlePumps()
+  assert.equal(reopenedA.reads, 0, 'the original child A callback cannot address a later same-id open')
+  assert.equal(viewer.read()!.folder, reopenedFolder, 'the reopened same-id fold keeps its own identity')
+  assert.equal(repaints, 0, 'the retired callback cannot repaint the reopened viewer')
+
+  reopenedA.sinks.current!.onWindowRefoldRequired()
+  await settlePumps()
+  assert.equal(reopenedA.reads, 1, 'the current same-id open accepts its own notification')
+  assert.equal(repaints, 1, 'the current same-id proof commits once')
   viewer.dispose()
 })
 

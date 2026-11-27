@@ -264,6 +264,13 @@ export function createRemoteChildViewSource<Event>(
         },
         async loadOlder(): Promise<void> {
           if (released) return
+          const before = ownedBinding()
+          if (before === undefined || !isOpen(before)) return
+          const fenceGeneration = options.generation.getSnapshot()
+          if (fenceGeneration === undefined) return
+          // The shared reader applies its own exact-generation pin and current
+          // open/hasMore/loadingOlder guards. Its settlement creates no fold;
+          // only the official window publication may request one.
           await reader.loadOlder(childId)
         },
         currentActivity: (): 'running' | 'inactive' => childActivity(ownedBinding()),

@@ -623,6 +623,39 @@ test('loadOlder pages the reader for the exact child and stops after release', a
   assert.deepEqual(pages, ['child-1'], 'a released child view never pages')
 })
 
+test('loadOlder dispatches only for the live exact open binding and an available generation', async () => {
+  const original = childBinding(true)
+  const fixture = childSessions('child-1', original)
+  const pages: string[] = []
+  let generation: { id: number } | undefined = { id: 1 }
+  const { ingress } = fakeIngress()
+  const source = buildSource({
+    sessions: fixture.sessions,
+    ingress,
+    generation: { getSnapshot: () => generation, subscribe: () => () => {} },
+    loadOlder: async (id) => { pages.push(id); return snapshotOf(2) },
+  })
+  const view = await source.open(openTarget())
+  assert.ok(view !== undefined)
+
+  generation = undefined
+  await view.loadOlder()
+  assert.deepEqual(pages, [], 'a missing Connection generation cannot dispatch paging')
+
+  generation = { id: 1 }
+  fixture.setBinding('child-1', childBinding(true))
+  await view.loadOlder()
+  assert.deepEqual(pages, [], 'a same-id replacement binding cannot inherit the retained view paging authority')
+
+  fixture.setBinding('child-1', original)
+  await view.loadOlder()
+  assert.deepEqual(pages, ['child-1'], 'the restored exact live binding is the positive control')
+
+  view.release()
+  await view.loadOlder()
+  assert.deepEqual(pages, ['child-1'], 'release still refuses every later page')
+})
+
 test('a missing readable window releases the reference and throws instead of fabricating an empty child', async () => {
   const fixture = childSessions('child-1', childBinding(true))
   const { ingress } = fakeIngress()
