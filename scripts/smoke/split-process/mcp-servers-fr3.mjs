@@ -286,7 +286,7 @@ export async function selectRow(client, index) {
   // Reach the FIRST row by probing the painted marker (the list wraps, so a
   // fixed number of Up presses cannot mean "top").
   for (let step = 0; step < 8; step += 1) {
-    if (/\u25b8 fr3-fixture/u.test((await client.viewport()).join('\n'))) break
+    if (/>\s*fr3-fixture(?:\s|$)/u.test((await client.viewport()).join('\n'))) break
     client.send('\x1b[A')
     await sleep(200)
   }
@@ -389,13 +389,15 @@ export async function runMcpServersFr3(context) {
     await openMcpPage(client, 'FR3')
     await waitForScreenText(client, SERVER_NAME, 'FR3 configured stdio server row')
     await waitForScreenText(client, 'fr3-http', 'FR3 configured HTTP server row')
-    // Connection state may arrive before the independent Settings key-set verdict.
-    // Wait for BOTH facts on the configured fixture's own row.
+    // Connection state may arrive before the independent Settings key-set
+    // verdict. The adaptive List owns Name/Status; the selected Detail owns the
+    // full Source fact, so wait for BOTH in their real homes.
     await waitForScreenPattern(
       client,
-      /^[^\r\n]*\bfr3-fixture\b[ \t]+Connected[ \t]+Configured(?:[ \t]|$)/mu,
-      'FR3 configured stdio source verdict',
+      /^[^\r\n]*>?[ \t]*fr3-fixture[ \t]+Connected(?:[ \t]|$)/mu,
+      'FR3 configured stdio status',
     )
+    await waitForScreenText(client, 'Source: Configured', 'FR3 configured stdio source verdict')
     trace('fr3.source-confirmed', { name: SERVER_NAME, source: 'Configured' })
     const listFrame = (await client.viewport()).join('\n')
     // A single failed server never hides the other managed servers.
@@ -410,7 +412,7 @@ export async function runMcpServersFr3(context) {
     await waitForScreenText(client, 'Probe passed', 'FR3 stdio probe result')
     assert(/1 tool/u.test((await client.viewport()).join('\n')), 'FR3: stdio probe must report the fixture tool')
     client.send('x')
-    await waitForScreenText(client, `Restart ${SERVER_NAME}?`, 'FR3 restart confirmation')
+    await waitForScreenText(client, `Restart server ${SERVER_NAME}.`, 'FR3 restart confirmation')
     client.send('y')
     await waitForScreenText(client, 'Restart settled · awaiting connected status', 'FR3 restart settled notice')
     trace('fr3.stdio', { probe: 'PASS', restart: 'SETTLED' })
@@ -422,7 +424,7 @@ export async function runMcpServersFr3(context) {
     client.send('p')
     await waitForScreenText(client, 'Probe passed', 'FR3 HTTP probe result')
     client.send('x')
-    await waitForScreenText(client, 'Restart fr3-http?', 'FR3 HTTP restart confirmation')
+    await waitForScreenText(client, 'Restart server fr3-http.', 'FR3 HTTP restart confirmation')
     client.send('y')
     await waitForScreenText(client, 'Restart settled · awaiting connected status', 'FR3 HTTP restart settled')
     trace('fr3.http', { probe: 'PASS', restart: 'SETTLED' })

@@ -1,5 +1,6 @@
 /**
- * FR4 — the PURE renderer/field model of the MCP server configuration form.
+ * FR4 / SUX-07 — the PURE renderer/field model of the MCP server configuration
+ * form.
  *
  * It owns no authority: every fact comes from the controller's
  * {@link McpEditorSnapshot}, every intent goes back to the controller. It never
@@ -9,6 +10,10 @@
  * The fixed grouping is Identity (name/transport/enabled) → Connection
  * (command/cwd or url) → Parameters (args rows / env or header key-value rows)
  * → Status (the captured revision and the current write state).
+ *
+ * SUX-07: each field is a selectable row whose value wraps on real cells. The
+ * row itself never activates a draft mutation; the page paints the explicit
+ * verb (`Edit [Enter]`, `Switch [Enter]`, …) as its own target.
  *
  * @module @xmoon76/dsh-pi-tui/tui/panels/mcp-server-config-form
  */
@@ -66,7 +71,7 @@ function dictValueText(value: string): string {
 /**
  * Build the form's field list from one editor snapshot (deterministic).
  * `formOf` supplies the EXPLICIT storage form the user chose for one value (the
- * controller owns it); the row states it and a separate row toggles it.
+ * controller owns it).
  */
 export function mcpFormRows(
   editor: McpEditorSnapshot,
@@ -83,7 +88,7 @@ export function mcpFormRows(
     id: 'transport',
     group: 'Identity',
     label: 'Transport',
-    value: `${editor.transport} (Enter to switch)`,
+    value: editor.transport,
     action: { kind: 'cycle-transport' },
   })
   rows.push({
@@ -136,7 +141,6 @@ export function mcpFormRows(
         id: `env-value:${entry.key}`,
         group: 'Parameters',
         label: `Env ${entry.key}`,
-        // A reference stays verbatim; a literal is only `Set (hidden)`.
         value: dictValueText(entry.value),
         action: { kind: 'edit-dict-value', field: 'env', key: entry.key },
       })
@@ -144,7 +148,7 @@ export function mcpFormRows(
         id: `env-form:${entry.key}`,
         group: 'Parameters',
         label: `Env ${entry.key} stored as`,
-        value: `${formOf('env', entry.key) === 'reference' ? 'Credential reference' : 'Literal (stored in profile)'} (Enter to switch)`,
+        value: formOf('env', entry.key) === 'reference' ? 'Credential reference' : 'Literal (stored in profile)',
         action: { kind: 'cycle-dict-form', field: 'env', key: entry.key },
       })
     }
@@ -178,7 +182,7 @@ export function mcpFormRows(
         id: `header-form:${entry.key}`,
         group: 'Parameters',
         label: `Header ${entry.key} stored as`,
-        value: `${formOf('headers', entry.key) === 'reference' ? 'Credential reference' : 'Literal (stored in profile)'} (Enter to switch)`,
+        value: formOf('headers', entry.key) === 'reference' ? 'Credential reference' : 'Literal (stored in profile)',
         action: { kind: 'cycle-dict-form', field: 'headers', key: entry.key },
       })
     }
@@ -194,10 +198,66 @@ function fit(text: string, width: number): string {
   return padding > 0 ? clamped + ' '.repeat(padding) : clamped
 }
 
-/** One painted form row with its page-local line index (the hit target). */
+/** Wrap one field value with a hanging indent, hard-splitting long tokens. */
+function wrapFieldLines(marker: string, label: string, value: string, width: number, valueInk: (text: string) => string): string[] {
+  const prefix = `${label}: `
+  const prefixWidth = visibleWidth(prefix)
+  if (prefixWidth + 4 > width) {
+    // The label alone fills the row: keep it readable and put the value on the
+    // following lines under the content column.
+    const lines = [fit(marker + color.textDim(label), width)]
+    for (const part of hardWrap(value, Math.max(1, width - 2))) {
+      lines.push(fit('  ' + valueInk(part), width))
+    }
+    return lines
+  }
+  const valueWidth = Math.max(1, width - 2 - prefixWidth)
+  const parts = hardWrap(value, valueWidth)
+  const lines: string[] = []
+  for (let index = 0; index < parts.length; index += 1) {
+    const text = parts[index] ?? ''
+    if (index === 0) lines.push(fit(marker + color.textDim(prefix) + valueInk(text), width))
+    else lines.push(fit('  ' + ' '.repeat(prefixWidth) + valueInk(text), width))
+  }
+  return lines
+}
+
+/** Split one string into cell-accurate chunks (hard split where needed). */
+function hardWrap(text: string, width: number): string[] {
+  const out: string[] = []
+  let current = ''
+  for (const word of sanitizedPhysicalLine(text).split(' ').filter(part => part !== '')) {
+    let rest = word
+    while (visibleWidth(rest) > Math.max(1, width)) {
+      if (current !== '') {
+        out.push(current)
+        current = ''
+      }
+      let take = 0
+      while (take < rest.length && visibleWidth(rest.slice(0, take + 1)) <= width) take += 1
+      if (take === 0) take = 1
+      out.push(rest.slice(0, take))
+      rest = rest.slice(take)
+    }
+    const candidate = current === '' ? rest : `${current} ${rest}`
+    if (visibleWidth(candidate) <= width) {
+      current = candidate
+      continue
+    }
+    if (current !== '') out.push(current)
+    current = rest
+  }
+  if (current !== '') out.push(current)
+  return out.length === 0 ? [''] : out
+}
+
+/** One painted form row with its absolute content-line range. */
 export interface McpFormPaintedRow {
   readonly row: McpFormRow
+  /** The FIRST content line of this field (absolute; the page applies offset). */
   readonly line: number
+  /** The last content line of this field (absolute). */
+  readonly lineEnd: number
 }
 
 /** Render the form body (no Action Bar) at one width/row grant. */
@@ -211,28 +271,34 @@ export function renderMcpConfigForm(
   keyRemovable: (field: 'env' | 'headers', key: string) => boolean = (_field, _key) => true,
 ): { readonly lines: string[]; readonly painted: readonly McpFormPaintedRow[]; readonly maxOffset: number; readonly focusedContentRow: number } {
   const formRows = mcpFormRows(editor, formOf, keyRemovable)
-  const content: { readonly text: string; readonly row?: McpFormRow; readonly group?: McpFormGroup }[] = []
+  const content: { readonly text: string; readonly row?: McpFormRow; readonly blockStart: number }[] = []
   let lastGroup: McpFormGroup | undefined
   for (const row of formRows) {
     if (row.group !== lastGroup) {
       lastGroup = row.group
-      content.push({ text: color.textMuted(row.group), group: row.group })
+      content.push({ text: color.textMuted(row.group), blockStart: content.length })
     }
     const focused = formRows[focusIndex]?.id === row.id
-    const marker = focused ? color.textStrong('▸ ', 'primary') : '  '
-    const label = color.textDim(`${row.label}: `)
-    const value = focused ? color.textStrong(row.value, 'primary') : color.text(row.value)
-    content.push({ text: marker + label + value, row })
+    const marker = focused ? color.textStrong('> ', 'primary') : '  '
+    // The marker/label ink is chosen per row; long values wrap with a hanging
+    // indent under the value column.
+    const block = wrapFieldLines(marker, row.label, row.value, width, (text) =>
+      focused ? color.textStrong(text, 'primary') : color.text(text))
+    const blockStart = content.length
+    const first = block[0] ?? ''
+    content.push({ text: first, row, blockStart })
+    for (let index = 1; index < block.length; index += 1) {
+      content.push({ text: block[index] ?? '', row, blockStart })
+    }
   }
   const viewport = Math.max(1, rows)
   const maxOffset = Math.max(0, content.length - viewport)
-  // The focused FIELD's PHYSICAL content row (group headers occupy rows too).
-  // The scroller must reason in painted rows, never in field indices.
   const focusedRowId = formRows[focusIndex]?.id
   const focusedContentRow = content.findIndex(entry => entry.row?.id === focusedRowId)
   const clamped = Math.min(Math.max(0, offset), maxOffset)
   const lines: string[] = []
   const painted: McpFormPaintedRow[] = []
+  const paintedById = new Map<string, { line: number; lineEnd: number }>()
   for (let index = 0; index < viewport; index += 1) {
     const entry = content[clamped + index]
     if (entry === undefined) {
@@ -240,7 +306,16 @@ export function renderMcpConfigForm(
       continue
     }
     lines.push(fit(truncateToWidth(sanitizedPhysicalLine(entry.text), width, '…', false), width))
-    if (entry.row !== undefined) painted.push({ row: entry.row, line: index })
+    if (entry.row !== undefined) {
+      const existing = paintedById.get(entry.row.id)
+      const absolute = clamped + index
+      if (existing === undefined) paintedById.set(entry.row.id, { line: entry.blockStart, lineEnd: absolute })
+      else paintedById.set(entry.row.id, { line: existing.line, lineEnd: absolute })
+    }
+  }
+  for (const row of formRows) {
+    const range = paintedById.get(row.id)
+    if (range !== undefined) painted.push({ row, line: range.line, lineEnd: range.lineEnd })
   }
   return { lines, painted, maxOffset, focusedContentRow }
 }
@@ -248,6 +323,6 @@ export function renderMcpConfigForm(
 /** The one-line form status sentence (never a secret). */
 export function mcpFormStatusText(editor: McpEditorSnapshot, statusText: string | undefined): string {
   if (statusText !== undefined) return statusText
-  if (editor.issues.length > 0) return editor.issues[0]?.message ?? 'invalid draft'
+  if (editor.issues.length > 0) return `${editor.issues[0]?.message ?? 'invalid draft'}`
   return editor.dirty ? 'Unsaved changes' : 'No changes'
 }

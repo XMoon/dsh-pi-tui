@@ -128,10 +128,13 @@ class FakeConfiguration implements McpServerConfigurationConfig {
   value: McpServerConfiguration = { kind: 'unavailable', reason: 'not read' }
   readonly mutations: Array<{ ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[]; revision: number; generation: object }> = []
   outcome: (ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[], revision: number, generation: object) => McpConfigWriteOutcome = () => ({ kind: 'saved', revision: 2 })
+  /** Keep one write in flight while the test changes authority. */
+  hold: Promise<void> | undefined
   async refresh(): Promise<void> {}
   read(): McpServerConfiguration { return this.value }
   async mutate(ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[], revision: number, generation: object): Promise<McpConfigWriteOutcome> {
     this.mutations.push({ ops, revision, generation })
+    if (this.hold !== undefined) await this.hold
     return this.outcome(ops, revision, generation)
   }
 }
@@ -241,6 +244,23 @@ test('a removed and re-listed name is a NEW entry: its late probe is discarded',
   assert.equal(h.controller.snapshot().operation?.phase, 'failed')
 })
 
+test('Edit captures a new entry token after a same-name removal and re-add', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.controller.beginEdit()
+  const first = h.controller.snapshot().editor?.entryToken
+  assert.ok(first !== undefined, 'an Edit carries the exact entry token')
+  h.controller.discardEditor()
+  h.port.roster([], GENERATION_1)
+  await h.flush()
+  h.port.roster([view('mine')], GENERATION_1)
+  await h.flush()
+  h.controller.beginEdit()
+  const second = h.controller.snapshot().editor?.entryToken
+  assert.ok(second !== undefined)
+  assert.notEqual(second, first, 'a same-name re-add is a NEW instance, not the old Edit target')
+  assert.equal(h.controller.snapshot().rows[0]?.entryToken, second)
+})
+
 test('a dispatched restart that loses its settlement is never reported as "could not be dispatched"', async () => {
   const h = harness()
   h.sources.value = { kind: 'ready', configuredNames: ['alpha'], generation: GENERATION_1 }
@@ -272,6 +292,48 @@ test('a restart invalidated by the observation reports an unconfirmed outcome, n
   await h.flush()
   assert.equal(h.controller.snapshot().operation?.phase, 'failed')
   assert.equal(h.controller.snapshot().notice?.text, RESTART_LOST_NOTE)
+  assert.equal(h.controller.snapshot().restartOutcomeUnconfirmed, true,
+    'retirement records the typed uncertainty before any late settlement')
+  h.controller.beginRestart()
+  assert.equal(h.controller.snapshot().confirmingName, undefined,
+    'a retired restart cannot be blindly re-opened')
+})
+
+test('a saving configuration retired before settlement stays unconfirmed and blocks a blind retry', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  let releaseWrite!: () => void
+  h.configuration.hold = new Promise<void>(resolve => { releaseWrite = resolve })
+  h.controller.beginToggle()
+  h.controller.answerConfigConfirm(true)
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saving')
+  // The authority is replaced while the write is still in flight.
+  h.port.emit({ kind: 'invalidated', reason: 'connection-changed' })
+  await h.flush()
+  assert.equal(h.controller.snapshot().configOutcomeUnconfirmed, true)
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'unconfirmed')
+  h.controller.beginToggle()
+  h.controller.beginAdd()
+  assert.equal(h.controller.snapshot().configConfirm, undefined,
+    'no second configuration question opens after the loss')
+  assert.equal(h.controller.snapshot().editor, undefined)
+  // Only an explicit R plus a current roster/descriptor can release it.
+  releaseWrite()
+  await h.flush()
+  h.sources.value = { kind: 'ready', configuredNames: ['mine'], generation: GENERATION_2 }
+  h.configuration.value = configOf(GENERATION_2, 4, [{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.port.roster([view('mine')], GENERATION_2)
+  await h.flush()
+  assert.equal(h.controller.snapshot().configOutcomeUnconfirmed, true,
+    'an unsolicited ready roster never releases the retirement gate')
+  const writes = h.configuration.mutations.length
+  h.controller.beginToggle()
+  h.controller.answerConfigConfirm(true)
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, writes, 'no second write before explicit R')
+  h.controller.refresh()
+  h.port.roster([view('mine')], GENERATION_2)
+  await h.flush()
+  assert.equal(h.controller.snapshot().configOutcomeUnconfirmed, undefined)
 })
 
 test('a settings source read from another generation is Unknown, never Configured/Plugin-owned', async () => {
@@ -1073,4 +1135,70 @@ test('the snapshot projects the roster observation and configuration read epochs
   assert.equal(after.observationEpoch, before.observationEpoch, 'a write readback changes no roster observation')
   assert.ok(after.configurationReadEpoch > before.configurationReadEpoch,
     'the readback advances the configuration read epoch')
+})
+
+test('a zero-diff Edit reports No changes and dispatches nothing', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.controller.beginEdit()
+  assert.equal(h.controller.snapshot().editor?.mode, 'edit')
+  h.controller.saveEditor()
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, 0, 'an unchanged draft performs no Host write')
+  assert.equal(h.controller.snapshot().editor, undefined, 'the unchanged form closes')
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'no-changes')
+  assert.equal(h.controller.snapshot().configStatus?.text, 'No changes')
+  assert.doesNotMatch(h.controller.snapshot().configStatus?.text ?? '', /Saved|waiting for Host reconcile/u)
+})
+
+test('an unconfirmed configuration write blocks a blind retry until an explicit refresh re-observes', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.configuration.outcome = () => ({ kind: 'failed', failure: { kind: 'outcome-unconfirmed', reason: 'ack lost' } })
+  h.controller.beginToggle()
+  h.controller.answerConfigConfirm(true)
+  await h.flush()
+  assert.equal(h.controller.snapshot().configOutcomeUnconfirmed, true)
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'unconfirmed')
+  assert.equal(h.controller.canEditConfiguration(), false, 'the same write may not be resubmitted blindly')
+  h.controller.beginAdd()
+  h.controller.beginEdit()
+  h.controller.beginToggle()
+  h.controller.beginDelete()
+  h.controller.beginReset()
+  assert.equal(h.controller.snapshot().configConfirm, undefined, 'no new configuration question opens')
+  assert.equal(h.controller.snapshot().editor, undefined, 'no new draft opens')
+
+  // A background roster frame alone is NOT the user's explicit re-observation.
+  h.port.roster([view('mine')], GENERATION_1)
+  await h.flush()
+  assert.equal(h.controller.snapshot().configOutcomeUnconfirmed, true,
+    'a background publication never opens the recovery admission')
+
+  // The explicit `r` starts a NEW watch; its current roster + same-generation
+  // descriptor read release the local gate while the old notice remains.
+  h.controller.refresh()
+  h.port.roster([view('mine')], GENERATION_1)
+  await h.flush()
+  assert.equal(h.controller.snapshot().configOutcomeUnconfirmed, undefined)
+  assert.equal(h.controller.canEditConfiguration(), true)
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'unconfirmed',
+    'the prior outcome is never rewritten as Saved/Cancelled')
+})
+
+test('a lost restart settlement blocks a blind restart until an explicit refresh re-observes', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.controller.beginRestart()
+  h.controller.answerRestart(true)
+  assert.deepEqual(h.port.restarts, ['mine'])
+  h.port.resolveRestart({ kind: 'failed', generation: GENERATION_1, failure: { kind: 'superseded', reason: 'manager changed' } })
+  await h.flush()
+  assert.equal(h.controller.snapshot().restartOutcomeUnconfirmed, true)
+  h.controller.beginRestart()
+  assert.equal(h.controller.snapshot().confirmingName, undefined, 'no second confirmation opens')
+  // An explicit refresh + real current roster releases restart retry.
+  h.controller.refresh()
+  h.port.roster([view('mine')], GENERATION_1)
+  await h.flush()
+  assert.equal(h.controller.snapshot().restartOutcomeUnconfirmed, undefined)
+  h.controller.beginRestart()
+  assert.equal(h.controller.snapshot().confirmingName, 'mine')
 })

@@ -1402,9 +1402,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           const page = new McpServersPage({
             controller,
             requestRender: () => { if (!app.isDisposed()) app.requestRender() },
-            done: () => {
+            done: () => { done() },
+            // SUX-07: every real close route (explicit done, category switch,
+            // forced workspace teardown) retires the EXACT command-level
+            // reference through the page's existing dispose lifecycle.
+            onDispose: () => {
               if (activeMcpController === controller) activeMcpController = undefined
-              done()
             },
           })
           activeMcpController = controller

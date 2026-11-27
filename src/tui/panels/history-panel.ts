@@ -358,6 +358,8 @@ interface HistoryDisplayRow {
   readonly bodyMessage?: string
   /** Remote exact body carries non-text attachments (text-only contract). */
   readonly hasNonText?: boolean
+  /** Complete Remote row identity (id + content hash); keeps anchors honest. */
+  readonly identity?: string
 }
 
 interface HistoryPanelState {
@@ -590,6 +592,8 @@ export class HistoryPanel implements Component, Focusable {
   private controller: AbortController | undefined
   /** The last painted frame (pointer hit-testing; `undefined` = nothing painted). */
   private frame: HistoryMouseFrame | undefined
+  /** Partial indexing text carried by the query row when the header has no gap. */
+  private queryIndexing: string | undefined
   /** The pressed pointer gesture, valid only until its release/click. */
   private gesture: HistoryPointerGesture | undefined
   /** The Preview scroll position: the source VISUAL row painted first. It is
@@ -719,7 +723,14 @@ export class HistoryPanel implements Component, Focusable {
     if (!this.plan(this.lastWidth()).acceptEnabled) return false
     const selected = this.selected()
     if (selected === undefined) return false
-    if (this.remote !== undefined && !this.remoteExactBodyReady(selected)) return false
+    if (this.remote !== undefined) {
+      // The last painted frame must still describe the CURRENT Remote commit:
+      // an automatic refresh may have replaced the page/selection underneath
+      // these cells, and the exact-body check alone cannot prove which row the
+      // user is looking at. Direct keeps its historical paint behavior.
+      if (!this.remoteFrameCurrent()) return false
+      if (!this.remoteExactBodyReady(selected)) return false
+    }
     return this.frame?.paintedResultIds.has(selected.id) === true
   }
 
@@ -862,7 +873,9 @@ export class HistoryPanel implements Component, Focusable {
       }
       if (hit.kind === 'result') {
         // A result row click only SELECTS; the explicit `Use Selected [Enter]` item
-        // (or Enter) accepts.
+        // (or Enter) accepts. A stale Remote hit id must not select a different
+        // row that the new automatic page now owns.
+        if (!this.remoteFrameCurrent(frame)) return undefined
         const index = this.state.results.findIndex(candidate => candidate.id === hit.id)
         if (index === -1) return undefined
         this.gesture = { kind: 'result', generation: frame.generation, x: event.x, y: event.y, id: hit.id }
@@ -878,6 +891,7 @@ export class HistoryPanel implements Component, Focusable {
         return { handled: true }
       }
       if (hit.kind === 'actions') {
+        if (!this.remoteFrameCurrent(frame)) return undefined
         const action = this.actionAt(hit, event.x)
         if (action === undefined) return undefined
         // The ACTION is only armable while the row it belongs to is a real,
@@ -887,6 +901,7 @@ export class HistoryPanel implements Component, Focusable {
         return { handled: true }
       }
       if (hit.kind === 'footer') {
+        if (!this.remoteFrameCurrent(frame)) return undefined
         // A Footer press only arms the EXACT painted action; the release must
         // re-prove the same frame, seat state and (for Use/Copy) result id.
         const action = this.footerActionAt(hit, event.x)
@@ -908,6 +923,7 @@ export class HistoryPanel implements Component, Focusable {
         return { handled: true }
       }
       if (hit.kind === 'preview') {
+        if (!this.remoteFrameCurrent(frame)) return undefined
         // A press inside the painted Preview starts the exact source drag — ONLY
         // when a Remote body is verified: a bounded preview is never draggable
         // into an "exact" copy.
@@ -1126,6 +1142,7 @@ export class HistoryPanel implements Component, Focusable {
       if (selected && body.kind === 'ready') {
         return {
           id: row.id,
+          identity: `${row.id}\u0000${row.contentSha256}`,
           summary: row.preview,
           content: body.text,
           cwd: row.effectiveCwd,
@@ -1138,6 +1155,7 @@ export class HistoryPanel implements Component, Focusable {
       if (selected && body.kind === 'failed') {
         return {
           id: row.id,
+          identity: `${row.id}\u0000${row.contentSha256}`,
           summary: row.preview,
           content: body.preview,
           cwd: row.effectiveCwd,
@@ -1149,6 +1167,7 @@ export class HistoryPanel implements Component, Focusable {
       }
       return {
         id: row.id,
+        identity: `${row.id}\u0000${row.contentSha256}`,
         summary: row.preview,
         content: row.preview,
         cwd: row.effectiveCwd,
@@ -1201,7 +1220,8 @@ export class HistoryPanel implements Component, Focusable {
     // bottom rule first, then the top one, before any Preview region shrinks.
     if (layout.topRule) push(color.border('─'.repeat(layout.width)), { kind: 'inert' })
     if (layout.header) {
-      const header = this.renderHeader(layout.width)
+      this.queryIndexing = undefined
+      const header = this.renderHeader(layout)
       push(header.text, header.hit)
     }
     if (layout.query) push(this.renderQueryRow(layout.width), { kind: 'search', xOffset: visibleWidth('Search: ') })
@@ -1304,12 +1324,30 @@ export class HistoryPanel implements Component, Focusable {
 
   // ── rendering ────────────────────────────────────────────────────────────
 
-  private renderHeader(width: number): { text: string; hit: HistoryMouseHit } {
+  private remoteIndexingText(compact: boolean): string | undefined {
+    const view = this.remoteView
+    if (view?.status !== 'partial' || view.progress === undefined) return undefined
+    const { settled, total } = view.progress
+    const percent = total === 0 ? 0 : Math.floor((settled * 100) / total)
+    return compact
+      ? `Indexing ${String(percent)}%`
+      : `Indexing ${String(settled)}/${String(total)} (${String(percent)}%)`
+  }
+
+  private renderHeader(layout: HistorySeatLayout): { text: string; hit: HistoryMouseHit } {
+    const width = layout.width
     // Identity is Title Case, role 1 (`textStrong`); the leading/trailing blank
     // width of the old ` Input history ` is preserved.
     const title = ' Input History '
-    const hint = `${HISTORY_CHORDS.expand.label} ${this.expanded ? 'collapse' : 'expand'}`
     const tabs = this.renderTabs(width)
+    // The Results counter is only painted when the region can keep a real result
+    // row with it. When it is omitted (short grant), the existing Header/Query
+    // row must still state the indexing fact instead of looking like a full page.
+    const counterPainted = layout.resultsRows >= 2 && this.state.results.length > 0
+    const headerIndexing = counterPainted || this.state.results.length === 0
+      ? undefined
+      : this.remoteIndexingText(false)
+    const hint = headerIndexing ?? `${HISTORY_CHORDS.expand.label} ${this.expanded ? 'collapse' : 'expand'}`
     const headPlain = `${title}${tabs.plain}`
     // The hit spans are resolved from the SAME text the final row paints: a
     // label clipped by the head clamp (or covered by its trailing ellipsis)
@@ -1333,6 +1371,18 @@ export class HistoryPanel implements Component, Focusable {
         text: `${color.textStrong(title)}${tabs.styled}${' '.repeat(gap)}${color.textMuted(hint)}`,
         hit: publishHit(headPlain, false),
       }
+    }
+    if (headerIndexing !== undefined) {
+      const compact = this.remoteIndexingText(true)
+      const compactGap = compact === undefined ? -1 : width - visibleWidth(headPlain) - visibleWidth(compact)
+      if (compact !== undefined && compactGap >= 2) {
+        return {
+          text: `${color.textStrong(title)}${tabs.styled}${' '.repeat(compactGap)}${color.textMuted(compact)}`,
+          hit: publishHit(headPlain, false),
+        }
+      }
+      // No room beside the head: the SAME query row carries the compact fact.
+      this.queryIndexing = compact
     }
     // Cramped: the F2 hint is removed WHOLE (never a partial `F2 exp…`); the
     // scope tabs keep their own ink while the head fits, and the head is
@@ -1397,9 +1447,13 @@ export class HistoryPanel implements Component, Focusable {
     // and cursor, which is never re-rendered or trimmed here.
     const label = 'Search: '
     const labelWidth = visibleWidth(label)
-    const inputLines = this.input.render(Math.max(1, width - labelWidth))
+    const indexing = this.queryIndexing
+    const reserve = indexing === undefined ? 0 : visibleWidth(` ${indexing}`)
+    const inputLines = this.input.render(Math.max(1, width - labelWidth - reserve))
     const first = inputLines[0] ?? ''
-    return `${color.textDim(label)}${first}${' '.repeat(Math.max(0, width - labelWidth - visibleWidth(first)))}`
+    const padding = Math.max(0, width - labelWidth - visibleWidth(first) - reserve)
+    return `${color.textDim(label)}${first}${' '.repeat(padding)}`
+      + (indexing === undefined ? '' : color.textMuted(indexing))
   }
 
   private renderMessage(width: number): string {
@@ -1408,7 +1462,13 @@ export class HistoryPanel implements Component, Focusable {
       // loading, incomplete/unavailable/denied/failed/stale/too-long and the
       // honest `No matches` all arrive from ONE committed view.
       const failed = this.state.error !== undefined
-      const text = this.state.error ?? (this.remoteView?.message || 'Loading history…')
+      const view = this.remoteView
+      let text = this.state.error ?? (view?.message || 'Loading history…')
+      if (view?.status === 'partial' && view.progress !== undefined && (view.rows.length === 0)) {
+        const { settled, total } = view.progress
+        const withCount = `No matches yet — indexing… (${String(settled)}/${String(total)})`
+        if (visibleWidth(withCount) <= Math.max(1, width - 2)) text = withCount
+      }
       // Remote status text may carry a stable Host failure code: it is display
       // material, never a terminal protocol byte. The raw state stays untouched.
       const plain = clampLine(`  ${sanitizedPhysicalLine(text)}`, width)
@@ -1422,6 +1482,28 @@ export class HistoryPanel implements Component, Focusable {
     // `error` (a no-match must never read as a failure).
     const plain = clampLine(`  ${text}`, width)
     return failed ? color.error(plain) : color.textDim(plain)
+  }
+
+  /**
+   * The ONE Remote counter/status line. A partial page must keep the visible
+   * indexing word instead of letting a long `Results ...` suffix be truncated
+   * into an apparent full page; progress-only changes reuse the same row.
+   */
+  private remoteCounterText(count: number, width: number): string {
+    const view = this.remoteView
+    if (view === undefined) return `Results · ${String(count)} shown`
+    if (view.status !== 'partial' || view.progress === undefined) return view.message
+    const { settled, total } = view.progress
+    const percent = total === 0 ? 0 : Math.floor((settled * 100) / total)
+    const candidates = count === 0
+      ? ['No matches yet — indexing…', `Indexing ${String(settled)}/${String(total)} (${String(percent)}%)`, `Indexing ${String(percent)}%`]
+      : [
+        `Results · ${String(count)} shown · Indexing ${String(settled)}/${String(total)} (${String(percent)}%)`,
+        `Indexing ${String(settled)}/${String(total)} (${String(percent)}%)`,
+        `Indexing ${String(percent)}%`,
+        'Indexing',
+      ]
+    return candidates.find(text => visibleWidth(text) <= width) ?? candidates[candidates.length - 1]!
   }
 
   /** The results list: one single-line virtual window that FOLLOWS the
@@ -1443,7 +1525,7 @@ export class HistoryPanel implements Component, Focusable {
       // `Loading more…`, `Searching…`), so a page/status change is readable.
       const counterText = this.remote === undefined
         ? `Results · ${count} match${count === 1 ? '' : 'es'}`
-        : sanitizedPhysicalLine(this.remoteView?.message || `Results · ${String(count)} shown`)
+        : sanitizedPhysicalLine(this.remoteCounterText(count, width))
       const plain = clampLine(counterText, width)
       if (!counterText.startsWith('Results · ')) {
         // A transient Remote status (Searching… / Loading more…) is ONE muted
@@ -1917,7 +1999,8 @@ export class HistoryPanel implements Component, Focusable {
   /** A NEW selected result starts its Preview at the top; a repaint of the SAME
    *  result keeps the manual scroll position. */
   private reanchorPreview(): void {
-    const id = this.selected()?.id
+    const selected = this.selected()
+    const id = selected === undefined ? undefined : selected.identity ?? selected.id
     if (id === this.previewResultId) return
     this.previewResultId = id
     this.previewTop = 0
@@ -1991,6 +2074,10 @@ export class HistoryPanel implements Component, Focusable {
   private handleWheel(event: TuiMouseEvent, frame: HistoryMouseFrame): TuiMouseEventResult | undefined {
     const delta = event.wheelDelta ?? 0
     if (delta === 0) return undefined
+    // The list/preview regions come from the painted frame; a wheel consumed
+    // against a new automatic page before its repaint would retarget the new
+    // selection/preview through old coordinates.
+    if (!this.remoteFrameCurrent(frame)) return undefined
     const inList = frame.listTop !== undefined && frame.listBottom !== undefined
       && event.y >= frame.listTop && event.y <= frame.listBottom
     if (inList) {
@@ -2053,9 +2140,18 @@ export class HistoryPanel implements Component, Focusable {
     if (selected === undefined) return false
     if (this.remote !== undefined) {
       if (this.state.loading) return false
+      if (!this.remoteFrameCurrent()) return false
       if (!this.remoteExactBodyReady(selected)) return false
     }
     return this.frame?.paintedResultIds.has(selected.id) === true
+  }
+
+  /** A Remote data target (row, action, footer or wheel region) is only
+   *  consumable from the last PAINTED generation. Chrome/cancel/search input
+   *  stays live while an automatic refresh is waiting for its repaint. */
+  private remoteFrameCurrent(frame = this.frame): boolean {
+    return this.remote === undefined
+      || (frame !== undefined && frame.generation === this.state.generation)
   }
 
   /** Whether the selected Remote row owns a verified, non-empty exact body. */
@@ -2114,9 +2210,10 @@ export class HistoryPanel implements Component, Focusable {
     const view = this.remoteView
     if (view === undefined || view.moreLoading) return false
     if (this.remoteBlockingFailure()) return true
-    // A body failure belongs to a READY page: a pending query/loading status
-    // keeps its own message and must not offer a Retry of an older body.
-    return view.status === 'ready' && view.body.kind === 'failed'
+    // A body failure belongs to a readable page (ready or first-cold partial):
+    // a pending query/loading status keeps its own message and must not offer a
+    // Retry of an older body.
+    return (view.status === 'ready' || view.status === 'partial') && view.body.kind === 'failed'
   }
 
   /** A seat failure that leaves NO readable page: PgDn is its keyboard Retry. */

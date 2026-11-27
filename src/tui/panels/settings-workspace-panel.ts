@@ -802,25 +802,33 @@ export interface EmbeddedSpecialistPage extends Component {
    */
   requestParentLeave?(target: SpecialistParentLeaveTarget, leave: () => void): 'allow' | 'refuse'
   /**
-   * SUX-06B: the Web workbench's ONE real body/bar grant for THIS frame. Only
-   * the mounted Web page implements this seam; every other specialist keeps its
-   * existing `setMaxRows` budget.
+   * SUX-06B/SUX-07: the shared Adaptive Workbench's ONE real body/bar grant for
+   * THIS frame (the Web Search / Fetch page and the MCP servers page). Every
+   * other specialist keeps its existing `setMaxRows` budget.
    */
   setWebWorkbenchGrant?(grant: WebWorkbenchGrant): void
-  /** SUX-06B: the Web page's current LOCAL region (list or Detail). The Root
+  /** SUX-06B/SUX-07: the mounted workbench's current LOCAL region. The Root
    *  routes Tab and pointer focus between the rail and this region. */
   webWorkbenchRegion?(): 'list' | 'detail'
   /**
-   * SUX-06B: whether a USER parent navigation may retire the Web workbench
+   * SUX-06B/SUX-07: whether a USER parent navigation may retire the workbench
    * right now. The page owns this answer from its local region and phases: a
    * saving write, an active choice/action, or a visible unknown outcome refuses;
    * a clean browse or a truly read-only Detail allows the normal parent path.
    */
   webWorkbenchBlocksParentNavigation?(): boolean
-  /** SUX-06B: whether the Root may move the keyboard from the Web LIST to the
-   *  visible Categories rail without retiring the mounted page. Only the
-   *  untouched list root may yield; a saving row or the active Detail keeps it. */
+  /** SUX-06B/SUX-07: whether the Root may move the keyboard from the workbench
+   *  LIST to the visible Categories rail without retiring the mounted page.
+   *  Only the untouched list root may yield; a saving row or the active Detail
+   *  keeps it. */
   webWorkbenchCanYieldToRail?(): boolean
+  /**
+   * SUX-07: whether the workbench's CURRENT sub-view must occupy the whole body
+   * (the MCP configuration form and every risk confirmation). The Root then
+   * paints no rail/list/detail background and publishes no target outside the
+   * child. The shared Web page never requires it.
+   */
+  workbenchRequiresFullWidth?(): boolean
   /** Revoke one in-flight body press when another owner claims the gesture. */
   cancelPointer?(): void
 }
@@ -1443,6 +1451,10 @@ export class SettingsWorkspacePanel implements Component {
     readonly revision: number
     readonly box: ContentBox
   } | undefined
+  /** SUX-07: the last painted workbench's full-width requirement. A live change
+   *  (form/risk enter or leave) alters the whole frame projection; until that
+   *  frame paints, only the real Esc may act. */
+  private paintedWorkbenchFullWidth: boolean | undefined
   /** The active Models/Account direct page (at most one). */
   private authPage: SettingsAuthPage | undefined
   private authPageCategory: 'models' | 'account' | undefined
@@ -4324,7 +4336,13 @@ export class SettingsWorkspacePanel implements Component {
     // activate against the previous seat).
     if (this.webWorkbenchActive()) {
       if (this.paintedLayout === undefined) return false
-      return this.paintedFocus !== this.focus
+      if (this.paintedFocus !== this.focus) return true
+      // SUX-07: entering/leaving the MCP full-width form or a risk question
+      // repaints the whole body projection (rail/list/detail disappear) without
+      // a focus change. Until that frame paints, no new body target or business
+      // key may act against the previous geometry.
+      return this.paintedWorkbenchFullWidth !== undefined
+        && this.paintedWorkbenchFullWidth !== this.workbenchLiveFullWidth()
     }
     // Scope: ONLY the embedded plugin page. It is the one direct page whose keys
     // the ROOT also intercepts (Shift+Tab) and whose yield swaps the narrow
@@ -4376,18 +4394,29 @@ export class SettingsWorkspacePanel implements Component {
   // ── the embedded specialist page (C2-R3) ──────────────────────────────────
 
   /**
-   * SUX-06B: the ONE Adaptive Workbench authority. It is the mounted specialist
-   * SLOT plus its row route — never the selected row, the category name, a
-   * painted label or the factory's mere presence.
+   * SUX-06B/SUX-07: the ONE Adaptive Workbench authority. It is the mounted
+   * specialist SLOT plus its row route — never the selected row, the category
+   * name, a painted label or the factory's mere presence. The Web Search /
+   * Fetch page and the MCP servers page are the TWO real consumers.
    */
   private webWorkbenchActive(): boolean {
-    return this.specialistPage !== undefined && this.specialistRow === 'web-settings'
+    return this.specialistPage !== undefined
+      && (this.specialistRow === 'web-settings' || this.specialistRow === 'mcp-servers')
+  }
+
+  /** SUX-07: whether the mounted workbench's CURRENT sub-view needs the whole
+   *  body (the MCP form and its confirmations). */
+  private workbenchLiveFullWidth(): boolean {
+    return this.webWorkbenchActive()
+      && this.specialistPage?.workbenchRequiresFullWidth?.() === true
   }
 
   /** Whether the workbench really paints a SECOND region beside the current
-   *  seat (the 76+ / 6+ pair). A one-region grant makes Tab/Shift+Tab inert. */
+   *  seat (the 76+ / 6+ pair). A full-width sub-view or a one-region grant
+   *  makes Tab/Shift+Tab inert. */
   private webWorkbenchPairAvailable(): boolean {
-    return this.intents.columns() >= SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS
+    return !this.workbenchLiveFullWidth()
+      && this.intents.columns() >= SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS
       && this.webWorkbenchLiveContentRows() >= 6
   }
 
@@ -4512,9 +4541,9 @@ export class SettingsWorkspacePanel implements Component {
     // retired page can never close a newer one (instance-identity fence).
     const done = (): void => {
       if (this.specialistPage !== page) return
-      // SUX-06B: the Web workbench returns to the REAL level it was opened
-      // from (Rows or Detail), never to a guessed intermediate pane.
-      if (row.specialist === 'web-settings') {
+      // SUX-06B/SUX-07: the mounted workbench returns to the REAL level it was
+      // opened from (Rows or Detail), never to a guessed intermediate pane.
+      if (row.specialist === 'web-settings' || row.specialist === 'mcp-servers') {
         this.closeWebWorkbench()
         return
       }
@@ -4583,8 +4612,8 @@ export class SettingsWorkspacePanel implements Component {
     }
     this.specialistPage = page
     this.specialistRow = row.id
-    this.webReturnLevel = row.specialist === 'web-settings' ? (webOrigin ?? 'detail') : undefined
-    if (row.specialist === 'web-settings') this.commitWebSeat(this.focus)
+    this.webReturnLevel = row.specialist === 'web-settings' || row.specialist === 'mcp-servers' ? (webOrigin ?? 'detail') : undefined
+    if (row.specialist === 'web-settings' || row.specialist === 'mcp-servers') this.commitWebSeat(this.focus)
     this.pressedGesture = undefined
     this.contentPressed = undefined
     this.bumpRevision()
@@ -4649,6 +4678,7 @@ export class SettingsWorkspacePanel implements Component {
     this.specialistRow = undefined
     this.webReturnLevel = undefined
     this.paintedSpecialistBox = undefined
+    this.paintedWorkbenchFullWidth = undefined
     this.tenantBarLine = undefined
     page.focused = false
     page.dispose()
@@ -4892,6 +4922,12 @@ export class SettingsWorkspacePanel implements Component {
     if (rows < 1) {
       return { railWidth: 0, childX: 0, childWidth: 0, childRows: 0, allowDual: false, paintChild: false }
     }
+    // SUX-07: the MCP configuration form and every risk question own the whole
+    // body at every width. No rail/list/detail background is published, so a
+    // hidden parent cell can never be clicked behind the full-width view.
+    if (this.workbenchLiveFullWidth()) {
+      return { railWidth: 0, childX: 0, childWidth: width, childRows: rows, allowDual: false, paintChild: true }
+    }
     // A short grant has one current logical region only: the rail, or the
     // child's current local region. It never invents a second visible pane.
     if (rows < 6) {
@@ -5037,9 +5073,25 @@ export class SettingsWorkspacePanel implements Component {
     // 0 at the FULL frame width. A child that painted no bar line leaves the
     // truthful Back-only fallback (never an invented action).
     if (plan.actionRows === 1 && contentRows < 1) {
-      const bar = this.paintBar([{ text: 'Back [Esc]', priority: 8 }], plan.width)
-      lines.push(bar.line)
-      if (bar.span !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, bar.span))
+      // SUX-07: the MCP page owns a truthful zero-body bar for its CURRENT
+      // sub-view (Back/Cancel/Keep/Waiting). The Web page keeps the original
+      // Back-only Root fallback unchanged.
+      if (this.webWorkbenchActive() && this.specialistRow === 'mcp-servers'
+        && this.focus !== 'categories' && page !== undefined) {
+        page.focused = true
+        page.setWebWorkbenchGrant?.({ width: plan.width, rows: 0, barWidth: plan.width, allowDual: false })
+        const zeroBody = page.render(plan.width).slice(0, 1)
+        lines.push(fit(zeroBody[0] ?? '', plan.width))
+        const escape = page.paintedEscapeSpan?.()
+        if (escape !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, escape))
+        for (const span of page.paintedBarSpans?.() ?? []) {
+          targets.push({ kind: 'bar-span', id: span.id, row: lines.length - 1, startCol: span.startCol, endCol: span.endCol })
+        }
+      } else {
+        const bar = this.paintBar([{ text: 'Back [Esc]', priority: 8 }], plan.width)
+        lines.push(bar.line)
+        if (bar.span !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, bar.span))
+      }
     } else if (plan.actionRows === 1) {
       if (this.focus === 'categories') {
         const bar = this.renderWebWorkbenchRailBar(plan.width)
@@ -5083,6 +5135,7 @@ export class SettingsWorkspacePanel implements Component {
       : {}
     this.paintedContentBox = undefined
     this.paintedTargets = targets
+    this.paintedWorkbenchFullWidth = this.workbenchLiveFullWidth()
     this.paintedRevision = this.revision
     return lines.slice(0, plan.rows)
   }
@@ -5588,8 +5641,10 @@ export class SettingsWorkspacePanel implements Component {
       } else {
         // A zero-body workbench frame has no visible action: only the real Esc
         // may run the page's own Back ladder (never a hidden refresh/Tab/Open).
-        if (this.webWorkbenchActive() && !matchesKey(data, 'escape') && this.webWorkbenchLiveContentRows() < 1) return
-        if (!matchesKey(data, 'escape') && this.specialistPage.grantAwaitingPaint?.() === true) return
+        if (this.webWorkbenchActive() && !matchesKey(data, 'escape')
+          && this.webWorkbenchLiveContentRows() < 1) return
+        if (!matchesKey(data, 'escape')
+          && this.specialistPage.grantAwaitingPaint?.() === true) return
         // SUX-06B: the untouched Web list yields the keyboard to the visible
         // rail; the Detail keeps Tab as its own local List/Detail toggle, and
         // a saving/active choice refuses the yield inside the page.
@@ -6068,6 +6123,10 @@ export class SettingsWorkspacePanel implements Component {
     // detail/recorder/mutation) the rail — keyboard OR pointer — may not leave
     // the page behind its business confirmation. A forced teardown bypasses this.
     if (this.specialistPage?.blocksParentNavigation?.() === true) return
+    // SUX-07: the mounted MCP workbench owns its own leave guard (form, risk
+    // question, pending operation or an unconfirmed outcome). A parent category
+    // change must go through its explicit Back path, never silently retire it.
+    if (this.webWorkbenchActive() && this.specialistPage?.webWorkbenchBlocksParentNavigation?.() === true) return
     const changed = category !== this.categoryId
     // A Host mutation owns the page: user navigation may not abandon it. The
     // gate covers the MOUSE switch too: the keyboard may never leave a page
@@ -6108,10 +6167,15 @@ export class SettingsWorkspacePanel implements Component {
     // so the entry waits for the content to take the focus (enterContent /
     // the content-focus click), whose own hook admits exactly one read.
     if (category === 'about' && changed && this.paintsDirectContent()) this.intents.onAboutEnter?.()
+    // A same-category rail click is a YIELD request only while the mounted
+    // workbench really may yield (a clean List); an active Detail/form keeps
+    // the child seat, so it must be refused BEFORE the logical focus moves.
+    if (!changed && this.specialistRow === 'mcp-servers' && focus === 'categories'
+      && this.specialistPage?.webWorkbenchCanYieldToRail?.() !== true) return
     this.focus = focus
-    // A same-category reselect keeps the mounted Web page: project the logical
+    // A same-category reselect keeps the mounted workbench: project the logical
     // seat onto it synchronously, exactly like the explicit handoff helper.
-    if (!changed) this.commitWebSeat(focus)
+    if (!changed && this.webWorkbenchActive()) this.commitWebSeat(focus)
     // The direct page is mounted only when its content column is PAINTED: a
     // narrow terminal that still shows the category list has no right column,
     // and browsing an invisible category must not start a Host watch.
@@ -6806,6 +6870,9 @@ export class SettingsWorkspacePanel implements Component {
           y: event.y - box.top,
           screenX: event.screenX - box.x,
           screenY: event.screenY - box.top,
+          // SUX-07: the workbench receives ITS painted body grant, never the
+          // terminal frame size. The MCP wheel path checks this width.
+          ...(this.webWorkbenchActive() ? { width: box.width, height: box.rows } : {}),
         })
         this.intents.requestRender()
         return result
@@ -7584,6 +7651,7 @@ export class SettingsWorkspacePanel implements Component {
     this.specialistPage = undefined
     this.specialistRow = undefined
     this.paintedSpecialistBox = undefined
+    this.paintedWorkbenchFullWidth = undefined
     this.tenantBarLine = undefined
     this.specialistPressed = undefined
     // An external Settings teardown releases the hosted Plugin page's owner
