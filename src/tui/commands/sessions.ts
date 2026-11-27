@@ -23,13 +23,13 @@ import type {
 } from '../../app/command/session-browser-presentation.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type SessionScope } from '../../app/session/scope.ts'
-import { SessionNavigationStopError, type NavigationIntent } from '../../app/session/transition.ts'
+import { SessionNavigationStopError, type NavigationIntent, type TransitionOutcome } from '../../app/session/transition.ts'
 import type { SessionSwitchOutcome } from '../../app/session/runtime.ts'
 import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { createWorkspaceNextIntentOwner } from '../../app/session/workspace-next-intent.ts'
 import { recoverableWorkspaceSelection } from '../../app/session/workspace-selection-recovery.ts'
-import { LifecycleError, WorkspaceSelectionError, type ResolvedWorkspaceSelection, type WorkspaceSelectionIntent } from '../../runtime/session-lifecycle-port.ts'
+import { LifecycleError, WorkspaceSelectionError, type ResolvedWorkspaceSelection, type WorkspaceSelectionIntent, type WorkspaceNewConversationCapture } from '../../runtime/session-lifecycle-port.ts'
 import {
   findSessionMatch,
   sanitizeTerminalText,
@@ -49,6 +49,7 @@ type SessionCommandRunner = Pick<
   TuiCommandRunner,
   | 'agents'
   | 'awaitPendingDefaultWrite'
+  | 'backendKind'
   | 'awaitWorkspacePreflight'
   | 'captureSessionScope'
   | 'catalog'
@@ -76,6 +77,7 @@ type SessionCommandRunner = Pick<
   | 'switchSession'
   | 'switchSessionOutcome'
   | 'transitionTo'
+  | 'transitionToActualId'
   | 'withSessionTransition'
   | 'withWriter'
   | 'workspaceNextIntent'
@@ -987,6 +989,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           scope: runner.captureSessionScope(),
           admission: { oldStopAccepted: false },
         }
+        // Remote explicit New pins the official Connection generation at the
+        // gesture. Direct keeps the ordinary pre-generated fresh-id path.
+        const workspaceNewCapture: WorkspaceNewConversationCapture | undefined =
+          runner.backendKind === 'remote' ? runner.agents.captureWorkspaceNewConversation?.() : undefined
+        if (runner.backendKind === 'remote' && workspaceNewCapture === undefined) {
+          return done({ kind: 'error', text: 'fresh session creation failed: the remote connection is not connected' })
+        }
         // The quiesce callback is the ONLY proof that the old Turn reached
         // idle. An accepted stop is just a REQUEST until then.
         let oldOwnerQuiesced = false
@@ -1054,7 +1063,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           }
           let workspace: ResolvedWorkspaceSelection
           try {
-            workspace = await runner.agents.resolveWorkspace(intent, signal)
+            workspace = await runner.agents.resolveWorkspace(intent, signal, workspaceNewCapture)
           } catch (error) {
             // A cancellation-shaped resolution rejection is NOT a user-visible
             // failure: it propagates to the owned task's cancellation
@@ -1091,12 +1100,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             // fresh session is created, the commit is synchronous, and a failure
             // anywhere before the create leaves the current session untouched
             // (no published child to roll back).
-            const sessionId = newSessionId()
             // The concrete preset id is resolved ONCE and rides the create (a
             // rejected create is NEVER retried — the old session stays current).
             // The preset COMPOSITION (setup callback) is resolved inside the
             // Direct session lifecycle from this id — the command surface only
             // ever sees the identity (migration M1.11).
+            const freshSessionId = workspaceNewCapture === undefined ? newSessionId() : undefined
             let resolved
             try {
               resolved = await runner.catalog.presets.resolve(runner.effectivePresetId, runner.signal)
@@ -1122,11 +1131,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               if (isCancellation(error) || runner.signal.aborted) throw error
               return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}${stopNote()}` }
             }
-            const result = await runner.transitionTo({
-              // The Host-verified canonical Workspace directory is a display
-              // hint only; the durable header cwd is resolved by the Host from
-              // the Workspace id below.
-              target: { id: String(sessionId), header: { cwd: workspace.path } },
+            const steps = {
+              // Remote explicit New has no candidate-owned identity: the Host's
+              // returned id is the only committed target. Direct keeps its
+              // pre-generated fresh id and existing opening journal.
+              target: freshSessionId === undefined
+                ? { header: { cwd: workspace.path } }
+                : { id: String(freshSessionId), header: { cwd: workspace.path } },
               onOldOwnerQuiesced: () => { oldOwnerQuiesced = true },
               create: async () => {
                 // Re-wait immediately before dispatch: a newer sessionless /model may
@@ -1156,8 +1167,17 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
                 if (nextIntentCapture !== undefined && !nextIntentCapture.isCurrent()) {
                   throw new WorkspaceSelectionError('superseded', 'workspace selection changed before fresh session creation')
                 }
+                if (workspaceNewCapture !== undefined) {
+                  return runner.agents.create({
+                    workspaceId: workspace.workspaceId,
+                    agentPreset: resolved.id,
+                    capture: workspaceNewCapture,
+                    signal,
+                  })
+                }
+                if (freshSessionId === undefined) throw new Error('fresh Session id was not generated')
                 return runner.agents.create({
-                  sessionId: String(sessionId),
+                  sessionId: String(freshSessionId),
                   // The official Host Workspace identity is the ONE directory
                   // authority; no cwd crosses this request. The Host resolves
                   // the durable directory from its own registry.
@@ -1168,7 +1188,15 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
                   agentPreset: resolved.id,
                 })
               },
-            })
+            }
+            let result: TransitionOutcome<unknown>
+            if (freshSessionId === undefined) {
+              const transition = runner.transitionToActualId
+              if (transition === undefined) throw new Error('actual-id session transition is unavailable')
+              result = await transition({ ...steps, target: { header: { cwd: workspace.path } } })
+            } else {
+              result = await runner.transitionTo({ ...steps, target: { id: String(freshSessionId), header: { cwd: workspace.path } } })
+            }
             if (!result.ok) {
               if (result.error instanceof LifecycleError) {
                 // Preserve the machine-readable cause (incl. a published identity for
@@ -1195,11 +1223,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               workspaceNextIntent.consumeAfterCommittedCreate(nextIntentCapture)
             }
             // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
-            // drop the unpinned ones now, never before (a failed create keeps
-            // the current session and its drafts intact; in-flight submissions
-            // keep their pinned drafts — review finding 2).
-            runner.imageStore.clearUnpinned()
-            runner.fileStore?.clearUnpinned()
+            // drop the unpinned ones only when this was a genuine owner change.
+            // Exact-binding reuse and the sessionless first-owner path keep the
+            // active draft and staged attachments.
+            if (navigation.scope.sessionId !== undefined && !runner.isSessionScopeCurrent(navigation.scope)) {
+              runner.imageStore.clearUnpinned()
+              runner.fileStore?.clearUnpinned()
+            }
             return { kind: 'success', text: 'started a fresh session' }
           }, navigation))
         } catch (error) {

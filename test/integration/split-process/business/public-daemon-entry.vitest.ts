@@ -67,6 +67,15 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
+async function clickFrameText(launch: PublicDaemonLaunch, text: string, label: string): Promise<void> {
+  const frame = await waitForFrame(launch, text, label)
+  const lines = frame.split('\n')
+  const y = lines.findIndex(line => line.includes(text))
+  if (y < 0) throw new Error(`${label}: ${JSON.stringify(text)} is not painted`)
+  const x = lines[y]!.indexOf(text) + 1
+  await launch.mouseClick(x, y)
+}
+
 async function exitPublicLaunch(
   launch: PublicDaemonLaunch,
   label: string,
@@ -202,6 +211,148 @@ test('starts one real public daemon Client and Host from the installed CLI', asy
           'the public daemon business test failed and its Scene cleanup also failed')
       }
       throw new AggregateError(teardown, 'the public daemon business test cleanup failed')
+    }
+  }
+})
+
+test('explicit New hides quiet blanks, closes without writing, reuses the actual blank and publishes its first-turn visibility', async () => {
+  const scene = await createSplitProcessScene()
+  const launches: PublicDaemonLaunch[] = []
+  let testError: unknown
+  try {
+    const seeded = await scene.startPublicDaemon({ label: 'rbs-1-seeded-history', backend: 'daemon', cols: 140, rows: 40 })
+    launches.push(seeded)
+    await waitForFrame(seeded, '❯', 'RBS-1 seeded composer')
+    const hostIdentity = seeded.host?.instanceId
+    expect(hostIdentity, 'the public Host identity is authenticated').toBeTruthy()
+
+    const beforeHistory = new Set(await scene.sessionIds())
+    await seeded.submit('started history prompt')
+    const historyId = await scene.waitForNewSessionId(beforeHistory, 'RBS-1 started history')
+    await scene.waitForSessionEvent(historyId, 0,
+      event => event.type === 'assistant/message' && JSON.stringify(event.data ?? {}).includes('stub answer'),
+      'RBS-1 started history answer')
+    await seeded.submit('/title Started H')
+    await waitForFrame(seeded, 'Started H', 'RBS-1 started history title')
+
+    const beforeFirstBlank = new Set(await scene.sessionIds())
+    await seeded.submit('/new')
+    const firstBlankId = await scene.waitForNewSessionId(beforeFirstBlank, 'RBS-1 first quiet blank')
+    await waitForFrame(seeded, '❯', 'RBS-1 first blank composer')
+    await seeded.submit('/title Quiet B')
+    await waitForFrame(seeded, 'Quiet B', 'RBS-1 first blank title')
+    expect((scene.sessionEvents(firstBlankId) ?? []).some(event => event.type === 'turn/start'),
+      'the explicit New operation itself starts no Turn').toBe(false)
+    await exitPublicLaunch(seeded, 'RBS-1 first blank launch')
+
+    const minimal = await scene.startPublicDaemon({
+      label: 'rbs-1-second-blank',
+      backend: 'daemon',
+      args: { preset: 'minimal' },
+      cols: 140,
+      rows: 40,
+    })
+    launches.push(minimal)
+    expect(minimal.host?.instanceId, 'the second blank uses the same authenticated Host').toBe(hostIdentity)
+    await waitForFrame(minimal, '❯', 'RBS-1 minimal composer')
+    const beforeSecondBlank = new Set(await scene.sessionIds())
+    await minimal.submit('/new')
+    const secondBlankId = await scene.waitForNewSessionId(beforeSecondBlank, 'RBS-1 second quiet blank')
+    expect(secondBlankId).not.toBe(firstBlankId)
+    await waitForFrame(minimal, '❯', 'RBS-1 second blank composer')
+    await minimal.submit('/title Quiet C')
+    await waitForFrame(minimal, 'Quiet C', 'RBS-1 second blank title')
+    expect((scene.sessionEvents(secondBlankId) ?? []).some(event => event.type === 'turn/start'),
+      'the different-preset explicit New creates a quiet blank without a Turn').toBe(false)
+    await exitPublicLaunch(minimal, 'RBS-1 second blank launch')
+
+    const browser = await scene.startPublicDaemon({
+      label: 'rbs-1-browser-reuse',
+      backend: 'daemon',
+      args: { session: firstBlankId },
+      cols: 140,
+      rows: 40,
+    })
+    launches.push(browser)
+    expect(browser.host?.instanceId, 'the Browser launch uses the same authenticated Host').toBe(hostIdentity)
+    await waitForFrame(browser, '❯', 'RBS-1 resumed blank composer')
+    const idsBeforeBrowse = [...await scene.sessionIds()].sort()
+    await browser.submit('/sessions')
+    const hiddenFrame = await waitForFrame(browser, 'New session', 'RBS-1 Browser with quiet blanks')
+    expect(hiddenFrame).toContain('Started H')
+    expect(hiddenFrame).not.toContain('Quiet B')
+    expect(hiddenFrame).not.toContain('Quiet C')
+    expect(hiddenFrame).toContain('Sessions · 1')
+    expect(hiddenFrame).toContain('Current')
+    await clickFrameText(browser, 'Close [Esc]', 'RBS-1 pointer Close')
+    await waitForFrame(browser, '❯', 'RBS-1 Browser Close returns to composer')
+    expect([...await scene.sessionIds()].sort(), 'opening and pointer-closing the Browser creates no Session').toEqual(idsBeforeBrowse)
+
+    await browser.submit('/sessions')
+    await waitForFrame(browser, 'New session', 'RBS-1 Browser before pointer New')
+    await clickFrameText(browser, 'New session', 'RBS-1 pointer New')
+    await waitForFrame(browser, '❯', 'RBS-1 pointer New returns to composer')
+    expect([...await scene.sessionIds()].sort(), 'actual same-id reuse creates no additional Session').toEqual(idsBeforeBrowse)
+
+    await browser.submit('/sessions')
+    await waitForFrame(browser, 'New session', 'RBS-1 Browser before official push')
+    const peer = await scene.startPublicDaemon({
+      label: 'rbs-1-first-prompt-peer',
+      backend: 'daemon',
+      args: { session: firstBlankId },
+      cols: 120,
+      rows: 36,
+    })
+    launches.push(peer)
+    expect(peer.host?.instanceId, 'the first-prompt peer uses the same authenticated Host').toBe(hostIdentity)
+    await waitForFrame(peer, '❯', 'RBS-1 first-prompt peer composer')
+    await peer.submit('first prompt on reused blank')
+    await scene.waitForSessionEvent(firstBlankId, 0,
+      event => event.type === 'assistant/message' && JSON.stringify(event.data ?? {}).includes('stub answer'),
+      'RBS-1 reused blank first answer')
+    const pushedFrame = await waitForFrameMatch(browser,
+      frame => frame.includes('Sessions · 2') && !frame.includes('Quiet C'),
+      'RBS-1 official blank-false push admits only the started blank')
+    expect(pushedFrame).toContain('Started H')
+    expect([...await scene.sessionIds()].sort(), 'the first real prompt creates no additional Session').toEqual(idsBeforeBrowse)
+    await clickFrameText(browser, 'Close [Esc]', 'RBS-1 pointer Close after official push')
+    await waitForFrame(browser, '❯', 'RBS-1 composer after pushed Browser Close')
+
+    const beforeFresh = new Set(await scene.sessionIds())
+    await browser.submit('/new')
+    const freshId = await scene.waitForNewSessionId(beforeFresh, 'RBS-1 fresh actual-id create')
+    expect(freshId).not.toBe(firstBlankId)
+    expect(freshId).not.toBe(secondBlankId)
+    await waitForFrame(browser, '❯', 'RBS-1 fresh Session composer')
+    expect((scene.sessionEvents(freshId) ?? []).some(event => event.type === 'turn/start'),
+      'the no-eligible-candidate New creates one quiet Session without a Turn').toBe(false)
+
+    await exitPublicLaunch(browser, 'RBS-1 Browser launch')
+    await exitPublicLaunch(peer, 'RBS-1 first-prompt peer')
+    await peer.stopHost()
+  } catch (error) {
+    testError = error
+    throw error
+  } finally {
+    const teardown: Error[] = []
+    for (const launch of [...launches].reverse()) {
+      if (launch.closed) continue
+      try {
+        await launch.reclaim()
+      } catch (error) {
+        teardown.push(asError(error))
+      }
+    }
+    try {
+      await scene.dispose()
+    } catch (error) {
+      teardown.push(asError(error))
+    }
+    if (teardown.length > 0) {
+      if (testError !== undefined) {
+        throw new AggregateError([testError, ...teardown], 'the RBS-1 public business test and cleanup both failed')
+      }
+      throw new AggregateError(teardown, 'the RBS-1 public business test cleanup failed')
     }
   }
 })

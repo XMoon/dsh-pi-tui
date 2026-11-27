@@ -3334,7 +3334,10 @@ test('a reopen of the Session a /new command replaced waits for its deferred rel
   })
   const lifecycle: SessionLifecycle = {
     resolveWorkspace: async intent => ({ workspaceId: 'ws', path: intent.kind === 'host-path' ? intent.path : '/workspace' }),
-    create: async request => ({ ownership: 'current', outcome: { kind: 'created', handle: attach(request.sessionId) } }),
+    create: async request => {
+      if (request.capture !== undefined || request.sessionId === undefined) throw new Error('fixture expects a fresh create')
+      return { ownership: 'current', outcome: { kind: 'created', handle: attach(request.sessionId) } }
+    },
     // The Direct adapter's own open shape: the pending owner release is awaited
     // through the SAME ledger seam bootstrap wires as the Direct pool's
     // `waitForRelease` (`ownership.waitForOwnerRelease`). The real adapter's

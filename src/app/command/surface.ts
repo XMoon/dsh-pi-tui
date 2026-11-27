@@ -361,6 +361,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     /** Whether a captured navigation identity still owns the visible surface. */
     isNavigationCurrent: ApplicationSessionRuntime['isNavigationCurrent']
     transitionTo: TuiCommandRunner['transitionTo']
+    transitionToActualId?: TuiCommandRunner['transitionToActualId']
   }
   /** The status owner seams the runner delegates to. */
   readonly status: {
@@ -1779,6 +1780,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         return result
       },
       transitionTo: (steps) => deps.session.transitionTo(steps),
+      ...(deps.session.transitionToActualId === undefined ? {} : { transitionToActualId: deps.session.transitionToActualId }),
       currentPreset: deps.presets.current,
       sessionBlank: deps.presets.blank,
       // PR D2: the command surface's generic refresh is UI-only (a

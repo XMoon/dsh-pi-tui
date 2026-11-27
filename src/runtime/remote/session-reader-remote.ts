@@ -254,6 +254,9 @@ export class RemoteSessionReader implements SessionReader {
         cwd: row.cwd,
         ...(row.parentId === undefined ? {} : { parentSession: row.parentId }),
         ...(row.origin === undefined ? {} : { origin: row.origin }),
+        // Preserve the official tri-state fact from this SAME accepted row.
+        // An omitted bit stays unknown; a proven false must not be dropped.
+        ...(row.blank === undefined ? {} : { blank: row.blank }),
         // The official Client row's `formatStatus` is passed through VERBATIM:
         // no header parsing, no `cwd`-missing inference, no client-side decoder.
         ...(row.formatStatus === undefined ? {} : { formatStatus: row.formatStatus }),

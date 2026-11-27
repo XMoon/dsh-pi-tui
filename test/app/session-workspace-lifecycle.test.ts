@@ -400,6 +400,7 @@ interface Harness {
 }
 
 function harness(options: {
+  readonly backendKind?: 'direct' | 'remote'
   readonly currentSessionId?: string
   readonly rows?: readonly SessionSummary[]
   readonly list?: () => Promise<readonly SessionSummary[]>
@@ -435,6 +436,7 @@ function harness(options: {
   readonly agents?: Partial<TuiCommandRunner['agents']>
   /** The ONE transition seam the Folder-New transaction calls. */
   readonly transitionTo?: TuiCommandRunner['transitionTo']
+  readonly transitionToActualId?: TuiCommandRunner['transitionToActualId']
   /** The runner's lifetime signal (cancellation tests). */
   readonly signal?: AbortSignal
   /** PR3: the ONE Host directory browse seam this harness composes. */
@@ -567,6 +569,7 @@ function harness(options: {
     get defaultIntentOutcome() { return undefined },
     openScheduleWorkspace: () => ({ kind: 'success' } as const),
     ...sessionScopeFacts(() => state.agent, () => 1),
+    backendKind: options.backendKind ?? 'direct',
     sessionPolicy: unconfiguredSessionPolicyPort(),
     sessionMarkdown: {
       read: (sessionId, signal) => {
@@ -637,6 +640,7 @@ function harness(options: {
       return new Promise<SessionSwitchOutcome>((resolve) => { pendingSwitch = resolve })
     },
     transitionTo: options.transitionTo ?? (async <T>(steps: { create: () => Promise<T> }) => ({ ok: true, next: await steps.create() })),
+    ...(options.transitionToActualId === undefined ? {} : { transitionToActualId: options.transitionToActualId }),
     currentPreset: () => undefined,
     pendingPreset: undefined,
     effectivePresetId: undefined,
@@ -992,6 +996,105 @@ test('the Folder New row hands the official workspaceId to the real command tran
   await waitUntil(() => !h.view().includes('Sessions'), 'the committed switch retires the Browser')
   assert.equal(h.facts.handles[0]!.disposed, 1, 'the per-open Workspace follow is disposed once')
   assert.equal(creates.length, 1, 'a committed Folder New is never retried')
+})
+
+test('Remote Folder New uses the captured workspace-new branch and an actual-id target', async () => {
+  const capture = { generation: { id: 7 } }
+  const resolutions: Array<{ intent: unknown; capture: unknown }> = []
+  const creates: Array<{ sessionId?: string; workspaceId: string; capture: unknown }> = []
+  let target: { id?: string } | undefined
+  const h = harness({
+    backendKind: 'remote',
+    currentSessionId: CURRENT,
+    agents: {
+      captureWorkspaceNewConversation: () => capture,
+      resolveWorkspace: (async (intent: unknown, _signal: unknown, received: unknown) => {
+        resolutions.push({ intent, capture: received })
+        return { workspaceId: 'ws-a', path: '/ws' }
+      }) as never,
+      create: (async (input: { sessionId?: string; workspaceId: string; capture: unknown }) => {
+        creates.push(input)
+        return { session: { id: 'session-actual' } }
+      }) as never,
+    },
+    transitionToActualId: (async (steps: { target: { id?: string }; create: () => Promise<unknown> }) => {
+      target = steps.target
+      return { ok: true, next: await steps.create() }
+    }) as never,
+    transitionTo: (async (steps: { target: { id?: string }; create: () => Promise<unknown> }) => {
+      target = steps.target
+      return { ok: true, next: await steps.create() }
+    }) as never,
+  })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles[0]!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
+  ))
+  await waitUntil(() => h.view().includes('project-a · 1'), 'the official baseline is proved')
+  h.vt.sendInput('\x1b[H')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[C')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  try {
+    await waitUntil(() => creates.length === 1, 'Remote Folder New reaches the workspace-new create')
+  } catch (error) {
+    throw new Error(`${String(error)} notices=${JSON.stringify(h.notices)} view=${h.view()}`, { cause: error })
+  }
+  assert.deepEqual(resolutions, [{ intent: { kind: 'workspace-id', workspaceId: 'ws-a' }, capture }])
+  assert.equal(creates.length, 1)
+  assert.equal(creates[0]!.workspaceId, 'ws-a')
+  assert.equal(creates[0]!.capture, capture)
+  assert.equal(creates[0]!.sessionId, undefined)
+  assert.deepEqual(target, { header: { cwd: '/ws' } }, 'no candidate-owned opening id is published')
+})
+
+test('Remote New fails closed when no Connection generation can be captured', async () => {
+  let resolutions = 0
+  let creates = 0
+  const h = harness({
+    backendKind: 'remote',
+    currentSessionId: CURRENT,
+    agents: {
+      resolveWorkspace: (async () => { resolutions += 1; return { workspaceId: 'ws-a', path: '/ws' } }) as never,
+      create: (async () => { creates += 1; return { session: { id: 'unexpected' } } }) as never,
+    },
+  })
+  try {
+    const result = await h.runCommand('new')
+    assert.equal(result.kind, 'error')
+    if (result.kind !== 'error') throw new Error('unreachable')
+    assert.match(result.text ?? '', /remote connection is not connected/u)
+    assert.equal(resolutions, 0)
+    assert.equal(creates, 0)
+  } finally {
+    h.close()
+  }
+})
+
+test('sessionless Remote New commits the first actual owner without dropping staged drafts', async () => {
+  const capture = { generation: { id: 1 } }
+  let cleared = 0
+  const h = harness({
+    backendKind: 'remote',
+    agents: {
+      captureWorkspaceNewConversation: () => capture,
+      resolveWorkspace: (async () => ({ workspaceId: 'ws-a', path: '/ws' })) as never,
+      create: (async () => ({ session: { id: 'session-first' } })) as never,
+    },
+    transitionToActualId: (async (steps: { create: () => Promise<unknown> }) => ({ ok: true, next: await steps.create() })) as never,
+  })
+  h.runner.imageStore.clearUnpinned = () => { cleared += 1 }
+  try {
+    const result = await h.runCommand('new')
+    assert.equal(result.kind, 'success')
+    assert.equal(cleared, 0)
+  } finally {
+    h.close()
+  }
 })
 
 test('a command-refused Folder New keeps the Browser and releases the pending lock for a retry', async () => {

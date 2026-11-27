@@ -47,17 +47,22 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   restores the same Session, draft, editor focus and screen; the gesture never
   switches, stops or writes by itself. TSP has no PiTUI TuiApp, installs no such
   entry and keeps its native Browser.
-- **Workspace-first list, one row per Session.** The browse list paints official
-  Workspace folders in Host follow order. Each folder contains one row per listed
-  Session; within it, active priorities are Needs, Working, then ordinary
-  history, each ordered by official `updatedAt` with the previous order as the
-  tie-break. Only ordinary history is watermarked, and the watermark is
-  RENDERER-LOCAL to one Browser open. The shared default watermark is eight
-  ordinary rows for the current Workspace (and a Host-confirmed next-create
-  destination) and zero for every other Workspace; a non-current Workspace with
-  confirmed Needs/Working starts expanded with those active rows and zero
-  ordinary history; every other Workspace starts as its Folder row only.
-  Explicit manual collapse hides EVERY
+- **Workspace-first eligible list.** The browse list paints official Workspace
+  folders in Host follow order. The shared read owner keeps the complete official
+  roster, but the visible Browse corpus excludes `origin === 'subagent'` rows and
+  known quiet blank Sessions (`blank === true`) unless the exact accepted
+  Activity sample proves that row Needs attention or Working. `blank === false`
+  and an absent blank fact remain ordinary rows; selection, Current and title
+  enrichment never force a hidden row back into the list. Within each folder,
+  visible active priorities are Needs, Working, then ordinary history, each
+  ordered by official `updatedAt` with the previous order as the tie-break. Only
+  ordinary history is watermarked, and the watermark is RENDERER-LOCAL to one
+  Browser open. The shared default watermark is eight ordinary rows for the
+  current Workspace (and a Host-confirmed next-create destination) and zero for
+  every other Workspace; a non-current Workspace with confirmed Needs/Working
+  starts expanded with those active rows and zero ordinary history; every other
+  Workspace starts as its Folder row only. A real Folder with zero visible rows
+  keeps its existing `+ New session` action. Explicit manual collapse hides EVERY
   child row, active and current ones included, and leaves the Folder row with
   its trustworthy right-aligned `N Needs`/`M Working` counts; a non-zero count
   stays whole on a narrow row while zero counts yield first. `Enter`/`Right`
@@ -107,6 +112,16 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   `cancelled` (which unlock a deliberate retry). A transient notice, its expiry,
   a timer or a roster diff is never a Folder-New settlement. The Welcome chooser
   paints no `New session` and no `Use directory` child row.
+- **Remote explicit New is reuse-or-create, not a second entry.** `/new` and the
+  Folder `New session` action share the existing command-owned transaction. On
+  Remote, one operation captures the Connection generation at the gesture, reads
+  one complete Workspace baseline and one raw official Session list, and asks the
+  official `sessions.create` to reuse the first eligible blank in Workspace order
+  (or to create without a candidate when none is eligible). The Host's returned
+  identity is the only committed target. Reusing the exact current binding keeps
+  the current owner, generation, draft, recall, attachments and ingress; a
+  different actual identity follows the ordinary replacement commit. Direct keeps
+  its mandatory pre-generated fresh identity. Browse/Close never creates.
 - **The cursor is ONE typed row identity.** `> ` marks the selection; `●` marks
   the current opened Session, and `· Current` marks the one official Workspace
   that uniquely contains it. Selection never changes Current, the Host working
@@ -118,7 +133,10 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   painted: a row scrolled or budgeted out of the frame cannot be opened by a
   blind key. The cursor is preserved by row id across official reorders and
   expansion changes; a hidden Session re-anchors on its parent Folder and a
-  removed Folder on its nearest surviving neighbor.
+  removed Folder on its nearest surviving neighbor. A blank-only or Activity
+  eligibility change that removes the selected row applies the same rebase before
+  publication: its Reader/Inspector is disposed and stale Enter/pointer/read
+  completions cannot revive the hidden id.
 - **A Session row is a tree CHILD of its Folder.** The `> ` selection gutter
   keeps the tree's leftmost two cells, while a Session's `●` current bullet,
   its identity and its metadata start two cells further right; the bullet
@@ -292,8 +310,12 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
 - **Attention stays inside its Workspace.** Needs/Working are row priorities inside each official Workspace folder, never a cross-folder section or a reason to filter out sibling folders. Browse scope is not narrowed, so the header paints no outside-attention count.
 - **Search stays global.** The panel never re-filters the Host's bounded search
   page by the browse scope; only a real editor text change reaches the read
-  owner's one debounced Host search generation. `Enter` in the editor only moves
-  focus to the first real result; a second `Enter` from the results list is the
+  owner's one debounced Host search generation. Known quiet blank rows are
+  excluded from both metadata and content results even when Browse's confirmed
+  active exception makes them visible. The explicit typed-id/prefix direct-match
+  path still uses the complete official roster, so an authorized hidden blank can
+  be opened deliberately without appearing in ordinary search. `Enter` in the
+  editor only moves focus to the first real result; a second `Enter` from the results list is the
   ONE activation: it returns when that result is the Current Session and is the
   guarded Resume otherwise. Results are never re-grouped by Activity. The ONE
   fixed search context row keeps `Search all workspaces` on the left and states
@@ -407,9 +429,9 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   advancing the Browser's action/target revision. The Inspector title is its
   own display; the roster title is never rewritten. The Sessionless chooser
   paints no Inspect verb and F2 is inert there.
-- **Header, Preview and navigation.** The header is ONE row: `Sessions · <listed
-  count>` (or `Choose workspace` in the chooser) with the real `/ Search` target
-  on the right. It never repeats the Current Session id or an `All workspaces`
+- **Header, Preview and navigation.** The header is ONE row: `Sessions · <visible
+  eligible count>` (or `Choose workspace` in the chooser) with the real `/ Search`
+  target on the right. It never repeats the Current Session id or an `All workspaces`
   scope; `Current`/`Next` live on the official Folder row. `Tab`/`Shift+Tab`
   jump by ONE Folder TITLE in the projected tree (wrapping, skipping Sessions,
   New and Show more; from Add they start at the first/last Folder; zero Folders

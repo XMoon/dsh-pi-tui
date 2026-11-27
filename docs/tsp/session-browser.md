@@ -8,15 +8,20 @@ production default; TSP keeps the experimental opt-in described in
 ## Scope and authority
 
 - `SessionReader.list(currentSessionId, signal)` is the sole membership and
-  ordering authority. Only listed main Sessions are presented; `origin ===
-  'subagent'` rows are excluded.
+  ordering authority. The shared read owner keeps the complete listed main
+  roster, while Browse presents only eligible rows: `origin === 'subagent'` is
+  excluded, and a known `blank === true` row is excluded unless its exact accepted
+  Activity sample proves Needs attention or Working. False and absent blank facts
+  remain ordinary rows.
 - `SessionReader.projectionBatch(rows, signal)` enriches those rows with title
   and preset facts. A missing projection remains unknown; it is never filled
   from a local transcript or a second persistence reader.
 - `SessionReader.search(canonicalQuery, signal)` is the sole content-search
   authority. Its bounded page order, snippets and `hasMore` fact are consumed as
   returned. Content hits are intersected with the listed main rows; an unlisted
-  ID never becomes a Browser row.
+  ID never becomes a Browser row. Known blank rows are excluded from both local
+  metadata matches and Host content results, even when Browse's confirmed active
+  exception makes them visible there.
 - The Browser does not scan Client/Host files, read session logs, add a
   persistence format or change the `SessionReader` contract. Direct and Remote
   adapters keep their existing semantics.
@@ -47,8 +52,8 @@ production default; TSP keeps the experimental opt-in described in
   sessionless, Host-confirmed next-create Workspace is ordered first, labelled
   `Next`, and receives the same eight-row watermark without ever becoming
   `Current`.
-- A missing or failed Workspace baseline keeps the listed roster usable as a
-  flat fallback and states the single unavailable membership annotation; the
+- A missing or failed Workspace baseline keeps the eligible listed roster usable
+  as a flat fallback and states the single unavailable membership annotation; the
   same panel restores membership from the next fresh official baseline after a
   carrier loss (see the shared Session activity/Workspace contract in
   [host-client.md](../architecture/host-client.md)). Ambiguous membership is
@@ -107,10 +112,11 @@ production default; TSP keeps the experimental opt-in described in
   body/scroll identity; a same-id data-only Inspector refresh keeps that SAME
   identity (it opens no second page), while a real page/selection change opens a
   new reading. No Resume action is offered from Details. When the Details target
-  leaves the accepted roster/search state, the reading exits and the typed
-  session id and picker item identity are re-anchored TOGETHER to the first
-  surviving accepted row (or cleared); Enter/Footer can never resume a hidden
-  id that the painted frame does not select.
+  leaves the accepted eligible Browse/search state — including a blank-only or
+  Activity eligibility revocation while the raw roster still lists it — the
+  reading exits and the typed session id and picker item identity are re-anchored
+  TOGETHER to the first surviving accepted row (or cleared); Enter/Footer can
+  never resume a hidden id that the painted frame does not select.
 - The native Browser reports its typed Session-row selection (Browse and
   Search-results rows, plus the SAME admitted id while its read-only Details
   reading is painted; a Folder, Show more, directory editor or suspended

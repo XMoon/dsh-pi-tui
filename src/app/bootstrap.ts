@@ -3119,6 +3119,7 @@ export function applyRunnerWithRuntime(
         // second epoch counter.
         isNavigationCurrent: (expected) => sessionRuntime.isNavigationCurrent(expected),
         transitionTo: (steps) => sessionRuntime.transitionTo(steps),
+        transitionToActualId: (steps) => sessionRuntime.transitionTo(steps),
       },
       status: {
         forceContextMeasurement: () => status.forceContextMeasurement(),
@@ -3611,7 +3612,8 @@ export function applyRunnerWithRuntime(
       // The /new pre-selection: the SAME backend lifecycle port resolves the
       // Host Workspace. This bridge adds no second Workspace owner and no
       // composition-root registry query.
-      resolveWorkspace: (intent, signal) => backend.sessionLifecycle.resolveWorkspace(intent, signal),
+      resolveWorkspace: (intent, signal, capture) => backend.sessionLifecycle.resolveWorkspace(intent, signal, capture),
+      captureWorkspaceNewConversation: () => backend.sessionLifecycle.captureWorkspaceNewConversation?.(),
       create: async (options) => requireCreated(await backend.sessionLifecycle.create({ ...options, signal })),
       open: async (options) => requireOpened(await backend.sessionLifecycle.open({ ...options, signal })),
     }

@@ -63,6 +63,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
+import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
@@ -106,6 +107,7 @@ function* scriptedTextTurn(text: string): Generator<StreamChunk> {
 class StubStreamingLlmAdapter extends LlmAdapter {
   private gate: Promise<void> | undefined
   private openGate: (() => void) | undefined
+  private heldSessionId: string | undefined
   private heldStreams = 0
 
   /** How many model requests actually ENTERED the held gate (a witness that a
@@ -115,13 +117,15 @@ class StubStreamingLlmAdapter extends LlmAdapter {
     return this.heldStreams
   }
 
-  /** Hold every subsequent turn open; returns the release. */
-  hold(): () => void {
+  /** Hold every subsequent turn open, or only one exact Session when named. */
+  hold(sessionId?: string): () => void {
     this.gate = new Promise<void>(resolve => { this.openGate = resolve })
+    this.heldSessionId = sessionId
     return () => {
       const open = this.openGate
       this.gate = undefined
       this.openGate = undefined
+      this.heldSessionId = undefined
       open?.()
     }
   }
@@ -149,7 +153,7 @@ class StubStreamingLlmAdapter extends LlmAdapter {
     // LLM contract): an aborted request wakes with the abort reason instead
     // of parking the Host teardown's whenIdle() forever.
     const gate = this.gate
-    if (gate !== undefined) {
+    if (gate !== undefined && (this.heldSessionId === undefined || String(options.sessionId) === this.heldSessionId)) {
       this.heldStreams += 1
       const signal = options.signal
       if (signal === undefined) {
@@ -413,6 +417,163 @@ export async function mountRemoteRunner(
     aggregate: aggregateRef,
     dispose,
   }
+}
+
+function testGate(): { readonly promise: Promise<void>; readonly open: () => void; readonly entered: () => boolean } {
+  let settled = false
+  let open!: () => void
+  const promise = new Promise<void>(resolve => {
+    open = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+  })
+  return { promise, open, entered: () => settled }
+}
+
+async function waitForGate(gate: ReturnType<typeof testGate>, label: string): Promise<void> {
+  await waitFor(label, () => gate.entered(), 20_000)
+}
+
+/** Observe the REAL official unary carrier after the Host has produced its
+ * response. Tests may withhold that actual response; they never replace the
+ * Host result with a fabricated Session identity. */
+function observeSharedFetch(
+  life: TestLifecycle,
+  observe: (pathname: string, response: Response) => Promise<Response>,
+): void {
+  const original = HostConnectionService.prototype.createSharedFetchHandler
+  HostConnectionService.prototype.createSharedFetchHandler = function patched(channel: '/api') {
+    const shared = original.call(this, channel)
+    return {
+      ...shared,
+      async fetch(request: Request, peer: never): Promise<Response> {
+        const response = await shared.fetch(request, peer)
+        return await observe(new URL(request.url).pathname, response)
+      },
+    }
+  }
+  life.defer(() => { HostConnectionService.prototype.createSharedFetchHandler = original })
+}
+
+async function seedBlankWorkspaceSessions(
+  host: Awaited<ReturnType<typeof mountRemotePresentationHost>>,
+  sessionIds: readonly string[],
+): Promise<void> {
+  const registry = host.ctx.get('workspaceRegistry') as unknown as {
+    create(path: string): Promise<{ attachSession(id: unknown): Promise<void> }>
+  }
+  const workspace = await registry.create(host.anchorDir)
+  for (const sessionId of sessionIds) {
+    await host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke-model' } as never, { cwd: host.anchorDir })
+    await workspace.attachSession(SessionId(sessionId))
+  }
+}
+
+async function mountOfficialPeer(
+  life: TestLifecycle,
+  fixture: RemoteRunnerFixture,
+): Promise<Awaited<ReturnType<(typeof import('../support/m3-inprocess/client-runtime.ts'))['createRemoteClientRuntime']>>> {
+  const { createRemoteClientRuntime } = await import('../support/m3-inprocess/client-runtime.ts')
+  const peer = await createRemoteClientRuntime({ carrier: fixture.aggregate.wire.host.carrier })
+  life.defer(() => peer.dispose())
+  return peer
+}
+
+async function retainPeerSession(
+  peer: Awaited<ReturnType<(typeof import('../support/m3-inprocess/client-runtime.ts'))['createRemoteClientRuntime']>>,
+  sessionId: string,
+) {
+  const reference = peer.sessions.retain(SessionId(sessionId), { source: 'controllerOperation' })
+  await reference.ready
+  const binding = peer.sessions.binding(SessionId(sessionId))
+  if (binding === undefined) throw new Error(`the official peer binding for ${sessionId} is absent`)
+  return { reference, binding }
+}
+
+function hostEventTexts(
+  host: Awaited<ReturnType<typeof mountRemotePresentationHost>>,
+  sessionId: string,
+  type: string,
+): string[] {
+  const session = host.ctx.sessions.get(SessionId(sessionId)) as unknown as {
+    snapshotEvents(): readonly { readonly type: string; readonly data?: unknown }[]
+  }
+  return session.snapshotEvents().filter(event => event.type === type).map(event => JSON.stringify(event.data ?? {}))
+}
+
+async function waitForHostText(
+  host: Awaited<ReturnType<typeof mountRemotePresentationHost>>,
+  sessionId: string,
+  type: string,
+  text: string,
+): Promise<void> {
+  await waitFor(`the official Host ${type} for ${text}`, () =>
+    hostEventTexts(host, sessionId, type).some(value => value.includes(text)), 20_000)
+}
+
+function countOfficialSessionCalls(life: TestLifecycle, fixture: RemoteRunnerFixture): {
+  readonly creates: unknown[]
+  readonly retains: unknown[]
+  readonly createFailures: unknown[]
+} {
+  const sessions = fixture.aggregate.wire.client.sessions as unknown as {
+    create(options?: unknown): Promise<string>
+    retain(target: unknown, options: unknown): unknown
+  }
+  const creates: unknown[] = []
+  const retains: unknown[] = []
+  const createFailures: unknown[] = []
+  const originalCreate = sessions.create
+  const originalRetain = sessions.retain
+  sessions.create = function countedCreate(this: unknown, options?: unknown): Promise<string> {
+    creates.push(options)
+    return originalCreate.call(this, options).catch(error => {
+      createFailures.push(error)
+      throw error
+    })
+  }
+  sessions.retain = function countedRetain(this: unknown, target: unknown, options: unknown): unknown {
+    retains.push({ target, options })
+    return originalRetain.call(this, target, options)
+  }
+  life.defer(() => {
+    sessions.create = originalCreate
+    sessions.retain = originalRetain
+  })
+  return { creates, retains, createFailures }
+}
+
+function mountedEditor(fixture: RemoteRunnerFixture): {
+  setDraft(text: string): void
+  getDraft(): string
+  getInputHistory(): readonly string[]
+  submitDraft(request?: 'enter'): void
+  notifyTextForTest(): string
+} {
+  return fixture.runnerApp() as unknown as ReturnType<typeof mountedEditor>
+}
+
+async function openCurrentWorkspace(fixture: RemoteRunnerFixture, draft: string): Promise<void> {
+  const editor = mountedEditor(fixture)
+  editor.setDraft('/sessions')
+  editor.submitDraft()
+  await waitFor('the real Session Workspace opens', () =>
+    fixture.vt.getViewport().join('\n').includes('Sessions ·'), 20_000)
+  editor.setDraft(draft)
+  await fixture.vt.waitForRender()
+}
+
+async function activateCurrentFolderNew(fixture: RemoteRunnerFixture): Promise<void> {
+  fixture.vt.sendInput('\x1b[H')
+  await fixture.vt.waitForRender()
+  fixture.vt.sendInput('\x1b[B')
+  await fixture.vt.waitForRender()
+  fixture.vt.sendInput('\x1b[C')
+  await fixture.vt.waitForRender()
+  fixture.vt.sendInput('\r')
+  await fixture.vt.waitForRender()
 }
 
 /** Seed one completed durable turn on the REAL Host session. */
@@ -2456,6 +2617,400 @@ test('a real Remote /new leaves the running old turn alive while it commits the 
     'the old Session remains persisted (a Client detach is not a delete)')
   void app
 })
+
+test('explicit Remote New reuses the current exact blank binding without create, retain, reset or hydrate', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'rbs-1-same-binding-preset'
+  const sessionId = 'rbs-1-same-binding-blank'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke-model' } as never, { cwd: host.anchorDir })
+  const registry = host.ctx.get('workspaceRegistry') as unknown as {
+    create(path: string): Promise<{ attachSession(id: unknown): Promise<void> }>
+  }
+  const workspace = await registry.create(host.anchorDir)
+  await workspace.attachSession(SessionId(sessionId))
+  const listEntered = testGate()
+  const listRelease = testGate()
+  life.defer(listRelease.open)
+  let holdList = false
+  observeSharedFetch(life, async (pathname, response) => {
+    if (holdList && pathname.endsWith('/session/list')) {
+      holdList = false
+      listEntered.open()
+      await listRelease.promise
+    }
+    return response
+  })
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: sessionId, host, productionSerializer: true })
+  const sessions = fixture.aggregate.wire.client.sessions
+  const bindingBefore = sessions.binding(SessionId(sessionId))
+  assert.ok(bindingBefore !== undefined, 'the current blank Session has one official exact binding')
+  const refsBefore = sessions.retainInfo(SessionId(sessionId)).getSnapshot().referenceCount
+  const calls = countOfficialSessionCalls(life, fixture)
+  const reader = fixture.override.presentation.presentationReader as unknown as {
+    read(id: string, signal?: AbortSignal): Promise<unknown>
+  }
+  const originalRead = reader.read
+  let hydrateReads = 0
+  reader.read = function countedRead(this: unknown, id: string, signal?: AbortSignal): Promise<unknown> {
+    hydrateReads += 1
+    return originalRead.call(this, id, signal)
+  }
+  life.defer(() => { reader.read = originalRead })
+  const editor = mountedEditor(fixture)
+
+  await openCurrentWorkspace(fixture, '')
+  const recallBefore = editor.getInputHistory()
+  holdList = true
+  await activateCurrentFolderNew(fixture)
+  await waitForGate(listEntered, 'the same-binding raw list response')
+  editor.setDraft('draft survives same-binding New')
+  listRelease.open()
+  try {
+    await waitFor('same-binding New closes the Browser', () =>
+      fixture.vt.getViewport().join('\n').includes('Sessions ·') === false, 20_000)
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}\nlast frame:\n${fixture.vt.getViewport().join('\n')}`)
+  }
+
+  assert.equal(calls.creates.length, 0, 'same exact binding performs no Host create')
+  assert.equal(calls.retains.length, 0, 'same exact binding performs no second retain')
+  assert.equal(hydrateReads, 0, 'same owner performs no ordinary reset or hydrate')
+  assert.strictEqual(sessions.binding(SessionId(sessionId)), bindingBefore, 'the official binding object is unchanged')
+  assert.equal(sessions.retainInfo(SessionId(sessionId)).getSnapshot().referenceCount, refsBefore)
+  assert.equal(editor.getDraft(), 'draft survives same-binding New', 'the active draft stays byte-identical')
+  assert.deepEqual(editor.getInputHistory(), recallBefore, 'the same recall scope is not reset')
+
+  const currentBinding = sessions.binding(SessionId(sessionId)) as unknown as {
+    session: {
+      prompt(content: readonly { readonly type: 'text'; readonly text: string }[], mode: 'queue' | 'steer'): Promise<unknown>
+    }
+  }
+  assert.ok(currentBinding !== undefined)
+  const promptResult = await currentBinding.session.prompt([{ type: 'text', text: 'next prompt on same binding' }], 'queue')
+  assert.equal((promptResult as { readonly ok?: boolean }).ok, true, `the reused owner refused the next prompt: ${JSON.stringify(promptResult)}`)
+  await waitForHostText(host, sessionId, 'user/message', 'next prompt on same binding')
+  assert.equal(hostEventTexts(host, sessionId, 'user/message').filter(value => value.includes('next prompt on same binding')).length, 1,
+    'the next real prompt through the reused owner is durable exactly once')
+})
+
+test('explicit Remote New adopts the actual Host id and closes pre-retain and hydrate-to-ingress gaps exactly once', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'rbs-1-actual-id-preset'
+  const oldId = 'rbs-1-actual-id-old'
+  const candidateId = 'rbs-1-actual-id-candidate'
+  const adapter = new StubStreamingLlmAdapter()
+  const host = await mountRemotePresentationHost(life, presetId, { llmAdapter: adapter })
+  await host.harness.create(SessionId(oldId), { provider: 'smoke', model: 'smoke-model' } as never, { cwd: host.anchorDir })
+  await host.harness.create(SessionId(candidateId), { provider: 'smoke', model: 'smoke-model' } as never, { cwd: host.anchorDir })
+  const registry = host.ctx.get('workspaceRegistry') as unknown as {
+    create(path: string): Promise<{ attachSession(id: unknown): Promise<void> }>
+  }
+  const workspace = await registry.create(host.anchorDir)
+  await workspace.attachSession(SessionId(oldId))
+  await workspace.attachSession(SessionId(candidateId))
+
+  const listEntered = testGate()
+  const listRelease = testGate()
+  const createEntered = testGate()
+  const createRelease = testGate()
+  const hydrateEntered = testGate()
+  const hydrateRelease = testGate()
+  life.defer(listRelease.open)
+  life.defer(createRelease.open)
+  life.defer(hydrateRelease.open)
+  let armList = false
+  let armCreate = false
+  let actualId: string | undefined
+  observeSharedFetch(life, async (pathname, response) => {
+    if (armList && pathname.endsWith('/session/list')) {
+      armList = false
+      listEntered.open()
+      await listRelease.promise
+    }
+    if (armCreate && pathname.endsWith('/session/create')) {
+      armCreate = false
+      const envelope = await response.clone().json() as {
+        readonly result?: { readonly ok?: boolean; readonly value?: { readonly sessionId?: unknown } }
+      }
+      const published = envelope.result?.value?.sessionId
+      if (envelope.result?.ok !== true || typeof published !== 'string' || published === '') {
+        throw new Error('the real session/create response did not name its published Session')
+      }
+      actualId = published
+      createEntered.open()
+      await createRelease.promise
+    }
+    return response
+  })
+
+  let hydrateTarget: string | undefined
+  let hydrateArmed = false
+  const fixture = await mountRemoteRunner(life, {
+    presetId,
+    resumeSessionId: oldId,
+    host,
+    productionSerializer: true,
+    beforeRunnerMount: presentation => {
+      const reader = presentation.presentationReader as unknown as {
+        read(id: string, signal?: AbortSignal): Promise<unknown>
+      }
+      const realRead = reader.read
+      reader.read = async function heldHydrate(this: unknown, id: string, signal?: AbortSignal): Promise<unknown> {
+        const snapshot = await realRead.call(this, id, signal)
+        if (hydrateArmed && id === hydrateTarget) {
+          hydrateArmed = false
+          hydrateEntered.open()
+          await hydrateRelease.promise
+        }
+        return snapshot
+      }
+      life.defer(() => { reader.read = realRead })
+    },
+  })
+  await waitFor('the old owner is mounted', () => fixture.vt.getViewport().join('\n').includes('❯'), 20_000)
+  const sessions = fixture.aggregate.wire.client.sessions
+  const oldBinding = sessions.binding(SessionId(oldId)) as unknown as {
+    session: {
+      getSnapshot(): { readonly running: boolean }
+      prompt(content: readonly { readonly type: 'text'; readonly text: string }[], mode: 'queue' | 'steer'): Promise<unknown>
+    }
+  }
+  assert.ok(oldBinding !== undefined)
+  const releaseOldTurn = adapter.hold(oldId)
+  life.defer(releaseOldTurn)
+  await oldBinding.session.prompt([{ type: 'text', text: 'old turn stays busy' }], 'queue')
+  await waitFor('the old Host turn is running', () => oldBinding.session.getSnapshot().running, 20_000)
+  await waitFor('the old model request entered the selective hold', () => adapter.heldStreamCount >= 1, 20_000)
+
+  const peer = await mountOfficialPeer(life, fixture)
+  const calls = countOfficialSessionCalls(life, fixture)
+  armList = true
+  armCreate = true
+  const editor = mountedEditor(fixture)
+  editor.setDraft('/new')
+  editor.submitDraft()
+
+  await waitForGate(listEntered, 'the real raw list response before candidate dispatch')
+  const candidateReference = await retainPeerSession(peer, candidateId)
+  const candidatePrompt = await candidateReference.binding.session.prompt([{ type: 'text', text: 'candidate started after selection' }], 'queue')
+  assert.equal((candidatePrompt as { readonly ok?: boolean }).ok, true, `the live blank candidate refused its peer prompt: ${JSON.stringify(candidatePrompt)}`)
+  await waitForHostText(host, candidateId, 'user/message', 'candidate started after selection')
+  listRelease.open()
+
+  await waitForGate(createEntered, 'the real session/create response before main retain')
+  assert.ok(actualId !== undefined)
+  const publishedId = actualId
+  assert.notEqual(publishedId, candidateId, 'the Host declined the now-started candidate and published another actual id')
+  hydrateTarget = publishedId
+  hydrateArmed = true
+  const actualReference = await retainPeerSession(peer, publishedId)
+  await actualReference.binding.session.prompt([{ type: 'text', text: 'peer event before main retain' }], 'queue')
+  await waitForHostText(host, publishedId, 'user/message', 'peer event before main retain')
+  await waitFor('the pre-retain peer turn settles', () =>
+    actualReference.binding.session.getSnapshot().running === false, 20_000)
+  createRelease.open()
+
+  await waitFor('the actual Host id is retained by the main Client', () =>
+    sessions.binding(SessionId(publishedId)) !== undefined, 20_000)
+  await waitForGate(hydrateEntered, 'the actual-id hydrate snapshot before ingress subscription')
+  await actualReference.binding.session.prompt([{ type: 'text', text: 'peer event during hydrate gap' }], 'queue')
+  await waitForHostText(host, publishedId, 'user/message', 'peer event during hydrate gap')
+  await waitFor('the hydrate-gap peer turn settles', () =>
+    actualReference.binding.session.getSnapshot().running === false, 20_000)
+  hydrateRelease.open()
+
+  await waitFor('the pre-retain event paints once', () =>
+    fixture.vt.getViewport().join('\n').includes('peer event before main retain'), 20_000)
+  await waitFor('the hydrate-gap event paints once', () =>
+    fixture.vt.getViewport().join('\n').includes('peer event during hydrate gap'), 20_000)
+  assert.equal(hostEventTexts(host, publishedId, 'user/message').filter(value => value.includes('peer event before main retain')).length, 1,
+    'the pre-retain peer event is durable exactly once')
+  assert.equal(hostEventTexts(host, publishedId, 'user/message').filter(value => value.includes('peer event during hydrate gap')).length, 1,
+    'the hydrate-gap peer event is durable exactly once')
+  assert.equal(calls.creates.length, 1, 'the real Host decision comes from exactly one create dispatch')
+  assert.deepEqual(calls.creates[0], { workspaceId: expectWorkspaceId(host, oldId), sessionId: candidateId, agentPreset: presetId })
+  assert.equal(sessions.retainInfo(SessionId(oldId)).getSnapshot().referenceCount, 0,
+    'the old Client reference is released only after the actual child commits')
+  assert.equal(sessions.retainInfo(SessionId(publishedId)).getSnapshot().referenceCount, 1,
+    'the main Client owns one reference to the actual id')
+  assert.equal(peer.sessions.retainInfo(SessionId(publishedId)).getSnapshot().referenceCount, 1,
+    'the independent official peer owns its separate reference to the actual id')
+  assert.equal((host.ctx.get('agents') as unknown as { get(id: unknown): { status: string } | undefined }).get(SessionId(oldId))?.status, 'running',
+    'the busy old Host owner is never cancelled')
+  assert.equal(hostEventTexts(host, oldId, 'turn/end').length, 0, 'the old Host turn has no durable end')
+
+  candidateReference.reference.release()
+  actualReference.reference.release()
+  const actualMainBinding = sessions.binding(SessionId(publishedId))
+  assert.ok(actualMainBinding !== undefined)
+  await actualMainBinding.session.prompt([{ type: 'text', text: 'next prompt on actual id' }], 'queue')
+  await waitForHostText(host, publishedId, 'user/message', 'next prompt on actual id')
+  assert.equal(hostEventTexts(host, publishedId, 'user/message').filter(value => value.includes('next prompt on actual id')).length, 1)
+})
+
+test('a real raw Session-list response loss cannot authorize create from the ready Client snapshot', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'rbs-1-raw-list-failure-preset'
+  const oldId = 'rbs-1-raw-list-failure-old'
+  const blankId = 'rbs-1-raw-list-failure-blank'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(oldId), undefined, { cwd: host.anchorDir })
+  const append = host.ctx.sessions.get(SessionId(oldId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seedTurns(append, 1, 1, 'old raw-list owner')
+  await seedBlankWorkspaceSessions(host, [blankId])
+  const registry = host.ctx.get('workspaceRegistry') as unknown as {
+    create(path: string): Promise<{ attachSession(id: unknown): Promise<void> }>
+  }
+  const workspace = await registry.create(host.anchorDir)
+  await workspace.attachSession(SessionId(oldId))
+
+  let failList = false
+  observeSharedFetch(life, async (pathname, response) => {
+    if (failList && pathname.endsWith('/session/list')) {
+      failList = false
+      throw new Error('controlled raw Session-list response loss after the Host answered')
+    }
+    return response
+  })
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: oldId, host, productionSerializer: true })
+  await waitFor('the old owner hydrates before the raw-read negative', () =>
+    fixture.vt.getViewport().join('\n').includes('old raw-list owner answer 1'), 20_000)
+  const sessions = fixture.aggregate.wire.client.sessions
+  const oldBinding = sessions.binding(SessionId(oldId))
+  const calls = countOfficialSessionCalls(life, fixture)
+  const editor = mountedEditor(fixture)
+
+  failList = true
+  await openCurrentWorkspace(fixture, 'draft survives raw-list failure')
+  await activateCurrentFolderNew(fixture)
+  await waitFor('the real raw-list failure is visible', () =>
+    fixture.vt.getViewport().join('\n').includes('Host Session list is unavailable'), 20_000)
+  assert.equal(calls.creates.length, 0, 'a cached ready list never authorizes create after the raw read fails')
+  assert.strictEqual(sessions.binding(SessionId(oldId)), oldBinding, 'the prior exact owner remains current')
+  assert.equal(editor.getDraft(), 'draft survives raw-list failure')
+  assert.ok(fixture.vt.getViewport().join('\n').includes('Sessions ·'), 'the failed Folder New leaves the Browser open')
+
+  const connection = fixture.aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const generationBefore = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  await waitFor('the Client reaches a fresh generation', () => {
+    const id = connection.generation.getSnapshot()?.id
+    return id !== undefined && id !== generationBefore
+  }, 20_000)
+  await waitFor('the official Client list is ready again', () =>
+    sessions.list.getSnapshot().phase === 'ready', 20_000)
+  await openCurrentWorkspace(fixture, '')
+  await activateCurrentFolderNew(fixture)
+  try {
+    await waitFor('the fresh user gesture adopts the eligible blank', () =>
+      sessions.binding(SessionId(blankId)) !== undefined, 20_000)
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}\ncreates=${JSON.stringify(calls.creates)}\nnotice=${editor.notifyTextForTest()}\nlast frame:\n${fixture.vt.getViewport().join('\n')}`)
+  }
+  assert.equal(calls.creates.length, 1, 'only the deliberate post-reconnect gesture dispatches create')
+  assert.deepEqual(calls.creates[0], { workspaceId: expectWorkspaceId(host, oldId), sessionId: blankId, agentPreset: presetId })
+})
+
+test('a controlled create response loss is indeterminate, never replayed on reconnect, and a new gesture may reuse the published blank', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'rbs-1-create-response-loss-preset'
+  const oldId = 'rbs-1-create-response-loss-old'
+  const blankId = 'rbs-1-create-response-loss-blank'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(oldId), undefined, { cwd: host.anchorDir })
+  const append = host.ctx.sessions.get(SessionId(oldId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seedTurns(append, 1, 1, 'old response-loss owner')
+  await seedBlankWorkspaceSessions(host, [blankId])
+  const registry = host.ctx.get('workspaceRegistry') as unknown as {
+    create(path: string): Promise<{ attachSession(id: unknown): Promise<void> }>
+  }
+  const workspace = await registry.create(host.anchorDir)
+  await workspace.attachSession(SessionId(oldId))
+
+  let loseCreateResponse = false
+  let publishedWitness: string | undefined
+  observeSharedFetch(life, async (pathname, response) => {
+    if (loseCreateResponse && pathname.endsWith('/session/create')) {
+      loseCreateResponse = false
+      const envelope = await response.clone().json() as {
+        readonly result?: { readonly ok?: boolean; readonly value?: { readonly sessionId?: unknown } }
+      }
+      const published = envelope.result?.value?.sessionId
+      if (envelope.result?.ok !== true || typeof published !== 'string' || published === '') {
+        throw new Error('the real session/create response did not name its published Session')
+      }
+      publishedWitness = published
+      throw new Error('controlled create response loss after Host publication')
+    }
+    return response
+  })
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: oldId, host, productionSerializer: true })
+  await waitFor('the old owner hydrates before the create-loss negative', () =>
+    fixture.vt.getViewport().join('\n').includes('old response-loss owner answer 1'), 20_000)
+  const sessions = fixture.aggregate.wire.client.sessions
+  const oldBinding = sessions.binding(SessionId(oldId))
+  const calls = countOfficialSessionCalls(life, fixture)
+  const editor = mountedEditor(fixture)
+
+  await waitFor('the real New command is installed', () =>
+    (editor as unknown as { commandCompletionsForTest(): readonly { readonly name?: string }[] }).commandCompletionsForTest()
+      .some(command => command.name === 'new'), 20_000)
+  loseCreateResponse = true
+  editor.setDraft('/new')
+  editor.submitDraft()
+  await waitFor('the official Client create rejects after the controlled response loss', () =>
+    calls.createFailures.length === 1, 20_000)
+  assert.match(String(calls.createFailures[0]), /controlled create response loss after Host publication/u)
+  assert.equal(publishedWitness, blankId, 'the real Host published/reused the requested blank before its reply was lost')
+  assert.equal(calls.creates.length, 1, 'the lost reply causes no automatic second create')
+  assert.strictEqual(sessions.binding(SessionId(oldId)), oldBinding, 'the prior owner is not replaced by an unproven result')
+  assert.equal(sessions.binding(SessionId(blankId)), undefined, 'the Client never guesses adoption from the Host-side witness')
+  assert.ok(host.ctx.sessions.get(SessionId(blankId)) !== undefined, 'the authoritative Host Session really exists')
+
+  const connection = fixture.aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const generationBefore = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  await waitFor('the Client reaches a fresh generation after the lost reply', () => {
+    const id = connection.generation.getSnapshot()?.id
+    return id !== undefined && id !== generationBefore
+  }, 20_000)
+  await waitFor('the official Client list is ready after reconnect', () =>
+    sessions.list.getSnapshot().phase === 'ready', 20_000)
+  assert.equal(calls.creates.length, 1, 'reconnect alone never replays the indeterminate create')
+
+  await waitFor('the main composer is ready for the deliberate retry', () =>
+    fixture.vt.getViewport().join('\n').includes('❯'), 20_000)
+  editor.setDraft('/new')
+  editor.submitDraft()
+  await waitFor('a new user gesture adopts the already-published blank', () =>
+    sessions.binding(SessionId(blankId)) !== undefined, 20_000)
+  assert.equal(calls.creates.length, 2, 'the second dispatch belongs only to the deliberate new gesture')
+  assert.deepEqual(calls.creates[1], { workspaceId: expectWorkspaceId(host, oldId), sessionId: blankId, agentPreset: presetId })
+  const recoveredRows = await fixture.aggregate.selected.backend.sessionReader.list(undefined)
+  assert.ok(recoveredRows !== undefined)
+  assert.equal(recoveredRows.filter(row => row.id === blankId).length, 1,
+    'the recovered blank is one official row, not a duplicate Session')
+})
+
+function expectWorkspaceId(host: Awaited<ReturnType<typeof mountRemotePresentationHost>>, sessionId: string): string {
+  const registry = host.ctx.get('workspaceRegistry') as unknown as {
+    list(): readonly { readonly id?: unknown; readonly sessionIds: readonly unknown[] }[]
+  }
+  const workspace = registry.list().find(item => item.sessionIds.some(id => String(id) === sessionId))
+  assert.ok(workspace !== undefined, `the official Workspace containing ${sessionId} exists`)
+  return String(workspace.id)
+}
 
 test('pending: accepted queued -> queue pane, accepted steering -> official status, and the echo -> durable identity handoff', async (t) => {
   const life = testLifecycle(t)

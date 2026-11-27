@@ -440,6 +440,8 @@ export interface PublicDaemonLaunch {
   readonly exit: { code: number | null; signal: string | null } | null
   type(text: string): Promise<void>
   press(...keys: string[]): Promise<void>
+  /** Control-injected pointer click at one zero-based painted terminal cell. */
+  mouseClick(x: number, y: number): Promise<void>
   submit(text?: string): Promise<void>
   text(options?: { full?: boolean }): Promise<string>
   state(): Promise<PublicDaemonState>
@@ -1206,6 +1208,10 @@ class PublicDaemon implements PublicDaemonLaunch {
 
   async press(...keys: string[]): Promise<void> {
     await this.#scene.publicDaemonRequest(this.launchId, 'PUBLIC_DAEMON_INPUT', { input: { type: 'press', keys } })
+  }
+
+  async mouseClick(x: number, y: number): Promise<void> {
+    await this.#scene.publicDaemonRequest(this.launchId, 'PUBLIC_DAEMON_INPUT', { input: { type: 'mouseClick', x, y } })
   }
 
   async submit(text?: string): Promise<void> {

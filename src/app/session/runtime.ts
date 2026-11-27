@@ -569,7 +569,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     const stopReceipt = navigationReceipt
     core.bumpNavigationEpoch()
     const from = core.currentSessionId()
-    const opening = deps.surface.beginOpening(steps.target.id)
+    const opening = steps.target.id === undefined ? undefined : deps.surface.beginOpening(steps.target.id)
     // The OLD owner is captured at ADMISSION: the post-commit retirement must
     // retire exactly the owner this transition replaced.
     const oldOwner = core.owner()
@@ -647,6 +647,15 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // acquired NEW owner exactly once instead of leaking its reference.
           const nextOwner = deps.owners.fromHandle(next as SessionHandle)
           if (nextOwner === undefined) throw new Error('ordinary transition published a handle without an owned Session generation')
+          if (oldOwner !== undefined && nextOwner === oldOwner) {
+            // Exact-binding reuse is not a replacement: keep the current
+            // generation, drafts, recall, ingress and retained reference.
+            committedOwner = nextOwner
+            committedSessionId = deps.owners.sessionId(nextOwner)
+            deps.surface.settlePendingQueueRecalls(true)
+            transitionCommitted = true
+            return
+          }
           try {
             runOrdinaryCommit({
               isSurfaceDisposed: deps.surface.isSurfaceDisposed,
@@ -754,6 +763,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // fast otherwise).
         const nextOwner = committedOwner
         if (nextOwner === undefined) throw new Error('committed transition child has no owned Session generation')
+        if (nextOwner === oldOwner) return
         // D2 durability checkpoint — the FIRST post-commit step, before the OLD
         // owner's retirement and before the abort-aware child quiesce. The
         // order is load-bearing: DSH's close drains what was appended but does
@@ -901,7 +911,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         } catch (error) {
           retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
         }
-        deps.surface.clearOpening(opening)
+        if (opening !== undefined) deps.surface.clearOpening(opening)
         if (retired.length > 0) {
           deps.diag.error('transition retire failed (child committed)', {
             to: committedSessionId,
@@ -915,7 +925,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       },
       recordFailure: (phase, error) => {
         deps.diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
-        deps.surface.clearOpening(opening)
+        if (opening !== undefined) deps.surface.clearOpening(opening)
       },
       }, steps)
     } catch (error) {
@@ -929,7 +939,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       throw error
     } finally {
       if (!transitionCommitted) deps.surface.settlePendingQueueRecalls(false)
-      deps.surface.clearOpening(opening)
+      if (opening !== undefined) deps.surface.clearOpening(opening)
     }
   }
 

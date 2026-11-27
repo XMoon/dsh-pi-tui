@@ -53,6 +53,7 @@ import type {
   SessionHandle,
   SessionLifecycle,
   WorkspaceSelectionIntent,
+  WorkspaceNewConversationCapture,
 } from '../session-lifecycle-port.ts'
 import { WorkspaceSelectionError } from '../session-lifecycle-port.ts'
 import type { OperationOwnership } from '../write-outcome.ts'
@@ -76,7 +77,10 @@ import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
  *  are registry-global Session sets and stay out of the Workspace facts. */
 export interface RemoteWorkspaceFollowFrameLike {
   readonly type: string
-  readonly value?: { readonly items: readonly RemoteWorkspaceViewLike[] }
+  readonly value?: {
+    readonly items: readonly RemoteWorkspaceViewLike[]
+    readonly archivedSessionIds?: readonly string[]
+  }
   readonly workspace?: RemoteWorkspaceViewLike
   readonly workspaceId?: string
   readonly workspaceIds?: readonly string[]
@@ -132,12 +136,24 @@ export interface RemoteLifecycleSessions {
     target: RemoteSessionTarget,
     options: { readonly source: TuiSessionReferenceSource; readonly signal?: AbortSignal },
   ): RemoteSessionReferenceLike
+  /** Borrow the currently retained exact binding, when one exists. */
+  binding?(sessionId: string): {
+    readonly session: { getSnapshot(): { readonly blank: boolean } }
+  } | undefined
+  /** Official Client roster projection used only for the optional preset fact. */
+  readonly list?: {
+    getSnapshot(): {
+      readonly byId: Readonly<Record<string, { readonly projectionValues?: { readonly agentPreset?: unknown } }>>
+    }
+  }
 }
 
 /** One official Host Session-list row (the `session.list` summary subset). */
 export interface RemoteSessionListRowLike {
   readonly sessionId: string
   readonly cwd?: string
+  readonly blank?: boolean
+  readonly origin?: 'subagent'
 }
 
 /**
@@ -217,7 +233,7 @@ function errorCode(error: unknown): string | undefined {
  * pre-publication refusal code becomes `rejected`; everything else is
  * `indeterminate` with the requested id as CORRELATION ONLY.
  */
-function classifyCreateFailure(error: unknown, requestedSessionId: string): CreateOutcome {
+function classifyCreateFailure(error: unknown, requestedSessionId?: string): CreateOutcome {
   const code = errorCode(error)
   const published = publishedSessionId(error)
   if (published !== undefined) {
@@ -266,23 +282,51 @@ function classifyForkFailure(error: unknown): ForkResult['outcome'] {
   }
 }
 
+interface RemoteWorkspaceBaseline {
+  readonly items: readonly RemoteWorkspaceViewLike[]
+  readonly archivedSessionIds: readonly string[]
+}
+
+interface WorkspaceNewConversationProof {
+  readonly workspace: RemoteWorkspaceViewLike
+  readonly rows: readonly RemoteSessionListRowLike[]
+  readonly archivedSessionIds: readonly string[]
+}
+
+/** Return the already-owned main-surface handle for one exact binding. The
+ * application owner registry supplies this so same-binding reuse never calls
+ * `retain()` a second time. */
+export type RemoteCurrentOwnerHandle = (
+  sessionId: string,
+  binding: unknown,
+) => SessionHandle | undefined
+
 /** The experimental Remote session lifecycle. */
 export class RemoteSessionLifecycle implements SessionLifecycle {
   private readonly sessions: RemoteLifecycleSessions
   private readonly generation: RemoteConnectionGenerationSource
   private readonly workspace: RemoteWorkspaceNamespaceLike
   private readonly sessionList: RemoteSessionListSourceLike
+  private readonly currentOwnerHandle: RemoteCurrentOwnerHandle | undefined
+  private readonly workspaceNewProofs = new WeakMap<WorkspaceNewConversationCapture, WorkspaceNewConversationProof>()
 
   constructor(
     sessions: RemoteLifecycleSessions,
     generation: RemoteConnectionGenerationSource,
     workspace: RemoteWorkspaceNamespaceLike,
     sessionList: RemoteSessionListSourceLike,
+    currentOwnerHandle?: RemoteCurrentOwnerHandle,
   ) {
     this.sessions = sessions
     this.generation = generation
     this.workspace = workspace
     this.sessionList = sessionList
+    this.currentOwnerHandle = currentOwnerHandle
+  }
+
+  captureWorkspaceNewConversation(): WorkspaceNewConversationCapture | undefined {
+    const generation = this.generation.getSnapshot()
+    return generation === undefined ? undefined : { generation }
   }
 
   /**
@@ -291,20 +335,68 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
    * draft. Every await re-checks the Connection generation identity and the
    * caller's signal, so a result is never handed to a newer generation.
    */
-  async resolveWorkspace(intent: WorkspaceSelectionIntent, signal?: AbortSignal): Promise<ResolvedWorkspaceSelection> {
-    const captured = this.generation.getSnapshot()
-    if (captured === undefined) {
+  async resolveWorkspace(
+    intent: WorkspaceSelectionIntent,
+    signal?: AbortSignal,
+    capture?: WorkspaceNewConversationCapture,
+  ): Promise<ResolvedWorkspaceSelection> {
+    const capturedValue = capture?.generation ?? this.generation.getSnapshot()
+    if (capturedValue === undefined) {
       throw new WorkspaceSelectionError('unavailable', 'the remote connection is not connected')
+    }
+    const captured = capturedValue as NonNullable<ReturnType<RemoteConnectionGenerationSource['getSnapshot']>>
+    if (capture !== undefined && !Object.is(captured, this.generation.getSnapshot())) {
+      throw new WorkspaceSelectionError('superseded', 'the workspace selection was superseded by a newer connection generation')
     }
     if (isAborted(signal)) {
       throw new WorkspaceSelectionError('superseded', 'the workspace selection was superseded before it settled')
+    }
+    if (capture !== undefined) {
+      let baseline: RemoteWorkspaceBaseline
+      let workspace: RemoteWorkspaceViewLike | undefined
+      let rows: readonly RemoteSessionListRowLike[]
+      if (intent.kind === 'host-path') {
+        const adopted = await this.adoptHostPath(captured, intent.path, signal)
+        baseline = await this.readWorkspaceBaseline(captured, signal, adopted.workspaceId)
+        workspace = baseline.items.find(item => item.workspaceId === adopted.workspaceId)
+        rows = await this.readSessionList(captured, signal)
+      } else {
+        baseline = await this.readWorkspaceBaseline(captured, signal)
+        rows = await this.readSessionList(captured, signal)
+        if (intent.kind === 'workspace-id') {
+          workspace = baseline.items.find(item => item.workspaceId === intent.workspaceId)
+          if (workspace === undefined) {
+            throw new WorkspaceSelectionError('refused', `workspace "${intent.workspaceId}" is not registered on the Host`, 'workspace/not-found')
+          }
+        } else {
+          workspace = baseline.items.find(item => item.sessionIds.includes(intent.sessionId))
+          if (workspace === undefined) {
+            const headerPath = rows.find(item => item.sessionId === intent.sessionId)?.cwd
+            if (headerPath === undefined || headerPath === '') {
+              throw new WorkspaceSelectionError('unavailable', `session "${intent.sessionId}" has no readable Host header directory`)
+            }
+            const adopted = await this.adoptHostPath(captured, headerPath, signal)
+            workspace = baseline.items.find(item => item.workspaceId === adopted.workspaceId)
+              ?? { workspaceId: adopted.workspaceId, path: adopted.path, title: '', sessionIds: [] }
+          }
+        }
+      }
+      if (workspace === undefined) {
+        throw new WorkspaceSelectionError('unavailable', 'the resolved Host Workspace is absent from its baseline', 'workspace/follow-invalid')
+      }
+      this.workspaceNewProofs.set(capture, {
+        workspace,
+        rows,
+        archivedSessionIds: baseline.archivedSessionIds,
+      })
+      return { workspaceId: workspace.workspaceId, path: workspace.path }
     }
     switch (intent.kind) {
       case 'host-path':
         return this.adoptHostPath(captured, intent.path, signal)
       case 'workspace-id': {
-        const items = await this.readWorkspaceBaseline(captured, signal)
-        const workspace = items.find(item => item.workspaceId === intent.workspaceId)
+        const baseline = await this.readWorkspaceBaseline(captured, signal)
+        const workspace = baseline.items.find(item => item.workspaceId === intent.workspaceId)
         if (workspace === undefined) {
           throw new WorkspaceSelectionError('refused', `workspace "${intent.workspaceId}" is not registered on the Host`, 'workspace/not-found')
         }
@@ -313,8 +405,8 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
       case 'source-session': {
         // Membership FIRST: the official Host account of the captured Session,
         // never the Client's launch directory or an effective status cwd.
-        const items = await this.readWorkspaceBaseline(captured, signal)
-        const member = items.find(item => item.sessionIds.includes(intent.sessionId))
+        const baseline = await this.readWorkspaceBaseline(captured, signal)
+        const member = baseline.items.find(item => item.sessionIds.includes(intent.sessionId))
         if (member !== undefined) return { workspaceId: member.workspaceId, path: member.path }
         const headerPath = await this.sourceSessionHeaderPath(captured, intent.sessionId, signal)
         return this.adoptHostPath(captured, headerPath, signal)
@@ -377,7 +469,8 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
   private async readWorkspaceBaseline(
     captured: NonNullable<ReturnType<RemoteConnectionGenerationSource['getSnapshot']>>,
     signal: AbortSignal | undefined,
-  ): Promise<readonly RemoteWorkspaceViewLike[]> {
+    expectedWorkspaceId?: string,
+  ): Promise<RemoteWorkspaceBaseline> {
     const stream = this.workspace.follow(signal)
     try {
       for await (const frame of stream) {
@@ -385,11 +478,15 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
           throw new WorkspaceSelectionError('unavailable', 'the Host Workspace stream did not begin with a baseline', 'workspace/follow-invalid')
         }
         const items = frame.value?.items
-        if (!Array.isArray(items)) {
-          throw new WorkspaceSelectionError('unavailable', 'the Host Workspace baseline carries no item list', 'workspace/follow-invalid')
+        const archivedSessionIds = frame.value?.archivedSessionIds
+        if (!Array.isArray(items) || !Array.isArray(archivedSessionIds)) {
+          throw new WorkspaceSelectionError('unavailable', 'the Host Workspace baseline is incomplete', 'workspace/follow-invalid')
         }
         this.requireCurrent(captured, signal)
-        return items
+        if (expectedWorkspaceId !== undefined && !items.some(item => item.workspaceId === expectedWorkspaceId)) {
+          throw new WorkspaceSelectionError('unavailable', 'the resolved Host Workspace is absent from its baseline', 'workspace/follow-invalid')
+        }
+        return { items, archivedSessionIds }
       }
       throw new WorkspaceSelectionError('unavailable', 'the Host Workspace stream ended before its baseline', 'workspace/follow-unavailable')
     } catch (error) {
@@ -405,16 +502,13 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     }
   }
 
-  /** The captured Session's persisted immutable header directory, read from
-   *  the OFFICIAL Host Session list. Never the Client's launch directory and
-   *  never an effective/runtime status cwd. A failed Host read fails closed:
-   *  the Client list store carries no pull-failure bit, so reading its cached
-   *  row would silently authorize a stale header. */
-  private async sourceSessionHeaderPath(
+  /** Read the raw official Session list. The Client list store is deliberately
+   * not consulted here: it cannot distinguish a failed pull from a cached
+   * ready snapshot. */
+  private async readSessionList(
     captured: NonNullable<ReturnType<RemoteConnectionGenerationSource['getSnapshot']>>,
-    sessionId: string,
     signal: AbortSignal | undefined,
-  ): Promise<string> {
+  ): Promise<readonly RemoteSessionListRowLike[]> {
     let result: RemoteReadResult<{ readonly items: readonly RemoteSessionListRowLike[] }>
     try {
       result = await this.sessionList.list({}, signal)
@@ -427,27 +521,61 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
       )
     }
     this.requireCurrent(captured, signal)
-    if (!result.ok) {
+    if (!result.ok || !Array.isArray(result.value.items)) {
       throw new WorkspaceSelectionError(
         'unavailable',
         'the Host Session list is unavailable',
-        errorCode(result.error) ?? 'session/list-unavailable',
+        result.ok ? 'session/list-result-invalid' : errorCode(result.error) ?? 'session/list-unavailable',
       )
     }
-    const cwd = result.value.items.find(item => item.sessionId === sessionId)?.cwd
+    return result.value.items
+  }
+
+  /** The captured Session's persisted immutable header directory, read from
+   *  the OFFICIAL Host Session list. Never the Client's launch directory and
+   *  never an effective/runtime status cwd. A failed Host read fails closed:
+   *  the Client list store carries no pull-failure bit, so reading its cached
+   *  row would silently authorize a stale header. */
+  private async sourceSessionHeaderPath(
+    captured: NonNullable<ReturnType<RemoteConnectionGenerationSource['getSnapshot']>>,
+    sessionId: string,
+    signal: AbortSignal | undefined,
+  ): Promise<string> {
+    const rows = await this.readSessionList(captured, signal)
+    const cwd = rows.find(item => item.sessionId === sessionId)?.cwd
     if (typeof cwd !== 'string' || cwd === '') {
       throw new WorkspaceSelectionError('unavailable', `session "${sessionId}" has no Host recorded workspace directory`)
     }
     return cwd
   }
 
+  private workspaceNewCandidate(
+    proof: WorkspaceNewConversationProof,
+    agentPreset: string | undefined,
+  ): string | undefined {
+    const rows = new Map(proof.rows.map(row => [row.sessionId, row]))
+    const archived = new Set(proof.archivedSessionIds)
+    for (const sessionId of proof.workspace.sessionIds) {
+      const row = rows.get(sessionId)
+      if (row === undefined || row.blank !== true || row.origin === 'subagent' || archived.has(sessionId)) continue
+      if (row.cwd !== proof.workspace.path) continue
+      const projectedPreset = this.sessions.list?.getSnapshot().byId[sessionId]?.projectionValues?.agentPreset
+      if (agentPreset !== undefined && typeof projectedPreset === 'string' && projectedPreset !== '' && projectedPreset !== agentPreset) continue
+      return sessionId
+    }
+    return undefined
+  }
+
   async create(request: CreateSessionRequest): Promise<CreateResult> {
     // A provable PRE-dispatch cancellation is `cancelled` (never a throw).
     if (isAborted(request.signal)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
     const workspaceId = request.workspaceId
-    const captured = this.generation.getSnapshot()
+    const captured = request.capture?.generation ?? this.generation.getSnapshot()
     // A disconnected client must not dispatch through stale/queued state.
     if (captured === undefined) return { ownership: 'current', outcome: { kind: 'cancelled' } }
+    if (request.capture !== undefined && !Object.is(captured, this.generation.getSnapshot())) {
+      return { ownership: 'superseded', outcome: { kind: 'cancelled' } }
+    }
     // Ownership is a SEPARATE axis (v2 §0.2.1): a reconnect or a post-dispatch
     // abort means this result no longer owns the surface — it does NOT prove
     // the Host did not create the Session.
@@ -455,6 +583,29 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
       !Object.is(captured, this.generation.getSnapshot()) || isAborted(request.signal)
         ? 'superseded'
         : 'current'
+    let candidateId: string | undefined
+    if (request.capture !== undefined) {
+      const proof = this.workspaceNewProofs.get(request.capture)
+      if (proof === undefined || proof.workspace.workspaceId !== workspaceId) {
+        return {
+          ownership: 'current',
+          outcome: {
+            kind: 'rejected',
+            error: { code: 'session/workspace-new-conversation-proof-unavailable', message: 'the explicit New operation has no current Workspace roster proof' },
+          },
+        }
+      }
+      candidateId = this.workspaceNewCandidate(proof, request.agentPreset)
+      const binding = candidateId === undefined ? undefined : this.sessions.binding?.(candidateId)
+      if (candidateId !== undefined && binding?.session.getSnapshot().blank === true) {
+        const current = this.currentOwnerHandle?.(candidateId, binding)
+        if (current !== undefined) {
+          return { ownership: ownership(), outcome: { kind: 'created', handle: current } }
+        }
+      }
+    } else {
+      candidateId = request.sessionId
+    }
     // ONE official Client create for every create: rc.2 `ClientSessions.create`
     // accepts `agentPreset` as a creation-time input and records the published
     // catalog row before resolving, so `retain()` below is immediately valid.
@@ -463,11 +614,11 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     try {
       id = await this.sessions.create({
         workspaceId,
-        sessionId: request.sessionId,
-        ...request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset },
+        ...(candidateId === undefined ? {} : { sessionId: candidateId }),
+        ...(request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset }),
       })
     } catch (error) {
-      return { ownership: ownership(), outcome: classifyCreateFailure(error, request.sessionId) }
+      return { ownership: ownership(), outcome: classifyCreateFailure(error, candidateId ?? request.sessionId) }
     }
     // The wire envelope parser does not validate the nested payload: a
     // malformed success must not fake a created Session identity.
@@ -477,7 +628,7 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
         outcome: {
           kind: 'indeterminate',
           error: { code: 'session/create-result-invalid', message: 'the Host returned an unusable Session id' },
-          requestedSessionId: request.sessionId,
+          ...(candidateId === undefined && request.sessionId === undefined ? {} : { requestedSessionId: candidateId ?? request.sessionId }),
         },
       }
     }

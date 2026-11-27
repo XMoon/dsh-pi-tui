@@ -160,6 +160,32 @@ test('list passes the official formatStatus through verbatim and never invents o
     'an absent official fact must not become a client-side value')
 })
 
+test('list maps the official blank bit as true/false/unknown on pull and push', async () => {
+  const generations = createObservableGenerationHarness()
+  const source = remoteSource({
+    state: state(
+      ['session-blank', 'session-started', 'session-unknown'],
+      {
+        'session-blank': listRow('session-blank', 30, { blank: true }),
+        'session-started': listRow('session-started', 20, { blank: false }),
+        'session-unknown': listRow('session-unknown', 10),
+      },
+    ),
+  })
+  const reader = new RemoteSessionReader(source, generations.source)
+
+  const rows = await reader.list(undefined)
+  assert.deepEqual(rows, [
+    { id: 'session-blank', updatedAt: 30, cwd: undefined, live: false, blank: true },
+    { id: 'session-started', updatedAt: 20, cwd: undefined, live: false, blank: false },
+    { id: 'session-unknown', updatedAt: 10, cwd: undefined, live: false },
+  ])
+  assert.equal(Object.hasOwn(rows?.[2] ?? {}, 'blank'), false,
+    'an omitted official bit stays unknown instead of becoming false')
+  assert.deepEqual(reader.observableList?.getSnapshot().rows, rows,
+    'the observable snapshot uses the same tri-state row mapping')
+})
+
 test('list distinguishes pending/disconnected from an established empty list', async () => {
   const generations = createObservableGenerationHarness()
   const pendingSource = remoteSource({ state: state([], {}, 'pending') })

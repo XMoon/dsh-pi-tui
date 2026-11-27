@@ -57,7 +57,7 @@ class ProbePresentation implements SessionBrowserPresentation {
 test('L5 the REAL Client store drives the Browser owner roster and its Workspace recovery', async (t) => {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, 'l5-browser-owner')
-  host.ctx.sessions.create(SessionId(CURRENT), { meta: { cwd: host.anchorDir } })
+  const currentSession = host.ctx.sessions.create(SessionId(CURRENT), { meta: { cwd: host.anchorDir } })
   const hostRuntime = await createRemoteHostRuntime(host.ctx)
   const client = await createRemoteClientRuntime({ carrier: hostRuntime.carrier })
   t.after(async () => {
@@ -103,6 +103,15 @@ test('L5 the REAL Client store drives the Browser owner roster and its Workspace
     presentation.latest()?.rows.some(entry => entry.id === CURRENT) === true)
   await waitFor('the real Workspace baseline is proven', () =>
     presentation.latest()?.workspace?.baselineProven === true)
+  assert.equal(presentation.latest()?.rows.find(entry => entry.id === CURRENT)?.blank, true,
+    'the official empty Session reaches the owner as a known blank')
+
+  // The first accepted turn clears the official summary bit. The Client store
+  // pushes that same row through RemoteSessionReader.rowsOf; no renderer-side
+  // blank lookup or optimistic false is involved.
+  currentSession.append('turn/start', { turn: 0 })
+  await waitFor('the official nonblank push reaches the owner', () =>
+    presentation.latest()?.rows.find(entry => entry.id === CURRENT)?.blank === false)
 
   // A real Host Session create reaches the SAME owner through the official push.
   host.ctx.sessions.create(SessionId(LATE), { meta: { cwd: host.anchorDir } })

@@ -70,6 +70,7 @@ interface Row {
   updatedAt: number
   cwd?: string
   origin?: 'subagent'
+  blank?: boolean
   live?: boolean
 }
 
@@ -322,6 +323,29 @@ test('a content-only hit becomes visible through its snippet under the local fil
   const view = h.view()
   assert.ok(view.includes('beta'), 'the content-only hit must surface through its snippet')
   assert.ok(view.includes('…needle found in beta…'), 'the snippet must be part of the row description')
+})
+
+test('ordinary search excludes a known blank from metadata and content hits', async (t) => {
+  const h = harness({
+    rows: [
+      { id: 'session-alpha', updatedAt: 300, cwd: '/ws', blank: false },
+      { id: 'session-beta', updatedAt: 200, cwd: '/ws', blank: true },
+    ],
+    search: async () => ({
+      items: [
+        { sessionId: 'session-beta', snippet: 'needle hidden blank content' },
+        { sessionId: 'session-alpha', snippet: 'needle visible content' },
+      ],
+      hasMore: false,
+    }),
+  })
+  t.after(() => h.app.stop())
+  await h.runSearch('needle')
+  await waitUntil(() => h.searchCalls.length === 1)
+  await waitUntil(() => h.view().includes('needle visible content'))
+  assert.ok(h.view().includes('alpha'))
+  assert.ok(!h.view().includes('beta'), 'a content hit cannot reintroduce a known blank')
+  assert.ok(!h.view().includes('needle hidden blank content'))
 })
 
 test('unknown hit ids are ignored and subagent hits never enter the browser', async (t) => {

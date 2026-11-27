@@ -12,6 +12,7 @@
 
 import type { Backend } from '../../runtime/backend.ts'
 import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
+import type { RemoteCurrentOwnerHandle } from '../../runtime/remote/session-lifecycle-remote.ts'
 import { RemoteConfigPort, type RemoteConfigRuntimeSource } from '../../runtime/remote/config-remote.ts'
 import { RemoteConfigWriteLifetime } from '../../runtime/remote/config-write-lifetime.ts'
 import { RemoteSessionPolicyPort } from '../../runtime/remote/session-policy-remote.ts'
@@ -62,6 +63,8 @@ export interface RemoteBackendRuntimeOptions {
   readonly surfaceRevision?: number
   /** Qualification-only telemetry forwarded to the Remote interaction port. */
   readonly onQualification?: (record: Record<string, unknown>) => void
+  /** The already-owned exact-binding handle source used by Remote explicit New. */
+  readonly currentOwnerHandle?: RemoteCurrentOwnerHandle
   /** The ONE shared Client runtime source every adapter consumes: the M3-1
    *  Client runtime or the real split Client's mounted official Domains —
    *  never a second graph. */
@@ -152,6 +155,7 @@ export async function createRemoteBackendRuntime(
       ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
       ...(options.surfaceRevision === undefined ? {} : { surfaceRevision: options.surfaceRevision }),
       ...(options.onQualification === undefined ? {} : { onQualification: options.onQualification }),
+      ...(options.currentOwnerHandle === undefined ? {} : { currentOwnerHandle: options.currentOwnerHandle }),
     })
     unwind.push(() => semantics.dispose())
     // M6-1 F8: the ONE shared accepted-write lifetime. The ConfigPort's

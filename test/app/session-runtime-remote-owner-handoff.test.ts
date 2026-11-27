@@ -99,7 +99,7 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
     ...fakeDiag,
     error: (message, fields) => { diagnostics.push({ message, fields }) },
   }
-  const calls = { forks: 0, opens: [] as string[], creates: 0, fromHandle: 0 }
+  const calls = { forks: 0, opens: [] as string[], creates: 0, fromHandle: 0, openings: 0 }
   const live = new Map<string, { binding: FakeBinding; refs: number }>()
   const arms = new Map<string, OpenArm>()
   let forkHook: (() => void) | undefined
@@ -190,6 +190,7 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
   const lifecycle: SessionLifecycle = {
     resolveWorkspace: async (intent) => ({ workspaceId: 'ws-a', path: intent.kind === 'host-path' ? intent.path : '/workspace' }),
     create: async (request): Promise<CreateResult> => {
+      if (request.capture !== undefined || request.sessionId === undefined) throw new Error('fixture expects a fresh create')
       calls.creates += 1
       const wrapper = retain(request.sessionId)
       return {
@@ -246,7 +247,7 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
     warnRetirement: () => {},
     warnRetirementSkipped: () => {},
     isSurfaceDisposed: (): boolean => disposed,
-    beginOpening: (sessionId) => ({ sessionId }),
+    beginOpening: (sessionId) => { calls.openings += 1; return { sessionId } },
     clearOpening: () => {},
     settlePendingQueueRecalls: (committed) => {
       events.push(`recalls:${committed}`)
@@ -397,6 +398,39 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
     throwOnSessionIdCall: (call: number): void => { throwOnSessionIdCall = call },
   }
 }
+
+test('an exact-binding create reuse keeps the current generation and skips replacement work', async () => {
+  const h = harness()
+  const current = h.publishRetained('session-a')
+  h.events.length = 0
+  const generation = h.core.generation()
+  const result = await h.runtime.transitionTo({
+    target: { header: { cwd: '/workspace' } },
+    create: async () => ({ session: { id: 'session-a' }, client: current.wrapper }),
+  })
+  assert.equal(result.ok, true)
+  assert.equal(h.core.generation(), generation)
+  assert.equal(h.calls.openings, 0, 'actual-id reuse must not open a candidate-owned journal entry')
+  assert.equal(h.countRefs('session-a'), 1)
+  assert.deepEqual(h.events, ['recalls:true'], 'same-binding reuse only commits deferred recalls; it does not reset, retire, hydrate, refresh or report a replacement')
+})
+
+test('an actual-id transition commits the returned owner without a candidate opening journal', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  h.events.length = 0
+  const next = h.retain('session-host-chosen')
+  const result = await h.runtime.transitionTo({
+    target: { header: { cwd: '/workspace' } },
+    create: async () => ({ session: { id: 'session-host-chosen' }, client: next }),
+  })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(h.core.currentSessionId(), 'session-host-chosen')
+  assert.equal(h.calls.openings, 0)
+  assert.equal(h.countRefs('session-a'), 0)
+  assert.equal(h.countRefs('session-host-chosen'), 1)
+  assert.ok(h.events.includes('release:session-a@current=session-host-chosen'))
+})
 
 test('ordinary switch = retain NEW → commit NEW → release OLD → post-handoff init', async () => {
   const h = harness()
