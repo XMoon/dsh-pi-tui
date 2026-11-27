@@ -6016,7 +6016,7 @@ function assertProcessClientSignalHost(handle, signal, label) {
     if (signal !== 'SIGTERM') throw error
     const host = hosts.find(value => value.hostId === handle.hostId)
     if (host?.finished !== true || host.terminal?.outcome !== 'business-crash'
-      || host.terminal?.signal !== 'SIGHUP'
+      || !PROCESS_HOST_CRASH_SIGNALS.has(host.terminal?.signal)
       || host.ready?.localHost?.hostPid !== handle.readyHost?.hostPid) {
       throw error
     }
