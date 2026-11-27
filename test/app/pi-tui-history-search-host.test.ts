@@ -7278,7 +7278,7 @@ test('a pre-upgrade v2 projection with a no-rpcId accepted input replays and min
   }
 })
 
-test('an early hit cannot publish ready while a later Session official read is still latched', async (t) => {
+test('an early hit and legacy omission cannot publish ready while a later Session official read is still latched', async (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-history-proof-latch-root-')
   const profileDir = life.tempDir('dsh-history-proof-latch-profile-')
@@ -7288,6 +7288,8 @@ test('an early hit cannot publish ready while a later Session official read is s
     header: testHeader('proof-session', '/repo/proof', { createdAt: 1_721_232_000_010 }),
   })
   const replaySource = proofSource(root, { header: testHeader('late-session', '/repo/late') })
+  const legacySource = legacyMutableSource(root, 'legacy-partial')
+  legacySource.header = testHeader('legacy-partial', '/repo/legacy-partial', { createdAt: 1_721_232_000_005 })
   const probe = proofAuthority(root)
   const hitRows: readonly HistoryOccurrenceInput[] = [
     { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/proof', content: 'mutable first', hasNonText: false },
@@ -7297,11 +7299,15 @@ test('an early hit cannot publish ready while a later Session official read is s
     { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/late', content: 'mutable first', hasNonText: false },
     { messageId: 'msg-2', firstEventSeq: 2, acceptedAt: 1002, effectiveCwd: '/repo/late-two', content: 'mutable second', hasNonText: false },
   ]
+  const legacyRows: readonly HistoryOccurrenceInput[] = [
+    { messageId: 'legacy-msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/legacy-partial', content: 'legacy partial old text', hasNonText: false },
+  ]
   seedColdProof(profileDir, hitSource, probe.authority, { occurrences: hitRows })
+  seedColdProof(profileDir, legacySource, probe.authority, { mint: false, occurrences: legacyRows })
   // A clean committed row from the previous incarnation exists for the
   // latched source too; it must stay unreadable until this round's terminal.
   seedColdProof(profileDir, replaySource, probe.authority, { mint: false, occurrences: lateRows })
-  const { deps, calls } = mutableDeps(hitSource, [replaySource])
+  const { deps, calls } = mutableDeps(hitSource, [legacySource, replaySource])
   const basePersistence = deps.sessionPersistence()!
   let latched = false
   let release = (): void => {}
@@ -7327,9 +7333,12 @@ test('an early hit cannot publish ready while a later Session official read is s
     const early = await service.search({ scope: 'all', query: 'mutable', limit: 25 }, new AbortController().signal)
     assert.equal(early.kind, 'partial', `an early hit must not publish ready: ${JSON.stringify(early)}`)
     if (early.kind !== 'partial') throw new Error('expected partial')
-    assert.deepEqual(early.progress, { settled: 1, total: 2 })
+    assert.deepEqual(early.progress, { settled: 1, total: 3 })
+    assert.equal('nextCursor' in early, false, 'a partial page never carries a cursor')
     assert.deepEqual(early.items.map(item => item.sessionId), ['proof-session', 'proof-session'])
     assert.equal(early.items.length, 2, 'only the proved terminal ID contributes rows')
+    assert.equal(indexOfService(service).checkpointOf('legacy-partial'), undefined,
+      'the legacy ID must already have reached its unreadable omission terminal')
     // Exact text is served from the same permit.
     const exact = await service.readText({
       sessionId: early.items[0]!.sessionId,
@@ -7348,6 +7357,16 @@ test('an early hit cannot publish ready while a later Session official read is s
       limit: 4096,
     }, new AbortController().signal)
     assert.equal(lateBefore.kind, 'loading')
+    const legacyBefore = await service.readText({
+      sessionId: 'legacy-partial',
+      messageId: 'legacy-msg-1',
+      contentSha256: sha256('legacy partial old text'),
+      offset: 0,
+      limit: 4096,
+    }, new AbortController().signal)
+    assert.equal(legacyBefore.kind, 'loading', 'an omitted legacy ID never receives a partial read permit')
+    const legacyRecallBefore = await service.readSessionRecall({ sessionId: 'legacy-partial' }, new AbortController().signal)
+    assert.deepEqual(legacyRecallBefore, { kind: 'loading' }, 'an omitted legacy ID has no fabricated empty recall')
     // The session-recall read follows the SAME per-ID permit: the proved ID is
     // readable before global ready, the latched/unverified ID is not an empty.
     const earlyRecall = await service.readSessionRecall({ sessionId: 'proof-session' }, new AbortController().signal)
@@ -7388,6 +7407,12 @@ test('an early hit cannot publish ready while a later Session official read is s
     assert.equal(lateRecall.kind, 'ready', JSON.stringify(lateRecall))
     if (lateRecall.kind !== 'ready') throw new Error('expected ready recall')
     assert.equal(lateRecall.items.length, 2)
+    const legacy = await service.search({ scope: 'session', sessionId: 'legacy-partial', query: 'legacy partial old text', limit: 10 }, new AbortController().signal)
+    assert.equal(legacy.kind, 'ready', JSON.stringify(legacy))
+    assert.ok(legacy.kind === 'ready' && legacy.items.length === 0)
+    assert.ok(!calls.statIds().includes('legacy-partial'))
+    assert.ok(!calls.openIds().includes('legacy-partial'))
+    assert.ok(!calls.readIds().includes('legacy-partial'))
     // A target with no verified checkpoint is NEVER a ready empty, even under
     // the (different) ready corpus.
     const absentRecall = await service.readSessionRecall({ sessionId: 'not-a-session' }, new AbortController().signal)
