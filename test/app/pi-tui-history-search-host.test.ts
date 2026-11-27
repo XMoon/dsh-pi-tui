@@ -3051,10 +3051,13 @@ test('a stale official read cannot reset or overwrite a replaced live Session so
     releaseObserve()
     await Promise.allSettled(flights)
 
-    // The stale candidate wrote/deleted nothing; the old rows stay provisional
-    // and the next official pass rebuilds from the replaced source.
+    // The stale candidate wrote/deleted nothing; the old rows stay behind the
+    // reconcile barrier, but an invalid old witness must not mark a replacement
+    // source's checkpoint dirty. The next official pass rebuilds from the source.
     assert.equal(occurrences(), 2, 'a stale candidate must not reset the committed rows')
-    assert.equal(internals.index.checkpointOf('mutable-session')?.dirty, true)
+    assert.equal(internals.index.checkpointOf('mutable-session')?.dirty, false)
+    const blocked = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(blocked.kind, 'incomplete', JSON.stringify(blocked))
     await verify()
     await waitDirectReady(service)
     const replaced = await service.search({ scope: 'all', query: 'replaced source first', limit: 25 }, new AbortController().signal)
@@ -3511,11 +3514,22 @@ test('a rebuild requested during an active repair is coalesced and retried', asy
   const source = mutableSource('/repo/r202')
   source.live = true
   const { deps } = mutableDeps(source)
+  const liveSession = deps.sessions().get('mutable-session')
+  assert.ok(liveSession !== undefined)
   const ctx = new Context()
   const service = directService(ctx, deps, profileDir)
   const query = deps.sessionQuery()
   assert.ok(query !== undefined)
   const realObserve = query.observeSession
+  const internals = service as unknown as {
+    index: { checkpointOf(id: string): { nextSeq: number; dirty: boolean } | undefined }
+    pending: Map<string, { events: readonly { seq: number }[] }>
+    heldPending: Set<string>
+    sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    writeTail: Promise<void>
+    observeLiveEvent(session: unknown, event: unknown): void
+  }
+  let observations = 0
   let firstObserve = true
   let observeEntered!: () => void
   const entered = new Promise<void>(resolve => { observeEntered = resolve })
@@ -3534,6 +3548,7 @@ test('a rebuild requested during an active repair is coalesced and retried', asy
   try {
     await waitDirectReady(service)
     query.observeSession = async (id, options) => {
+      observations += 1
       if (firstObserve) {
         firstObserve = false
         const observation = await realObserve.call(query, id, options)
@@ -3544,27 +3559,51 @@ test('a rebuild requested during an active repair is coalesced and retried', asy
       return realObserve.call(query, id, options)
     }
     // Gap => rebuild starts and holds inside observeSession.
-    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
-      .observeLiveEvent(liveSessionOf(source), inbox(5, 'r202 gap five'))
+    internals.observeLiveEvent(liveSession, inbox(5, 'r202 gap five'))
     await entered
+    await internals.writeTail
+    const firstFlight = internals.sessionRepairFlights.get('mutable-session')?.promise
+    assert.ok(firstFlight !== undefined, 'the held observation must have one exact repair claim')
+    const checkpointAtEntry = structuredClone(internals.index.checkpointOf('mutable-session'))
 
     // The missing durable events exist, and a second live event invalidates the
     // held observation while the first repair flight is still active.
     source.events.push(inbox(3, 'r202 durable three'), inbox(4, 'r202 durable four'), inbox(5, 'r202 gap five'), inbox(6, 'r202 follow-up six'))
     source.revision += 1
-    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
-      .observeLiveEvent(liveSessionOf(source), inbox(6, 'r202 follow-up six'))
-    // Let the queued drain observe the gap and coalesce its rebuild request.
-    await new Promise(resolve => setTimeout(resolve, 25))
+    const followup = inbox(6, 'r202 follow-up six')
+    internals.observeLiveEvent(liveSession, followup)
+    // Ownership transfer is synchronous: the active replay must retain the new
+    // payload before any queued writer can run.
+    assert.equal(internals.sessionRepairFlights.get('mutable-session')?.promise, firstFlight)
+    assert.equal(internals.heldPending.has('mutable-session'), true)
+    assert.ok(internals.pending.get('mutable-session')?.events.some(event => event.seq === 6))
+    assert.deepEqual(internals.index.checkpointOf('mutable-session'), checkpointAtEntry)
+    // Re-delivering the same pending fact is not another source change.
+    internals.observeLiveEvent(liveSession, followup)
+    internals.observeLiveEvent(liveSession, followup)
+    assert.equal(internals.pending.get('mutable-session')?.events.filter(event => event.seq === 6).length, 1)
     releaseFirst()
 
     // The first observation is stale; the coalesced follow-up must repair now,
-    // without any 30 s full pass.
+    // without any 30 s full pass. Await the actual claim promises, not a sleep.
+    await firstFlight
+    const secondFlight = internals.sessionRepairFlights.get('mutable-session')?.promise
+    assert.ok(secondFlight !== undefined, 'the real new fact must schedule one coalesced follow-up')
+    await secondFlight
+    await internals.writeTail
+    assert.equal(observations, 2, 'one stale observation and one current follow-up must settle the source')
     await waitDirectReady(service, 10_000)
-    const six = await service.search({ scope: 'all', query: 'r202 follow-up six', limit: 25 }, new AbortController().signal)
-    assert.equal(six.kind, 'ready', JSON.stringify(six))
-    if (six.kind !== 'ready') throw new Error('expected ready')
-    assert.equal(six.items.length, 1)
+    for (const [seq, text] of [
+      [3, 'r202 durable three'],
+      [4, 'r202 durable four'],
+      [5, 'r202 gap five'],
+      [6, 'r202 follow-up six'],
+    ] as const) {
+      const answer = await service.search({ scope: 'all', query: text, limit: 25 }, new AbortController().signal)
+      assert.equal(answer.kind, 'ready', JSON.stringify(answer))
+      if (answer.kind !== 'ready') throw new Error('expected ready')
+      assert.equal(answer.items.length, 1, `accepted seq ${String(seq)} must appear exactly once`)
+    }
   } finally {
     query.observeSession = realObserve
     await service.dispose()
@@ -5310,6 +5349,8 @@ test('a bounded startup burst completes the round on the final drain', async (t)
   const { deps } = mutableDeps(source)
   const persistence = deps.sessionPersistence()
   const query = deps.sessionQuery()
+  const liveSession = deps.sessions().get('r9-burst')
+  assert.ok(liveSession !== undefined)
   const realList = persistence.list
   let listEntered!: () => void
   const listReached = new Promise<void>(resolve => { listEntered = resolve })
@@ -5323,10 +5364,14 @@ test('a bounded startup burst completes the round on the final drain', async (t)
     return realList.call(persistence)
   }
   const realObserve = query.observeSession
+  let replayObserved = false
+  let observations = 0
   let burstDelivered = false
+  let burstAfterTraversal = false
   const deliverBurst = (): void => {
     if (burstDelivered) return
     burstDelivered = true
+    burstAfterTraversal = internals.coverageRound?.traversed === true
     for (let seq = 3; seq < 603; seq += 1) {
       const event = {
         type: 'agent/inbox/spliced',
@@ -5344,40 +5389,38 @@ test('a bounded startup burst completes the round on the final drain', async (t)
         },
       }
       source.events.push(event)
-      internals.observeLiveEvent(liveSessionOf(source), event)
+      internals.observeLiveEvent(liveSession, event)
     }
   }
   query.observeSession = async (id, options) => {
+    observations += 1
     const observation = await realObserve.call(query, id, options)
-    // The timer fires after the replay's synchronous short writes/terminal and
-    // before the round can finish across the startup yield.
-    if (!burstDelivered && String(id) === 'r9-burst') setTimeout(deliverBurst, 0)
+    if (String(id) === 'r9-burst') replayObserved = true
     return observation
   }
   const ctx = new Context()
   const service = directService(ctx, deps, profileDir)
   const internals = service as unknown as {
     index: { checkpointOf(id: string): { nextSeq: number } | undefined }
+    coverageRound?: { traversed: boolean }
     observeLiveEvent(session: unknown, event: unknown): void
+    releaseWitness(witness: { readonly sessionId: string }): void
+  }
+  const realReleaseWitness = internals.releaseWitness
+  internals.releaseWitness = function (witness) {
+    const result = realReleaseWitness.call(this, witness)
+    // Deliver only after the authoritative replay terminal and its witness
+    // release, while the cold round still owns its untraversed barrier.
+    if (replayObserved && !burstDelivered && witness.sessionId === 'r9-burst') deliverBurst()
+    return result
   }
   try {
     await listReached
     releaseList()
-    const readyStarted = Date.now()
-    let ready = false
-    while (Date.now() - readyStarted < 3_000) {
-      const answer = await service.search({ scope: 'all', query: 'r9 burst 602', limit: 25 }, new AbortController().signal)
-      if (answer.kind === 'ready') {
-        ready = true
-        break
-      }
-      await new Promise(resolve => setTimeout(resolve, 10))
-    }
-    const readyElapsed = Date.now() - readyStarted
-    assert.equal(ready, true, 'the final drain must not wait for the 30 s timer')
-    assert.ok(readyElapsed < 3_000, `startup ready took ${String(readyElapsed)}ms; the 30 s timer masked the drain`)
-    console.log('R9 STARTUP READY', readyElapsed)
+    await waitDirectReady(service, 10_000)
     assert.equal(burstDelivered, true)
+    assert.equal(burstAfterTraversal, false, 'the burst must arrive before the cold round traversal completes')
+    assert.equal(observations, 1, 'an ordinary post-replay burst must not manufacture a mandatory point replay')
     assert.equal(internals.index.checkpointOf('r9-burst')?.nextSeq, 603)
     const hit = await service.search({ scope: 'all', query: 'r9 burst 602', limit: 25 }, new AbortController().signal)
     assert.equal(hit.kind, 'ready', JSON.stringify(hit))
@@ -5387,6 +5430,7 @@ test('a bounded startup burst completes the round on the final drain', async (t)
     releaseList()
     persistence.list = realList
     query.observeSession = realObserve
+    internals.releaseWitness = realReleaseWitness
     await service.dispose()
     await ctx.fiber.dispose()
   }
@@ -5502,7 +5546,7 @@ test('a real accepted event during retained-index startup reaches the point repl
     await promptHost(host, sessionId, 'req-r12-second', 'hsp-r12-second')
     const service2Proxy = host.ctx.reflect.get(PI_TUI_HISTORY_SEARCH_NAMESPACE) as unknown as {
       index: { checkpointOf(id: string): { nextSeq: number } | undefined }
-      pending: Map<string, unknown>
+      pending: Map<string, { events: readonly { seq: number }[] }>
       sessionRepairFlights: Map<string, unknown>
       rebuildRequests: Set<string>
       reconcilePending: Set<string>
@@ -5531,7 +5575,10 @@ test('a real accepted event during retained-index startup reaches the point repl
     }))
     const afterDrain = service2.index.checkpointOf(sessionId)
     assert.ok(afterDrain !== undefined)
-    assert.equal(service2.pending.size, 0)
+    // The full claim's short drain advances the retained checkpoint before the
+    // point observation. A still-running real Agent may own newer pending Turn
+    // events at this boundary, so total pending emptiness is not this case's
+    // independent failure class.
     assert.ok(afterDrain.nextSeq > retained.nextSeq, 'the ordinary drain must advance the retained checkpoint before the point observation')
     releasePoint()
     const readyStarted = Date.now()
@@ -5676,6 +5723,7 @@ test('a real retained-index startup replay owns a pre-reset ordinary backlog wit
   const realObserve = query.observeSession
   let releaseList: () => void = () => {}
   let releasePoint: () => void = () => {}
+  let restoreService2: (() => void) | undefined
   try {
     runtime1 = await host.ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     m3 = await createRemoteHostRuntime(host.ctx)
@@ -5693,6 +5741,9 @@ test('a real retained-index startup replay owns a pre-reset ordinary backlog wit
     }
     const agent = await host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
     await promptHost(host, sessionId, 'req-r13-first', 'hsp-r13-first')
+    // `whenIdle()` establishes the fixed source cut; prompt acceptance alone can
+    // still leave a real Turn consuming the Inbox and appending later events.
+    await agent.whenIdle()
     await waitGateway('retained first incarnation', { scope: 'all', query: '', limit: 1 })
     const service1 = host.ctx.reflect.get(PI_TUI_HISTORY_SEARCH_NAMESPACE) as unknown as {
       index: { checkpointOf(id: string): { nextSeq: number } | undefined }
@@ -5713,18 +5764,21 @@ test('a real retained-index startup replay owns a pre-reset ordinary backlog wit
     const pointGate = new Promise<void>(resolve => { releasePoint = resolve })
     let pointGated = false
     let observations = 0
-    let observationError: Error | undefined
+    let pointEntered!: () => void
+    const pointReached = new Promise<void>(resolve => { pointEntered = resolve })
+    let pointEntry: ReturnType<typeof capturePointEntry> | undefined
     query.observeSession = async (id, options) => {
       observations += 1
-      if (observations > 6) {
-        observationError = new Error(`unbounded live re-observation (${String(observations)}) on an unchanged backlog`)
-        throw observationError
-      }
+      // Capture the official observation BEFORE holding it. The entry snapshot
+      // therefore names the exact post-drain checkpoint the candidate observed.
+      const observation = await realObserve.call(query, id, options)
       if (!pointGated && String(id) === sessionId) {
         pointGated = true
+        pointEntry = capturePointEntry()
+        pointEntered()
         await pointGate
       }
-      return realObserve.call(query, id, options)
+      return observation
     }
     runtime2 = await host.ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await listReached
@@ -5732,38 +5786,79 @@ test('a real retained-index startup replay owns a pre-reset ordinary backlog wit
     // A finite contiguous accepted burst > one 256-event writer batch, all
     // before the required reset, while the retained roster read is held.
     const burst = 600
+    const acceptedMessages: string[] = []
     for (let index = 0; index < burst; index += 1) {
       const message = createUserMessage({
         content: [{ type: 'text', text: `hsp-r13-backlog-${String(index)}` }],
         source: { kind: 'user', rpcId: `rpc-r13-backlog-${String(index)}` as never },
       })
+      acceptedMessages.push(message.id)
       agent.session.append([['agent/inbox/spliced', { target: 'next-turn', start: index, inserted: [message] }]])
     }
     const service2Proxy = host.ctx.reflect.get(PI_TUI_HISTORY_SEARCH_NAMESPACE) as unknown as {
-      index: { checkpointOf(id: string): { nextSeq: number } | undefined }
-      pending: Map<string, { events: unknown[] }>
+      index: { checkpointOf(id: string): { nextSeq: number; dirty: boolean } | undefined }
+      pending: Map<string, { events: readonly { seq: number }[] }>
       heldPending: Set<string>
-      sessionRepairFlights: Map<string, unknown>
+      sessionRepairFlights: Map<string, { promise: Promise<void> }>
       rebuildRequests: Set<string>
       reconcilePending: Set<string>
       state: { kind: string }
       coverage: string
       pointCounters: PointCountersLike
+      writeTail: Promise<void>
+      coverageRound?: { traversed: boolean }
+      finishCoverageRound(): void
+      drainPendingSession(sessionId?: string, owner?: unknown): void
+      observeLiveEvent(session: unknown, event: unknown): void
     }
     const service2 = ((service2Proxy as unknown as Record<symbol, unknown>)[symbols.original] ?? service2Proxy) as typeof service2Proxy
+    function capturePointEntry() {
+      const checkpoint = service2.index.checkpointOf(sessionId)
+      return {
+        officialSeq: agent.session.snapshotEvents().length,
+        checkpoint: checkpoint === undefined ? undefined : structuredClone(checkpoint),
+        pendingSeqs: service2.pending.get(sessionId)?.events.map(event => event.seq) ?? [],
+        held: service2.heldPending.has(sessionId),
+        flight: service2.sessionRepairFlights.get(sessionId)?.promise,
+      }
+    }
     const bufferedStarted = Date.now()
     while ((service2.pending.get(sessionId)?.events.length ?? 0) < burst && Date.now() - bufferedStarted < 5_000) {
       await new Promise(resolve => setTimeout(resolve, 10))
     }
     assert.ok((service2.pending.get(sessionId)?.events.length ?? 0) >= burst, 'the whole accepted burst must be buffered before release')
-    releaseList()
-    const pointStarted = Date.now()
-    while (!pointGated && Date.now() - pointStarted < 5_000) {
-      assert.equal(observationError, undefined, String(observationError))
-      await new Promise(resolve => setTimeout(resolve, 10))
+
+    // Observe any competing drain on the production instance, and the actual
+    // full-round traversal terminal. The fixed tail must skip the active point
+    // ID entirely; its before/after checkpoint is the Q1 witness.
+    const realDrain = service2.drainPendingSession
+    const realFinishCoverageRound = service2.finishCoverageRound
+    const postPointDrains: Array<{ before: ReturnType<typeof capturePointEntry>; after: ReturnType<typeof capturePointEntry> }> = []
+    let traversalReached!: () => void
+    const traversalObserved = new Promise<void>(resolve => { traversalReached = resolve })
+    service2.drainPendingSession = function (id, owner) {
+      const observe = pointGated && id === sessionId
+      const before = observe ? capturePointEntry() : undefined
+      const result = realDrain.call(this, id, owner)
+      if (observe && before !== undefined) postPointDrains.push({ before, after: capturePointEntry() })
+      return result
     }
-    assert.equal(observationError, undefined, String(observationError))
-    assert.equal(pointGated, true, JSON.stringify({
+    service2.finishCoverageRound = function () {
+      const result = realFinishCoverageRound.call(this)
+      if (this.coverageRound?.traversed === true) traversalReached()
+      return result
+    }
+    restoreService2 = () => {
+      service2.drainPendingSession = realDrain
+      service2.finishCoverageRound = realFinishCoverageRound
+    }
+    releaseList()
+    const pointSeen = await Promise.race([
+      pointReached.then(() => true),
+      // Bounded failure window: the real point observation must enter its held official read.
+      new Promise<boolean>(resolve => setTimeout(() => resolve(false), 5_000)),
+    ])
+    assert.equal(pointSeen, true, JSON.stringify({
       state: service2.state,
       coverage: service2.coverage,
       checkpoint: service2.index.checkpointOf(sessionId),
@@ -5773,21 +5868,85 @@ test('a real retained-index startup replay owns a pre-reset ordinary backlog wit
       rebuilds: [...service2.rebuildRequests],
       observations,
     }))
-    // The point owns the unchanged ordinary remainder; the reset/replay can
-    // proceed instead of re-observing the same backlog forever.
-    assert.equal(service2.heldPending.has(sessionId), true, 'the authoritative replay must take over the remaining accepted backlog')
-    const remainder = service2.pending.get(sessionId)?.events.length ?? 0
-    assert.ok(remainder > 0 && remainder < burst, JSON.stringify({ remainder, checkpoint: service2.index.checkpointOf(sessionId) }))
-    const afterDrain = service2.index.checkpointOf(sessionId)
-    assert.ok(afterDrain !== undefined)
-    assert.ok(afterDrain.nextSeq > retained.nextSeq)
+    const traversalSeen = await Promise.race([
+      traversalObserved.then(() => true),
+      // Bounded observation window: the actual full-round traversal terminal must arrive.
+      new Promise<boolean>(resolve => setTimeout(() => resolve(false), 5_000)),
+    ])
+    assert.equal(traversalSeen, true, 'the full round must traverse while the point observation is held')
+    await service2.writeTail
+    assert.ok(pointEntry !== undefined)
+    const remainder = pointEntry.pendingSeqs.length
+    assert.ok(remainder > 0 && remainder < burst, JSON.stringify({ remainder, pointEntry }))
+    assert.ok(pointEntry.checkpoint !== undefined)
+    assert.ok(pointEntry.checkpoint.nextSeq > retained.nextSeq, 'the mandatory point observation must capture the post-drain checkpoint')
+    const q1 = { point: pointEntry, afterTail: capturePointEntry() }
+    assert.equal(observations, 1, 'an unchanged source cut must not trigger another point observation')
+    const heldAnswer = await Promise.race([
+      realSearch(host, peer, { scope: 'all', query: 'hsp-r13-backlog-599', limit: 25 }),
+      // The official observation is held indefinitely, so two seconds is a
+      // bounded failure window for the independent non-blocking Owner read.
+      new Promise<{ kind: 'timeout' }>(resolve => setTimeout(() => resolve({ kind: 'timeout' }), 2_000)),
+    ])
+    assert.ok(
+      heldAnswer.kind === 'loading' || heldAnswer.kind === 'incomplete' || heldAnswer.kind === 'partial',
+      `an Owner query must settle non-ready without waiting for the held official read: ${JSON.stringify(heldAnswer)}`,
+    )
+
+    // Q2 adds ONE legal event through the real Session append producer while
+    // the same point observation is still held. The old witness must stale, but
+    // the new accepted payload must remain inside that exact claim.
+    const sourceSeqBefore = agent.session.snapshotEvents().length
+    const followup = createUserMessage({
+      content: [{ type: 'text', text: `hsp-r13-backlog-${String(burst)}` }],
+      source: { kind: 'user', rpcId: `rpc-r13-backlog-${String(burst)}` as never },
+    })
+    acceptedMessages.push(followup.id)
+    let followupReceived!: () => void
+    const followupObserved = new Promise<void>(resolve => { followupReceived = resolve })
+    const realObserveEvent = service2.observeLiveEvent
+    service2.observeLiveEvent = function (session, event) {
+      const result = realObserveEvent.call(this, session, event)
+      if ((event as { readonly seq?: unknown }).seq === sourceSeqBefore) followupReceived()
+      return result
+    }
+    restoreService2 = () => {
+      service2.drainPendingSession = realDrain
+      service2.finishCoverageRound = realFinishCoverageRound
+      service2.observeLiveEvent = realObserveEvent
+    }
+    agent.session.append([['agent/inbox/spliced', { target: 'next-turn', start: burst, inserted: [followup] }]])
+    const eventSeen = await Promise.race([
+      followupObserved.then(() => true),
+      // Bounded negative window: the real Session listener must receive the legal append.
+      new Promise<boolean>(resolve => setTimeout(() => resolve(false), 5_000)),
+    ])
+    assert.equal(eventSeen, true, 'the real Session event must reach the production listener')
+    await service2.writeTail
+    service2.observeLiveEvent = realObserveEvent
+    const q2 = { before: q1.afterTail, after: capturePointEntry(), drains: postPointDrains.length }
+    const pointCheckpoint = q1.point.checkpoint
+    if (pointCheckpoint === undefined) throw new Error('the point observation must capture a checkpoint')
+    const q1Owned = q1.point.officialSeq === q1.afterTail.officialSeq
+      && q1.afterTail.checkpoint?.nextSeq === pointCheckpoint.nextSeq
+      && JSON.stringify(q1.afterTail.pendingSeqs) === JSON.stringify(q1.point.pendingSeqs)
+      && q1.afterTail.held === true
+      && postPointDrains.length === 0
+    const q2Owned = q2.after.officialSeq === sourceSeqBefore + 1
+      && q2.after.pendingSeqs.includes(sourceSeqBefore)
+      && q2.after.held === true
+      && q2.after.checkpoint?.nextSeq === pointCheckpoint.nextSeq
+      && q2.drains === 0
+    assert.ok(
+      q1Owned && q2Owned,
+      `Q1/Q2 ownership negative control: ${JSON.stringify({ q1Owned, q2Owned, q1, q2 })}`,
+    )
     releasePoint()
     const readyStarted = Date.now()
     let replayed: HistorySearchResponse
     for (;;) {
-      replayed = await realSearch(host, peer, { scope: 'all', query: 'hsp-r13-backlog-599', limit: 25 })
+      replayed = await realSearch(host, peer, { scope: 'all', query: 'hsp-r13-backlog-600', limit: 25 })
       if (replayed.kind === 'ready' || replayed.kind === 'unavailable') break
-      assert.equal(observationError, undefined, String(observationError))
       if (Date.now() - readyStarted > 20_000) {
         assert.fail(JSON.stringify({
           kind: replayed.kind,
@@ -5803,14 +5962,53 @@ test('a real retained-index startup replay owns a pre-reset ordinary backlog wit
       }
       await new Promise(resolve => setTimeout(resolve, 10))
     }
-    assert.equal(observationError, undefined, String(observationError))
     assert.equal(replayed.kind, 'ready', JSON.stringify(replayed))
     if (replayed.kind !== 'ready') throw new Error('expected ready')
     assert.equal(replayed.items.length, 1)
     assert.equal(replayed.items[0]?.sessionId, sessionId)
-    assert.equal(replayed.items[0]?.preview, 'hsp-r13-backlog-599')
+    assert.equal(replayed.items[0]?.preview, 'hsp-r13-backlog-600')
+    assert.equal(observations, 2, 'one stale observation plus exactly one current follow-up must settle the active source')
+    assert.equal(postPointDrains.length, 0, 'no external drain may consume either the old or the newly accepted backlog')
     assert.equal(service2.pending.has(sessionId), false, 'the replay terminal must settle the owned backlog')
     assert.equal(service2.heldPending.has(sessionId), false)
+
+    // Compare the complete result against the real producer's message-id oracle,
+    // across keyset pages; a last-row hit alone would not prove no loss/duplicate.
+    const found = new Set<string>()
+    let cursor: string | undefined
+    for (;;) {
+      const page = await realSearch(host, peer, {
+        scope: 'all',
+        query: 'hsp-r13-backlog-',
+        limit: 25,
+        ...(cursor === undefined ? {} : { cursor }),
+      })
+      assert.equal(page.kind, 'ready', JSON.stringify(page))
+      if (page.kind !== 'ready') throw new Error('expected ready')
+      for (const item of page.items) found.add(item.messageId)
+      if (page.nextCursor === null) break
+      cursor = page.nextCursor
+    }
+    assert.deepEqual([...found].sort(), [...acceptedMessages].sort(), 'every real accepted messageId must appear exactly once')
+    const last = replayed.items[0]!
+    const recovered = parseHistoryReadTextResponse(await host.ctx.typertGateway.invoke({
+      namespace: PI_TUI_HISTORY_SEARCH_NAMESPACE,
+      method: 'readText',
+      args: {
+        request: {
+          sessionId,
+          messageId: last.messageId,
+          contentSha256: last.contentSha256,
+          offset: 0,
+          limit: 4096,
+        },
+      },
+      peer,
+      signal: new AbortController().signal,
+    }))
+    assert.equal(recovered.kind, 'ready', JSON.stringify(recovered))
+    if (recovered.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(recovered.chunk, 'hsp-r13-backlog-600')
     const first = await realSearch(host, peer, { scope: 'all', query: 'hsp-r13-first', limit: 25 })
     assert.equal(first.kind, 'ready', JSON.stringify(first))
     if (first.kind !== 'ready') throw new Error('expected ready')
@@ -5827,6 +6025,7 @@ test('a real retained-index startup replay owns a pre-reset ordinary backlog wit
   } finally {
     releaseList()
     releasePoint()
+    restoreService2?.()
     persistence.list = realList
     query.observeSession = realObserve
     await runtime1?.dispose()
