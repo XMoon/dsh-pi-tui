@@ -135,6 +135,16 @@ export async function runWebStartupPreference(context) {
     const ready = await tui.waitFor(record => record.m4a0 === 'ready', `${label} TUI ready`, 180_000)
     assert(ready.surfaceMounted === true && ready.transport === 'connected',
       `${label}: the real Split TUI did not mount its surface`)
+    // Surface readiness can precede the editor seat. Prove the Composer accepts
+    // real input before returning so an immediately typed /web is not dropped.
+    const marker = `pc-ready-${randomUUID()}`
+    tui.send(marker)
+    await tui.waitForComposerDraft(marker, 30_000)
+    tui.send('\x15')
+    await waitForCondition(async () => {
+      const draft = await tui.composerText()
+      return draft !== undefined && !draft.includes(marker)
+    }, `${label} Composer cleared after readiness proof`, 30_000)
     return tui
   }
   const webAccess = async (peer, label, value) => {
@@ -162,6 +172,24 @@ export async function runWebStartupPreference(context) {
       await sleep(50)
     }
     throw new SplitSmokeAssertionError(`${label}: the Composer never released the submitted draft`)
+  }
+  /** Retire the real Settings workspace: Detail -> Host Rows -> rail -> editor. */
+  const closeSettings = async (tui, label) => {
+    tui.send('\u001b')
+    await tui.waitForScreen('Settings · Host · Rows', `${label} page retired`, 30_000)
+    tui.send('\u001b')
+    await tui.waitForScreen('Settings · Categories', `${label} category rail`, 30_000)
+    tui.send('\u001b')
+    await tui.waitForScreenGone('Settings ·', `${label} workspace closed`, 30_000)
+  }
+  const waitForFramePattern = async (tui, pattern, label, timeoutMs = 30_000) => {
+    await waitForCondition(async () => pattern.test((await tui.viewport()).join('\n')), label, timeoutMs)
+  }
+  const waitForSelectedRow = async (tui, label, timeoutMs = 30_000) => {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+    const selected = new RegExp(`^.*> ${escaped}(?:\\s|$)`, 'mu')
+    await waitForCondition(async () => selected.test((await tui.viewport()).join('\n')),
+      `${label} row selected`, timeoutMs)
   }
   const assertToggle = (record, expected, label) => {
     assert(record.ok === true, `${label}: the private Web access call failed: ${JSON.stringify(record.errorCode ?? null)}`)
@@ -216,23 +244,19 @@ export async function runWebStartupPreference(context) {
     // ── B. The real TUI `/web → Enable Web` serves the frontend (PC-04/06) ──
     const tui = await startTui('PC-06 TUI')
     tui.send('/web\r')
-    await tui.waitForScreen('Status: disabled', 'PC-06 menu')
-    // The overlay owns the keyboard: ONE arrow per chunk, and the selected
-    // row's own description is the authoritative "the move landed" signal.
-    tui.send('\u001b[B')
-    await tui.waitForScreen('Start serving the official Web frontend', 'PC-06 Enable row')
+    await tui.waitForScreen('Settings · Host · Web UI', 'PC-06 Web UI page', 30_000)
+    await waitForFramePattern(tui, /Serving\s+Disabled/u, 'PC-06 disabled projection')
+    // The Settings page's first focus is the primary Host action: Enable Web.
+    await waitForSelectedRow(tui, 'Enable Web')
     tui.send('\r')
-    await tui.waitForScreen('Status: enabled', 'PC-06 enabled projection')
+    await waitForFramePattern(tui, /Serving\s+Enabled/u, 'PC-06 enabled projection', 120_000)
+    await waitForFramePattern(tui, /Status\s+Web enabled/u, 'PC-06 enable settled')
     const enabledStatus = await hostStatus(first.host)
     assertFullyOn(enabledStatus, 'PC-06 enabled')
     assert(enabledStatus.pid === firstPid, 'PC-06 the enable changed the Host process')
     const launch = readJson(join(dshHome, 'run', 'dsh-pi-tui', first.ready.localHost.scopeId, 'launch.json'))
     const serving = await assertServing(origin, launch, 'PC-06')
-    // Close the menu (Esc) before the TUI receives ordinary input: the open
-    // overlay owns the keyboard, so a prompt typed into it would only edit
-    // the list's own search box.
-    tui.send('\u001b')
-    await tui.waitForScreenGone('Status: enabled', 'PC-06 menu closed')
+    await closeSettings(tui, 'PC-06')
     // The TUI keeps working on the serving Host.
     // Split typing from submitting: a batched `pc-06 tui works\r` may be
     // consumed before the Composer paints it, so the release check below
@@ -265,19 +289,17 @@ export async function runWebStartupPreference(context) {
     assert(link.pageStatus === 200 && link.pageBytes > 1024,
       `PC-05 the cookie did not reach the served page (HTTP ${String(link.pageStatus)}, ${String(link.pageBytes)} bytes)`)
     assert(!('url' in link) && !('token' in link), 'PC-05 the URL/token leaked into a record')
-    // Copy Link through the SAME real TUI menu (enabled projection): rows are
-    // status -> Open Browser -> Copy Link, so two Downs then Enter. Only the
-    // clipboard acknowledgement may be painted.
+    // Copy Link through the SAME real Settings page. The enabled page focuses
+    // Open first; one Down reaches Copy access link. Only the clipboard
+    // acknowledgement may be painted.
     tui.send('/web\r')
-    await tui.waitForScreen('Status: enabled', 'PC-05 menu')
+    await tui.waitForScreen('Settings · Host · Web UI', 'PC-05 Web UI page', 30_000)
+    await waitForFramePattern(tui, /Serving\s+Enabled/u, 'PC-05 enabled projection')
+    await waitForSelectedRow(tui, 'Open in browser')
     tui.send('\u001b[B')
-    await tui.waitForScreen('Request the OS to open the official Web home page', 'PC-05 Open Browser row')
-    tui.send('\u001b[B')
-    await tui.waitForScreen('Copy the authenticated Web home link to the clipboard', 'PC-05 Copy Link row')
+    await waitForSelectedRow(tui, 'Copy access link')
     tui.send('\r')
-    // The copy result is painted INSIDE the open menu (the overlay covers the
-    // base notice line at the smoke's PTY height).
-    await tui.waitForScreen('Link copied', 'PC-05 copy acknowledgement')
+    await tui.waitForScreen('Link copied', 'PC-05 copy acknowledgement', 30_000)
     const copyScreen = (await tui.viewport()).join('\n')
     assert(!copyScreen.includes('token='), 'PC-05 the launch URL/token was painted by Copy Link')
     assert(copyScreen.includes('Link copied'), 'PC-05 the copy acknowledgement disappeared')
@@ -291,26 +313,20 @@ export async function runWebStartupPreference(context) {
     })
 
     // ── D. Manual `/web Disable` keeps the TUI working (PC-08) ──────────
-    // Continue in the SAME menu the copy settled on: rows are status ->
-    // copy result -> Open -> Copy -> Disable (the notice row is a disabled
-    // fact but still a cursor stop). One arrow per chunk, each move proven
-    // by the row's own selected description.
+    // Continue on the same enabled page: Copy -> Disable Web… -> confirmation.
     tui.send('\u001b[B')
-    await tui.waitForScreen('Action result.', 'PC-08 copy result row')
-    tui.send('\u001b[B')
-    await tui.waitForScreen('Request the OS to open the official Web home page', 'PC-08 Open Browser row')
-    tui.send('\u001b[B')
-    await tui.waitForScreen('Copy the authenticated Web home link to the clipboard', 'PC-08 Copy Link row')
-    tui.send('\u001b[B')
-    await tui.waitForScreen('Stop serving the official Web frontend', 'PC-08 Disable row')
+    await waitForSelectedRow(tui, 'Disable Web…')
     tui.send('\r')
-    await tui.waitForScreen('Status: disabled', 'PC-08 disable')
+    await tui.waitForScreen('Stop serving the Web UI?', 'PC-08 disable confirmation', 30_000)
+    await waitForSelectedRow(tui, 'Disable Web')
+    tui.send('\r')
+    await waitForFramePattern(tui, /Serving\s+Disabled/u, 'PC-08 disable', 120_000)
+    await waitForFramePattern(tui, /Status\s+Web disabled/u, 'PC-08 disable settled')
     const disabledStatus = await hostStatus(first.host)
     assertFullyOff(disabledStatus, 'PC-08 manual disable')
     assert(disabledStatus.pid === firstPid, 'PC-08 the disable changed the Host process')
     await assertHttpOff(origin, 'PC-08 manual disable')
-    tui.send('\u001b')
-    await tui.waitForScreenGone('Status: disabled', 'PC-08 menu closed')
+    await closeSettings(tui, 'PC-08')
     tui.send('pc-08 after disable\r')
     await tui.waitForScreen('pc-08 after disable', 'PC-08 TUI prompt after disable')
     // Saving Off does not change the running Host's FINAL Web state. The
