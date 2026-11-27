@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
@@ -1095,6 +1095,8 @@ test('a failed Client Domain restore verification stays owned through joined cle
       && note.detail?.fault === 'client-domain-module-absent')).toBe(true)
     expect(receipt.notes?.some(note => note?.event === 'installation-mutation-restored'
       && note.detail?.fault === 'client-domain-module-absent')).toBe(false)
+    expect(existsSync(scene.workDir), 'the Supervisor-preserved negative Scene root').toBe(true)
+    expect(receipt.cleanup?.sceneRootRemoved, 'the retained negative Scene root was not removed').toBe(false)
   } catch (error) {
     primary = error
     throw error
@@ -1102,7 +1104,6 @@ test('a failed Client Domain restore verification stays owned through joined cle
     if (!disposeAttempted) {
       try { await scene.dispose() } catch (error) { cleanupError = error }
     }
-    if (existsSync(scene.workDir)) rmSync(scene.workDir, { recursive: true })
     if (primary !== undefined) {
       if (cleanupError !== undefined) throw new AggregateError([primary, cleanupError], 'restore failure negative control and cleanup both failed')
       throw primary

@@ -13022,14 +13022,15 @@ async function handleSetInstallationFault(message) {
           renameSync(absent, resolved)
           mutation.renamed = false
         }
-        if (process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT === 'client-domain-restore-mode') {
-          chmodSync(resolved, original.mode ^ 0o100)
-        }
         const restoredStat = lstatSync(resolved)
         const restoredBytes = readFileSync(resolved)
+        // Fixed non-mutating negative: every restore call must re-run verification.
+        const observedMode = process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT === 'client-domain-restore-mode'
+          ? original.mode ^ 0o100
+          : restoredStat.mode & 0o777
         if (!restoredStat.isFile() || restoredStat.isSymbolicLink()
           || restoredStat.uid !== original.uid || restoredStat.gid !== original.gid
-          || (restoredStat.mode & 0o777) !== original.mode
+          || observedMode !== original.mode
           || !restoredBytes.equals(original.bytes)
           || createHash('sha256').update(restoredBytes).digest('hex') !== sha256
           || realpathSync(profileRequire.resolve(moduleName)) !== resolved) {
