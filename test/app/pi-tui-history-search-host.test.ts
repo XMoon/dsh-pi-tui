@@ -8798,6 +8798,7 @@ test('resuming an excluded Session during an open round schedules only one autho
     await Promise.race([
       currentStarted,
       new Promise<never>((_, reject) => {
+        // Bounded failure deadline only; the candidate signal is the authoritative wake-up.
         const timer = setTimeout(() => reject(new Error('current candidate did not reach the held writer')), 10_000)
         currentStarted.finally(() => clearTimeout(timer))
       }),
@@ -9033,6 +9034,7 @@ test('a live registration and accepted event during legacy exclusion veto the st
     await Promise.race([
       candidateStarted,
       new Promise<never>((_, reject) => {
+        // Bounded failure deadline only; the candidate signal is the authoritative wake-up.
         const timer = setTimeout(() => reject(new Error('legacy exclusion candidate did not reach the held writer')), 10_000)
         candidateStarted.finally(() => clearTimeout(timer))
       }),
