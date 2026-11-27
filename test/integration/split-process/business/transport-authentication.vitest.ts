@@ -917,6 +917,8 @@ test('cancels an installed Client during an in-flight authentication without dis
   let testError: unknown
   let peer: SplitProcessClient | undefined
   let cancelled: QualificationClientHandle | undefined
+  let startAttempted = false
+  let signalAttempted = false
   let cancelledFinished = false
   let targetTerminalProven = false
   let listener: ReturnType<typeof createHttpServer> | undefined
@@ -950,7 +952,10 @@ test('cancels an installed Client during an in-flight authentication without dis
   const settleCancelledClient = async (): Promise<void> => {
     if (cancelled === undefined || cancelledFinished) return
     const facts = await scene.entryRecordFacts(cancelled)
-    if (!facts.exited && facts.records.every(record => record.m4a0 !== 'signal')) {
+    if (!facts.exited && !signalAttempted) {
+      // Exactly one owned SIGTERM attempt. If the RPC was already attempted,
+      // join the existing close instead of dispatching a second signal.
+      signalAttempted = true
       await scene.signalEntry(cancelled, 'SIGTERM')
     }
     await scene.finishEntry(cancelled)
@@ -993,7 +998,6 @@ test('cancels an installed Client during an in-flight authentication without dis
     const requests: Array<{ method: string; pathname: string; token: string | null; interactions: string | null; keys: string[] }> = []
     let requestSocket: Socket | undefined
     let requestArrivedAt: number | undefined
-    let requestArrivedWallMs: number | undefined
     let unexpected: Error | undefined
     let resolveFirstRequest: (() => void) | undefined
     const firstRequest = new Promise<void>(resolve => { resolveFirstRequest = resolve })
@@ -1037,7 +1041,6 @@ test('cancels an installed Client during an in-flight authentication without dis
       }
       requestSocket = request.socket
       requestArrivedAt = performance.now()
-      requestArrivedWallMs = Date.now()
       resolveFirstRequest?.()
       // Deliberately hold the response: no status line, headers or body.
     })
@@ -1069,6 +1072,7 @@ test('cancels an installed Client during an in-flight authentication without dis
     writePrivateJson(hostFiles.registryPath, { ...registry, origin: listenerOrigin })
     writePrivateJson(hostFiles.launchPath, { ...launch, connectUrl: `${listenerOrigin}/connect?token=${syntheticToken}` })
 
+    startAttempted = true
     const [target] = await scene.startQualificationClients({ mode: 'attach' })
     cancelled = target!
     const targetFacts = await scene.entryRecordFacts(cancelled)
@@ -1084,11 +1088,11 @@ test('cancels an installed Client during an in-flight authentication without dis
     })
     if (unexpected !== undefined) throw unexpected
     const arrivedAt = requestArrivedAt
-    const arrivedWallMs = requestArrivedWallMs
-    if (arrivedAt === undefined || arrivedWallMs === undefined || requestSocket === undefined) {
+    if (arrivedAt === undefined || requestSocket === undefined) {
       throw new Error('the controlled listener did not record the real request arrival and socket')
     }
-    expect(requestSocket.destroyed).toBe(false)
+    const heldSocket = requestSocket
+    expect(heldSocket.destroyed).toBe(false)
 
     // The decisive boundary is the real request already in flight, not a sleep
     // or a spawn timestamp: the Client has not authenticated, created a
@@ -1099,17 +1103,30 @@ test('cancels an installed Client during an in-flight authentication without dis
         `the cancelled Client reported ${recordName} before the request was held`).toBe(false)
     }
 
-    const signalWallMs = Date.now()
+    // Re-verify the SAME sole request is still pending immediately before the
+    // signal; no sleep or spawn timestamp is the decisive boundary.
+    expect(unexpected).toBeUndefined()
+    expect(requests).toHaveLength(1)
+    expect(requestSocket).toBe(heldSocket)
+    expect(heldSocket.destroyed).toBe(false)
+    const recordsAtSignal = await scene.entryRecords(cancelled)
+    for (const recordName of ['host-authenticated', 'context-ready', 'ready', 'failure']) {
+      expect(recordsAtSignal.some(record => record.m4a0 === recordName),
+        `the cancelled Client reported ${recordName} while the request was still held`).toBe(false)
+    }
+    const signalAt = performance.now()
+    signalAttempted = true
     await scene.signalEntry(cancelled, 'SIGTERM')
     const terminal = await scene.finishEntry(cancelled)
+    const terminalAt = performance.now()
     cancelledFinished = true
     targetTerminalProven = true
-    const exitWallMs = terminal.exitWallMs
-    if (typeof exitWallMs !== 'number' || !Number.isFinite(exitWallMs)) {
-      throw new Error('the cancelled Client terminal did not carry its real exit wall time')
-    }
-    expect(exitWallMs - arrivedWallMs, 'the cancelled Client did not exit within 5s of the real request arrival').toBeLessThan(5_000)
-    expect(exitWallMs - signalWallMs, 'the cancelled Client did not exit within 5s of the real SIGTERM').toBeLessThan(5_000)
+    // Conservative same-Worker upper bounds on the real close, not exact OS
+    // exit timestamps.
+    expect(terminalAt - arrivedAt, 'the cancelled Client did not close within 5s of the real request arrival').toBeGreaterThanOrEqual(0)
+    expect(terminalAt - arrivedAt, 'the cancelled Client did not close within 5s of the real request arrival').toBeLessThan(5_000)
+    expect(terminalAt - signalAt, 'the cancelled Client did not close within 5s of the real SIGTERM').toBeGreaterThanOrEqual(0)
+    expect(terminalAt - signalAt, 'the cancelled Client did not close within 5s of the real SIGTERM').toBeLessThan(5_000)
     expect(terminal.exit).toEqual({ code: 0, signal: null })
     expect(terminal.outcome).toBe('signal')
 
@@ -1128,8 +1145,7 @@ test('cancels an installed Client during an in-flight authentication without dis
 
     // The Client's abort closes the real in-flight socket; the test must not be
     // the one that ends it.
-    const socketAtArrival = requestSocket
-    await waitFor(async () => socketAtArrival.destroyed, 'the held authentication connection to close after the Client exit', 10_000)
+    await waitFor(async () => heldSocket.destroyed, 'the held authentication connection to close after the Client exit', 10_000)
 
     // Restore the private files only after the Client's real terminal, then
     // release the listener. The SAME Host must still authenticate with its own
@@ -1185,7 +1201,7 @@ test('cancels an installed Client during an in-flight authentication without dis
     } catch (error) {
       cleanupErrors.push(asError(error))
     }
-    if (targetTerminalProven || cancelled === undefined) {
+    if (!startAttempted || targetTerminalProven) {
       try {
         restorePrivate()
       } catch (error) {
@@ -1193,7 +1209,7 @@ test('cancels an installed Client during an in-flight authentication without dis
       }
     } else if (privateSnapshot !== undefined) {
       cleanupErrors.push(new Error(
-        'the private discovery files were left mutated because the cancelled Client terminal was not proven'))
+        'the private discovery files were left mutated because the started Client terminal was not proven'))
     }
     if (peer !== undefined) {
       try {

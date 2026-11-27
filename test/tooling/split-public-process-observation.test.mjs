@@ -18,6 +18,7 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
   admitPublicObservation,
   parseDarwinProcargs,
+  parseDarwinProcargsArgv,
   parseLinuxCommandLine,
   parseLinuxEnvironment,
   publicAdmissionDisposition,
@@ -58,6 +59,21 @@ test('Darwin procargs preserves interior empty argv entries and exact environmen
   assert.equal(parsed.envMap.get('P1D_EMPTY'), '')
   assert.equal(parsed.envMap.get('P1D_SPACE'), 'a b c')
   assert.equal(parsed.envMap.get('P1D_ASSIGN'), 'x=y=z')
+})
+
+test('Darwin argv-only decoding respects the actual copied length boundary', () => {
+  const { buffer, used } = procargs({ argc: 2, argv: ['node', 'child'] })
+  const capacity = Buffer.concat([buffer, Buffer.from('\0outside-used\0')])
+  const complete = parseDarwinProcargsArgv(capacity, used)
+  assert.equal(complete.kind, 'ok')
+  assert.deepEqual(complete.argv, ['node', 'child'])
+
+  // The capacity still contains the final argv NUL, but used ends inside the
+  // final argument. Bytes outside [0, used) must never complete argv.
+  const cut = buffer.indexOf(Buffer.from('child')) + Buffer.byteLength('child')
+  const truncated = parseDarwinProcargsArgv(capacity, cut)
+  assert.equal(truncated.kind, 'unknown')
+  assert.equal(truncated.code, 'ARGV_FRAMING')
 })
 
 test('Darwin procargs records the real env section bytes and a real apple tail', () => {

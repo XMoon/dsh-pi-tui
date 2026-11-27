@@ -1060,8 +1060,20 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
    */
   function argvEntry(pid) {
     if (platform === 'darwin') {
+      const stateBefore = kernelState(pid)
+      if (stateBefore.state !== 'alive') {
+        return stateBefore.state === 'gone' ? gone() : unknown(stateBefore.code)
+      }
       const parsed = darwin.readProcargs(pid, { argvOnly: true })
       if (parsed.kind !== 'ok') return parsed
+      const stateAfter = kernelState(pid)
+      if (stateAfter.state !== 'alive') {
+        return stateAfter.state === 'gone' ? gone() : unknown(stateAfter.code)
+      }
+      if (stateAfter.birth !== stateBefore.birth
+        || !identityTopologyMatches(stateBefore.identity, stateAfter.identity)) {
+        return unknown('TORN_OBSERVATION')
+      }
       if (!Array.isArray(parsed.argv) || parsed.argv.length < 2
         || typeof parsed.argv[1] !== 'string' || parsed.argv[1] === ''
         || !isAbsolute(parsed.argv[1])) {
@@ -1483,15 +1495,18 @@ function createDarwinBridge(koffiEntry) {
     if (rc !== 0) return unknown(classifyProcargsErrno(koffi.errno(), pid), { stage: 'read' })
     const used = length[0]
     if (!Number.isInteger(used) || used < 4 || used > size) return unknown('ABI_UNSUPPORTED')
+    if (options?.argvOnly === true) {
+      // sysctl(3) reports the amount actually copied. Parse only those bytes:
+      // zero padding or garbage outside [0, used) is not argv. The decoder still
+      // enforces its own argc/NUL/UTF-8 framing, so a short copy is never proof
+      // of complete argv by itself.
+      const argvOnly = parseDarwinProcargsArgv(buffer.subarray(0, used), used)
+      if (argvOnly.kind !== 'ok') return argvOnly
+      return { ...argvOnly, used, argmax: max.value }
+    }
     if (used !== size) return unknown('PROCARGS_LENGTH_MISMATCH', { query: size, used })
     const parsed = parseDarwinProcargs(buffer, used)
-    if (parsed.kind !== 'ok') {
-      if (options?.argvOnly === true) {
-        const argvOnly = parseDarwinProcargsArgv(buffer, used)
-        if (argvOnly.kind === 'ok') return { ...argvOnly, used, argmax: max.value }
-      }
-      return parsed
-    }
+    if (parsed.kind !== 'ok') return parsed
     return { ...parsed, used, argmax: max.value }
   }
 

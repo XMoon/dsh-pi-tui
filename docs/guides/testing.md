@@ -650,21 +650,26 @@ Two further non-PTY contracts are fixed (Linux and macOS):
   origin holds the one expected real `/connect` transaction (the synthetic token
   is not a product secret), the real installed Client is still unauthenticated
   and has no Context/Ready/failure, then the test-owned SIGTERM reaches the
-  Supervisor. The Client must exit within five seconds, close the held socket
+  Supervisor. The Client must close within five seconds, close the held socket
   and report the one shutdown cleanup, while the original Host and a real
-  already-mounted peer stay usable.
+  already-mounted peer stay usable. The two <5s bounds are conservative
+  same-Worker monotonic measurements from the real request arrival and the
+  signal RPC to the awaited close, not exact OS exit timestamps.
 - A cross-home profile discovery uses ONE fixed alias `DSH_HOME` whose
   `profiles/pi-tui` resolves to the SAME canonical installed profile: the scope
   id (UID + canonical profile) is identical while the discovery root is
   distinct. Its registry/launch/Host log must start absent. The real detached
   Host candidate must record exactly the product `host-seat-conflict`
-  (`HOST_ALREADY_OWNED`, same scope) and no Ready/profile boot. The Supervisor
-  must settle the alias obligation (real log, no publication, candidate
-  terminal, alias qualification seat free, primary seat still held) before it
-  releases the primary Host seat or calls the Scene clean. An unproven alias
-  terminal is `NOT_QUIESCED`, never a pass; an abnormal abort with no candidate
-  spawn is the only branch where `ENOENT` Host log plus no live candidate is a
-  valid terminal.
+  (`HOST_ALREADY_OWNED`, same scope) and no Ready/profile boot. The exact
+  conflict PID and its detached process group are the terminal authority even
+  when the short-lived candidate was never captured; a captured candidate is
+  bound to that same PID/birth. The Supervisor must settle the alias obligation
+  (real log, no publication, exact PID/group terminal, alias qualification seat
+  free, exact primary seat still held) before it releases the primary Host seat
+  or calls the Scene clean. An unproven alias terminal is `NOT_QUIESCED`, never
+  a pass. An abnormal abort may use the no-spawn branch only when the producer
+  is joined or positively never dispatched, the `ENOENT` Host log is strict, no
+  candidate was ever observed and an independent all-PID scan finds none.
 
 It requires two private inputs:
 

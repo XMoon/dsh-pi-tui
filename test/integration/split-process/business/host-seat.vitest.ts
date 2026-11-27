@@ -536,7 +536,17 @@ test('refuses cross-home discovery for the same canonical profile while the Host
     expect(facts?.primarySeatBusy).toBe(true)
     expect(facts?.primaryPid).toBe(hostPid)
     expect(facts?.primaryInstanceId).toBe(hostInstanceId)
-    expect(facts?.scratchProvenance).toBe(true)
+    expect(facts?.candidateTerminal).not.toBeUndefined()
+    if (facts?.candidate === null) {
+      // The short-lived natural loser may be gone before the first full
+      // capture; the exact conflict PID/group is still the terminal authority.
+      expect(facts?.candidateTerminal).toBeNull()
+      expect(facts?.scratchProvenance).toBeNull()
+    } else {
+      expect(facts?.candidateTerminal).toBe(true)
+      expect(facts?.scratchProvenance).toBe(true)
+      expect(facts?.candidate?.pid).toBe(facts?.conflict?.pid)
+    }
 
     const clientRecords = (await scene.entryRecordFacts(client)).records
     const clientFailures = clientRecords.filter(record => record.m4a0 === 'failure')

@@ -466,8 +466,9 @@ let crossHomeObservation
 let crossHomeExpectedEntry
 /** The producer Client's live start instant, captured before the Worker kill. */
 let crossHomeProducerStart
-/** The producer Client PID captured before the Worker kill. */
-let crossHomeProducerPid
+/** The exact primary Host PID/birth captured before the Worker kill. */
+let crossHomePrimaryPid
+let crossHomePrimaryBirth
 async function loadPublicObservation(receipt) {
   const anchor = receipt?.installation?.anchor
   if (typeof anchor !== 'string' || anchor === '') fail('the receipt carries no installed DSH anchor')
@@ -950,12 +951,12 @@ function probeStartFacts(identity) {
   return undefined
 }
 
-function probeStartedAtOrAfter(identity, baseline) {
+function probeStartedBefore(identity, baseline) {
   const current = probeStartFacts(identity)
-  if (current === undefined || baseline === undefined || current.platform !== baseline.platform) return true
-  if (current.platform === 'linux') return BigInt(current.ticks) >= BigInt(baseline.ticks)
+  if (current === undefined || baseline === undefined || current.platform !== baseline.platform) return false
+  if (current.platform === 'linux') return BigInt(current.ticks) < BigInt(baseline.ticks)
   return BigInt(current.sec) * 1_000_000n + BigInt(current.usec)
-    >= BigInt(baseline.sec) * 1_000_000n + BigInt(baseline.usec)
+    < BigInt(baseline.sec) * 1_000_000n + BigInt(baseline.usec)
 }
 
 async function assertCrossHomeProbeTerminal(receipt, kernel, observation) {
@@ -978,10 +979,43 @@ async function assertCrossHomeProbeTerminal(receipt, kernel, observation) {
   exactPathAbsent(join(scopeDir, 'instance.json'), 'cross-home probe alias registry')
   exactPathAbsent(join(scopeDir, 'launch.json'), 'cross-home probe alias launch')
   if (!(await hostSeatFree(row.aliasSeat))) fail('cross-home probe: the alias qualification Client seat is still held')
+  if (row.primarySeatBusy !== true) fail('cross-home probe: the pre-release primary seat fact is not busy')
+  if (!Number.isInteger(crossHomePrimaryPid) || typeof crossHomePrimaryBirth !== 'string') {
+    fail('cross-home probe: the primary Host identity was not captured before the kill')
+  }
+  if (row.primaryPid !== crossHomePrimaryPid) fail('cross-home probe: the receipt primary PID is not the captured primary')
   if (row.terminal === 'seat-conflict') {
     if (row.hostLogPresent !== true) fail('cross-home probe: the seat-conflict terminal has no recorded alias Host log')
     if (row.conflict?.error !== 'HOST_ALREADY_OWNED' || row.conflict?.scopeId !== receipt.scope?.scopeId) {
       fail('cross-home probe: the alias Host conflict is not the expected product conflict/scope')
+    }
+    const conflictPid = row.conflict?.pid
+    if (!Number.isInteger(conflictPid) || conflictPid <= 0) {
+      fail('cross-home probe: the alias Host conflict has no exact PID')
+    }
+    let candidateBirth
+    if (row.candidate === null || row.candidate === undefined) {
+      if (row.candidateTerminal !== null || row.scratchProvenance !== null) {
+        fail('cross-home probe: an uncaptured candidate must have null terminal/scratch facts')
+      }
+    } else {
+      if (row.candidate.pid !== conflictPid || typeof row.candidate.birth !== 'string') {
+        fail('cross-home probe: the captured candidate is not the exact conflict PID/birth')
+      }
+      if (row.candidateTerminal !== true || row.scratchProvenance !== true) {
+        fail('cross-home probe: the captured candidate lacks terminal/scratch proof')
+      }
+      candidateBirth = row.candidate.birth
+    }
+    const candidateState = identityLiveness(kernel, conflictPid, candidateBirth)
+    if (candidateState === 'live' || candidateState === 'unknown' || candidateState === 'unproven') {
+      fail(`cross-home probe: the exact conflict PID is ${candidateState}`)
+    }
+    if (candidateBirth === undefined && candidateState !== 'gone') {
+      fail(`cross-home probe: the uncaptured conflict PID is ${candidateState}, not actually gone`)
+    }
+    if (processGroupTerminalState(kernel, conflictPid) !== 'terminal') {
+      fail('cross-home probe: the exact conflict process group is not terminal')
     }
     const logPath = join(scopeDir, 'host.log')
     if (existsSync(logPath)) {
@@ -1002,15 +1036,13 @@ async function assertCrossHomeProbeTerminal(receipt, kernel, observation) {
     }
   } else if (row.terminal === 'no-spawn') {
     if (row.hostLogPresent !== false) fail('cross-home probe: the no-spawn terminal carries an alias Host log')
+    if (row.conflict !== null || row.candidate !== null || row.candidateTerminal !== null
+      || row.scratchProvenance !== null) {
+      fail('cross-home probe: the no-spawn terminal carries a candidate/conflict fact')
+    }
     exactPathAbsent(join(scopeDir, 'host.log'), 'cross-home probe no-spawn alias Host log')
   } else {
     fail(`cross-home probe: unknown cross-home terminal ${String(row.terminal)}`)
-  }
-  if (row.candidate !== null && row.candidate !== undefined) {
-    const state = identityLiveness(kernel, row.candidate.pid, row.candidate.birth)
-    if (state === 'live' || state === 'unknown' || state === 'unproven') {
-      fail(`cross-home probe: the captured alias candidate is ${state}`)
-    }
   }
   // Independent observation of the exact candidate set: every current PID is
   // read; unreadable aliases that started before the producer are provably
@@ -1035,8 +1067,8 @@ async function assertCrossHomeProbeTerminal(receipt, kernel, observation) {
     }
     if (identity.kind === 'gone') return
     if (identity.kind !== 'alive') fail(`cross-home probe: the unknown PID ${String(pid)} (${String(code)}) is unverifiable`)
-    if (identity.identity.ppid !== 1 && identity.identity.ppid !== crossHomeProducerPid) return
-    if (!probeStartedAtOrAfter(identity.identity, crossHomeProducerStart)) return
+    // Only a positively known earlier start can exclude an unreadable PID.
+    if (probeStartedBefore(identity.identity, crossHomeProducerStart)) return
     fail(`cross-home probe: the alias candidate PID ${String(pid)} is unverifiable (${String(code)})`)
   }
   for (const pid of all.pids) {
@@ -1066,7 +1098,16 @@ async function assertCrossHomeProbeTerminal(receipt, kernel, observation) {
       groupLeader: true,
     })
     if (captured.kind === 'captured') fail(`cross-home probe: a live alias Host candidate remains: ${String(pid)}`)
-    if (captured.kind === 'unknown') failUnknown(pid, captured.code ?? 'CAPTURE_UNKNOWN')
+    if (captured.kind === 'unknown') {
+      failUnknown(pid, captured.code ?? 'CAPTURE_UNKNOWN')
+      continue
+    }
+    const foreign = captured.reason === 'dsh-home-mismatch'
+      || captured.reason === 'uid-mismatch'
+      || captured.reason === 'canonical-entry-mismatch'
+    if (!foreign) {
+      fail(`cross-home probe: same-entry PID ${String(pid)} is not the alias reservation (${String(captured.reason)})`)
+    }
   }
 }
 
@@ -1722,7 +1763,11 @@ try {
             if (crossHomeProducerStart === undefined) {
               fail('cross-home case: the producer Client has no comparable start instant')
             }
-            crossHomeProducerPid = reserved.pid
+            if (!Number.isInteger(host.pid) || typeof host.birth !== 'string') {
+              fail('cross-home case: the primary Host has no captured kernel identity')
+            }
+            crossHomePrimaryPid = host.pid
+            crossHomePrimaryBirth = host.birth
             crossHomeObservation = await loadPublicObservation(receipt)
             crossHomeExpectedEntry = realpathSync(receipt.installation.entries.host)
           }
