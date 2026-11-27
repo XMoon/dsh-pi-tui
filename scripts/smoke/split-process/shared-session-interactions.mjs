@@ -185,6 +185,7 @@ export async function runSharedSessionInteractions(context) {
       // source; the exact marker below still proves A sees B's Host occurrence,
       // never a Client-local optimistic echo.
       clientB.send('\x1b[A')
+      clientB.send('\x1b[F') // End: recalled draft may park the cursor at column 0.
       clientB.send('\x15')
 
       // MB-02: B queues into the shared Host inbox while the Turn is held.
