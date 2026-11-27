@@ -54,6 +54,7 @@ function surface(options: {
     clearResumeFailure: () => {},
     retireStaleHistorySeat: () => {},
     beginInputHistoryScope: record,
+    bindInputRecallScope: () => {},
     dropOutgoingActiveDraft: record,
     reportSwitchFailure: record,
     warnCommittedDurability: record,

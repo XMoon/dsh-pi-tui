@@ -1209,8 +1209,8 @@ test('a submit inside a session transition is refused, keeps the draft and dispa
     'the retired session stays untouched after the settle')
   assert.equal([...recallOf(fixture)].includes('fenced transition draft zeta'), false,
     'a fenced/refused submit never enters the process recall')
-  assert.ok([...recallOf(fixture)].includes('/sessions'),
-    'the accepted clear-first command is still history')
+  assert.equal([...recallOf(fixture)].includes('/sessions'), false,
+    'the outgoing Session\'s clear-first command is not imported into the new Session scope')
 })
 
 test('a Remote submit after /resume targets the replacement current Session, never the retired Session', async (t) => {

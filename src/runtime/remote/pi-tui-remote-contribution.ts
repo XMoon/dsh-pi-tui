@@ -75,6 +75,7 @@ import {
 import {
   PI_TUI_HISTORY_SEARCH,
   PI_TUI_HISTORY_SEARCH_READ_TEXT,
+  PI_TUI_HISTORY_SEARCH_SESSION_RECALL,
 } from './pi-tui-history-search-contract.ts'
 
 /** The npm package that owns every private Remote invocation here. A test
@@ -113,6 +114,7 @@ export const PI_TUI_HOST_CONTRIBUTION: TypertContribution = {
     PI_TUI_PROMPT_PRESENCE_SYNC_VIEW,
     PI_TUI_HISTORY_SEARCH,
     PI_TUI_HISTORY_SEARCH_READ_TEXT,
+    PI_TUI_HISTORY_SEARCH_SESSION_RECALL,
   ],
 }
 
@@ -145,5 +147,6 @@ export const PI_TUI_CLIENT_CONTRIBUTION: TypertRemoteContribution = {
     PI_TUI_PROMPT_PRESENCE_SYNC_VIEW,
     PI_TUI_HISTORY_SEARCH,
     PI_TUI_HISTORY_SEARCH_READ_TEXT,
+    PI_TUI_HISTORY_SEARCH_SESSION_RECALL,
   ],
 }

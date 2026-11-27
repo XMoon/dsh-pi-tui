@@ -6537,6 +6537,114 @@ test('PR2-A: the process recall commits an accepted-while-stopped input exactly 
   }
 })
 
+test('PR2-C: the Host seed and an official rpcId merge through the real editor mirror and reseat', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const recall = createInputMemoryRecall()
+  const scope = { carrier: { connection: {}, binding: {} }, sessionId: 'session-a' }
+  recall.bindScope(scope)
+  recall.applySeed([
+    { messageId: 'host-1', rpcId: 'rpc-1', text: 'Host newest' },
+    { messageId: 'host-2', text: 'Host older' },
+  ], 'session-a')
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { inputRecall: recall })
+  app.start()
+  startedApps.add(app)
+  try {
+    assert.deepEqual([...app.getInputHistory()], ['Host newest', 'Host older'],
+      'the mount mirrors the current Host-seeded scope')
+
+    // The REAL accepted settlement carries the official rpcId: the matching
+    // Host row is replaced by the local original text, once.
+    app.setDraft('Local original')
+    app.holdSubmission('attempt-seed')
+    app.settleSubmission('attempt-seed', 'accepted', 'rpc-1')
+    assert.deepEqual([...recall.snapshot()], ['Local original', 'Host older'])
+    assert.deepEqual([...app.getInputHistory()], ['Local original', 'Host older'])
+    assert.equal(app.getDraft(), '', 'the accepted settlement cleared the draft once')
+
+    // The REAL ↑ sink must consume the rebuilt mirror BEFORE any later seed:
+    // the local original is newest, then the older Host row. The replaced Host
+    // projection must not survive in the editor and duplicate itself.
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'Local original', 'the accepted local original is the first ↑')
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'Host older',
+      'the replaced Host projection is gone; the next ↑ is the older Host row')
+    app.setDraft('')
+
+    // A late async same-scope seed re-projects the authority into the real
+    // ↑ sink; no Client file and no duplicated Host row is involved.
+    recall.applySeed([
+      { messageId: 'host-1', rpcId: 'rpc-1', text: 'Host newest' },
+      { messageId: 'host-2', text: 'Host older' },
+      { messageId: 'host-3', text: 'Host after reseed' },
+    ], 'session-a')
+    app.reseedInputRecall()
+    await vt.waitForRender()
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'Local original', 'the local accepted occurrence is the newest')
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'Host after reseed',
+      'repeated ↑ reaches the newly seeded Host row: the reseat rebuilt the real editor mirror')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2-C: a legacy recorded input evicts an older root candidate from the editor ↑ sink too', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const recall = createInputMemoryRecall()
+  recall.bindScope({ carrier: { connection: {}, binding: {} }, sessionId: 'session-a' })
+  // The bounded candidate window is full: 99 identical display rows plus one
+  // older distinct B. The visible projection is [A, B], but the editor must
+  // never keep an independently unshifted B after the root evicts it.
+  recall.applySeed([
+    ...Array.from({ length: 99 }, (_value, index) => ({
+      messageId: `a-${String(index)}`,
+      text: 'A',
+    })),
+    { messageId: 'b', text: 'B' },
+  ], 'session-a')
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => { submitted.push(text) },
+    onExit: () => {},
+  }, { inputRecall: recall })
+  app.start()
+  startedApps.add(app)
+  try {
+    assert.deepEqual([...app.getInputHistory()], ['A', 'B'],
+      'the bounded root starts with the visible A/B projection')
+    // A REAL legacy Enter (not the accepted-hold settlement): the root records C
+    // without an official rpcId and evicts the oldest candidate B.
+    vt.sendInput('C')
+    await vt.waitForRender()
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    assert.deepEqual(submitted, ['C'])
+    assert.deepEqual([...app.getInputHistory()], ['C', 'A'],
+      'the root window evicted B when the 101st candidate arrived')
+    const recalled: string[] = []
+    for (let index = 0; index < 3; index += 1) {
+      vt.sendInput('\x1b[A')
+      await vt.waitForRender()
+      recalled.push(app.getDraft())
+    }
+    assert.equal(recalled[0], 'C', 'the real ↑ sink starts at the new legacy input')
+    assert.equal(recalled[1], 'A', 'the next ↑ reaches the remaining root row')
+    assert.notEqual(recalled[2], 'B',
+      'the editor mirror was rebuilt from the root, so the evicted B is unreachable')
+  } finally {
+    app.stop()
+  }
+})
+
 test('PR2-A: a legacy steer draft is recalled once and an empty queue sweep records nothing', async () => {
   const vt = new VirtualTerminal(100, 24)
   const recall = createInputMemoryRecall()

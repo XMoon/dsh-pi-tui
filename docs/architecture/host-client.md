@@ -1837,20 +1837,21 @@ or the current Ctrl+R/↑↓ contract owned by
 
 | Fact | Authority |
 | --- | --- |
-| Accepted occurrence | the official durable `session/event`: an `agent/inbox/spliced.inserted[]` or `user/message` whose `source.kind === 'user'`; the FIRST event per `(sessionId, messageId)` is the one immutable occurrence. `source.kind` is the sole producer authority: request correlation (`rpcId`), principal, client time zone and presentation metadata are optional and never participate in admission, deduplication or completeness |
+| Accepted occurrence | the official durable `session/event`: an `agent/inbox/spliced.inserted[]` or `user/message` whose `source.kind === 'user'`; the FIRST event per `(sessionId, messageId)` is the one immutable occurrence. `source.kind` is the sole PRODUCER authority: request correlation (`rpcId`), principal, client time zone and presentation metadata are optional and never participate in admission, deduplication or completeness. The official request correlation of that first admission is carried as optional metadata for exact recall merge only |
+| Corpus membership | the official immutable Session header `origin` is the root-only authority: a Session with `origin === 'subagent'` contributes ZERO occurrences (search, readText and recall), even though its delegated initial task is still `source.kind === 'user'`; an ordinary fork contributes only its own post-`inheritedEventCount` input. A verified child target answers the truthful ready-empty state, never another Session's rows |
 | Event-time directory | Session header `cwd` folded with each `working-directory/change` in seq order at first acceptance; a missing header directory, or a delivered change whose value is not a usable absolute Host path, is the explicit unknown `null` for that interval (never the previous directory, never the Client cwd); a later valid change restores it |
 | Fork inheritance | the official `inheritedEventCount` cut: prefix events fold cwd but never create a child occurrence |
 | Official corpus roster | ONE `sessionPersistence.list` snapshot merged with the Host `sessions` live registry; a same-id live/persisted Header must pass the official `assertSessionHeadersCompatible` check, and the live Header is the visible one |
-| Derived index | ONE disposable SQLite projection under the running Profile (`$PROFILE/.dsh-pi-tui/history-search/v2.sqlite`, private directory/file modes); it is rebuilt from official reads whenever the official log and the projection disagree and is never a persistence authority |
-| Durable cold source proof | ONE row per Session in the same `v2.sqlite` records the exact official source path, opaque revision, install/config scope digest and checkpoint digest of one COMPLETE cold replay. Any checkpoint-changing batch, marker rewrite, reset or delete revokes it in the SAME transaction. An aborted transaction may restore the OLD valid proof together with the old checkpoint; a failed or partial NEW replay must never create a new proof |
+| Derived index | ONE disposable SQLite projection under the running Profile (`$PROFILE/.dsh-pi-tui/history-search/v3.sqlite`, private directory/file modes; the dormant v2 file is never opened, migrated or deleted); it is rebuilt from official reads whenever the official log and the projection disagree and is never a persistence authority |
+| Durable cold source proof | ONE row per Session in the same `v3.sqlite` records the exact official source path, opaque revision, install/config scope digest and checkpoint digest of one COMPLETE cold replay. Any checkpoint-changing batch, marker rewrite, reset or delete revokes it in the SAME transaction. An aborted transaction may restore the OLD valid proof together with the old checkpoint; a failed or partial NEW replay must never create a new proof |
 | Restart recovery | Only a qualified runtime/backend may compare a committed persisted proof across Host restarts; unqualified sources replay through official handles. The upstream revision API itself remains instance-scoped. A qualified hit performs no official `open`/`read`/`stat`/replay, releases no accepted obligation and settles only the per-ID round evidence; a stale or refused hit keeps the ordinary round barrier and hands the official replay to the existing repair owner |
 | Source binding | Proof eligibility is bound to the exact pass-scoped official persistence binding (raw service, official Symbol, Loader provider entry/activation, effective root/codec and installed release identity) plus the selected snapshot classification. A replaced service binding, an invalidated runtime authority, a missing required official service on a mounted index, or changed snapshot metadata retires prior-proof reuse and coverage; absence stays `unavailable` (`service-missing`) and a present observation only returns `incomplete`/unproven until a complete full pass replays and re-proves officially |
 | Completeness | the index publishes `loading`, `ready`, `incomplete` (`source-uncertain`, `reconciling`, `resource-limit`, `source-read-failed`) or `unavailable` (`index-unavailable`, `service-missing`); a partial or failing pass never answers an authoritative empty list. The search additionally answers a cursor-free `partial` under the first-cold-round contract below. First/full coverage is proven only by a full round that visited and settled every authoritative Session; storage health and one-Session repair do not prove coverage, and a failed/partial pass remains `loading`/`incomplete` until a complete full round. A legal optional metadata absence (no correlation metadata, an unknown event-time directory, non-text content) is not a source fault; a malformed required payload of an explicit user message never becomes a silent omission |
 | Live growth | the official `session/event` plane feeds a bounded buffer; reaching the bound marks the affected Sessions dirty and re-reads the official source instead of dropping accepted rows |
 | Destructive round | before the first known destructive publication of a full round (deletion, rebuild or marker rewrite), the round establishes an `incomplete` barrier and holds it through every required deletion, accepted-payload/repair settlement and per-ID terminal commit. Read-only discovery preserves the prior `ready` epoch; the round-local deletion cut and its cut-bound witness fence derived deletion |
 | Full/point ownership | one full-inventory round and independent exact-ID repairs share ONE per-ID single-flight claim: a repair requested while the full round owns that id is coalesced and handed off after the full candidate settles. The terminal `commitWitness` is the second, non-substitutable fence |
-| Verification/read boundary | the single Host maintenance owner runs the 30 s full-corpus roster check and per-Session official repairs OUTSIDE the serial index writer; Owner `search`/`readText` wait only for accepted short index commits, never for a background `list`/`open`/`stat`/`observeSession` Promise. The writer completeness check uses an index-owned SQL existence probe, never a full checkpoint materialization |
-| Remote surface | the private `piTuiHistorySearch` namespace with exactly two Owner-only unary methods: `search` (three scopes, keyset cursor, bounded preview + immutable content hash) and `readText` (exact original text chunks by content hash) |
+| Verification/read boundary | the single Host maintenance owner runs the 30 s full-corpus roster check and per-Session official repairs OUTSIDE the serial index writer; Owner `search`/`readText`/`readSessionRecall` wait only for accepted short index commits, never for a background `list`/`open`/`stat`/`observeSession` Promise. The writer completeness check uses an index-owned SQL existence probe, never a full checkpoint materialization |
+| Remote surface | the private `piTuiHistorySearch` namespace with exactly three Owner-only unary methods: `search` (three scopes, keyset cursor, bounded preview + immutable content hash), `readText` (exact original text chunks by content hash) and `readSessionRecall` (ONE exact Session, at most 100 newest-first full-text rows under a fixed 64 KiB serialized UTF-8 budget, trim + blank/`!` normalization, `loading`/`incomplete`/`unavailable` otherwise) |
 | Direct | unchanged: the Direct Host never mounts this index and keeps its existing Client-local input history |
 
 A HEALTHY first cold round may answer `partial` while official coverage is
@@ -1955,16 +1956,16 @@ control (`dsh --profile <profile> daemon stop`), confirm the Host exited and the
 kernel seat is free, and prevent the supervisor or a Client from restarting it;
 stop any other writer of the same source. After the restore, resolve the ACTUAL
 canonical Profile directory (never `DSH_HOME` or a Session root), then move the
-existing `.dsh-pi-tui/history-search/v2.sqlite`, `v2.sqlite-wal` and
-`v2.sqlite-shm` as ONE set into a new owner-only backup directory inside that
+existing `.dsh-pi-tui/history-search/v3.sqlite`, `v3.sqlite-wal` and
+`v3.sqlite-shm` as ONE set into a new owner-only backup directory inside that
 private `history-search` directory (`umask 077`, a private `mktemp -d`,
 skip absent files, never a wildcard delete). A symlink, foreign owner or
 unexpected file stops the procedure for manual inspection. Leave `v1.sqlite`,
-other artifacts and the original Sessions untouched, restart the Host, and let
-the index rebuild from the official source; history search reports loading or
-incomplete until that rebuild proves full coverage. Do not copy the backed-up
-`v2` set back over the restored source. Automatic rollback detection is not
-promised.
+the dormant `v2.sqlite` set, other artifacts and the original Sessions
+untouched, restart the Host, and let the v3 index rebuild from the official
+source; history search reports loading or incomplete until that rebuild proves
+full coverage. Do not copy the backed-up `v3` set back over the restored
+source. Automatic rollback detection is not promised.
 
 ## Currentness, operation ownership and request ids
 

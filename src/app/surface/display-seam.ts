@@ -241,6 +241,22 @@ export interface SurfaceDisplaySeam {
    * Direct-mounted renderer records it in its own kernel; the Daemon/Split
    * Client only retires the outgoing browse/caret (its process list stays). */
   beginInputHistoryScope(owner: string | undefined): void
+  /**
+   * Re-project the CURRENT recall authority after an ASYNCHRONOUS same-scope
+   * seed commit (the Split Client's Host recall read). The authority already
+   * owns the merged projection; this only rebuilds the renderer's disposable
+   * mirror/reseat state. It never imports entries, clears a draft or changes
+   * the Session scope.
+   */
+  reseedInputRecall(): void
+  /**
+   * The recall ROOT scope actually changed (a different carrier/Connection or
+   * Session) before any new Host seed: retire the renderer's disposable
+   * projection now so the outgoing rows and browse position cannot be
+   * recalled even while the new seed is loading or unavailable. Same-scope
+   * reattach/HMR must not call this.
+   */
+  resetInputRecallScope(): void
   /** Record ONE settlement of the open editor-recall scope, IN APPEND ORDER:
    * called from the SAME synchronous stack as the append (or from the policy
    * skip that settled without a row). The occurrence token attributes the

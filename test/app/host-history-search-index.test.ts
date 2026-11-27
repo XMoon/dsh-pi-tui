@@ -36,8 +36,23 @@ function profileDir(t: Parameters<typeof testLifecycle>[0]): string {
   return life.tempDir('dsh-history-search-')
 }
 
-function occurrence(messageId: string, text: string, acceptedAt: number, cwd: string | null, firstEventSeq = 0): HistoryOccurrenceInput {
-  return { messageId, firstEventSeq, acceptedAt, effectiveCwd: cwd, content: text, hasNonText: false }
+function occurrence(
+  messageId: string,
+  text: string,
+  acceptedAt: number,
+  cwd: string | null,
+  firstEventSeq = 0,
+  rpcId?: string,
+): HistoryOccurrenceInput {
+  return {
+    messageId,
+    ...(rpcId === undefined ? {} : { rpcId }),
+    firstEventSeq,
+    acceptedAt,
+    effectiveCwd: cwd,
+    content: text,
+    hasNonText: false,
+  }
 }
 
 function seed(
@@ -81,11 +96,12 @@ test('a fresh index owns a private 0700 directory, 0600 file and its fixed schem
     try {
       assert.equal((db.prepare('PRAGMA application_id').get() as { application_id: number }).application_id,
         HISTORY_SEARCH_SQLITE_APPLICATION_ID)
-      assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2)
+      assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, HISTORY_SEARCH_SQLITE_USER_VERSION)
       const columns = (db.prepare('PRAGMA table_info(history_occurrences)').all() as Array<{ name: string }>)
         .map(column => column.name)
-      assert.ok(columns.includes('preview'), 'the active v2 schema owns the bounded preview column')
-      assert.ok(columns.includes('content_length'), 'the active v2 schema owns the exact UTF-16 length column')
+      assert.ok(columns.includes('preview'), 'the active v3 schema owns the bounded preview column')
+      assert.ok(columns.includes('rpc_id'), 'the active v3 schema owns the optional official request correlation')
+      assert.ok(columns.includes('content_length'), 'the active v3 schema owns the exact UTF-16 length column')
     } finally {
       db.close()
     }
@@ -100,7 +116,7 @@ test('a foreign database at the derived path is refused and never rewritten', (t
   mkdirSync(historyDir, { recursive: true, mode: 0o700 })
   chmodSync(join(dir, '.dsh-pi-tui'), 0o700)
   chmodSync(historyDir, 0o700)
-  const dbPath = join(historyDir, 'v2.sqlite')
+  const dbPath = join(historyDir, 'v3.sqlite')
   const foreign = new DatabaseSync(dbPath)
   foreign.exec('CREATE TABLE someone_else (a TEXT)')
   foreign.close()
@@ -119,16 +135,16 @@ test('a corrupt own database is quarantined instead of deleted and a fresh index
   mkdirSync(historyDir, { recursive: true, mode: 0o700 })
   chmodSync(join(dir, '.dsh-pi-tui'), 0o700)
   chmodSync(historyDir, 0o700)
-  const dbPath = join(historyDir, 'v2.sqlite')
+  const dbPath = join(historyDir, 'v3.sqlite')
   writeFileSync(dbPath, 'this is not a sqlite database', { mode: 0o600 })
   const index = HistorySearchIndex.open({ profileDir: dir })
   try {
     index.close()
     const names = readdirSync(historyDir)
-    assert.ok(names.includes('v2.sqlite'), 'a fresh index file must exist')
-    assert.ok(names.some(name => name.startsWith('v2.sqlite.quarantine-')),
+    assert.ok(names.includes('v3.sqlite'), 'a fresh index file must exist')
+    assert.ok(names.some(name => name.startsWith('v3.sqlite.quarantine-')),
       `the corrupt bytes must be preserved under a quarantined name: ${names.join(', ')}`)
-    const quarantined = names.find(name => name.startsWith('v2.sqlite.quarantine-'))
+    const quarantined = names.find(name => name.startsWith('v3.sqlite.quarantine-'))
     assert.equal(readFileSync(join(historyDir, quarantined!)).toString('utf8'), 'this is not a sqlite database')
   } finally {
     index.close()
@@ -143,7 +159,7 @@ test('a symlinked index file or a non-private directory refuses the derived inde
   mkdirSync(historyDir, { recursive: true, mode: 0o700 })
   chmodSync(join(dir, '.dsh-pi-tui'), 0o700)
   chmodSync(historyDir, 0o700)
-  symlinkSync(target, join(historyDir, 'v2.sqlite'))
+  symlinkSync(target, join(historyDir, 'v3.sqlite'))
   assert.throws(
     () => HistorySearchIndex.open({ profileDir: dir }),
     (error: unknown) => error instanceof HistorySearchIndexUnavailableError,
@@ -402,7 +418,7 @@ test('an incremental checkpoint survives close/reopen and a renamed-away file is
 })
 
 function rejoinedDbPath(profileDirPath: string): string {
-  return join(profileDirPath, '.dsh-pi-tui', 'history-search', 'v2.sqlite')
+  return join(profileDirPath, '.dsh-pi-tui', 'history-search', 'v3.sqlite')
 }
 test('an existing empty SQLite database is refused without being rewritten', (t) => {
   const dir = profileDir(t)
@@ -410,7 +426,7 @@ test('an existing empty SQLite database is refused without being rewritten', (t)
   mkdirSync(historyDir, { recursive: true, mode: 0o700 })
   chmodSync(join(dir, '.dsh-pi-tui'), 0o700)
   chmodSync(historyDir, 0o700)
-  const dbPath = join(historyDir, 'v2.sqlite')
+  const dbPath = join(historyDir, 'v3.sqlite')
   const empty = new DatabaseSync(dbPath)
   empty.close()
   chmodSync(dbPath, 0o600)
@@ -428,7 +444,7 @@ test('unsafe WAL or SHM sidecars refuse the derived index', (t) => {
   const first = HistorySearchIndex.open({ profileDir: dir })
   first.close()
   const historyDir = join(dir, '.dsh-pi-tui', 'history-search')
-  const dbPath = join(historyDir, 'v2.sqlite')
+  const dbPath = join(historyDir, 'v3.sqlite')
   const target = join(dir, 'foreign-sidecar')
   writeFileSync(target, '', { mode: 0o600 })
   symlinkSync(target, `${dbPath}-wal`)
@@ -441,7 +457,7 @@ test('unsafe WAL or SHM sidecars refuse the derived index', (t) => {
   const secondIndex = HistorySearchIndex.open({ profileDir: second })
   secondIndex.close()
   const secondDir = join(second, '.dsh-pi-tui', 'history-search')
-  writeFileSync(join(secondDir, 'v2.sqlite-shm'), '', { mode: 0o644 })
+  writeFileSync(join(secondDir, 'v3.sqlite-shm'), '', { mode: 0o644 })
   assert.throws(
     () => HistorySearchIndex.open({ profileDir: second }),
     (error: unknown) => error instanceof HistorySearchIndexUnavailableError,
@@ -455,7 +471,7 @@ test('a fresh index materializes only private sidecars and refuses dangling syml
     seed(first, 's1', [occurrence('m1', 'private sidecars', 1000, '/repo/a')])
     const historyDir = join(dir, '.dsh-pi-tui', 'history-search')
     for (const suffix of ['-wal', '-shm'] as const) {
-      const path = join(historyDir, `v2.sqlite${suffix}`)
+      const path = join(historyDir, `v3.sqlite${suffix}`)
       if (!existsSync(path)) continue
       assert.equal(lstatSync(path).mode & 0o077, 0,
         `the materialized ${suffix} sidecar must stay private`)
@@ -466,7 +482,7 @@ test('a fresh index materializes only private sidecars and refuses dangling syml
 
   // A DANGLING symlink at the main path or a sidecar path is an existing entry:
   // `existsSync` would follow it and miss the refusal.
-  for (const name of ['v2.sqlite', 'v2.sqlite-wal'] as const) {
+  for (const name of ['v3.sqlite', 'v3.sqlite-wal'] as const) {
     const second = profileDir(t)
     const historyDir = join(second, '.dsh-pi-tui', 'history-search')
     mkdirSync(historyDir, { recursive: true, mode: 0o700 })
@@ -508,6 +524,46 @@ test('search returns only the stored bounded preview and never a full body', (t)
   }
 })
 
+test('session recall reads one exact Session in Host order with the stored identity facts', (t) => {
+  const index = HistorySearchIndex.open({ profileDir: profileDir(t) })
+  try {
+    const composite = {
+      messageId: 'm-composite',
+      firstEventSeq: 5,
+      acceptedAt: 2500,
+      effectiveCwd: '/repo/a',
+      content: 'attached only',
+      hasNonText: true,
+    } as const
+    seed(index, 's-recall', [
+      occurrence('m-newest', 'newest prompt', 5000, '/repo/a', 0, 'rpc-newest'),
+      occurrence('m-blank', '   ', 4500, '/repo/a', 1),
+      occurrence('m-shell', '!ls -la', 4000, '/repo/a', 2),
+      occurrence('m-unicode', '部署 ✓ deploy', 3000, '/repo/b', 3),
+      occurrence('m-long-ascii', 'x'.repeat(8193), 2000, '/repo/a', 4),
+      occurrence('m-preover', 'y'.repeat(65_537), 1500, '/repo/a', 5),
+      occurrence('m-rpc', 'correlated prompt', 1000, '/repo/a', 6, 'rpc-1'),
+      composite,
+    ])
+    seed(index, 's-other', [occurrence('m-other', 'other session newest', 6000, '/repo/a', 0)])
+
+    const rows = index.sessionRecallRows('s-recall', 100, 64 * 1024)
+    assert.deepEqual(rows.map(row => row.messageId), [
+      'm-newest', 'm-blank', 'm-shell', 'm-unicode', 'm-long-ascii', 'm-rpc',
+    ], 'exact session + non-text/absolute-preover excluded BEFORE the limit; long ASCII is admitted')
+    assert.equal(rows[0]?.rpcId, 'rpc-newest')
+    assert.equal('rpcId' in (rows[1] as object), false, 'optional correlation is absent, not null/empty')
+    assert.equal(rows[3]?.effectiveCwd, '/repo/b')
+    assert.equal(index.sessionRecallRows('s-recall', 2, 64 * 1024).length, 2, 'the candidate batch cap is independent of the cap')
+    assert.equal(rows.find(row => row.messageId === 'm-long-ascii')?.content.length, 8193,
+      'a long ASCII row is admitted whole, never truncated by the old 8192 prefilter')
+    assert.deepEqual(index.sessionRecallRows('missing', 100, 64 * 1024), [], 'an absent target returns no rows')
+    assert.equal(index.occurrence('s-recall', 'm-rpc')?.rpcId, 'rpc-1')
+  } finally {
+    index.close()
+  }
+})
+
 /** One synthetic durable proof basis; the opaque revision is compared literally. */
 function sourceBasis(
   scopeKey = 'a'.repeat(64),
@@ -519,7 +575,7 @@ function sourceBasis(
 
 function historyPaths(dir: string): { historyDir: string; dbPath: string; wal: string; shm: string } {
   const historyDir = join(dir, '.dsh-pi-tui', 'history-search')
-  const dbPath = join(historyDir, 'v2.sqlite')
+  const dbPath = join(historyDir, 'v3.sqlite')
   return { historyDir, dbPath, wal: `${dbPath}-wal`, shm: `${dbPath}-shm` }
 }
 
@@ -539,19 +595,25 @@ function seedProof(
   return checkpoint
 }
 
-test('v2 owns the exact source-proof schema and never touches a legacy v1 file set', (t) => {
+test('v3 owns the exact source-proof schema and never touches the legacy v1/v2 file sets', (t) => {
   const dir = profileDir(t)
   const { historyDir, dbPath } = historyPaths(dir)
   mkdirSync(historyDir, { recursive: true, mode: 0o700 })
   chmodSync(join(dir, '.dsh-pi-tui'), 0o700)
   chmodSync(historyDir, 0o700)
   const legacyFiles = new Map<string, { readonly bytes: Buffer; readonly ino: number; readonly mode: number; readonly mtimeMs: number }>()
-  const v1Path = join(historyDir, 'v1.sqlite')
-  for (const [suffix, contents] of [['', 'legacy-v1-main'], ['-wal', 'legacy-v1-wal'], ['-shm', 'legacy-v1-shm']] as const) {
-    const path = `${v1Path}${suffix}`
+  for (const [fileName, contents] of [
+    ['v1.sqlite', 'legacy-v1-main'],
+    ['v1.sqlite-wal', 'legacy-v1-wal'],
+    ['v1.sqlite-shm', 'legacy-v1-shm'],
+    ['v2.sqlite', 'dormant-v2-main'],
+    ['v2.sqlite-wal', 'dormant-v2-wal'],
+    ['v2.sqlite-shm', 'dormant-v2-shm'],
+  ] as const) {
+    const path = join(historyDir, fileName)
     writeFileSync(path, contents, { mode: 0o600 })
     const stat = lstatSync(path)
-    legacyFiles.set(suffix, { bytes: readFileSync(path), ino: stat.ino, mode: stat.mode, mtimeMs: stat.mtimeMs })
+    legacyFiles.set(path, { bytes: readFileSync(path), ino: stat.ino, mode: stat.mode, mtimeMs: stat.mtimeMs })
   }
 
   const index = HistorySearchIndex.open({ profileDir: dir })
@@ -562,7 +624,7 @@ test('v2 owns the exact source-proof schema and never touches a legacy v1 file s
     try {
       assert.equal((db.prepare('PRAGMA application_id').get() as { application_id: number }).application_id,
         HISTORY_SEARCH_SQLITE_APPLICATION_ID)
-      assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2)
+      assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, HISTORY_SEARCH_SQLITE_USER_VERSION)
       const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
         .all() as Array<{ name: string }>).map(row => row.name)
       assert.deepEqual(tables, ['history_occurrences', 'history_sessions', 'history_source_proofs'])
@@ -586,18 +648,18 @@ test('v2 owns the exact source-proof schema and never touches a legacy v1 file s
     index.close()
   }
 
-  for (const [suffix, before] of legacyFiles) {
-    const path = `${v1Path}${suffix}`
+  for (const [path, before] of legacyFiles) {
     const after = lstatSync(path)
-    assert.deepEqual(readFileSync(path), before.bytes, `the legacy v1${suffix} bytes must stay identical`)
-    assert.equal(after.ino, before.ino, `the legacy v1${suffix} inode must never be replaced`)
+    assert.deepEqual(readFileSync(path), before.bytes, `the dormant ${path} bytes must stay identical`)
+    assert.equal(after.ino, before.ino, `the dormant ${path} inode must never be replaced`)
     assert.equal(after.mode, before.mode)
     assert.equal(after.mtimeMs, before.mtimeMs)
   }
   assert.equal(existsSync(join(historyDir, 'v1.sqlite.quarantine-')), false)
+  assert.equal(existsSync(join(historyDir, 'v2.sqlite.quarantine-')), false)
 })
 
-test('a v1-schema database at the active v2 path is refused untouched', (t) => {
+test('a legacy schema version at the active v3 path is refused untouched', (t) => {
   const dir = profileDir(t)
   const { historyDir, dbPath } = historyPaths(dir)
   mkdirSync(historyDir, { recursive: true, mode: 0o700 })
@@ -606,7 +668,7 @@ test('a v1-schema database at the active v2 path is refused untouched', (t) => {
   const legacy = new DatabaseSync(dbPath)
   legacy.exec('CREATE TABLE history_sessions (session_id TEXT PRIMARY KEY)')
   legacy.exec(`PRAGMA application_id = ${String(HISTORY_SEARCH_SQLITE_APPLICATION_ID)}`)
-  legacy.exec('PRAGMA user_version = 1')
+  legacy.exec('PRAGMA user_version = 2')
   legacy.close()
   chmodSync(dbPath, 0o600)
   const before = readFileSync(dbPath)
@@ -614,7 +676,7 @@ test('a v1-schema database at the active v2 path is refused untouched', (t) => {
     () => HistorySearchIndex.open({ profileDir: dir }),
     (error: unknown) => error instanceof HistorySearchIndexUnavailableError,
   )
-  assert.deepEqual(readFileSync(dbPath), before, 'the v1-schema file must not be migrated or rewritten')
+  assert.deepEqual(readFileSync(dbPath), before, 'the legacy-schema file must not be migrated or rewritten')
 })
 
 test('every checkpoint mutation revokes exactly its own source proof atomically', (t) => {

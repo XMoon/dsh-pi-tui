@@ -156,7 +156,7 @@ test('layout: the responsive sizes allocate header/query/footer, ≤8 result row
     { cols: 80, rows: 24, chrome: 2, expanded: false, target: 15, list: 4, preview: 3 },
   ] as const
   for (const item of cases) {
-    const layout = planHistorySeatLayout(item.cols, item.rows, item.chrome, item.expanded, { previewable: true })
+    const layout = planHistorySeatLayout(item.cols, item.rows, item.chrome, item.expanded)
     const painted = (layout.header ? 1 : 0) + (layout.query ? 1 : 0) + (layout.footer ? 1 : 0)
       + (layout.divider ? 1 : 0) + (layout.previewHeading ? 1 : 0) + (layout.metadata ? 1 : 0)
       + (layout.topRule ? 1 : 0) + (layout.bottomRule ? 1 : 0)
@@ -176,7 +176,7 @@ test('layout: the responsive sizes allocate header/query/footer, ≤8 result row
 test('layout: the tiny sizes keep the mandatory chrome and never paint an unpainted acceptance', () => {
   // 80x10 / 80x8 / 44x8 with a real two-row chrome: query + hint survive and the
   // Preview (metadata, heading, divider) yields BEFORE the mandatory rows.
-  const tiny = planHistorySeatLayout(80, 8, 2, false, { previewable: true })
+  const tiny = planHistorySeatLayout(80, 8, 2, false)
   assert.equal(tiny.grant, 5)
   assert.deepEqual(
     [tiny.header, tiny.query, tiny.footer], [true, true, true],
@@ -186,13 +186,13 @@ test('layout: the tiny sizes keep the mandatory chrome and never paint an unpain
   assert.equal(tiny.resultsRows, 2, 'the visible selected result rows win')
   assert.equal(tiny.acceptEnabled, true)
 
-  const narrow = planHistorySeatLayout(44, 8, 2, false, { previewable: true })
+  const narrow = planHistorySeatLayout(44, 8, 2, false)
   assert.equal(narrow.grant, 5)
   assert.equal(narrow.resultsRows, 2)
   assert.equal(narrow.previewRows, 0)
 
   // A grant too small for the body: chrome only, and NO acceptance.
-  const empty = planHistorySeatLayout(80, 4, 0, false, { previewable: true })
+  const empty = planHistorySeatLayout(80, 4, 0, false)
   assert.equal(empty.grant, 2)
   assert.equal(empty.header, true)
   assert.equal(empty.query, true)
@@ -201,22 +201,93 @@ test('layout: the tiny sizes keep the mandatory chrome and never paint an unpain
   assert.equal(empty.acceptEnabled, false)
 
   // Zero grant (the chrome alone exceeds the terminal): the panel paints nothing.
-  const none = planHistorySeatLayout(80, 3, 4, false, { previewable: true })
+  const none = planHistorySeatLayout(80, 3, 4, false)
   assert.equal(none.grant, 0)
   assert.equal(none.header, false)
   assert.equal(none.resultsRows + none.previewRows, 0)
 
-  // Loading / empty / failed content: ONE message row and no preview at all.
-  const message = planHistorySeatLayout(120, 40, 2, false, { previewable: false })
-  assert.equal(message.resultsRows, 1)
-  assert.equal(message.previewRows, 0)
-  assert.equal(message.divider, false)
-  assert.equal(message.acceptEnabled, false)
+  // The allocator no longer consults the search state: loading/empty/failed at
+  // 120x40 receives the SAME nominal Results/Preview slots as a ready page.
+  // The frame-level stable-geometry test below proves the painted boundaries.
+})
+
+test('stable viewport: every Direct search state paints the SAME nominal boundaries', async () => {
+  const source = new FakeSource()
+  source.manual = true
+  const { panel } = makePanel(source, { geometry: seatGeometry(100, 30, 2) })
+  panel.start()
+  // Bounded wait: the debounced Direct source discharges its held answer next tick.
+  await settle()
+  assert.equal(source.pending.length, 1, 'the first search is held in the loading state')
+  const loading = panel.render(100)
+
+  source.resolveNext([])
+  // Bounded wait: the debounced Direct source discharges its held answer next tick.
+  await settle()
+  const empty = panel.render(100)
+  assert.equal(panel.canAccept(), false, 'an empty page never accepts an unpainted row')
+
+  panel.handleInput('a')
+  // Bounded wait: the debounced Direct source discharges its held answer next tick.
+  await settle()
+  assert.equal(source.pending.length, 1, 'typing starts the searching state')
+  const searching = panel.render(100)
+
+  source.resolveNext([row('alpha prompt', 1_000)])
+  // Bounded wait: the debounced Direct source discharges its held answer next tick.
+  await settle()
+  const one = panel.render(100)
+  assert.equal(panel.canAccept(), true)
+
+  panel.handleInput('b')
+  // Bounded wait: the debounced Direct source discharges its held answer next tick.
+  await settle()
+  source.resolveNext([
+    row('beta one', 2_000), row('beta two', 1_900), row('beta three', 1_800),
+    row('beta four', 1_700), row('beta five', 1_600), row('beta six', 1_500),
+  ])
+  // Bounded wait: the debounced Direct source discharges its held answer next tick.
+  await settle()
+  const many = panel.render(100)
+
+  source.fail = true
+  panel.handleInput('c')
+  // Bounded wait: the debounced Direct source discharges its held answer next tick.
+  await settle()
+  const failed = panel.render(100)
+  assert.equal(panel.canAccept(), false, 'a failed page never accepts a stale or blank row')
+
+  const boundaries = (lines: readonly string[]): {
+    readonly height: number
+    readonly header: number
+    readonly query: number
+    readonly divider: number
+    readonly preview: number
+    readonly footer: number
+  } => {
+    const text = plain(lines)
+    return {
+      height: lines.length,
+      header: text.findIndex(line => line.includes('Input History')),
+      query: text.findIndex(line => line.trimStart().startsWith('Search:')),
+      divider: internalDividerRow(lines),
+      preview: text.findIndex((line, index) => index > 0 && line.trimStart().startsWith('Preview')),
+      footer: text.findLastIndex((line, index) => index > 0 && index < text.length - 1 && !/^─+$/u.test(line.trim())),
+    }
+  }
+  const expected = boundaries(loading)
+  for (const [state, lines] of Object.entries({ empty, searching, one, many, failed })) {
+    assert.deepEqual(boundaries(lines), expected, `${state}: physical seat boundaries must not move`)
+  }
+  // The blank reserve is inert: only a ready page paints a selectable row.
+  for (const [state, lines] of Object.entries({ loading, empty, searching, failed })) {
+    assert.equal(plain(lines).some(line => line.startsWith('> ')), false, `${state}: no fabricated selected result row`)
+  }
 })
 
 test('layout: a non-positive/NaN geometry never produces a negative allocation', () => {
   for (const [cols, rows, chrome] of [[0, 0, 0], [-5, -5, -5], [Number.NaN, Number.NaN, Number.NaN]] as const) {
-    const layout = planHistorySeatLayout(cols, rows, chrome, false, { previewable: true })
+    const layout = planHistorySeatLayout(cols, rows, chrome, false)
     assert.ok(layout.width >= 1)
     assert.ok(layout.grant >= 0)
     assert.ok(layout.resultsRows >= 0 && layout.previewRows >= 0)
@@ -1143,7 +1214,7 @@ test('matrix: the seat never overflows 200x50 / 80x10 / 44x20 and keeps the acti
     for (const line of raw) {
       assert.ok(visibleWidthOf(line) <= columns, `${columns}x${rows}: a row exceeds the frame: ${JSON.stringify(line)}`)
     }
-    const layout = planHistorySeatLayout(columns, rows, 0, false, { previewable: true })
+    const layout = planHistorySeatLayout(columns, rows, 0, false)
     if (layout.grant >= 3) {
       const plainLines = plain(raw)
       const last = plainLines[plainLines.length - 1]!
@@ -1232,7 +1303,7 @@ test('boundary rules: the bottom rule yields first, leaving a witnessed TOP-only
   // 80x12, no chrome: grant = floor(12×.63) = 7. Two rules need an 8-row grant,
   // so the bottom rule has yielded while the top rule and the full mandatory
   // chrome plus a result row stay painted.
-  const topOnly = planHistorySeatLayout(80, 12, 0, false, { previewable: true })
+  const topOnly = planHistorySeatLayout(80, 12, 0, false)
   assert.equal(topOnly.grant, 7)
   assert.equal(topOnly.topRule, true, 'the top boundary rule survives')
   assert.equal(topOnly.bottomRule, false, 'the bottom boundary rule yielded first')
@@ -1242,20 +1313,11 @@ test('boundary rules: the bottom rule yields first, leaving a witnessed TOP-only
   assert.ok(topOnly.previewRows >= 1, 'the Preview is not what yielded for the rule')
 
   // One row narrower: both rules have yielded, still with the mandatory chrome.
-  const none = planHistorySeatLayout(80, 11, 0, false, { previewable: true })
+  const none = planHistorySeatLayout(80, 11, 0, false)
   assert.equal(none.grant, 6)
   assert.equal(none.topRule, false)
   assert.equal(none.bottomRule, false)
   assert.deepEqual([none.header, none.query, none.footer], [true, true, true])
-
-  // Non-previewable content keeps BOTH rules at the same small grant: loading /
-  // empty / failed needs only its one message row, so the rules are not
-  // competing with a Preview region (this is why 80x10 paints rules for
-  // error/loading/no-match but not for a ready Preview — documented in the PR).
-  const message = planHistorySeatLayout(80, 12, 0, false, { previewable: false })
-  assert.equal(message.topRule, true)
-  assert.equal(message.bottomRule, true)
-  assert.ok(message.resultsRows >= 1, 'the message row stays painted')
 })
 
 
@@ -1264,7 +1326,7 @@ test('boundary rules: they may compress Results/Preview but never to zero rows',
   // the pre-D15 vs D15 numbers, e.g. 200x60 preview 23 -> 21), yet a real result
   // row and a real Preview content row always survive them.
   for (const [rows, chrome] of [[24, 2], [30, 0], [40, 2], [50, 0], [60, 2]] as const) {
-    const layout = planHistorySeatLayout(100, rows, chrome, false, { previewable: true })
+    const layout = planHistorySeatLayout(100, rows, chrome, false)
     if (layout.topRule || layout.bottomRule) {
       assert.ok(layout.resultRows >= 1, `${rows}x${chrome}: a result row survives the rules`)
       assert.ok(layout.previewRows >= 1, `${rows}x${chrome}: a Preview content row survives the rules`)
@@ -1273,17 +1335,11 @@ test('boundary rules: they may compress Results/Preview but never to zero rows',
   // At the exact boundary the budget removes a rule rather than zeroing the
   // Preview: 80x12 -> grant 7 -> top only (the bottom rule is removed first)
   // while >=1 result row and >=1 Preview row stay painted.
-  const topOnly = planHistorySeatLayout(80, 12, 0, false, { previewable: true })
+  const topOnly = planHistorySeatLayout(80, 12, 0, false)
   assert.equal(topOnly.topRule, true)
   assert.equal(topOnly.bottomRule, false)
   assert.ok(topOnly.resultRows >= 1 && topOnly.previewRows >= 1,
     'removing the bottom rule is what protects the one-row Preview floor')
-  // A non-previewable state has no Preview to protect: it keeps both rules and
-  // its one status/message row.
-  const message = planHistorySeatLayout(80, 12, 0, false, { previewable: false })
-  assert.equal(message.topRule, true)
-  assert.equal(message.bottomRule, true)
-  assert.ok(message.resultsRows >= 1)
 })
 
 // ── PR-B B3: the Fullscreen Footer's complete pointer spans ──────────────────

@@ -180,6 +180,61 @@ test('fullscreen seat preflight: the alt screen delivers press/click to a Histor
   assert.ok(rowOf(h.vt, 'Preview') >= 0, 'the Preview must be painted')
 })
 
+test('fullscreen seat: padded and empty reserve rows are inert, and a stale press cannot act after replacement', async () => {
+  const h = startApp([row('alpha prompt', 3, '/work/a', 'id-a')])
+  await openFullscreenHistory(h)
+  const frame = (): string[] => rawView(h.vt)
+  const alphaRow = rowOf(h.vt, 'alpha prompt')
+  const col = frame()[alphaRow]?.indexOf('alpha') ?? 0
+  assert.ok(alphaRow >= 0 && col > 0, `the only result must paint:\n${view(h.vt)}`)
+  const dividerRow = frame().findIndex((line, index) => index > alphaRow && /^─+$/u.test(line.trim()))
+  const boundary = (): Record<string, number> => ({
+    header: rowOf(h.vt, 'Input History'),
+    divider: dividerRow,
+    preview: rowOf(h.vt, 'Preview'),
+    footer: frame().findIndex(line => line.includes('Cancel')),
+  })
+  const readyBoundary = boundary()
+  // The padded reserve below the one real row: a real SGR press/release there
+  // selects nothing and never accepts a fabricated entry.
+  const blankRow = alphaRow + 2
+  assert.ok(dividerRow > blankRow, `the padded row must sit inside the list:\n${view(h.vt)}`)
+  assert.equal(frame()[blankRow]?.trim(), '', 'the picked row must be blank reserve')
+  press(h.vt, blankRow, 4)
+  release(h.vt, blankRow, 4)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.equal(h.app.getDraft(), '', 'a padded blank press never accepts')
+  assert.ok(rowOf(h.vt, 'Input History') >= 0, 'a padded blank press never closes the seat')
+
+  // A press on the real result, then a MATERIAL page replacement before the
+  // release: the old cell is now blank reserve and the gesture must be inert.
+  press(h.vt, alphaRow, col)
+  h.rows.length = 0
+  await research(h)
+  release(h.vt, alphaRow, col)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.equal(h.app.getDraft(), '', 'a stale press cannot accept a replacement/blank target')
+  assert.deepEqual(h.submitted, [], 'a History gesture never submits')
+  assert.ok(rowOf(h.vt, 'Input History') >= 0, 'the seat remains open after the stale gesture')
+
+  // The empty page paints the SAME physical boundaries, and its status row /
+  // padded reserve are both inert.
+  assert.deepEqual(boundary(), readyBoundary, 'empty and ready pages keep identical seat boundaries')
+  const statusRow = rowOf(h.vt, 'No matching history')
+  assert.ok(statusRow >= 0, `the empty status must paint:\n${view(h.vt)}`)
+  press(h.vt, statusRow, 4)
+  release(h.vt, statusRow, 4)
+  press(h.vt, statusRow + 1, 4)
+  release(h.vt, statusRow + 1, 4)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.equal(h.app.getDraft(), '', 'an empty status/blank target never accepts')
+  assert.deepEqual(h.submitted, [], 'an empty seat gesture never submits')
+  assert.ok(rowOf(h.vt, 'Input History') >= 0, 'an empty-page gesture never closes the seat')
+})
+
 test('fullscreen seat preflight: wheel scrolls the region under the pointer only', async () => {
   const long = Array.from({ length: 200 }, (_, index) => `source line ${index}`).join('\n')
   const h = startApp([

@@ -64,6 +64,7 @@ import type { HistoryScopeSettlement } from '../../src/client/history/recall-sco
 import { historyFilePath, loadHistoryRecords } from '../../src/client/history/store.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
+import { createInputMemoryRecall, type InputMemoryRecall } from '../../src/client/history/memory-recall.ts'
 
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -292,6 +293,9 @@ async function mountTspHarness(options: {
    *  composition root wires it. Absent keeps the historical standalone mount
    *  (no renderer displayState) that every older case asserts. */
   displayState?: { preset: 'focus' | 'compact' | 'full' }
+  /** The Split Client root recall memory, exactly as the composition injects
+   *  it into the production renderer. */
+  inputRecall?: InputMemoryRecall
   /** Observe the production mount's authorized image-read port. */
   readImage?: (ref: ImageAttachmentRefLike, scope: unknown) => Promise<{ ref: unknown; data: Uint8Array }>
   imageScope?: unknown
@@ -411,6 +415,7 @@ async function mountTspHarness(options: {
         },
         ...(options.onFatal === undefined ? {} : { onFatal: options.onFatal }),
         ...(options.displayState === undefined ? {} : { displayState: options.displayState }),
+        ...(options.inputRecall === undefined ? {} : { inputRecall: options.inputRecall }),
       })
       // TSP-7 PR-A: the status reader is bound BEFORE the image binding, like
       // the production mount — a renderer that fails its image bind still
@@ -1628,6 +1633,9 @@ test('the interaction owner registers fail-closed answerers on a modal-less rend
     resetSessionFacts: () => {},
     resetInputHistory: () => {},
     beginInputHistoryScope: () => {},
+    bindInputRecallScope: () => {},
+    reseedInputRecall: () => {},
+    resetInputRecallScope: () => {},
     settleScopeInput: () => {},
     setSearchResult: () => {},
     setWelcomeCard: () => {},
@@ -1758,6 +1766,9 @@ test('the surface withdraws the interaction owner BEFORE it starts the renderer 
     retainsStaleDraftRestore: () => false,
     resetInputHistory: () => {},
     beginInputHistoryScope: () => {},
+    bindInputRecallScope: () => {},
+    reseedInputRecall: () => {},
+    resetInputRecallScope: () => {},
     settleScopeInput: () => {},
     setSearchResult: () => {},
     notify: () => {},
@@ -2055,6 +2066,50 @@ test('the SurfaceRuntime input binding carries the recall occurrence into the ap
     assert.equal(typeof submitted[0]!.scopeToken, 'number',
       'the occurrence token rides the EXISTING third argument through the composition')
     assert.equal(submitted[0]!.request, 'enter', 'the gesture is untouched by the wider signature')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('the real Tern SDK ↑ sink reads the root and a carrier scope reset retires the TSP browse', async () => {
+  const scopeA = { carrier: { connection: { id: 'carrier-a' }, binding: { id: 'binding-a' } }, sessionId: 'session-a' }
+  const scopeB = { carrier: { connection: { id: 'carrier-b' }, binding: { id: 'binding-b' } }, sessionId: 'session-b' }
+  const recall = createInputMemoryRecall()
+  recall.bindScope(scopeA)
+  recall.applySeed([
+    { messageId: 'host-a-new', text: 'A newest original' },
+    { messageId: 'host-a-old', text: 'A older original' },
+  ], 'session-a')
+  const harness = await mountTspHarness({ inputRecall: recall })
+  try {
+    harness.surface.bindRendererInput()
+    harness.tern.input.type('\x1b[A')
+    await waitUntil('the real SDK ↑ recalls the root newest row', () =>
+      harness.surface.composer.getDraft() === 'A newest original')
+    harness.tern.input.type('\x1b[A')
+    await waitUntil('the real SDK ↑ continues to the older root row', () =>
+      harness.surface.composer.getDraft() === 'A older original')
+
+    // A real carrier/Session scope change clears the root and invalidates the
+    // positional browse. The DOWN observation keeps the current row; the
+    // DISCRIMINATING step is the B reseed below (probe: with the reset omitted,
+    // the stale browse/bookmark state makes B's first ↑ never reach B only).
+    assert.equal(recall.bindScope(scopeB), true)
+    harness.surface.display.resetInputRecallScope()
+    harness.tern.input.type('\x1b[B')
+    // Bounded key-drain window: an inert reset key produces no repaint to await.
+    await settle()
+    assert.equal(harness.surface.composer.getDraft(), 'A older original',
+      'the outgoing browse position did not advance into a stale row')
+
+    // The new scope's seed reaches the same real ↑ sink from an empty draft.
+    recall.applySeed([{ messageId: 'host-b', text: 'B only original' }], 'session-b')
+    harness.surface.display.reseedInputRecall()
+    harness.surface.composer.setDraft('')
+    harness.tern.input.type('\x1b[A')
+    await waitUntil('the real SDK ↑ recalls the new scope seed', () =>
+      harness.surface.composer.getDraft() === 'B only original')
   } finally {
     await harness.dispose()
     await harness.session.close()

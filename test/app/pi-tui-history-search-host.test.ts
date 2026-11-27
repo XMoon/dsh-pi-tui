@@ -37,10 +37,13 @@ import {
   PI_TUI_HISTORY_SEARCH_NAMESPACE,
   parseHistoryReadTextResponse,
   parseHistorySearchResponse,
+  parseHistorySessionRecallResponse,
   type HistoryReadTextRequest,
   type HistoryReadTextResponse,
   type HistorySearchRequest,
   type HistorySearchResponse,
+  type HistorySessionRecallRequest,
+  type HistorySessionRecallResponse,
 } from '../../src/runtime/remote/pi-tui-history-search-contract.ts'
 import {
   HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION,
@@ -75,6 +78,11 @@ interface HistoryHost {
   readonly nonOwner: PeerScope
   search(request: HistorySearchRequest, peer?: PeerScope, signal?: AbortSignal): Promise<HistorySearchResponse>
   readText(request: HistoryReadTextRequest, peer?: PeerScope, signal?: AbortSignal): Promise<HistoryReadTextResponse>
+  readSessionRecall(
+    request: HistorySessionRecallRequest,
+    peer?: PeerScope,
+    signal?: AbortSignal,
+  ): Promise<HistorySessionRecallResponse>
   service(): PiTuiHistorySearchHostService
   dispose(): Promise<void>
 }
@@ -94,7 +102,7 @@ async function historyHost(
   const nonOwner = connection.createPeer({ principal: { kind: 'viewer' } } as never)
   const gateway = host.ctx.typertGateway
   const invoke = async (
-    method: 'search' | 'readText',
+    method: 'search' | 'readText' | 'readSessionRecall',
     request: unknown,
     peer: PeerScope,
     signal: AbortSignal,
@@ -117,6 +125,9 @@ async function historyHost(
     ),
     readText: async (request, peer = owner, signal = new AbortController().signal) => (
       parseHistoryReadTextResponse(await invoke('readText', request, peer, signal))
+    ),
+    readSessionRecall: async (request, peer = owner, signal = new AbortController().signal) => (
+      parseHistorySessionRecallResponse(await invoke('readSessionRecall', request, peer, signal))
     ),
     service: () => host.ctx.reflect.get(PI_TUI_HISTORY_SEARCH_NAMESPACE) as PiTuiHistorySearchHostService,
     dispose: async () => {
@@ -301,6 +312,29 @@ test('readText recovers the exact original text by content hash in bounded chunk
   }
 })
 
+test('the Owner-only session-recall wire returns the bounded normalized window with official correlation', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-recall-wire')
+  try {
+    await wire.host.harness.create(SessionId('history-recall'), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    await prompt(wire, 'history-recall', 'req-recall-1', '  hsp-recall-one 中文  ')
+    await prompt(wire, 'history-recall', 'req-recall-shell', '!echo hsp-recall')
+    await waitForReady(wire, 'recall wire')
+    const answer = await wire.readSessionRecall({ sessionId: 'history-recall' })
+    assert.equal(answer.kind, 'ready', JSON.stringify(answer))
+    if (answer.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(answer.sessionId, 'history-recall')
+    assert.deepEqual(answer.items.map(item => [item.text, item.rpcId]), [
+      ['hsp-recall-one 中文', 'req-recall-1'],
+    ], 'trimmed original text, shell-mode lines excluded, official rpcId preserved')
+    await assert.rejects(
+      wire.readSessionRecall({ sessionId: 'history-recall' }, wire.nonOwner),
+      /access denied|restricted to the authenticated Owner peer/u,
+    )
+  } finally {
+    await wire.dispose()
+  }
+})
+
 test('a wrong content hash and an unknown message are distinct truthful refusals', async (t) => {
   const wire = await historyHost(testLifecycle(t), 'history-search-read-negative')
   try {
@@ -392,6 +426,10 @@ test('an aborted Owner invocation never reaches the index', async (t) => {
     controller.abort(new Error('history search cancelled'))
     await assert.rejects(
       wire.search({ scope: 'all', query: '', limit: 1 }, wire.owner, controller.signal),
+      /abort|cancel/iu,
+    )
+    await assert.rejects(
+      wire.readSessionRecall({ sessionId: 'aborted-target' }, wire.owner, controller.signal),
       /abort|cancel/iu,
     )
   } finally {
@@ -593,6 +631,278 @@ test('a fork child inherits the parent prefix but only its own new prompt counts
     if (parentAnswer.kind !== 'ready' || childAnswer.kind !== 'ready') throw new Error('expected ready')
     assert.equal(parentAnswer.items.length, 1, 'the child inherited copy must not create a second parent occurrence')
     assert.equal(childAnswer.items.length, 1, 'the child new prompt must create exactly one occurrence')
+  } finally {
+    await wire.dispose()
+  }
+})
+
+test('root-only admission: a subagent Session contributes zero rows while root/fork stay eligible, live and cold/reopen', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-root-only-')
+  const root = mutableSource('/repo/root', 'root-session')
+  const childMessage = (id: string, text: string, rpcId?: string) => ({
+    id,
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: rpcId === undefined ? { kind: 'user' } : { kind: 'user', rpcId },
+  })
+  const child: MutableOfficialSource = {
+    present: true,
+    header: testHeader('child-session', '/repo/root', { origin: 'subagent' }),
+    events: [
+      {
+        type: 'agent/inbox/spliced',
+        seq: 0,
+        time: 2000,
+        data: { target: 'next-turn', start: 0, inserted: [childMessage('child-delegated', 'delegated child task')] },
+      },
+      {
+        type: 'agent/inbox/spliced',
+        seq: 1,
+        time: 2001,
+        data: { target: 'next-turn', start: 1, inserted: [childMessage('child-followup', 'child human follow-up', 'rpc-child')] },
+      },
+    ],
+    revision: 1,
+  }
+  const fork: MutableOfficialSource = {
+    present: true,
+    header: testHeader('fork-session', '/repo/root', { isSeeded: true }),
+    inheritedEventCount: 1,
+    events: [
+      {
+        type: 'user/message',
+        seq: 0,
+        time: 1500,
+        data: { ...childMessage('parent-inherited', 'inherited parent input', 'rpc-parent'), role: 'user' },
+      },
+      {
+        type: 'agent/inbox/spliced',
+        seq: 1,
+        time: 3001,
+        data: { target: 'next-turn', start: 0, inserted: [childMessage('fork-own', 'fork own input')] },
+      },
+    ],
+    revision: 1,
+  }
+  const deps = mutableDeps(root, [child, fork]).deps
+  const indexOf = (service: PiTuiHistorySearchHostService) => indexOfService(service)
+  const settle = async (service: PiTuiHistorySearchHostService): Promise<void> => {
+    await new Promise(resolve => setTimeout(resolve, 20))
+    await (service as unknown as { writeTail: Promise<void> }).writeTail
+  }
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  try {
+    await waitDirectReady(service)
+    const all = await service.search({ scope: 'all', query: '', limit: 25 }, new AbortController().signal)
+    assert.equal(all.kind, 'ready', JSON.stringify(all))
+    if (all.kind !== 'ready') throw new Error('expected ready')
+    assert.deepEqual(all.items.map(item => item.messageId).sort(), ['fork-own', 'msg-1', 'msg-2'],
+      'exactly the root and the fork OWN input are in the corpus; no child row exists')
+    const childSearch = await service.search({ scope: 'session', sessionId: 'child-session', query: '', limit: 25 }, new AbortController().signal)
+    assert.equal(childSearch.kind, 'ready', JSON.stringify(childSearch))
+    if (childSearch.kind !== 'ready') throw new Error('expected ready')
+    assert.deepEqual(childSearch.items, [], 'a verified child target answers an authoritative empty page')
+    assert.equal(indexOf(service).checkpointOf('child-session')?.dirty, false, 'the child checkpoint is clean, not absent')
+    assert.equal(indexOf(service).occurrenceCount(), 3)
+
+    const rootRecall = await service.readSessionRecall({ sessionId: 'root-session' }, new AbortController().signal)
+    assert.equal(rootRecall.kind, 'ready', JSON.stringify(rootRecall))
+    if (rootRecall.kind !== 'ready') throw new Error('expected ready recall')
+    assert.deepEqual(rootRecall.items.map(item => [item.messageId, item.rpcId, item.text]), [
+      ['msg-2', 'rpc-2', 'mutable second'],
+      ['msg-1', 'rpc-1', 'mutable first'],
+    ])
+    const childRecall = await service.readSessionRecall({ sessionId: 'child-session' }, new AbortController().signal)
+    assert.deepEqual(childRecall, { kind: 'ready', sessionId: 'child-session', items: [] })
+    const forkRecall = await service.readSessionRecall({ sessionId: 'fork-session' }, new AbortController().signal)
+    assert.equal(forkRecall.kind, 'ready', JSON.stringify(forkRecall))
+    if (forkRecall.kind !== 'ready') throw new Error('expected ready recall')
+    assert.deepEqual(forkRecall.items.map(item => item.messageId), ['fork-own'], 'the inherited prefix is never a fork occurrence')
+    const childText = await service.readText({
+      sessionId: 'child-session',
+      messageId: 'child-delegated',
+      contentSha256: sha256('delegated child task'),
+      offset: 0,
+      limit: 8,
+    }, new AbortController().signal)
+    assert.deepEqual(childText, { kind: 'unavailable', reason: 'not-found' }, 'child content is not addressable through readText')
+
+    // LIVE: a root acceptance is admitted; a child acceptance (including its
+    // delegated user task shape) stays excluded before body parsing.
+    const observe = (session: unknown, event: unknown): void => {
+      ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+        .observeLiveEvent(session, event)
+    }
+    const rootLive = {
+      type: 'agent/inbox/spliced', seq: 3, time: 5000,
+      data: { target: 'next-turn', start: 2, inserted: [childMessage('root-live', 'root live accepted', 'rpc-live')] },
+    }
+    const childLive = {
+      type: 'agent/inbox/spliced', seq: 2, time: 5001,
+      data: { target: 'next-turn', start: 2, inserted: [childMessage('child-live', 'child live task')] },
+    }
+    // Production also appends the accepted live event to the durable official
+    // log; the structural source mirrors that so the cold reopen can prove it.
+    root.events.push(rootLive)
+    child.events.push(childLive)
+    observe({ id: 'root-session', header: root.header, inheritedEventCount: 0 }, rootLive)
+    observe({ id: 'child-session', header: child.header, inheritedEventCount: 0 }, childLive)
+    await settle(service)
+    const liveRoot = await service.readSessionRecall({ sessionId: 'root-session' }, new AbortController().signal)
+    assert.equal(liveRoot.kind, 'ready', JSON.stringify(liveRoot))
+    if (liveRoot.kind !== 'ready') throw new Error('expected ready recall')
+    assert.equal(liveRoot.items[0]?.messageId, 'root-live', 'the live root acceptance is recalled')
+    const liveChild = await service.readSessionRecall({ sessionId: 'child-session' }, new AbortController().signal)
+    assert.deepEqual(liveChild, { kind: 'ready', sessionId: 'child-session', items: [] })
+    assert.equal(indexOf(service).occurrenceCount(), 4, 'only the live root row was added')
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+
+  // COLD/REOPEN: the same root-only facts survive a restarted service.
+  const secondCtx = new Context()
+  const restarted = directService(secondCtx, deps, profileDir)
+  try {
+    await waitDirectReady(restarted)
+    const recall = await restarted.readSessionRecall({ sessionId: 'root-session' }, new AbortController().signal)
+    assert.equal(recall.kind, 'ready', JSON.stringify(recall))
+    if (recall.kind !== 'ready') throw new Error('expected ready recall')
+    assert.equal(recall.items.filter(item => item.text === 'root live accepted').length, 1)
+    const childSearch = await restarted.search({ scope: 'session', sessionId: 'child-session', query: '', limit: 25 }, new AbortController().signal)
+    assert.equal(childSearch.kind, 'ready', JSON.stringify(childSearch))
+    if (childSearch.kind !== 'ready') throw new Error('expected ready')
+    assert.deepEqual(childSearch.items, [])
+    assert.equal(indexOfService(restarted).occurrenceCount(), 4)
+  } finally {
+    await restarted.dispose()
+    await secondCtx.fiber.dispose()
+  }
+})
+
+test('a REAL child Session created with origin=subagent contributes zero rows through cold and live admission', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-real-child')
+  try {
+    const parentId = 'history-real-parent'
+    const childId = 'history-real-child'
+    await wire.host.harness.create(SessionId(parentId), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    await prompt(wire, parentId, 'req-real-parent', 'hsp-real-parent-input')
+    // A REAL Host Session with the official child metadata (the same immutable
+    // shape the production subagent spawn writes; the real spawn seam proved
+    // that write in the entry gate).
+    const child = wire.host.ctx.sessions.create(SessionId(childId), {
+      meta: {
+        cwd: wire.host.anchorDir,
+        parentSession: SessionId(parentId),
+        origin: 'subagent',
+      },
+    } as never)
+    const delegated = createUserMessage({
+      content: [{ type: 'text', text: 'hsp-real-child-delegated task' }],
+      source: { kind: 'user' },
+    })
+    child.append([['agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [delegated] }]])
+    assert.equal(child.header.origin, 'subagent', 'the live Host Session carries the immutable child origin')
+
+    await waitForReady(wire, 'real child corpus')
+    const childSearch = await wire.search({ scope: 'session', sessionId: childId, query: '', limit: 25 })
+    assert.equal(childSearch.kind, 'ready', JSON.stringify(childSearch))
+    if (childSearch.kind !== 'ready') throw new Error('expected ready')
+    assert.deepEqual(childSearch.items, [], 'no child row is searchable even with its user-source task')
+    const childRecall = await wire.readSessionRecall({ sessionId: childId })
+    assert.deepEqual(childRecall, { kind: 'ready', sessionId: childId, items: [] })
+    // The child contributes ZERO rows to the broader scopes too: its accepted
+    // user-source task must never leak into All or its event-time Directory.
+    for (const scope of ['all', 'directory'] as const) {
+      const broad = await wire.search(scope === 'all'
+        ? { scope, query: 'hsp-real-child', limit: 25 }
+        : { scope, cwd: wire.host.anchorDir, query: 'hsp-real-child', limit: 25 })
+      assert.equal(broad.kind, 'ready', JSON.stringify(broad))
+      if (broad.kind !== 'ready') throw new Error('expected ready')
+      assert.deepEqual(broad.items, [], `${scope}: a child occurrence must never enter the root corpus`)
+    }
+    const childText = await wire.readText({
+      sessionId: childId,
+      messageId: delegated.id,
+      contentSha256: sha256('hsp-real-child-delegated task'),
+      offset: 0,
+      limit: 8,
+    })
+    assert.deepEqual(childText, { kind: 'unavailable', reason: 'not-found' })
+
+    // LIVE: a later human-style follow-up on the same real child is excluded
+    // by the same fold, while the parent's own accepted row stays visible.
+    const followup = createUserMessage({
+      content: [{ type: 'text', text: 'hsp-real-child-followup' }],
+      source: { kind: 'user', rpcId: 'rpc-real-child-followup' as never },
+    })
+    child.append([['agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [followup] }]])
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const liveChild = await wire.readSessionRecall({ sessionId: childId })
+    assert.deepEqual(liveChild, { kind: 'ready', sessionId: childId, items: [] })
+    const parentRecall = await wire.readSessionRecall({ sessionId: parentId })
+    assert.equal(parentRecall.kind, 'ready', JSON.stringify(parentRecall))
+    if (parentRecall.kind !== 'ready') throw new Error('expected ready recall')
+    assert.deepEqual(parentRecall.items.map(item => item.text), ['hsp-real-parent-input'])
+  } finally {
+    await wire.dispose()
+  }
+})
+
+test('a Host recall answer stays within the actual 64 KiB envelope, dropping a whole unfit row', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-recall-budget')
+  try {
+    const sessionId = 'history-recall-budget'
+    await wire.host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    const texts = [0, 1, 2].map(index => `${String(index)}${'中'.repeat(8191)}`)
+    for (const [index, text] of texts.entries()) {
+      await prompt(wire, sessionId, `req-recall-budget-${String(index)}`, text)
+    }
+    await waitForReady(wire, 'recall budget corpus')
+    let answer = await wire.readSessionRecall({ sessionId })
+    const deadline = Date.now() + 20_000
+    while (answer.kind === 'loading' && Date.now() < deadline) {
+      // Bounded observation window: the same Host may still be settling the
+      // just-accepted rows into its projection.
+      await new Promise(resolve => setTimeout(resolve, 25))
+      answer = await wire.readSessionRecall({ sessionId })
+    }
+    assert.equal(answer.kind, 'ready', JSON.stringify(answer))
+    if (answer.kind !== 'ready') throw new Error('expected ready recall')
+    // Three 8192-UTF-16-unit CJK rows cannot fit one 64 KiB answer: the newest
+    // two whole rows are kept in order, and the third is skipped, never sliced.
+    assert.deepEqual(answer.items.map(item => item.text), [texts[2], texts[1]])
+    assert.ok(answer.items.every(item => item.text.length === 8192))
+    assert.ok(Buffer.byteLength(JSON.stringify(answer), 'utf8') <= 64 * 1024,
+      'the recalled answer must stay within the fixed serialized byte budget')
+  } finally {
+    await wire.dispose()
+  }
+})
+
+test('a long ASCII occurrence that fits the actual envelope is recalled whole, never prefiltered', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-recall-long-ascii')
+  try {
+    const sessionId = 'history-recall-long-ascii'
+    await wire.host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    // 8193 ASCII code units fit the 64 KiB answer comfortably; the old 8192
+    // per-row prefilter silently lost this legal occurrence.
+    const longAscii = 'a'.repeat(8193)
+    await prompt(wire, sessionId, 'req-recall-long-ascii', longAscii)
+    await waitForReady(wire, 'long ASCII recall corpus')
+    let answer = await wire.readSessionRecall({ sessionId })
+    const deadline = Date.now() + 20_000
+    while (answer.kind === 'loading' && Date.now() < deadline) {
+      // Bounded observation window: the projection may commit after the prompt.
+      await new Promise(resolve => setTimeout(resolve, 25))
+      answer = await wire.readSessionRecall({ sessionId })
+    }
+    assert.equal(answer.kind, 'ready', JSON.stringify(answer))
+    if (answer.kind !== 'ready') throw new Error('expected ready recall')
+    assert.deepEqual(answer.items.map(item => item.text), [longAscii])
+    assert.ok(Buffer.byteLength(JSON.stringify(answer), 'utf8') <= 64 * 1024)
   } finally {
     await wire.dispose()
   }
@@ -1168,6 +1478,8 @@ interface MutableOfficialSource {
   omitEventCount?: boolean
   /** The official read is only durable through this many events. */
   durableEventCount?: number
+  /** The official fork-inherited prefix cut of this source. */
+  inheritedEventCount?: number
   /** The official sessionQuery reports this Session as live. */
   live?: boolean
   /** Official source classification used by the durable-proof tests. */
@@ -1250,7 +1562,7 @@ function mutableDeps(
       if (candidate === undefined) throw new Error(`mutable persistence: unknown Session ${String(id)}`)
       return {
         header: candidate.persistedHeader ?? candidate.header,
-        inheritedEventCount: 0,
+        inheritedEventCount: candidate.inheritedEventCount ?? 0,
         async read(offset = 0, length = Number.MAX_SAFE_INTEGER) {
           readCalls += 1
           const durable = candidate.durableEventCount ?? candidate.events.length
@@ -1267,7 +1579,7 @@ function mutableDeps(
       if (candidate === undefined) throw new Error(`mutable query: unknown Session ${String(id)}`)
       return {
         header: candidate.header,
-        inheritedEventCount: 0,
+        inheritedEventCount: candidate.inheritedEventCount ?? 0,
         events: candidate.events,
         [Symbol.dispose]() {},
       }
@@ -1732,7 +2044,7 @@ test('an unsafe sidecar keeps the index closed until a later write proves it saf
   const deliver = (event: unknown) => (service as unknown as {
     observeLiveEvent(session: unknown, event: unknown): void
   }).observeLiveEvent(liveSessionOf(source), event)
-  const dbPath = join(profileDir, '.dsh-pi-tui', 'history-search', 'v2.sqlite')
+  const dbPath = join(profileDir, '.dsh-pi-tui', 'history-search', 'v3.sqlite')
   const walPath = `${dbPath}-wal`
   try {
     await waitDirectReady(service)
@@ -6073,7 +6385,7 @@ function seedColdProof(
 }
 
 function rewriteProofContractVersion(profileDir: string, version: number): void {
-  const db = new DatabaseSync(join(profileDir, '.dsh-pi-tui', 'history-search', 'v2.sqlite'))
+  const db = new DatabaseSync(join(profileDir, '.dsh-pi-tui', 'history-search', 'v3.sqlite'))
   try {
     db.prepare('UPDATE history_source_proofs SET contract_version = ?').run(version)
   } finally {
@@ -6524,6 +6836,19 @@ test('an early hit cannot publish ready while a later Session official read is s
       limit: 4096,
     }, new AbortController().signal)
     assert.equal(lateBefore.kind, 'loading')
+    // The session-recall read follows the SAME per-ID permit: the proved ID is
+    // readable before global ready, the latched/unverified ID is not an empty.
+    const earlyRecall = await service.readSessionRecall({ sessionId: 'proof-session' }, new AbortController().signal)
+    assert.equal(earlyRecall.kind, 'ready', JSON.stringify(earlyRecall))
+    if (earlyRecall.kind !== 'ready') throw new Error('expected ready recall')
+    assert.deepEqual(earlyRecall.items.map(item => [item.messageId, item.text]), [
+      ['msg-2', 'mutable second'],
+      ['msg-1', 'mutable first'],
+    ])
+    const lateRecallBefore = await service.readSessionRecall({ sessionId: 'late-session' }, new AbortController().signal)
+    assert.deepEqual(lateRecallBefore, { kind: 'loading' }, 'an unverified target is never an authoritative empty recall')
+    const absentRecallBefore = await service.readSessionRecall({ sessionId: 'not-a-session' }, new AbortController().signal)
+    assert.deepEqual(absentRecallBefore, { kind: 'loading' })
     // A cursor can never continue a partial page.
     const stale = await service.search({
       scope: 'all', query: '', limit: 1, cursor: 'not-a-real-cursor',
@@ -6533,7 +6858,13 @@ test('an early hit cannot publish ready while a later Session official read is s
     indexOfService(service).markSession({ sessionId: 'proof-session', dirty: true })
     const dirty = await service.search({ scope: 'all', query: 'mutable', limit: 25 }, new AbortController().signal)
     assert.equal(dirty.kind, 'loading')
+    const dirtyRecall = await service.readSessionRecall({ sessionId: 'proof-session' }, new AbortController().signal)
+    assert.deepEqual(dirtyRecall, { kind: 'loading' }, 'a dirty target never answers the old checkpoint recall')
     indexOfService(service).markSession({ sessionId: 'proof-session', dirty: false })
+    indexOfService(service).markSession({ sessionId: 'proof-session', uncertainSources: 2 })
+    const uncertainRecall = await service.readSessionRecall({ sessionId: 'proof-session' }, new AbortController().signal)
+    assert.deepEqual(uncertainRecall, { kind: 'loading' }, 'an uncertain target never answers the old checkpoint recall')
+    indexOfService(service).markSession({ sessionId: 'proof-session', uncertainSources: 0 })
     assert.equal(calls.openCalls(), 0, 'the latched read must be the only open and it has not started')
     release()
     await waitDirectReady(service)
@@ -6541,6 +6872,14 @@ test('an early hit cannot publish ready while a later Session official read is s
     const late = await service.search({ scope: 'session', sessionId: 'late-session', query: 'mutable', limit: 10 }, new AbortController().signal)
     assert.equal(late.kind, 'ready')
     assert.ok(late.kind === 'ready' && late.items.length === 2)
+    const lateRecall = await service.readSessionRecall({ sessionId: 'late-session' }, new AbortController().signal)
+    assert.equal(lateRecall.kind, 'ready', JSON.stringify(lateRecall))
+    if (lateRecall.kind !== 'ready') throw new Error('expected ready recall')
+    assert.equal(lateRecall.items.length, 2)
+    // A target with no verified checkpoint is NEVER a ready empty, even under
+    // the (different) ready corpus.
+    const absentRecall = await service.readSessionRecall({ sessionId: 'not-a-session' }, new AbortController().signal)
+    assert.deepEqual(absentRecall, { kind: 'loading' })
   } finally {
     release()
     await service.dispose()

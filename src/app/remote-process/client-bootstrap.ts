@@ -60,6 +60,7 @@ import type { ProfileDaemonAdmin } from './local-profile-daemon-admin.ts'
 import type { SplitClientInteractionDeliveryOwner } from './client-interaction-delivery.ts'
 import {
   parseHistoryReadTextRequest,
+  parseHistorySessionRecallRequest,
   parseHistorySearchRequest,
 } from '../../runtime/remote/pi-tui-history-search-contract.ts'
 
@@ -723,12 +724,13 @@ async function startSurfaceLocalClient(
   const domains = composition.domains
   const delivery = composition.interactionDelivery
   /**
-   * Feature History PR2-A: the ONE process-lifetime input-recall memory of this
-   * Client root. It lives OUTSIDE the per-revision loop: a same-PID HMR
+   * Feature History PR2-A/PR2-C: the ONE process-lifetime input-recall memory
+   * of this Client root. It lives OUTSIDE the per-revision loop: a same-PID HMR
    * replacement re-borrows this SAME object (never a fresh mount-local one, and
    * never disposed by the revision cleanup), while a new OS process naturally
-   * starts empty. It holds plain strings only — no Session, cwd, file or Host
-   * identity.
+   * starts empty. It holds plain display strings plus the minimal local/Host
+   * provenance of the current carrier+Session scope; no Client file, cwd,
+   * durable cache or mirrored Host index.
    */
   const inputRecall = createInputMemoryRecall()
 
@@ -1835,6 +1837,35 @@ async function startSurfaceLocalClient(
             const result = await domains.remote.piTuiHistorySearch.readText(exact)
             if (!result.ok) {
               emit({ phase: 'failed', errorCode: result.error.code, error: 'the Host refused the history-read request' })
+              return
+            }
+            emit({ phase: 'result', answer: result.value })
+            return
+          }
+          if (op === 'readSessionRecall') {
+            const { abort, ...recallInput } = input
+            const exact = parseHistorySessionRecallRequest(recallInput)
+            if (abort === true) {
+              // Qualification-only cancellation control: the REAL generated
+              // namespace method observed against an already-aborted signal.
+              const controller = new AbortController()
+              controller.abort(new Error('history session recall qualification abort'))
+              try {
+                await domains.remote.piTuiHistorySearch.readSessionRecall(exact, controller.signal)
+              } catch (error) {
+                emit({
+                  phase: 'failed',
+                  errorCode: 'aborted',
+                  error: error instanceof Error ? error.message : String(error),
+                })
+                return
+              }
+              emit({ phase: 'failed', error: 'an aborted session-recall read unexpectedly resolved' })
+              return
+            }
+            const result = await domains.remote.piTuiHistorySearch.readSessionRecall(exact)
+            if (!result.ok) {
+              emit({ phase: 'failed', errorCode: result.error.code, error: 'the Host refused the session-recall request' })
               return
             }
             emit({ phase: 'result', answer: result.value })

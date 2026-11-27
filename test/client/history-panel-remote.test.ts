@@ -28,6 +28,8 @@ import type {
   HistorySearchItem,
   HistorySearchRequest,
   HistorySearchResponse,
+  HistorySessionRecallRequest,
+  HistorySessionRecallResponse,
 } from '../../src/runtime/remote/pi-tui-history-search-contract.ts'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import {
@@ -135,6 +137,11 @@ class FakeReadPort implements HistorySearchReadPort {
     const chunk = text.slice(request.offset, request.offset + request.limit)
     const nextOffset = request.offset + chunk.length < text.length ? request.offset + chunk.length : null
     return { kind: 'ready', chunk, nextOffset, contentLength: text.length }
+  }
+
+  async readSessionRecall(request: HistorySessionRecallRequest, signal: AbortSignal): Promise<HistorySessionRecallResponse> {
+    if (signal.aborted) throw new DOMException('aborted', 'AbortError')
+    return { kind: 'ready', sessionId: request.sessionId, items: [] }
   }
 
   releaseSearch(): void {
@@ -582,6 +589,60 @@ test('a Host-loading page offers PageDown Retry', async () => {
   await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 1 shown')),
     'the recovered page')
   assert.equal(port.searchCalls.length, 2, 'PageDown retried the Host-loading page exactly once')
+})
+
+test('stable viewport: loading / partial / ready / failed Remote pages keep identical seat boundaries', async () => {
+  const boundary = (lines: readonly string[]): {
+    readonly height: number
+    readonly header: number
+    readonly query: number
+    readonly divider: number
+    readonly preview: number
+    readonly footer: number
+  } => ({
+    height: lines.length,
+    header: lines.findIndex(line => line.includes('Input History')),
+    query: lines.findIndex(line => line.trimStart().startsWith('Search:')),
+    divider: internalDividerRow(lines),
+    preview: lines.findIndex((line, index) => index > 0 && line.trimStart().startsWith('Preview')),
+    footer: lines.findLastIndex((line, index) => index > 0 && index < lines.length - 1 && !/^─+$/u.test(line.trim())),
+  })
+
+  const loadingHarness = makeHarness({ items: [{ id: 'a', preview: 'alpha prompt', text: 'alpha prompt' }], defaultScope: 'all' })
+  loadingHarness.port.loadingSearches = 1
+  loadingHarness.panel.start()
+  const loading = await renderUntil(loadingHarness.panel, 120,
+    lines => lines.some(line => line.includes('Loading history…')), 'the Host-loading state')
+
+  const partialHarness = makeHarness({ items: [{ id: 'a', preview: 'alpha prompt', text: 'alpha prompt' }], defaultScope: 'all' })
+  partialHarness.port.responses.push({
+    kind: 'partial',
+    items: [item('a', 'alpha prompt', 'alpha prompt', 1, false)],
+    progress: { settled: 1, total: 2 },
+  })
+  partialHarness.panel.start()
+  const partial = await renderUntil(partialHarness.panel, 120,
+    lines => lines.some(line => line.includes('Indexing')), 'the partial first-cold state')
+
+  const readyHarness = makeHarness({ items: [{ id: 'a', preview: 'alpha prompt', text: 'alpha prompt' }], defaultScope: 'all' })
+  readyHarness.panel.start()
+  const ready = await renderUntil(readyHarness.panel, 120,
+    lines => lines.some(line => line.includes('Results · 1 shown')), 'the ready state')
+
+  const failedHarness = makeHarness({ items: [{ id: 'a', preview: 'alpha prompt', text: 'alpha prompt' }], defaultScope: 'all' })
+  failedHarness.port.failures = 1
+  failedHarness.panel.start()
+  const failed = await renderUntil(failedHarness.panel, 120,
+    lines => lines.some(line => line.includes('History request failed')), 'the failed state')
+
+  const expected = boundary(loading)
+  assert.ok(expected.divider > 0 && expected.preview > expected.divider && expected.footer > expected.preview)
+  for (const [state, lines] of Object.entries({ partial, ready, failed })) {
+    assert.deepEqual(boundary(lines), expected, `${state}: physical seat boundaries must not move`)
+  }
+  assert.equal(partial.some(line => line.startsWith('> ')), true, 'partial keeps its real selectable row')
+  assert.equal(ready.some(line => line.startsWith('> ')), true)
+  assert.equal(failed.some(line => line.startsWith('> ')), false, 'a failed page paints no actionable result')
 })
 
 // ── in-flight More / stale action admission ─────────────────────────────────

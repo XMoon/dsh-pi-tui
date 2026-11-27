@@ -386,8 +386,8 @@ test('a throwing real generation unsubscribe cannot truncate the root teardown',
 
   await fixture.runnerFiberDispose()
 
-  assert.equal(generationUnsubscribes, 2,
-    'the progress watch and command catalog each released their own official generation subscription once')
+  assert.equal(generationUnsubscribes, 3,
+    'the progress watch, recall watch and command catalog each released their own official generation subscription once')
   assert.equal(coordinatorDisposals.length, 1,
     'the production catalog coordinator disposed exactly once despite the throwing unsubscribe')
   assert.ok(transport !== undefined, 'the transport observer was installed')

@@ -22,6 +22,8 @@ import type {
   HistorySearchItem,
   HistorySearchRequest,
   HistorySearchResponse,
+  HistorySessionRecallRequest,
+  HistorySessionRecallResponse,
 } from '../../src/runtime/remote/pi-tui-history-search-contract.ts'
 import {
   RemoteHistorySearchDeniedError,
@@ -71,6 +73,10 @@ class FakeRead implements HistorySearchReadPort {
   async readText(request: HistoryReadTextRequest): Promise<HistoryReadTextResponse> {
     this.readCalls.push(request)
     return this.body(request)
+  }
+
+  async readSessionRecall(request: HistorySessionRecallRequest): Promise<HistorySessionRecallResponse> {
+    return { kind: 'ready', sessionId: request.sessionId, items: [] }
   }
 }
 

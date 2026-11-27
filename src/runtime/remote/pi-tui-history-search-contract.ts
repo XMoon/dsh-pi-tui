@@ -5,16 +5,19 @@
  * ```text
  * endpoint   @xmoon76/dsh-pi-tui#piTuiHistorySearch/search
  * endpoint   @xmoon76/dsh-pi-tui#piTuiHistorySearch/readText
+ * endpoint   @xmoon76/dsh-pi-tui#piTuiHistorySearch/readSessionRecall
  * service    piTuiHistorySearch   (Host Cordis service key)
  * namespace  piTuiHistorySearch   (wire namespace)
- * method     search(request, signal)    -> ready | loading | incomplete | unavailable | stale
- * method     readText(request, signal)  -> ready | loading | incomplete | unavailable
+ * method     search(request, signal)             -> ready | loading | incomplete | unavailable | stale
+ * method     readText(request, signal)           -> ready | loading | incomplete | unavailable
+ * method     readSessionRecall(request, signal)  -> ready | loading | incomplete | unavailable
  * ```
  *
  * The wire is deliberately small and strict: three exact scopes, a literal
- * substring query, a keyset cursor, and a chunked exact-text read keyed by the
- * immutable content hash. It never carries a profile path, a raw Session
- * event, an official object, a principal or a replay credential.
+ * substring query, a keyset cursor, a chunked exact-text read keyed by the
+ * immutable content hash, and ONE bounded session-scoped recall window. It
+ * never carries a profile path, a raw Session event, an official object, a
+ * principal or a replay credential.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/pi-tui-history-search-contract
  */
@@ -30,6 +33,9 @@ import type {
   HistorySearchScope,
   HistorySearchUnavailableReason,
   HistoryReadTextUnavailableReason,
+  HistorySessionRecallItem,
+  HistorySessionRecallRequest,
+  HistorySessionRecallResponse,
 } from '../history-search-dto.ts'
 
 export type {
@@ -43,17 +49,26 @@ export type {
   HistorySearchScope,
   HistorySearchUnavailableReason,
   HistoryReadTextUnavailableReason,
+  HistorySessionRecallItem,
+  HistorySessionRecallRequest,
+  HistorySessionRecallResponse,
 } from '../history-search-dto.ts'
 import {
   HISTORY_SEARCH_LIMIT_MAX,
   HISTORY_SEARCH_QUERY_MAX_CHARS,
   HISTORY_SEARCH_READ_TEXT_LIMIT_MAX,
+  HISTORY_SESSION_RECALL_LIMIT,
+  HISTORY_SESSION_RECALL_MAX_BYTES,
+  HISTORY_SESSION_RECALL_MAX_TEXT_CHARS,
 } from '../history-search-limits.ts'
 
 export {
   HISTORY_SEARCH_LIMIT_MAX,
   HISTORY_SEARCH_QUERY_MAX_CHARS,
   HISTORY_SEARCH_READ_TEXT_LIMIT_MAX,
+  HISTORY_SESSION_RECALL_LIMIT,
+  HISTORY_SESSION_RECALL_MAX_BYTES,
+  HISTORY_SESSION_RECALL_MAX_TEXT_CHARS,
 } from '../history-search-limits.ts'
 import { isAbsolute } from 'node:path'
 import type {
@@ -73,6 +88,9 @@ export const PI_TUI_HISTORY_SEARCH_SEARCH_ENDPOINT = '@xmoon76/dsh-pi-tui#piTuiH
 
 /** The exact-text read endpoint's stable identity. */
 export const PI_TUI_HISTORY_SEARCH_READ_TEXT_ENDPOINT = '@xmoon76/dsh-pi-tui#piTuiHistorySearch/readText'
+
+/** The session-scoped recall endpoint's stable identity. */
+export const PI_TUI_HISTORY_SEARCH_SESSION_RECALL_ENDPOINT = '@xmoon76/dsh-pi-tui#piTuiHistorySearch/readSessionRecall'
 
 /** The literal query bound (UTF-16 code units, never trimmed). */
 
@@ -105,9 +123,12 @@ export interface HistorySearchCursor {
 
 const REQUEST_LABEL = 'piTuiHistorySearch/search request'
 const READ_REQUEST_LABEL = 'piTuiHistorySearch/readText request'
+const RECALL_REQUEST_LABEL = 'piTuiHistorySearch/readSessionRecall request'
+const RECALL_ITEM_LABEL = 'piTuiHistorySearch recall item'
 const ITEM_LABEL = 'piTuiHistorySearch item'
 const ANSWER_LABEL = 'piTuiHistorySearch/search result'
 const READ_ANSWER_LABEL = 'piTuiHistorySearch/readText result'
+const RECALL_ANSWER_LABEL = 'piTuiHistorySearch/readSessionRecall result'
 const CURSOR_LABEL = 'piTuiHistorySearch cursor'
 
 const SCOPES: readonly HistorySearchScope[] = ['all', 'session', 'directory']
@@ -370,6 +391,86 @@ const SIGNED_64_MAX = 2n ** 63n - 1n
 const CANONICAL_SIGNED_64 = /^(?:0|-?[1-9][0-9]*)$/u
 
 /**
+ * Validate one exact session-scoped recall request and return a detached copy.
+ */
+export function parseHistorySessionRecallRequest(value: unknown): HistorySessionRecallRequest {
+  const record = recordOf(value, RECALL_REQUEST_LABEL)
+  exactKeys(record, ['sessionId'], RECALL_REQUEST_LABEL)
+  requiredKeys(record, ['sessionId'], RECALL_REQUEST_LABEL)
+  return { sessionId: nonEmptyString(record.sessionId, `${RECALL_REQUEST_LABEL} sessionId`) }
+}
+
+/** Validate one recalled occurrence and return a detached copy. */
+export function parseHistorySessionRecallItem(value: unknown): HistorySessionRecallItem {
+  const record = recordOf(value, RECALL_ITEM_LABEL)
+  const keys = ['messageId', 'rpcId', 'firstEventSeq', 'text'] as const
+  exactKeys(record, keys, RECALL_ITEM_LABEL)
+  requiredKeys(record, ['messageId', 'firstEventSeq', 'text'], RECALL_ITEM_LABEL)
+  if (typeof record.text !== 'string' || record.text.length === 0
+    || record.text.length > HISTORY_SESSION_RECALL_MAX_TEXT_CHARS) {
+    throw new TypeError(
+      `${RECALL_ITEM_LABEL}: text must be a non-empty string of at most ${HISTORY_SESSION_RECALL_MAX_TEXT_CHARS} characters (the response envelope owns the actual fit)`,
+    )
+  }
+  const rpcId = record.rpcId === undefined
+    ? undefined
+    : nonEmptyString(record.rpcId, `${RECALL_ITEM_LABEL} rpcId`)
+  if (rpcId !== undefined && rpcId.length > 256) {
+    throw new TypeError(`${RECALL_ITEM_LABEL}: rpcId exceeds 256 characters`)
+  }
+  return {
+    messageId: nonEmptyString(record.messageId, `${RECALL_ITEM_LABEL} messageId`),
+    ...(rpcId === undefined ? {} : { rpcId }),
+    firstEventSeq: nonNegativeInteger(record.firstEventSeq, `${RECALL_ITEM_LABEL} firstEventSeq`),
+    text: record.text,
+  }
+}
+
+/**
+ * Validate and detach the closed session-recall answer union. The WHOLE
+ * serialized answer must stay within the fixed UTF-8 byte budget, so the
+ * budget is enforced on the actual response envelope, not on a per-field
+ * estimate.
+ */
+export function parseHistorySessionRecallResponse(value: unknown): HistorySessionRecallResponse {
+  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > HISTORY_SESSION_RECALL_MAX_BYTES) {
+    throw new TypeError(`${RECALL_ANSWER_LABEL}: the answer exceeds ${HISTORY_SESSION_RECALL_MAX_BYTES} bytes`)
+  }
+  const record = recordOf(value, RECALL_ANSWER_LABEL)
+  if (record.kind === 'ready') {
+    exactKeys(record, ['kind', 'sessionId', 'items'], RECALL_ANSWER_LABEL)
+    requiredKeys(record, ['kind', 'sessionId', 'items'], RECALL_ANSWER_LABEL)
+    if (!Array.isArray(record.items) || record.items.length > HISTORY_SESSION_RECALL_LIMIT) {
+      throw new TypeError(`${RECALL_ANSWER_LABEL}: items must be an array of at most ${HISTORY_SESSION_RECALL_LIMIT} rows`)
+    }
+    return {
+      kind: 'ready',
+      sessionId: nonEmptyString(record.sessionId, `${RECALL_ANSWER_LABEL} sessionId`),
+      items: record.items.map(parseHistorySessionRecallItem),
+    }
+  }
+  if (record.kind === 'loading') {
+    exactKeys(record, ['kind'], RECALL_ANSWER_LABEL)
+    return { kind: 'loading' }
+  }
+  if (record.kind === 'incomplete') {
+    exactKeys(record, ['kind', 'reason'], RECALL_ANSWER_LABEL)
+    if (!INCOMPLETE_REASONS.includes(record.reason as HistorySearchIncompleteReason)) {
+      throw new TypeError(`${RECALL_ANSWER_LABEL}: unknown incomplete reason ${JSON.stringify(record.reason)}`)
+    }
+    return { kind: 'incomplete', reason: record.reason as HistorySearchIncompleteReason }
+  }
+  if (record.kind === 'unavailable') {
+    exactKeys(record, ['kind', 'reason'], RECALL_ANSWER_LABEL)
+    if (!UNAVAILABLE_REASONS.includes(record.reason as HistorySearchUnavailableReason)) {
+      throw new TypeError(`${RECALL_ANSWER_LABEL}: unknown unavailable reason ${JSON.stringify(record.reason)}`)
+    }
+    return { kind: 'unavailable', reason: record.reason as HistorySearchUnavailableReason }
+  }
+  throw new TypeError(`${RECALL_ANSWER_LABEL}: unknown kind ${JSON.stringify(record.kind)}`)
+}
+
+/**
  * Validate one SQLite row anchor as a canonical signed 64-bit decimal string.
  * SQLite's own `CAST` silently clamps out-of-range text and accepts `+1`/`012`,
  * so this check is load-bearing BEFORE the value reaches `CAST(? AS INTEGER)`.
@@ -518,6 +619,20 @@ const READ_TEXT_RESULT_CODEC: TypertCodec = {
   decode: parseHistoryReadTextResponse,
 }
 
+const RECALL_REQUEST_CODEC: TypertCodec = {
+  mode: 'strict',
+  typeSymbol: `${PI_TUI_HISTORY_SEARCH_SESSION_RECALL_ENDPOINT}:request`,
+  create: () => ({ parse: parseHistorySessionRecallRequest }),
+  decode: parseHistorySessionRecallRequest,
+}
+
+const RECALL_RESULT_CODEC: TypertCodec = {
+  mode: 'strict',
+  typeSymbol: `${PI_TUI_HISTORY_SEARCH_SESSION_RECALL_ENDPOINT}:result`,
+  create: () => ({ parse: parseHistorySessionRecallResponse }),
+  decode: parseHistorySessionRecallResponse,
+}
+
 /** The ONE shared search descriptor both contributions derive from. */
 export const PI_TUI_HISTORY_SEARCH: InvocationDescriptor = {
   id: PI_TUI_HISTORY_SEARCH_SEARCH_ENDPOINT,
@@ -546,16 +661,37 @@ export const PI_TUI_HISTORY_SEARCH_READ_TEXT: InvocationDescriptor = {
   result: READ_TEXT_RESULT_CODEC,
 }
 
+/** The ONE shared session-scoped recall descriptor both contributions derive from. */
+export const PI_TUI_HISTORY_SEARCH_SESSION_RECALL: InvocationDescriptor = {
+  id: PI_TUI_HISTORY_SEARCH_SESSION_RECALL_ENDPOINT,
+  service: PI_TUI_HISTORY_SEARCH_NAMESPACE,
+  namespace: PI_TUI_HISTORY_SEARCH_NAMESPACE,
+  method: 'readSessionRecall',
+  invocation: { kind: 'direct' },
+  parameters: [
+    { name: 'request', wire: 'request', source: 'json', codec: RECALL_REQUEST_CODEC },
+  ],
+  cancellation: { parameter: 'signal' },
+  result: RECALL_RESULT_CODEC,
+}
+
 /** The `search` call result as the Client receives it. */
 export type PiTuiHistorySearchCall = RemoteResult<HistorySearchResponse>
 
 /** The `readText` call result as the Client receives it. */
 export type PiTuiHistoryReadTextCall = RemoteResult<HistoryReadTextResponse>
 
+/** The `readSessionRecall` call result as the Client receives it. */
+export type PiTuiHistorySessionRecallCall = RemoteResult<HistorySessionRecallResponse>
+
 /** The mounted Client namespace slice this contract owns. */
 export interface PiTuiHistorySearchNamespace {
   search(request: HistorySearchRequest, signal?: AbortSignal): Promise<PiTuiHistorySearchCall>
   readText(request: HistoryReadTextRequest, signal?: AbortSignal): Promise<PiTuiHistoryReadTextCall>
+  readSessionRecall(
+    request: HistorySessionRecallRequest,
+    signal?: AbortSignal,
+  ): Promise<PiTuiHistorySessionRecallCall>
 }
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
@@ -568,12 +704,20 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
       request: HistoryReadTextRequest,
       signal?: AbortSignal,
     ) => Promise<PiTuiHistoryReadTextCall>
+    'piTuiHistorySearch/readSessionRecall': (
+      request: HistorySessionRecallRequest,
+      signal?: AbortSignal,
+    ) => Promise<PiTuiHistorySessionRecallCall>
   }
 
   interface TypertRemoteNamespaceMap {
     'piTuiHistorySearch': {
       search: (request: HistorySearchRequest, signal?: AbortSignal) => Promise<PiTuiHistorySearchCall>
       readText: (request: HistoryReadTextRequest, signal?: AbortSignal) => Promise<PiTuiHistoryReadTextCall>
+      readSessionRecall: (
+        request: HistorySessionRecallRequest,
+        signal?: AbortSignal,
+      ) => Promise<PiTuiHistorySessionRecallCall>
     }
   }
 }

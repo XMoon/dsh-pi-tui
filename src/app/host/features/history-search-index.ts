@@ -6,7 +6,7 @@
  * from the official log at any time:
  *
  * ```text
- * $PROFILE_DIR/.dsh-pi-tui/history-search/v2.sqlite
+ * $PROFILE_DIR/.dsh-pi-tui/history-search/v3.sqlite
  * ```
  *
  * Besides the projected rows it stores ONE source-proof row per Session: the
@@ -32,19 +32,19 @@ import { historySearchPreview } from '../../../runtime/remote/pi-tui-history-sea
 export const HISTORY_SEARCH_SQLITE_APPLICATION_ID = 0x50495448
 
 /**
- * Fixed schema version of the derived index. v2 adds the durable
- * `history_source_proofs` relation; the pre-release v1 file is never opened,
- * migrated or deleted.
+ * Fixed schema version of the derived index. v3 adds the optional official
+ * request correlation to an occurrence and narrows the projection to ordinary
+ * main Sessions; the older v2 file is never opened, migrated or deleted.
  */
-export const HISTORY_SEARCH_SQLITE_USER_VERSION = 2
+export const HISTORY_SEARCH_SQLITE_USER_VERSION = 3
 
 /**
  * Semantic contract of one durable source proof. Bump only when the projection
  * or the proof semantics change: proofs from an older contract are not reused.
  */
-export const HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION = 2
+export const HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION = 3
 
-const DATABASE_FILE = 'v2.sqlite'
+const DATABASE_FILE = 'v3.sqlite'
 const PRIVATE_DIRECTORY = '.dsh-pi-tui'
 const HISTORY_DIRECTORY = 'history-search'
 
@@ -65,6 +65,7 @@ CREATE TABLE history_occurrences (
   row_id INTEGER PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES history_sessions(session_id) ON DELETE CASCADE,
   message_id TEXT NOT NULL,
+  rpc_id TEXT,
   first_seq INTEGER NOT NULL,
   accepted_ms INTEGER NOT NULL,
   effective_cwd TEXT,
@@ -103,7 +104,7 @@ const SESSION_COLUMNS = [
   'last_event_hash', 'header_hash', 'source_state', 'uncertain_sources', 'dirty',
 ] as const
 const OCCURRENCE_COLUMNS = [
-  'row_id', 'session_id', 'message_id', 'first_seq', 'accepted_ms', 'effective_cwd',
+  'row_id', 'session_id', 'message_id', 'rpc_id', 'first_seq', 'accepted_ms', 'effective_cwd',
   'content', 'normalized_content', 'preview', 'content_length', 'content_sha256', 'has_non_text',
 ] as const
 const PROOF_COLUMNS = [
@@ -152,6 +153,8 @@ export interface HistorySourceProofRow extends HistorySourceProofBasis {
 /** One accepted occurrence to commit. */
 export interface HistoryOccurrenceInput {
   readonly messageId: string
+  /** Optional official request correlation of this first admission. */
+  readonly rpcId?: string
   readonly firstEventSeq: number
   readonly acceptedAt: number
   readonly effectiveCwd: string | null
@@ -172,10 +175,10 @@ export interface HistoryIndexCommitInput {
   readonly lastEventHash: string | null
   readonly sourceState: 'persisted' | 'live'
   /**
-   * Old-v2 recovery compatibility only: a retained pre-upgrade uncertainty
-   * count delta. The current admission fold has no optional-metadata
-   * uncertainty and every production caller passes `0`; the physical column
-   * and its checkpoint equality stay until a future schema change.
+   * A retained derived-projection uncertainty count delta. The current
+   * admission fold has no optional-metadata uncertainty and every production
+   * batch passes `0`; a marker set by an earlier v3 pass stays subject to the
+   * same checkpoint equality and is cleared only by an authoritative rebuild.
    */
   readonly uncertainSourcesDelta: number
   readonly occurrences: readonly HistoryOccurrenceInput[]
@@ -185,6 +188,8 @@ export interface HistoryIndexCommitInput {
 export interface HistoryOccurrenceRow {
   readonly sessionId: string
   readonly messageId: string
+  /** Optional official request correlation of the first admission. */
+  readonly rpcId?: string
   readonly firstEventSeq: number
   readonly acceptedAt: number
   readonly effectiveCwd: string | null
@@ -384,6 +389,7 @@ interface RawSourceProofRow {
 interface RawOccurrenceRow {
   readonly session_id: string
   readonly message_id: string
+  readonly rpc_id: string | null
   readonly first_seq: number
   readonly accepted_ms: number
   readonly effective_cwd: string | null
@@ -426,6 +432,7 @@ function occurrenceOfRaw(row: RawOccurrenceRow): HistoryOccurrenceRow {
   return {
     sessionId: row.session_id,
     messageId: row.message_id,
+    ...(row.rpc_id === null ? {} : { rpcId: row.rpc_id }),
     firstEventSeq: row.first_seq,
     acceptedAt: row.accepted_ms,
     effectiveCwd: row.effective_cwd,
@@ -494,7 +501,7 @@ function inspectSchema(db: DatabaseSync): SchemaState {
   return 'ok'
 }
 
-/** Quarantine one own-v2 file set under private names; never deletes data. */
+/** Quarantine one own-v3 file set under private names; never deletes data. */
 function quarantineDatabaseFile(dbPath: string): void {
   const stamp = String(Date.now())
   for (const suffix of ['', '-wal', '-shm']) {
@@ -591,7 +598,7 @@ export class HistorySearchIndex {
    * Open (or initialize) the profile-local derived index.
    *
    * A foreign database, a non-private path or an unowned directory refuses the
-   * index (the Host stays Ready and reports `unavailable`). A known v2 file
+   * index (the Host stays Ready and reports `unavailable`). A known v3 file
    * that fails schema validation or SQLite integrity is quarantined and
    * rebuilt from an empty schema; the original bytes are preserved.
    */
@@ -917,14 +924,15 @@ export class HistorySearchIndex {
       }
       const insertOccurrence = this.db.prepare(
         `INSERT OR IGNORE INTO history_occurrences (
-          session_id, message_id, first_seq, accepted_ms, effective_cwd,
+          session_id, message_id, rpc_id, first_seq, accepted_ms, effective_cwd,
           content, normalized_content, preview, content_length, content_sha256, has_non_text
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       for (const occurrence of input.occurrences) {
         insertedOccurrences += Number(insertOccurrence.run(
           input.sessionId,
           occurrence.messageId,
+          occurrence.rpcId ?? null,
           occurrence.firstEventSeq,
           occurrence.acceptedAt,
           occurrence.effectiveCwd,
@@ -1151,11 +1159,36 @@ export class HistorySearchIndex {
   occurrence(sessionId: string, messageId: string): HistoryOccurrenceRow | undefined {
     this.assertOpen()
     const row = this.db.prepare(
-      `SELECT session_id, message_id, first_seq, accepted_ms, effective_cwd,
+      `SELECT session_id, message_id, rpc_id, first_seq, accepted_ms, effective_cwd,
               content, preview, content_length, content_sha256, has_non_text
        FROM history_occurrences WHERE session_id = ? AND message_id = ?`,
     ).get(sessionId, messageId) as unknown as RawOccurrenceRow | undefined
     return row === undefined ? undefined : occurrenceOfRaw(row)
+  }
+
+  /**
+   * The bounded session-scoped recall candidate rows of ONE exact Session. The
+   * filter runs BEFORE `LIMIT`, so a child/other Session can never crowd out
+   * the addressed one; non-text rows and rows whose stored UTF-16 length is
+   * already too large for the recall byte budget are excluded without reading
+   * their body. The caller applies the text normalization and the final
+   * serialized-byte budget to the returned rows.
+   */
+  sessionRecallRows(
+    sessionId: string,
+    limit: number,
+    maxContentChars: number,
+  ): HistoryOccurrenceRow[] {
+    this.assertOpen()
+    const rows = this.db.prepare(
+      `SELECT session_id, message_id, rpc_id, first_seq, accepted_ms, effective_cwd,
+              content, preview, content_length, content_sha256, has_non_text
+       FROM history_occurrences
+       WHERE session_id = ? AND has_non_text = 0 AND content_length <= ?
+       ORDER BY accepted_ms DESC, first_seq DESC, message_id ASC
+       LIMIT ?`,
+    ).all(sessionId, maxContentChars, limit) as unknown as RawOccurrenceRow[]
+    return rows.map(occurrenceOfRaw)
   }
 
   sessionCount(): number {

@@ -42,7 +42,12 @@ function cwdChange(seq: number, time: number, cwd: unknown): HostAdmissionEventL
   return { type: 'working-directory/change', seq, time, data: { cwd } }
 }
 
-const OPTIONS = { sessionId: 'session-a', initialCwd: '/repo/a', inheritedEventCount: 0 }
+const OPTIONS = {
+  sessionId: 'session-a',
+  sessionOrigin: undefined,
+  initialCwd: '/repo/a',
+  inheritedEventCount: 0,
+}
 
 test('an inbox insertion plus its later user/message is ONE accepted occurrence', () => {
   const accepted = message('msg-1', 'hello host')
@@ -59,6 +64,7 @@ test('an inbox insertion plus its later user/message is ONE accepted occurrence'
     acceptedAt: 1000,
     cwd: '/repo/a',
     hasNonText: false,
+    rpcId: 'rpc-msg-1',
   })
   assert.equal(snapshot.editedOccurrences, 0)
 })
@@ -143,7 +149,81 @@ test('a user-sourced message without rpcId is ONE accepted occurrence across inb
   assert.equal(occurrence?.firstEventSeq, 0)
   assert.equal(occurrence?.acceptedAt, 1000)
   assert.equal(occurrence?.cwd, '/repo/a')
-  assert.equal(snapshot.occurrences.find(item => item.messageId === 'correlated-1')?.firstEventSeq, 0)
+  assert.equal('rpcId' in (occurrence as object), false, 'a no-rpcId producer stays uncorrelated')
+  const correlatedOccurrence = snapshot.occurrences.find(item => item.messageId === 'correlated-1')
+  assert.equal(correlatedOccurrence?.firstEventSeq, 0)
+  assert.equal(correlatedOccurrence?.rpcId, 'rpc-correlated-1')
+})
+
+test('a subagent-origin Session admits ZERO occurrences even for user-source prompts', () => {
+  const childOptions = { ...OPTIONS, sessionOrigin: 'subagent' }
+  const delegated = message('delegated-task', 'the delegated initial task')
+  const human = message('human-continuation', 'an explicit human follow-up')
+  const snapshot = classifyHostAdmission(childOptions, [
+    inbox(0, 1000, [delegated]),
+    userMessageEvent(1, 1005, delegated),
+    cwdChange(2, 1006, '/repo/child'),
+    inbox(3, 1007, [human]),
+  ])
+  assert.deepEqual(snapshot.occurrences, [], 'a child contributes no recall/search occurrence')
+  assert.equal(snapshot.editedOccurrences, 0)
+})
+
+test('an ordinary root/fork origin keeps its own and inherited-tail occurrences', () => {
+  const root = classifyHostAdmission(OPTIONS, [inbox(0, 1000, [message('root-msg', 'root input')])])
+  assert.deepEqual(root.occurrences.map(item => item.messageId), ['root-msg'])
+
+  // An ordinary fork has its own child-owned input after the inherited cut; its
+  // origin is not 'subagent', so the ordinary admission rules apply unchanged.
+  const fork = classifyHostAdmission({ ...OPTIONS, inheritedEventCount: 2 }, [
+    userMessageEvent(0, 900, message('parent-msg', 'inherited parent input')),
+    inbox(1, 901, [message('parent-msg-2', 'another inherited input')]),
+    inbox(2, 1000, [message('fork-msg', 'fork own input')]),
+  ])
+  assert.deepEqual(fork.occurrences.map(item => item.messageId), ['fork-msg'])
+})
+
+test('the subagent exclusion still validates the event envelope and folds cwd', () => {
+  const childOptions = { ...OPTIONS, sessionOrigin: 'subagent' }
+  const withCwd = new HostAdmissionFold(childOptions)
+  withCwd.apply([
+    cwdChange(0, 999, '/repo/child-a'),
+    inbox(1, 1000, [message('child-msg', 'child input')]),
+  ])
+  assert.deepEqual(withCwd.snapshot().occurrences, [])
+  assert.equal(withCwd.currentCwd, '/repo/child-a')
+
+  // A recognized inbox mutation without its required array is a source breach
+  // for a child too: exclusion never exempts the envelope/contiguity contract.
+  assert.throws(
+    () => classifyHostAdmission(childOptions, [
+      { type: 'agent/inbox/spliced', seq: 0, time: 1000, data: { target: 'next-turn', start: 0 } },
+    ]),
+    (error: unknown) => error instanceof Error && error.name === 'HostAdmissionPayloadError',
+  )
+})
+
+test('the first occurrence keeps its correlation; a later same-id edit cannot replace it', () => {
+  const snapshot = classifyHostAdmission(OPTIONS, [
+    inbox(0, 1000, [message('msg-1', 'first version', { kind: 'user', rpcId: 'rpc-first' })]),
+    inbox(2, 1002, [message('msg-1', 'edited version', { kind: 'user', rpcId: 'rpc-later' })]),
+  ])
+  assert.equal(snapshot.occurrences.length, 1)
+  assert.equal(snapshot.occurrences[0]?.rpcId, 'rpc-first')
+  assert.equal(snapshot.occurrences[0]?.content, 'first version')
+  assert.equal(snapshot.editedOccurrences, 1)
+})
+
+test('an unusable optional rpcId is absent correlation, never an incomplete source', () => {
+  const snapshot = classifyHostAdmission(OPTIONS, [
+    inbox(0, 1000, [message('empty-rpc', 'empty', { kind: 'user', rpcId: '' })]),
+    inbox(2, 1002, [message('long-rpc', 'long', { kind: 'user', rpcId: 'r'.repeat(257) })]),
+    inbox(4, 1004, [message('good-rpc', 'good', { kind: 'user', rpcId: 'r'.repeat(256) })]),
+  ])
+  const byId = (messageId: string) => snapshot.occurrences.find(item => item.messageId === messageId)
+  assert.equal('rpcId' in (byId('empty-rpc') as object), false)
+  assert.equal('rpcId' in (byId('long-rpc') as object), false)
+  assert.equal(byId('good-rpc')?.rpcId, 'r'.repeat(256))
 })
 
 test('an unusable working-directory/change makes that interval explicitly unknown', () => {

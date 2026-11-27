@@ -55,6 +55,36 @@ export interface HistoryReadTextRequest {
   readonly limit: number
 }
 
+/** One session-scoped recall request: exactly the addressed Session. */
+export interface HistorySessionRecallRequest {
+  readonly sessionId: string
+}
+
+/** One recalled occurrence: exact original text plus its official identity. */
+export interface HistorySessionRecallItem {
+  readonly messageId: string
+  /** Optional official request correlation of the first admission. */
+  readonly rpcId?: string
+  /** First event seq that proved acceptance (stable Host identity/order). */
+  readonly firstEventSeq: number
+  readonly text: string
+}
+
+/**
+ * The bounded session-scoped recall answer. There is no cursor and no query:
+ * the Host returns at most the fixed recall window under the fixed serialized
+ * byte budget, or one of the existing truthful non-ready states.
+ */
+export type HistorySessionRecallResponse =
+  | {
+    readonly kind: 'ready'
+    readonly sessionId: string
+    readonly items: readonly HistorySessionRecallItem[]
+  }
+  | { readonly kind: 'loading' }
+  | { readonly kind: 'incomplete'; readonly reason: HistorySearchIncompleteReason }
+  | { readonly kind: 'unavailable'; readonly reason: HistorySearchUnavailableReason }
+
 /** Bounded first-cold-round progress: settled expected IDs out of the fixed roster. */
 export interface HistorySearchProgress {
   /** Expected IDs currently queryable; may decrease when a source is revoked. */

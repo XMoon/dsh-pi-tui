@@ -8939,11 +8939,35 @@ export class TuiApp {
       // owns no scope occurrence, so it returns no token: the write owner's
       // row settlement has nothing to attribute in this backend.
       this.memoryRecall.remember(trimmed)
-      this.editor.addToHistory(trimmed)
+      // The root may evict an older candidate when its bounded window is full;
+      // never unshift an independent editor row that the authoritative root no
+      // longer projects.
+      this.restoreEditorRecall(false)
       return undefined
     }
     this.editor.addToHistory(trimmed)
     return this.historyRecall!.rememberAccepted(trimmed)
+  }
+
+  /**
+   * Re-project the selected recall authority into the renderer after an
+   * ASYNCHRONOUS same-scope seed commit. The authority itself (the Split
+   * Client's root memory) already committed the new projection; this only
+   * rebuilds the disposable editor mirror and restores an active browse draft.
+   * Direct never calls it (its reseed path goes through `resetInputHistory`).
+   */
+  reseedInputRecall(): void {
+    if (this.memoryRecall === undefined || this.disposed) return
+    this.restoreEditorRecall(true)
+  }
+
+  /** A real recall-root scope change: replace the disposable editor mirror
+   *  with the (already cleared) root projection and DROP any outgoing browse
+   *  bookmark. Unlike a same-scope seed reseat this never restores the old
+   *  carrier's draft. */
+  resetInputRecallScope(): void {
+    if (this.memoryRecall === undefined || this.disposed) return
+    this.restoreEditorRecall(false)
   }
 
   /** The selected recall authority's newest-first projection. */
@@ -8956,9 +8980,9 @@ export class TuiApp {
    *  memory). `addToHistory` unshifts, so the snapshot is fed oldest→newest;
    *  the authority already collapsed consecutive duplicates and applied the
    *  cap, so the editor ends up holding exactly the projection it owns. Called
-   *  only where the whole recall context was replaced (a scope publish or a
-   *  hydration reseed) — never on a settlement, which must not touch the
-   *  draft. */
+   *  for a whole-context replacement (scope publish/hydration/reset) and for a
+   *  live accepted rpcId merge that can remove a previously projected Host row;
+   *  a non-browse settlement keeps the visible draft untouched. */
   private restoreEditorRecall(restoreBrowseDraft: boolean): void {
     // A cold hydration reseed may land while the user is browsing the
     // provisional recall with their own non-empty draft. The base editor owns
@@ -9003,10 +9027,9 @@ export class TuiApp {
    * @param entries - persisted entries, most recent first.
    */
   seedInputHistory(entries: readonly string[]): void {
-    // Feature History PR2-A: the Split Client's recall authority is the
-    // process memory, which only a real admitted user input writes. An
-    // external seed (a file read) must never enter it, so this Direct-only
-    // import path is inert there.
+    // Feature History PR2-C: the Split Client's recall authority is the scoped
+    // root (real admitted inputs plus its Host seed). An external Direct file
+    // seed must never enter it, so this import path is inert there.
     if (this.memoryRecall !== undefined) return
     // addToHistory unshifts, so seed oldest→newest to keep the persisted order.
     for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -9029,8 +9052,9 @@ export class TuiApp {
    * order (the kernel's own reconcile). The commit closes the scope, so
    * ordinary submissions use the plain {@link rememberInput} path again.
    * Feature History PR2-A: Direct-only. On the Split Client this method is not
-   * a recall import entry — the process memory is written by real admitted
-   * inputs alone, so a cold reseed cannot change the list or the live draft.
+   * a recall import entry — the root is written by real admitted inputs and
+   * its bounded Host seed alone, so a cold Direct reseed cannot change the list
+   * or the live draft.
    * @param entries - the new workspace's persisted entries, newest first.
    * @param owner - the owner whose hydration committed this reseed. The
    *   sessionless boot seed passes no owner: it only seeds the recall pool and
@@ -9056,9 +9080,9 @@ export class TuiApp {
    * SESSIONLESS pool's entries are ADOPTED by the first published owner (that
    * submission is persisted under the new Session; there is no outgoing owner
    * to fence).
-   * Feature History PR2-A: the process memory is NOT a Session scope, so a
-   * publication keeps the same list; only the outgoing browse bookmark is
-   * retired (a Session A draft is never restored into Session B).
+   * Feature History PR2-C: the root is bound to the published carrier+Session
+   * by the application before this renderer call; the renderer only drops the
+   * outgoing browse bookmark and rebuilds from the current root projection.
    * @param owner - the published Session's id.
    */
   beginInputHistoryScope(owner: string | undefined): void {
@@ -25677,7 +25701,11 @@ export class TuiApp {
    * normal submit uses) and lands its recall occurrence; the refusal and
    * unknown outcomes unlock the editor with the document intact.
    */
-  settleSubmission(attemptId: string, result: 'accepted' | 'not-accepted' | 'unknown'): void {
+  settleSubmission(
+    attemptId: string,
+    result: 'accepted' | 'not-accepted' | 'unknown',
+    officialRequestId?: string,
+  ): void {
     // A disposed surface never settles again. A STOPPED surface (a real
     // stop(), not the external editor's temporary suspension) still completes
     // the LOGICAL settlement — the hold is released and the submit input
@@ -25704,7 +25732,7 @@ export class TuiApp {
         // physical effect, so its row commits now, in the same accepted
         // stack as a live settlement. The deferred record then carries only
         // the CLEAR that must wait for the re-presented screen.
-        if (hold.remember) this.memoryRecall?.remember(hold.text)
+        if (hold.remember) this.memoryRecall?.remember(hold.text, officialRequestId)
         this.deferredAcceptedSettle = { text: hold.text, remember: hold.remember }
       }
       return
@@ -25714,8 +25742,12 @@ export class TuiApp {
       // remember FIRST (the text is still available), then the clear.
       if (hold.remember) {
         if (this.memoryRecall !== undefined) {
-          this.memoryRecall.remember(hold.text)
-          this.editor.addToHistory(hold.text.trim())
+          // A root merge can REMOVE a previously projected Host row (the same
+          // official rpcId). Rebuild the disposable editor mirror from the
+          // authoritative root instead of independently unshifting the new
+          // text, or ↑ would still consume the obsolete row.
+          this.memoryRecall.remember(hold.text, officialRequestId)
+          this.restoreEditorRecall(false)
         } else {
           this.editor.addToHistory(hold.text.trim())
           this.historyRecall!.rememberAccepted(hold.text)

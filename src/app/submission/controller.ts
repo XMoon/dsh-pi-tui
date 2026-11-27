@@ -2182,7 +2182,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    *  and only while the pinned subject is still current. On acceptance the
    *  composer clears its draft and consumes exactly this attempt's frozen
    *  attachments — never before. */
-  const acceptComposerHold = (hold: ComposerHold): void => {
+  const acceptComposerHold = (hold: ComposerHold, officialRequestId?: string): void => {
     if (composerHold !== hold || hold.phase !== 'sending') return
     hold.phase = 'settled'
     // The subject fence: a replaced owner never receives the old clear. A
@@ -2208,7 +2208,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         }
       }
       try {
-        deps.app().settleSubmission?.(hold.id, 'accepted')
+        deps.app().settleSubmission?.(hold.id, 'accepted', officialRequestId)
       } catch (error) {
         reportAcceptanceFailure('settlement', error)
       }
@@ -2285,15 +2285,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   /** The writer-facing acceptance hook for an attempt's write: idempotent,
    *  fenced to the exact hold, and synchronous (Direct fires it while the
    *  writer call is still on the stack). */
-  const composerAcceptedCallback = (hold: ComposerHold): (() => void) | undefined => {
-    return () => { acceptComposerHold(hold) }
+  const composerAcceptedCallback = (hold: ComposerHold): ((officialRequestId?: string) => void) | undefined => {
+    return (officialRequestId?: string) => { acceptComposerHold(hold, officialRequestId) }
   }
 
   /** Adapt the controller's ComposerHold into the write-site hooks the
    *  dispatch/steer paths consume (PR2). The hooks route back into the exact
    *  hold's settlement and are idempotent on both sides. */
   const holdOf = (hold: ComposerHold | undefined): {
-    readonly accept: () => void
+    readonly accept: (officialRequestId?: string) => void
     readonly reject: () => void
     readonly markUnknown: () => void
     deferAccepted: (effect: () => void) => void
@@ -2304,7 +2304,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       if (hold.phase === 'sending') hold.submissionRequestId = requestId
     },
     handToLegacyCommand: () => { handComposerHoldToLegacy(hold) },
-    accept: () => { acceptComposerHold(hold) },
+    accept: (officialRequestId?: string) => { acceptComposerHold(hold, officialRequestId) },
     reject: () => { rejectComposerHold(hold) },
     markUnknown: () => { unknownComposerHold(hold) },
     deferAccepted: (effect: () => void) => {

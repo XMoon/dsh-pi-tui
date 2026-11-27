@@ -4498,6 +4498,20 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       composer.reseatRecallAfterReseed()
       historyRecall.reset(entries, owner, writeIds)
     },
+    reseedInputRecall() {
+      // The application's root recall memory already committed the merged
+      // projection; reseat only the composer's local browse indices (the live
+      // `entries` getter reads the same authority on demand). Pure state.
+      if (disposed) return
+      if (historyRecall === undefined) composer.reseatRecallAfterReseed()
+    },
+    resetInputRecallScope() {
+      // A real carrier/Session scope change invalidates the composer's
+      // positional recall browse before a new seed exists. The live entries
+      // getter already reads the cleared root; no second memory is created.
+      if (disposed) return
+      composer.invalidateRecallNavigation()
+    },
     beginInputHistoryScope(owner) {
       // TSP I-A: the formal Session publication the application already owns.
       // Pure kernel state; nothing here is inferred from a received Session id.
@@ -6357,7 +6371,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       render()
     },
-    settleSubmission: (attemptId, result) => {
+    settleSubmission: (attemptId, result, officialRequestId) => {
       const hold = heldSubmission
       if (hold === undefined || hold.attemptId !== attemptId) return
       heldSubmission = undefined
@@ -6368,7 +6382,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         // in this same accepted stack — exactly once, never on refusal/unknown.
         if (hold.remember) {
           if (options.inputRecall === undefined) historyRecall!.rememberAccepted(hold.text)
-          else options.inputRecall.remember(hold.text)
+          else options.inputRecall.remember(hold.text, officialRequestId)
         }
         composer.setDraft('')
       }

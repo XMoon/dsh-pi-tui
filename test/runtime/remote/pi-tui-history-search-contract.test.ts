@@ -17,8 +17,12 @@ import {
   HISTORY_SEARCH_PREVIEW_MAX_CHARS,
   HISTORY_SEARCH_QUERY_MAX_CHARS,
   HISTORY_SEARCH_READ_TEXT_LIMIT_MAX,
+  HISTORY_SESSION_RECALL_LIMIT,
+  HISTORY_SESSION_RECALL_MAX_BYTES,
+  HISTORY_SESSION_RECALL_MAX_TEXT_CHARS,
   PI_TUI_HISTORY_SEARCH,
   PI_TUI_HISTORY_SEARCH_READ_TEXT,
+  PI_TUI_HISTORY_SEARCH_SESSION_RECALL,
   PI_TUI_HISTORY_SEARCH_NAMESPACE,
   decodeHistorySearchCursor,
   encodeHistorySearchCursor,
@@ -30,6 +34,9 @@ import {
   parseHistoryReadTextResponse,
   parseHistorySearchRequest,
   parseHistorySearchResponse,
+  parseHistorySessionRecallItem,
+  parseHistorySessionRecallRequest,
+  parseHistorySessionRecallResponse,
   type HistorySearchCursor,
 } from '../../../src/runtime/remote/pi-tui-history-search-contract.ts'
 
@@ -41,16 +48,24 @@ const CURSOR: HistorySearchCursor = {
   afterRowId: '42',
 }
 
-test('the contract owns exactly the two strict unary endpoints of the private namespace', () => {
+test('the contract owns exactly the three strict unary endpoints of the private namespace', () => {
   assert.equal(PI_TUI_HISTORY_SEARCH.id, '@xmoon76/dsh-pi-tui#piTuiHistorySearch/search')
   assert.equal(PI_TUI_HISTORY_SEARCH_READ_TEXT.id, '@xmoon76/dsh-pi-tui#piTuiHistorySearch/readText')
+  assert.equal(
+    PI_TUI_HISTORY_SEARCH_SESSION_RECALL.id,
+    '@xmoon76/dsh-pi-tui#piTuiHistorySearch/readSessionRecall',
+  )
   assert.equal(PI_TUI_HISTORY_SEARCH.service, PI_TUI_HISTORY_SEARCH_NAMESPACE)
   assert.equal(PI_TUI_HISTORY_SEARCH_READ_TEXT.namespace, PI_TUI_HISTORY_SEARCH_NAMESPACE)
+  assert.equal(PI_TUI_HISTORY_SEARCH_SESSION_RECALL.namespace, PI_TUI_HISTORY_SEARCH_NAMESPACE)
   assert.equal(PI_TUI_HISTORY_SEARCH.method, 'search')
   assert.equal(PI_TUI_HISTORY_SEARCH_READ_TEXT.method, 'readText')
+  assert.equal(PI_TUI_HISTORY_SEARCH_SESSION_RECALL.method, 'readSessionRecall')
   assert.deepEqual(PI_TUI_HISTORY_SEARCH.parameters.map(parameter => parameter.name), ['request'])
   assert.deepEqual(PI_TUI_HISTORY_SEARCH_READ_TEXT.parameters.map(parameter => parameter.name), ['request'])
+  assert.deepEqual(PI_TUI_HISTORY_SEARCH_SESSION_RECALL.parameters.map(parameter => parameter.name), ['request'])
   assert.deepEqual(PI_TUI_HISTORY_SEARCH.cancellation, { parameter: 'signal' })
+  assert.deepEqual(PI_TUI_HISTORY_SEARCH_SESSION_RECALL.cancellation, { parameter: 'signal' })
 })
 
 test('every scope accepts exactly its own keys and rejects extra or foreign fields', () => {
@@ -241,6 +256,54 @@ test('the readText request/answer enforce exact identity, offsets and chunk boun
   assert.throws(() => parseHistoryReadTextResponse({ kind: 'ready', chunk: '', nextOffset: -1, contentLength: 0 }), /non-negative/u)
   assert.throws(() => parseHistoryReadTextResponse({ kind: 'unavailable', reason: 'gone' }), /unknown unavailable reason/u)
   assert.throws(() => parseHistoryReadTextResponse({ kind: 'stale', reason: 'cursor-stale' }), /unknown kind/u)
+})
+
+test('the session-recall wire is strictly session-addressed, bounded and correlated', () => {
+  assert.deepEqual(parseHistorySessionRecallRequest({ sessionId: 's1' }), { sessionId: 's1' })
+  assert.throws(() => parseHistorySessionRecallRequest({ sessionId: '' }), /non-empty/u)
+  assert.throws(() => parseHistorySessionRecallRequest({ sessionId: 's1', limit: 1 }), /unexpected field/u)
+  assert.throws(() => parseHistorySessionRecallRequest({ sessionId: 's1', query: 'x' }), /unexpected field/u)
+  assert.throws(() => parseHistorySessionRecallRequest(null), /object/u)
+
+  const item = { messageId: 'm1', firstEventSeq: 2, text: 'recalled prompt' }
+  assert.deepEqual(parseHistorySessionRecallItem(item), item)
+  assert.deepEqual(parseHistorySessionRecallItem({ ...item, rpcId: 'rpc-1' }), { ...item, rpcId: 'rpc-1' })
+  assert.throws(() => parseHistorySessionRecallItem({ ...item, text: '' }), /non-empty/u)
+  assert.throws(() => parseHistorySessionRecallItem({
+    ...item, text: 'x'.repeat(HISTORY_SESSION_RECALL_MAX_TEXT_CHARS + 1),
+  }), /at most/u)
+  assert.throws(() => parseHistorySessionRecallItem({ ...item, extra: 1 }), /unexpected field/u)
+  assert.throws(() => parseHistorySessionRecallItem({ ...item, firstEventSeq: -1 }), /non-negative/u)
+
+  const answer = { kind: 'ready', sessionId: 's1', items: [item, { ...item, messageId: 'm2', rpcId: 'rpc-2' }] }
+  assert.deepEqual(parseHistorySessionRecallResponse(answer), answer)
+  assert.deepEqual(parseHistorySessionRecallResponse({ kind: 'ready', sessionId: 's1', items: [] }),
+    { kind: 'ready', sessionId: 's1', items: [] })
+  assert.deepEqual(parseHistorySessionRecallResponse({ kind: 'loading' }), { kind: 'loading' })
+  assert.deepEqual(parseHistorySessionRecallResponse({ kind: 'incomplete', reason: 'source-uncertain' }),
+    { kind: 'incomplete', reason: 'source-uncertain' })
+  assert.deepEqual(parseHistorySessionRecallResponse({ kind: 'unavailable', reason: 'service-missing' }),
+    { kind: 'unavailable', reason: 'service-missing' })
+  assert.throws(() => parseHistorySessionRecallResponse({ kind: 'ready', sessionId: '',
+    items: [] }), /non-empty/u)
+  assert.throws(() => parseHistorySessionRecallResponse({ kind: 'ready', sessionId: 's1',
+    items: Array.from({ length: HISTORY_SESSION_RECALL_LIMIT + 1 }, (_value, index) => ({
+      messageId: `m${String(index)}`, firstEventSeq: index, text: 'x',
+    })),
+  }), /at most 100/u)
+  // The serialized answer ENVELOPE (not a per-field estimate) owns the budget.
+  const tooBig = {
+    kind: 'ready',
+    sessionId: 's1',
+    items: Array.from({ length: 10 }, (_value, index) => ({
+      messageId: `m${String(index)}`,
+      firstEventSeq: index,
+      text: 'x'.repeat(HISTORY_SESSION_RECALL_MAX_TEXT_CHARS),
+    })),
+  }
+  assert.ok(Buffer.byteLength(JSON.stringify(tooBig), 'utf8') > HISTORY_SESSION_RECALL_MAX_BYTES)
+  assert.throws(() => parseHistorySessionRecallResponse(tooBig), /exceeds/u)
+  assert.throws(() => parseHistorySessionRecallResponse({ kind: 'stale', reason: 'cursor-stale' }), /unknown kind/u)
 })
 
 test('the preview is a bounded code-point-safe prefix', () => {

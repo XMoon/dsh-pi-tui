@@ -21,6 +21,7 @@ import type { RemoteConnectionGenerationSource } from '../../../src/runtime/remo
 import type {
   HistoryReadTextRequest,
   HistorySearchRequest,
+  HistorySessionRecallRequest,
 } from '../../../src/runtime/remote/pi-tui-history-search-contract.ts'
 
 const SEARCH: HistorySearchRequest = { scope: 'all', query: 'needle', limit: 25 }
@@ -31,6 +32,7 @@ const READ: HistoryReadTextRequest = {
   offset: 0,
   limit: 16,
 }
+const RECALL: HistorySessionRecallRequest = { sessionId: 's1' }
 
 function generationOf(id: string): RemoteConnectionGenerationSource {
   const current = { id }
@@ -48,6 +50,7 @@ function namespaceOf(overrides: Partial<RemoteHistorySearchNamespace>): RemoteHi
   return {
     search: async () => ({ ok: true, value: { kind: 'ready', generation: 'g', items: [], nextCursor: null } }),
     readText: async () => ({ ok: true, value: { kind: 'ready', chunk: 'x', nextOffset: null, contentLength: 1 } }),
+    readSessionRecall: async () => ({ ok: true, value: { kind: 'ready', sessionId: 's1', items: [] } }),
     ...overrides,
   }
 }
@@ -58,6 +61,53 @@ test('a missing private namespace is a truthful service-missing answer', async (
     { kind: 'unavailable', reason: 'service-missing' })
   assert.deepEqual(await port.readText(READ, new AbortController().signal),
     { kind: 'unavailable', reason: 'service-missing' })
+  assert.deepEqual(await port.readSessionRecall(RECALL, new AbortController().signal),
+    { kind: 'unavailable', reason: 'service-missing' })
+})
+
+test('a mounted namespace without the new method is service-missing, never an empty success', async () => {
+  const namespace = namespaceOf({})
+  delete (namespace as { readSessionRecall?: unknown }).readSessionRecall
+  const port = new RemoteHistorySearchPort(namespace, generationOf('g'))
+  assert.deepEqual(await port.readSessionRecall(RECALL, new AbortController().signal),
+    { kind: 'unavailable', reason: 'service-missing' })
+})
+
+test('the session-recall answer crosses unchanged and preserves its method receiver', async () => {
+  const namespace = namespaceOf({
+    async readSessionRecall(this: unknown, request, signal) {
+      assert.equal(this, namespace, 'the generated namespace method keeps its receiver')
+      assert.deepEqual(request, RECALL)
+      assert.equal(signal, controller.signal)
+      return {
+        ok: true,
+        value: { kind: 'ready', sessionId: 's1', items: [{ messageId: 'm1', firstEventSeq: 0, text: 'recalled' }] },
+      }
+    },
+  })
+  const controller = new AbortController()
+  const port = new RemoteHistorySearchPort(namespace, generationOf('g'))
+  assert.deepEqual(await port.readSessionRecall(RECALL, controller.signal), {
+    kind: 'ready',
+    sessionId: 's1',
+    items: [{ messageId: 'm1', firstEventSeq: 0, text: 'recalled' }],
+  })
+})
+
+test('a recalled answer is discarded when its generation was replaced', async () => {
+  let generation = { id: 'g1' }
+  const source: RemoteConnectionGenerationSource = {
+    getSnapshot: () => generation,
+    subscribe: () => () => {},
+  }
+  let resolveRecall: ((value: { ok: true; value: { kind: 'ready'; sessionId: string; items: never[] } }) => void) | undefined
+  const port = new RemoteHistorySearchPort(namespaceOf({
+    readSessionRecall: async () => await new Promise(resolve => { resolveRecall = resolve }),
+  }), source)
+  const pending = port.readSessionRecall(RECALL, new AbortController().signal)
+  generation = { id: 'g2' }
+  resolveRecall?.({ ok: true, value: { kind: 'ready', sessionId: 's1', items: [] } })
+  await assert.rejects(pending, RemoteHistorySearchSupersededError)
 })
 
 test('a mounted namespace answer crosses unchanged and receives the caller signal', async () => {

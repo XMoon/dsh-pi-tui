@@ -111,6 +111,9 @@ function createScriptedPort(): ScriptedPort {
         readRequests.push(request)
         return enqueue(reads, request, signal)
       },
+      async readSessionRecall(request) {
+        return { kind: 'ready', sessionId: request.sessionId, items: [] }
+      },
     },
     searchRequests,
     readRequests,
