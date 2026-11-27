@@ -1444,6 +1444,8 @@ interface InflightPrompt {
   pendingBusinessOutcome?:
     | { readonly kind: 'failure'; readonly error: LocalAcpViewError }
     | { readonly kind: 'complete'; readonly result: AcpPromptResult }
+  /** The independent D4/D5 resource terminal of this file flight. */
+  resourceFailure?: LocalAcpViewError
   /** Receipts returned by THIS flight and not yet handed to the Controller. */
   stagedReceipts?: string[]
   /** A disposal observed while file preparation was still in flight. */
@@ -3654,8 +3656,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (flight !== undefined) {
       const outcome = await this.cancelOwnedFlight(claim, flight, access, 'closing')
         .then(() => 'ok' as const, (error: unknown) => error)
-      if (flight.fileCleanupUnconfirmed === true) {
-        resourceFailure ??= this.fileCleanupUnconfirmedError()
+      if (flight.fileCleanupUnconfirmed === true || flight.resourceFailure !== undefined) {
+        resourceFailure ??= flight.resourceFailure ?? this.fileCleanupUnconfirmedError()
       }
       if (outcome !== 'ok') {
         // A prompt failure is not a close proof (R701-04): only a real Host
@@ -3899,7 +3901,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (removed === 'removed') {
         flight.cancelKind = 'queued-removed'
         if (!this.retireRemovedPrompt(claim, flight.requestId)) {
-          this.failOrDeferAdmission(claim, flight, this.fileCleanupUnconfirmedError())
+          flight.resourceFailure ??= this.fileCleanupUnconfirmedError()
+          this.failOrDeferAdmission(claim, flight, flight.resourceFailure)
           return
         }
         flight.stagedReceipts = undefined
@@ -4412,16 +4415,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
         const disposed = disposalFailure()
         if (disposed !== undefined) {
-          if (!this.cleanupPreparedFiles(claim, flight)) {
-            return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
-          }
           return disposed
         }
         const before = stop()
         if (before !== undefined) {
-          if (!this.cleanupPreparedFiles(claim, flight)) {
-            return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
-          }
           return before === 'stale'
             ? { kind: 'failure', error: this.staleFilePreparationError() }
             : { kind: 'cancelled' }
@@ -4435,9 +4432,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         try {
           staged = await access.stageFile(agent, session, part.data, part.name, signal)
         } catch (error) {
-          if (!this.cleanupPreparedFiles(claim, flight)) {
-            return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
-          }
           if (flight.pendingDisposalFailure !== undefined) {
             return { kind: 'failure', error: flight.pendingDisposalFailure }
           }
@@ -4460,16 +4454,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         receipts.push(staged.receiptId)
         const disposedAfter = disposalFailure()
         if (disposedAfter !== undefined) {
-          if (!this.cleanupPreparedFiles(claim, flight)) {
-            return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
-          }
           return disposedAfter
         }
         const after = stop()
         if (after !== undefined) {
-          if (!this.cleanupPreparedFiles(claim, flight)) {
-            return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
-          }
           return after === 'stale'
             ? { kind: 'failure', error: this.staleFilePreparationError() }
             : { kind: 'cancelled' }
@@ -4477,22 +4465,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         content.push({ type: 'file', receiptId: staged.receiptId })
       }
       if (flight.pendingDisposalFailure !== undefined) {
-        if (!this.cleanupPreparedFiles(claim, flight)) {
-          return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
-        }
         return { kind: 'failure', error: flight.pendingDisposalFailure }
       }
       if (flight.deliveryClosed || flight.cancelRequested || signal.aborted) {
-        if (!this.cleanupPreparedFiles(claim, flight)) {
-          return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
-        }
         return { kind: 'cancelled' }
       }
       return { kind: 'content', content }
     } catch {
-      if (!this.cleanupPreparedFiles(claim, flight)) {
-        return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
-      }
       if (flight.pendingDisposalFailure !== undefined) {
         return { kind: 'failure', error: flight.pendingDisposalFailure }
       }
@@ -4505,6 +4484,201 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         ),
       }
     }
+  }
+
+
+  /**
+   * The ONE file-bearing admission terminal. Preparation, Skill preflight and
+   * the actual Controller call only return a fact to this method; D4 and the
+   * public settlement happen exactly once here.
+   */
+  private async admitFilePrompt(
+    claim: ViewClaim,
+    flight: InflightPrompt,
+    access: HostAcpSessionAccess,
+    request: AcpPromptSessionParams,
+    requestSignal: AbortSignal,
+    decodedContent: readonly AcpDecodedPromptPart[],
+    skillPreflight: { readonly name: string; readonly epoch: number } | undefined,
+  ): Promise<AcpPromptResult> {
+    type Outcome =
+      | { readonly kind: 'not-called'; readonly cancelled: true }
+      | { readonly kind: 'not-called'; readonly error: LocalAcpViewError }
+      | { readonly kind: 'rejected'; readonly error: unknown }
+      | { readonly kind: 'accepted' }
+    let called = false
+    let outcome: Outcome | undefined
+    const finalCheck = (): void => {
+      if (claim.inflight !== flight || claim.closing !== undefined
+        || flight.cancelRequested || flight.deliveryClosed) {
+        throw promptError(
+          'LOCAL_ACP_PROMPT_ABORTED',
+          'the prompt was cancelled or closed at the final Host admission boundary',
+          JSONRPC_INTERNAL_ERROR,
+        )
+      }
+      if (flight.pendingDisposalFailure !== undefined) throw flight.pendingDisposalFailure
+      const current = access.currentTurn(request.sessionId, claim.exactAgent!, claim.exactSession!)
+      if (current.kind === 'stale') {
+        throw promptError(
+          'LOCAL_ACP_PROMPT_STALE_AGENT',
+          'the borrowed turn identity changed at the final Host admission boundary',
+          JSONRPC_INTERNAL_ERROR,
+        )
+      }
+      if (skillPreflight !== undefined) {
+        let commands: AcpCommandCatalogRead
+        try {
+          commands = access.readCommandCatalog(claim.exactAgent!, claim.exactSession!)
+        } catch {
+          throw new LocalAcpViewError(
+            'LOCAL_ACP_COMMAND_UNAVAILABLE',
+            'the Host command registry could not be re-read at the final Host admission boundary',
+            JSONRPC_INVALID_PARAMS,
+          )
+        }
+        if ((claim.catalogEpoch ?? 0) !== skillPreflight.epoch
+          || commands.effectiveNames.includes(skillPreflight.name)) {
+          throw new LocalAcpViewError(
+            'LOCAL_ACP_COMMAND_STALE',
+            'the advertised Skill changed at the final Host admission boundary; it was not dispatched',
+            JSONRPC_INVALID_PARAMS,
+          )
+        }
+      }
+      // The actual call is now adjacent. No later local check is allowed.
+      called = true
+    }
+    try {
+      const prepared = await this.prepareFileContent(claim, flight, access, decodedContent, requestSignal)
+      if (prepared.kind === 'cancelled') {
+        outcome = { kind: 'not-called', cancelled: true }
+      } else if (prepared.kind === 'failure') {
+        outcome = { kind: 'not-called', error: prepared.error }
+      } else {
+        const currentAfterStaging = access.currentTurn(request.sessionId, claim.exactAgent!, claim.exactSession!)
+        if (currentAfterStaging.kind === 'stale') {
+          outcome = { kind: 'not-called', error: this.staleFilePreparationError() }
+        } else if (claim.inflight !== flight || claim.closing !== undefined
+          || flight.deliveryClosed || flight.cancelRequested) {
+          outcome = { kind: 'not-called', cancelled: true }
+        } else if (skillPreflight !== undefined) {
+          try {
+            const preflight = await this.preflightAdvertisedSkill(
+              claim, flight, access, skillPreflight.name, skillPreflight.epoch,
+            )
+            if (preflight === 'cancelled') outcome = { kind: 'not-called', cancelled: true }
+          } catch (error) {
+            outcome = {
+              kind: 'not-called',
+              error: error instanceof LocalAcpViewError
+                ? error
+                : error instanceof AcpHostCommandError
+                  ? this.mapHostCommandError(error)
+                  : new LocalAcpViewError(
+                    'LOCAL_ACP_COMMAND_UNAVAILABLE',
+                    'the advertised Skill could not be revalidated before dispatch',
+                    JSONRPC_INVALID_PARAMS,
+                  ),
+            }
+          }
+        }
+        if (outcome === undefined) {
+          await access.prompt({
+            requestId: flight.requestId,
+            sessionId: request.sessionId,
+            mode: 'queue',
+            content: prepared.content,
+          }, requestSignal, finalCheck)
+          outcome = { kind: 'accepted' }
+        }
+      }
+    } catch (error) {
+      if (!called) {
+        outcome = flight.pendingDisposalFailure !== undefined
+          ? { kind: 'not-called', error: flight.pendingDisposalFailure }
+          : flight.cancelRequested || flight.deliveryClosed
+            ? { kind: 'not-called', cancelled: true }
+            : { kind: 'not-called', error: error instanceof LocalAcpViewError
+                ? error
+                : promptError(
+                  'LOCAL_ACP_PROMPT_HOST_REJECTED',
+                  'the Host did not accept the prompt',
+                  JSONRPC_INTERNAL_ERROR,
+                  hostErrorCode(error) === undefined ? {} : { hostCode: hostErrorCode(error) },
+                ) }
+      } else {
+        outcome = { kind: 'rejected', error }
+      }
+    }
+    if (outcome === undefined) outcome = { kind: 'accepted' }
+    return await this.finishFileAdmission(claim, flight, outcome)
+  }
+
+  private async finishFileAdmission(
+    claim: ViewClaim,
+    flight: InflightPrompt,
+    outcome:
+      | { readonly kind: 'not-called'; readonly cancelled: true }
+      | { readonly kind: 'not-called'; readonly error: LocalAcpViewError }
+      | { readonly kind: 'rejected'; readonly error: unknown }
+      | { readonly kind: 'accepted' },
+  ): Promise<AcpPromptResult> {
+    // A true queued removal owns the receipt terminal (D5); D4 must not retry
+    // that retirement. Successful acceptance transfers authority to the
+    // official message even if this View has not observed the insertion yet.
+    const d5Owned = flight.cancelKind === 'queued-removed'
+    if (outcome.kind === 'accepted') {
+      flight.stagedReceipts = undefined
+    } else if (!d5Owned) {
+      if (!this.cleanupPreparedFiles(claim, flight) && flight.resourceFailure === undefined) {
+        flight.resourceFailure = this.fileCleanupUnconfirmedError()
+      }
+    }
+    flight.fileAdmissionPending = false
+    flight.settleAdmission()
+    const saved = flight.pendingBusinessOutcome
+    flight.pendingBusinessOutcome = undefined
+    if (saved?.kind === 'failure') this.failPrompt(claim, flight, saved.error)
+    else if (saved?.kind === 'complete') this.completePrompt(claim, flight, saved.result)
+    else if (outcome.kind === 'accepted') {
+      if (flight.pendingDisposalFailure !== undefined) this.failPrompt(claim, flight, flight.pendingDisposalFailure)
+      else if (flight.cancelKind === 'queued-removed') {
+        // settleQueuedRemoval owns the clean cancelled terminal.
+      } else if (flight.messageId === undefined && flight.deliveryClosed && flight.cancelRequested) {
+        this.failPrompt(claim, flight, promptError(
+          'LOCAL_ACP_PROMPT_ABORTED',
+          'the ACP prompt request was aborted before a real Host settlement',
+          JSONRPC_INTERNAL_ERROR,
+        ))
+      } else {
+        flight.phase = 'queued'
+      }
+    } else if (outcome.kind === 'rejected') {
+      if (flight.resourceFailure !== undefined && flight.messageId === undefined) {
+        this.failPrompt(claim, flight, flight.resourceFailure)
+      } else if (flight.messageId !== undefined) {
+        this.failPrompt(claim, flight, promptError(
+          'LOCAL_ACP_PROMPT_DISPATCH_INDETERMINATE',
+          'the Host prompt outcome could not be confirmed after dispatch; it was not retried',
+          JSONRPC_INTERNAL_ERROR,
+        ))
+      } else {
+        this.failPrompt(claim, flight, promptError(
+          'LOCAL_ACP_PROMPT_HOST_REJECTED',
+          'the Host did not accept the prompt',
+          JSONRPC_INTERNAL_ERROR,
+          hostErrorCode(outcome.error) === undefined ? {} : { hostCode: hostErrorCode(outcome.error) },
+        ))
+      }
+    } else if ('cancelled' in outcome && flight.resourceFailure === undefined) {
+      this.completePrompt(claim, flight, { stopReason: 'cancelled' })
+    } else {
+      this.failPrompt(claim, flight, flight.pendingDisposalFailure
+        ?? flight.resourceFailure
+        ?? ('error' in outcome ? outcome.error : this.fileCleanupUnconfirmedError()))
+    }
+    return await flight.settled.promise
   }
 
   async promptSession(
@@ -4658,6 +4832,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     flight.detachAbort = () => requestSignal.removeEventListener('abort', onAbort)
     claim.inflight = flight
 
+    if (decodedContent.some(part => part.type === 'blob')) {
+      return await this.admitFilePrompt(
+        claim, flight, access, request, requestSignal, decodedContent, skillPreflight,
+      )
+    }
     if (decodedContent.some(part => part.type === 'blob')) {
       const prepared = await this.prepareFileContent(claim, flight, access, decodedContent, requestSignal)
       if (prepared.kind === 'cancelled') {
@@ -5898,7 +6077,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           if (flight.settledDone || flight.turn !== undefined || flight.cancelKind !== undefined) return
           flight.cancelKind = 'queued-removed'
           if (!this.retireRemovedPrompt(claim, flight.requestId)) {
-            this.failOrDeferAdmission(claim, flight, this.fileCleanupUnconfirmedError())
+            flight.resourceFailure ??= this.fileCleanupUnconfirmedError()
+            this.failOrDeferAdmission(claim, flight, flight.resourceFailure)
             return
           }
           flight.stagedReceipts = undefined
