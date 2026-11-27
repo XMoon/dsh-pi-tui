@@ -40,6 +40,7 @@ import {
   parseHistorySessionRecallResponse,
   type HistoryReadTextRequest,
   type HistoryReadTextResponse,
+  type HistorySearchIncompleteReason,
   type HistorySearchRequest,
   type HistorySearchResponse,
   type HistorySessionRecallRequest,
@@ -3606,6 +3607,120 @@ test('a rebuild requested during an active repair is coalesced and retried', asy
     }
   } finally {
     query.observeSession = realObserve
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a checkpoint-less live replay hands a prebuffered accepted event to one repair without a false source fault', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r203-prebuffered-')
+  const source = mutableSource('/repo/r203-prebuffered')
+  source.live = true
+  source.events = []
+  const { deps } = mutableDeps(source)
+  const persistence = deps.sessionPersistence()
+  const realList = persistence.list
+  let listEntered!: () => void
+  const listReached = new Promise<void>(resolve => { listEntered = resolve })
+  let releaseList!: () => void
+  const listGate = new Promise<void>(resolve => { releaseList = resolve })
+  persistence.list = async () => {
+    listEntered()
+    await listGate
+    return realList.call(persistence)
+  }
+  const query = deps.sessionQuery()
+  assert.ok(query !== undefined)
+  const liveSession = deps.sessions().get('mutable-session')
+  assert.ok(liveSession !== undefined)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    pending: Map<string, { events: readonly { seq: number }[] }>
+    warmupSettled: Promise<void>
+    sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    sourceFaulted: boolean
+    bootFaultReason: HistorySearchIncompleteReason | undefined
+    state: { kind: string; reason?: string }
+    coverage: string
+    index: { checkpointOf(id: string): { nextSeq: number } | undefined }
+    rebuildRequests: Set<string>
+    reconcilePending: Set<string>
+    markReconcileNeeded(reason: HistorySearchIncompleteReason, fault?: boolean): void
+    observeLiveEvent(session: unknown, event: unknown): void
+  }
+  const faultReasons: HistorySearchIncompleteReason[] = []
+  const realMarkReconcileNeeded = internals.markReconcileNeeded
+  internals.markReconcileNeeded = function (reason, fault) {
+    if (reason === 'source-read-failed') faultReasons.push(reason)
+    return realMarkReconcileNeeded.call(this, reason, fault)
+  }
+  const realObserve = query.observeSession
+  let observations = 0
+  let followupEntered!: (flight: { promise: Promise<void> } | undefined) => void
+  const followupReached = new Promise<{ promise: Promise<void> } | undefined>(resolve => { followupEntered = resolve })
+  query.observeSession = async (id, options) => {
+    observations += 1
+    const followupAtEntry = observations === 2 && String(id) === 'mutable-session'
+      ? internals.sessionRepairFlights.get('mutable-session')
+      : undefined
+    const observation = await realObserve.call(query, id, options)
+    if (observations === 2 && String(id) === 'mutable-session') followupEntered(followupAtEntry)
+    return observation
+  }
+  try {
+    await listReached
+    const accepted = {
+      type: 'agent/inbox/spliced',
+      seq: 0,
+      time: 7000,
+      data: {
+        target: 'next-turn',
+        start: 0,
+        inserted: [{
+          id: 'r203-prebuffered',
+          role: 'user',
+          content: [{ type: 'text', text: 'r203 accepted before replay' }],
+          source: { kind: 'user', rpcId: 'rpc-r203-prebuffered' },
+        }],
+      },
+    }
+    source.events.push(accepted)
+    internals.observeLiveEvent(liveSession, accepted)
+    assert.ok(internals.pending.get('mutable-session')?.events.some(event => event.seq === 0), 'the real accepted event must be buffered before cold replay')
+    releaseList()
+    const followup = await Promise.race([
+      followupReached,
+      // Bounded negative window: the accepted obligation must produce one coalesced follow-up observation.
+      new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), 5_000)),
+    ])
+    assert.ok(followup !== undefined, JSON.stringify({
+      observations,
+      faultReasons,
+      state: internals.state,
+      coverage: internals.coverage,
+      checkpoint: internals.index.checkpointOf('mutable-session'),
+      pending: [...internals.pending.entries()].map(([id, batch]) => [id, batch.events.map(event => event.seq)]),
+      flights: [...internals.sessionRepairFlights.keys()],
+      rebuilds: [...internals.rebuildRequests],
+      reconcile: [...internals.reconcilePending],
+    }))
+    await followup.promise
+    await internals.warmupSettled
+    await waitDirectReady(service)
+    assert.equal(observations, 2, 'one full observation and one current point follow-up must settle the source')
+    assert.deepEqual(faultReasons, [], 'ordinary accepted warmup work must not be misclassified as a source fault')
+    assert.equal(internals.sourceFaulted, false)
+    assert.equal(internals.bootFaultReason, undefined)
+    const answer = await service.search({ scope: 'all', query: 'r203 accepted before replay', limit: 25 }, new AbortController().signal)
+    assert.equal(answer.kind, 'ready', JSON.stringify(answer))
+    if (answer.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(answer.items.length, 1)
+  } finally {
+    releaseList()
+    query.observeSession = realObserve
+    internals.markReconcileNeeded = realMarkReconcileNeeded
     await service.dispose()
     await ctx.fiber.dispose()
   }

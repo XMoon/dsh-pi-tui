@@ -321,6 +321,9 @@ interface HistoryCandidateWitness {
   expected: HistorySessionCheckpointRow | undefined
   /** Candidate-local watermark snapshot used only to distinguish a NEW obligation. */
   readonly droppedAccepted: number | undefined
+  /** Whether an accepted batch existed at admission, and whether this candidate owned it. */
+  readonly pending: boolean
+  readonly pendingHeld: boolean
   invalidated: boolean
 }
 
@@ -976,6 +979,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       liveObject: enforceLiveObject ? enforcedLiveObject : sessions.get(sessionId),
       expected,
       droppedAccepted: this.droppedAccepted.get(sessionId),
+      pending: this.pending.has(sessionId),
+      pendingHeld: this.heldPending.has(sessionId),
       invalidated: false,
     }
     const active = this.activeCandidates.get(sessionId)
@@ -1786,7 +1791,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       || serviceIdentity(persistence) !== witness.persistenceIdentity
       || serviceIdentity(sessions) !== witness.sessionsIdentity
       || sessions.get(witness.sessionId) !== witness.liveObject
-    const independentObligation = this.droppedAccepted.get(witness.sessionId) !== witness.droppedAccepted
+    const acceptedObligation = (this.pending.has(witness.sessionId) || this.heldPending.has(witness.sessionId))
+      && (!witness.pending || !witness.pendingHeld)
+    const independentObligation = acceptedObligation
+      || this.droppedAccepted.get(witness.sessionId) !== witness.droppedAccepted
       || this.rebuildRequests.has(witness.sessionId)
       || this.disposalRequests.has(witness.sessionId)
     if (witness.invalidated || sourceChanged || independentObligation) {
