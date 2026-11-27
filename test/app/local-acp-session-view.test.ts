@@ -729,6 +729,11 @@ test('malformed, unsupported or over-budget client appends are invalid params be
     { mode: 'append', content: [{ type: 'text', text: 'x'.repeat(1024 * 1024 + 1) }] },
     // Two 512 KiB blocks fit the block bytes but not the two-newline separator.
     { mode: 'append', content: [{ type: 'text', text: 'x'.repeat(512 * 1024) }, { type: 'text', text: 'x'.repeat(512 * 1024) }] },
+    // The budget is UTF-8 BYTES, not UTF-16 code units: 2-byte and 3-byte
+    // characters must count their encoded size, including the separators.
+    { mode: 'append', content: [{ type: 'text', text: 'é'.repeat(512 * 1024 + 1) }] },
+    { mode: 'append', content: [{ type: 'text', text: '你'.repeat(349_525) + 'xy' }] },
+    { mode: 'append', content: [{ type: 'text', text: 'é'.repeat(262_144) }, { type: 'text', text: 'é'.repeat(262_144) }] },
     'append',
   ]
   for (const value of invalidValues) {
@@ -744,7 +749,12 @@ test('malformed, unsupported or over-budget client appends are invalid params be
   }
   // Exactly the 1 MiB budget is legal and registers; a single empty string is
   // legal text and contributes nothing but still owns the same lifecycle.
-  for (const [text, expected] of [['y'.repeat(1024 * 1024), 1024 * 1024], ['', 0]] as const) {
+  for (const [text, expected] of [
+    ['y'.repeat(1024 * 1024), 1024 * 1024],
+    ['é'.repeat(524_288), 1024 * 1024],
+    ['你'.repeat(349_525) + 'x', 1024 * 1024],
+    ['', 0],
+  ] as const) {
     const access = new FakeAccess()
     access.createSessionImpl = async () => {
       access.seed(makeAgent(`S-${String(expected)}`, '/work/a'))
@@ -756,7 +766,31 @@ test('malformed, unsupported or over-budget client appends are invalid params be
       ...NEW,
       systemPrompt: { mode: 'append', content: [{ type: 'text', text }] },
     }, { systemPromptAppend: true })
-    assert.equal(access.systemPromptAppendRegistrations[0]?.text.length, expected)
+    assert.equal(Buffer.byteLength(access.systemPromptAppendRegistrations[0]?.text ?? ''), expected)
+  }
+  // Two multibyte blocks whose bytes plus the two separator bytes are exactly
+  // 1 MiB are legal; the same blocks with one more 2-byte character are not.
+  for (const [blocks, accepted] of [
+    [[`${'é'.repeat(262_143)}x`, `${'é'.repeat(262_143)}x`], true],
+    [['é'.repeat(262_144), 'é'.repeat(262_144)], false],
+  ] as const) {
+    const access = new FakeAccess()
+    access.createSessionImpl = async () => {
+      access.seed(makeAgent('S-bytes', '/work/a'))
+      return { kind: 'created', sessionId: 'S-bytes' }
+    }
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const conn = registry.createConnection()
+    const attempt = registry.newSession(conn, access, {
+      ...NEW,
+      systemPrompt: { mode: 'append', content: blocks.map(text => ({ type: 'text', text })) },
+    }, { systemPromptAppend: true })
+    if (accepted) {
+      await attempt
+      assert.equal(Buffer.byteLength(access.systemPromptAppendRegistrations[0]?.text ?? ''), 1024 * 1024)
+    } else {
+      await assert.rejects(attempt, isViewError('LOCAL_ACP_VIEW_INVALID_REQUEST'))
+    }
   }
 })
 
@@ -864,6 +898,85 @@ test('same-connection reattach retires the outgoing append before the replacemen
   // fabricate a second disposer call and releases its claim.
   registry.onAgentDisposed(agent)
   assert.equal(registry.hasClaim('S50'), false)
+})
+
+test('a reentrant close during append registration settles the late exact handle and refuses the stale commit', async () => {
+  const access = new FakeAccess()
+  access.createSessionImpl = async () => {
+    access.seed(makeAgent('S46', '/work/a'))
+    return { kind: 'created', sessionId: 'S46' }
+  }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  const stillCurrentSamples: boolean[] = []
+  access.registerSystemPromptAppendImpl = (_agent, _session, _text, stillCurrent) => {
+    stillCurrentSamples.push(stillCurrent())
+    // A synchronous `system-prompt/change` listener re-enters close while the
+    // official section call is still returning its exact disposer.
+    void registry.closeSession(conn, access, 'S46')
+    stillCurrentSamples.push(stillCurrent())
+  }
+  await assert.rejects(
+    registry.newSession(conn, access, {
+      ...NEW,
+      systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'REENTRANT' }] },
+    }, { systemPromptAppend: true }),
+    (error: unknown) => error instanceof LocalAcpViewError
+      && error.code === 'LOCAL_ACP_VIEW_CLOSED'
+      && error.data.sessionId === 'S46',
+  )
+  assert.deepEqual(stillCurrentSamples, [false, false],
+    'the provider is invisible before the commit and after the reentrant close')
+  assert.equal(access.systemPromptAppendRegistrations.length, 1)
+  assert.equal(access.systemPromptAppendRegistrations[0]?.disposeCalls, 1,
+    'the late returned exact disposer settles the abandoned registration exactly once')
+  assert.equal(registry.claimCount(), 0, 'the stale claim never commits')
+  assert.equal(registry.phaseOf(conn), 'idle')
+  // A successor attach is accepted and owns exactly one new contribution.
+  access.registerSystemPromptAppendImpl = () => {}
+  await registry.resumeSession(conn, access, {
+    sessionId: 'S46', cwd: '/work/a',
+    systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'SUCCESSOR' }] },
+  }, { systemPromptAppend: true })
+  assert.equal(access.systemPromptAppendRegistrations.length, 2)
+  assert.equal(access.systemPromptAppendRegistrations[1]?.disposeCalls, 0)
+})
+
+test('a failed append after a real MCP mount keeps the exact lease fence until its terminal', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S47', '/work/a')
+  access.createSessionImpl = async () => {
+    access.seed(agent)
+    return { kind: 'created', sessionId: 'S47' }
+  }
+  const lease = makeScopedLease(agent, agent.session)
+  access.mountScopedMcpImpl = async () => lease
+  const retired = deferred<void>()
+  access.retireScopedMcpImpl = async () => await retired.promise
+  access.registerSystemPromptAppendImpl = () => {
+    throw new AcpSystemPromptAppendError('registration-failed', 'injected append registration failure')
+  }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  await assert.rejects(
+    registry.newSession(conn, access, {
+      ...NEW,
+      mcpServers: [{ name: 's1', type: 'http', url: 'https://example.test/mcp', headers: [] }],
+      systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'FAIL-MCP' }] },
+    }, { systemPromptAppend: true }),
+    (error: unknown) => error instanceof LocalAcpViewError
+      && error.code === 'LOCAL_ACP_VIEW_HOST_ERROR'
+      && error.data.reason === 'system-prompt-registration-failed'
+      && error.data.sessionId === 'S47',
+  )
+  assert.equal(access.mountScopedMcpCalls.length, 1)
+  assert.equal(access.retireScopedMcpCalls.length, 1, 'the real lease is retired through its official terminal')
+  assert.equal(access.retireScopedMcpCalls[0], lease)
+  assert.equal(registry.claimCount(), 1, 'the exact MCP lease keeps the failed attach fenced')
+  assert.equal(registry.phaseOf(conn), 'idle')
+  retired.resolve()
+  await new Promise(resolveTick => setImmediate(resolveTick))
+  assert.equal(registry.claimCount(), 0, 'the claim is released only after the lease terminal')
 })
 
 test('session/new reports an unconfirmed workspace outcome instead of a client directory error', async () => {

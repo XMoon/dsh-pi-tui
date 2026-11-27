@@ -461,7 +461,7 @@ function recordPromptFacts(options) {
  * request is the real sink; a count is kept per marker so a sibling/child or a
  * retired generation can never pass by sharing one aggregate value.
  */
-const ACP_SYSTEM_PROMPT_MARKER_IDS = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
+const ACP_SYSTEM_PROMPT_MARKER_IDS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
 
 /** The exact marker text one ACP append case sends for a suffix. */
 function acpSystemPromptMarker(id) {
@@ -1511,6 +1511,28 @@ class C1Model extends LlmAdapter {
     // of the real request (both channels), then answer with ordinary text. The
     // markers are case-owned literals; no prompt text selects a behavior.
     if (this.scenario === 'acp-system-prompt') {
+      // B5: hold ONE real foreign request while the ACP View detaches. The
+      // already-sampled request keeps its append; after the detach the SAME
+      // turn's next step (the tool-result step below) must carry none.
+      if (userText.includes('asp-hold') && afterTool !== true) {
+        this.record('acp-system-prompt-held', acpSystemPromptRequestFacts(options, sessionId))
+        await waitForBarrier(process.env.C1_SYSTEM_PROMPT_HOLD, signal)
+        this.record('acp-system-prompt-released', { sessionId })
+        yield* this.toolCall('todo_write', `asp-hold-todo-${sessionId}`, {
+          todos: [{ content: 'held step', status: 'in_progress' }],
+        })
+        return
+      }
+      // B2: delegate ONE real formal child. The child has its own Agent scope,
+      // so the parent's scoped append must never reach the child's request.
+      if (userText.includes('asp-child-parent') && afterTool !== true) {
+        this.record('acp-system-prompt-request', acpSystemPromptRequestFacts(options, sessionId))
+        yield* this.toolCall('subagent', `asp-child-${sessionId}`, {
+          description: 'asp child probe',
+          prompt: 'asp-child-task',
+        })
+        return
+      }
       this.record('acp-system-prompt-request', acpSystemPromptRequestFacts(options, sessionId))
       yield* this.textAnswer(`acp-system-prompt answer ${sessionId}`)
       return

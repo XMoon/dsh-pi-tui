@@ -1250,10 +1250,11 @@ attach, a failed load and a replaced generation use the same ONE exact
 responsibility. The provider fails closed BEFORE the exact disposer runs, so no
 assembly after detachment can consume the contribution. The exact official
 disposer (or the destruction of its exact owning scope) is the retirement
-terminal; a synchronously thrown change notification after that undo is
-observed with a stable diagnostic and never reported as a clean call. An
-unproven retirement keeps the exact claim fenced and refuses a successor rather
-than allowing two overlapping live contributions.
+terminal: the scoped undo runs before the official change notification, so a
+synchronously thrown notification after that undo is observed with a stable
+diagnostic and never reported as a clean call, while the responsibility is
+already cleared and a successor may attach. There is no separate
+"unproven retirement" state.
 
 The official composition keeps final text authority: a real `complete` persona
 or a custom assembly waterfall can legitimately suppress or transform the

@@ -882,7 +882,7 @@ export function assertSelectedVerdict(caseId, result) {
   }
   if (caseId === 'acp.system-prompt-append') {
     const evidence = result?.evidence
-    const zero = request => ['A', 'B', 'C', 'D', 'E', 'F', 'G']
+    const zero = request => ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
       .every(id => (request?.markers?.[id] ?? 0) === 0)
     assert(result?.status === 'PASS'
       && result?.scope === 'REAL_SPLIT_PROCESS_L6'
@@ -894,6 +894,8 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.acpOwnedPrompt === true
       && result?.siblingIsolated === true
       && result?.closeRetired === true
+      && result?.foreignTurnHeld === true
+      && result?.formalChildIsolated === true
       && result?.reattachReplaced === true
       && result?.nullCleared === true
       && result?.coldLoadNoCarrier === true
@@ -911,6 +913,11 @@ export function assertSelectedVerdict(caseId, result) {
       && evidence?.afterClose?.markers?.A === 0
       && evidence?.requestC?.markers?.C === 1
       && evidence.requestC.markers.A === 0
+      && evidence?.heldRequest?.markers?.A === 1
+      && zero(evidence?.postHold)
+      && zero(evidence?.childRequest)
+      && evidence?.requestH?.markers?.H === 1
+      && evidence.requestH.markers.C === 0
       && zero(evidence?.cleared)
       && zero(evidence?.coldRequest)
       && evidence?.resendRequest?.markers?.D === 1
