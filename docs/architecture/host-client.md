@@ -520,7 +520,7 @@ owned exclusively by [host-daemon.md](./host-daemon.md#profile-scoped-host-proce
 The authoritative status/start/stop/restart/logs/install/uninstall semantics are
 in [host-daemon.md](./host-daemon.md#daemon-management-commands).
 
-### Host-owned local ACP v1 front door (Unix socket)
+### Host-owned local ACP v1 front door (local endpoint)
 
 The ACP transport and bounded connection/session-view contract are owned by
 [host-acp.md](./host-acp.md#host-owned-local-acp-v1-front-door-unix-socket).

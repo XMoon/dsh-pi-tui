@@ -262,7 +262,7 @@ function shellQuoteProfile(profile: string): string {
 
 /** The same profile literal for the TARGET shell: PowerShell doubles an
  *  embedded single quote instead of the POSIX close-reopen sequence. */
-function shellQuoteProfileFor(profile: string, platform: NodeJS.Platform): string {
+export function shellQuoteProfileFor(profile: string, platform: NodeJS.Platform): string {
   if (platform !== 'win32') return shellQuoteProfile(profile)
   if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(profile)) return profile
   return `'${profile.replace(/'/gu, "''")}'`
@@ -1085,7 +1085,7 @@ function acpControlNotMountedMessage(profile: string): string {
   return [
     `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked for an acp CLI command, but the daemon launcher row did not mount.`,
     'The pi-tui-daemon-launcher row failed to import/apply or stayed pending on tuiDaemonStartup (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
-    `This installation cannot run the acp CLI; reinstall the profile or fix its composition, then re-run: dsh --profile ${shellQuoteProfile(profile)} acp status`,
+    `This installation cannot run the acp CLI; reinstall the profile or fix its composition, then re-run: dsh --profile ${shellQuoteProfileFor(profile, process.platform)} acp status`,
   ].join('\n')
 }
 

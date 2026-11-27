@@ -273,7 +273,7 @@ test('the enabled first focus is Copy client command; the disabled one is Enable
   const enabled = await mount({ status: { state: 'enabled' } })
   assert.match(enabled.frame(), /^> Copy client command/mu)
   assert.match(enabled.frame(), /Current Host\s*\n\s+Listener\s+Enabled/u)
-  assert.match(enabled.frame(), /Access\s+Local Unix socket · Same OS user/u)
+  assert.match(enabled.frame(), /Access\s+Local IPC · Same OS user/u)
   assert.match(enabled.frame(), /Disable ACP…\s+Disconnects active ACP clients/u)
   assert.equal(enabled.reads(), 1, 'one Host read on mount, never a poll')
   enabled.close()

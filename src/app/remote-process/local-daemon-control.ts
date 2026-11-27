@@ -85,6 +85,7 @@ import {
   type OwnedLaunchdUnit,
 } from './local-host-launchd.ts'
 import { darwinAcpSocketPaths } from './local-acp-listener.ts'
+import { acpPipeAddress } from './local-acp-endpoint.ts'
 import { observeAuthenticatedLocalAcpStatus } from './local-acp-status.ts'
 import {
   closeWin32Handle,
@@ -1282,8 +1283,9 @@ export type AcpStdioTarget =
  * malformed path is never sanitized into a fake connectable address.
  */
 function acpSocketPathOf(scope: LocalScope, deps: DaemonControlDeps): string | undefined {
-  if (platformOf(deps) === 'win32') return undefined
-  const path = platformOf(deps) === 'darwin'
+  const platform = platformOf(deps)
+  if (platform === 'win32') return acpPipeAddress(scope.scopeId)
+  const path = platform === 'darwin'
     ? darwinAcpSocketPaths(scope, uidOf(deps)).publicPath
     : join(scope.dir, 'acp.sock')
   if (!path.startsWith('/') || /[\u0000-\u001f\u007f]/u.test(path)) return undefined
@@ -1297,7 +1299,6 @@ function acpSocketPathOf(scope: LocalScope, deps: DaemonControlDeps): string | u
  * change the original exit code, stderr or manager/Host classification.
  */
 async function observeAcpFacts(snapshot: Snapshot, deps: DaemonControlDeps): Promise<ObservedAcpFacts> {
-  if (platformOf(deps) === 'win32') return { acp: 'unavailable' }
   if (snapshot.authenticated === undefined || snapshot.status.host !== 'ready') {
     return { acp: 'unavailable' }
   }
@@ -1332,7 +1333,6 @@ export async function readAcpStdioTarget(
 ): Promise<AcpStdioTarget> {
   signal?.throwIfAborted()
   const effectiveDeps: DaemonControlDeps = signal === undefined ? deps : { ...deps, signal }
-  if (platformOf(effectiveDeps) === 'win32') return { kind: 'acp-unavailable' }
   const scope = inspectScope(profile, effectiveDeps)
   signal?.throwIfAborted()
   const snapshot = await readSnapshot(profile, effectiveDeps, scope)

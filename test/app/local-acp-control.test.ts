@@ -366,12 +366,33 @@ test('an already-aborted command sends no request at all', async (t) => {
   assert.equal(server.calls.length, 0)
 })
 
-test('a non-Linux/macOS platform fails closed with exit 3', async (t) => {
+test('an unsupported platform fails closed with exit 3', async (t) => {
   const fx = fixture(t)
-  const result = await runLocalAcpControl({ verb: 'status' }, fx.profile, { platform: 'win32' })
+  const result = await runLocalAcpControl({ verb: 'status' }, fx.profile, { platform: 'aix' })
   assert.equal(result.code, 3)
   assert.equal(result.stdout, '')
   assert.match(result.stderr, /UNSUPPORTED_PLATFORM/u)
+})
+
+test('the Windows platform reaches the existing authenticated status path', async (t) => {
+  const fx = fixture(t)
+  const server = await startServer(t, statusReply(UUID, 'enabled'))
+  const result = await run(fx, recordOf(fx.scope, server.origin), 'status', { deps: { platform: 'win32' } })
+  assert.deepEqual(result, { code: 0, stdout: 'acp=enabled\n', stderr: '' })
+  assert.equal(server.calls.length, 1)
+  assert.equal(server.calls[0].path, LOCAL_ACP_STATUS_ROUTE)
+})
+
+test('a Windows missing-Host hint quotes the profile for PowerShell, not POSIX', async (t) => {
+  const fx = fixture(t)
+  const profile = { ...fx.profile, name: "pi tui's" }
+  const result = await runLocalAcpControl({ verb: 'status' }, profile, {
+    platform: 'win32',
+    readRecord: () => undefined,
+  })
+  assert.equal(result.code, 3)
+  assert.match(result.stderr, /dsh --profile 'pi tui''s' daemon start/u)
+  assert.doesNotMatch(result.stderr, /'\\''/u, 'the POSIX close-reopen quote must not reach a PowerShell hint')
 })
 
 // ── enable / disable (ONE authenticated write, never replayed) ─────────────

@@ -243,6 +243,11 @@ function powershellQuote(value: string): string {
   return `'${value.replace(/'/gu, "''")}'`
 }
 
+/** The copy-paste Profile literal for the ACTUAL CLI shell. */
+function platformProfileQuote(value: string): string {
+  return process.platform === 'win32' ? powershellQuote(value) : shellQuote(value)
+}
+
 /** The child-exit mapping: a real code, or 128+signal when the child was signalled. */
 function exitCodeFor(code: number | null, signal: NodeJS.Signals | null): number {
   if (code !== null) return code
@@ -483,7 +488,7 @@ export class AcpStdioRunner {
         .catch(() => {
           if (this.disposed) return
           this.fail('ACP_STDIO_STATUS_UNAVAILABLE',
-            `check the Host state with dsh --profile ${shellQuote(this.options.profileName)} daemon status`, 3)
+            `check the Host state with dsh --profile ${platformProfileQuote(this.options.profileName)} daemon status`, 3)
         })
     }
     return this.launchPromise
@@ -523,21 +528,21 @@ export class AcpStdioRunner {
     } catch {
       if (this.disposed || this.controller.signal.aborted) return
       this.fail('ACP_STDIO_STATUS_UNAVAILABLE',
-        `check the Host state with dsh --profile ${shellQuote(this.options.profileName)} daemon status`, 3)
+        `check the Host state with dsh --profile ${platformProfileQuote(this.options.profileName)} daemon status`, 3)
       return
     }
     if (this.disposed || this.controller.signal.aborted) return
     switch (target.kind) {
       case 'host-unavailable':
         this.fail('ACP_STDIO_HOST_NOT_READY',
-          `start the Host explicitly with dsh --profile ${shellQuote(this.options.profileName)} daemon start`, 3)
+          `start the Host explicitly with dsh --profile ${platformProfileQuote(this.options.profileName)} daemon start`, 3)
         return
       case 'acp-disabled':
         this.fail('ACP_STDIO_LISTENER_DISABLED', 'enable ACP from a connected TUI with /acp', 3)
         return
       case 'acp-unavailable':
         this.fail('ACP_STDIO_LISTENER_UNAVAILABLE',
-          `check the Host state with dsh --profile ${shellQuote(this.options.profileName)} daemon status`, 3)
+          `check the Host state with dsh --profile ${platformProfileQuote(this.options.profileName)} daemon status`, 3)
         return
       case 'ready':
         break

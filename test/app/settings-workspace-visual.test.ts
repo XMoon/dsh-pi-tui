@@ -13362,7 +13362,7 @@ test('an enabled Host paints the runtime actions, the preference and the client 
   const frame = acpAccessPlain(h)
   assert.match(frame, /Current Host/u)
   assert.match(frame, /Listener\s+Enabled/u)
-  assert.match(frame, /Access\s+Local Unix socket · Same OS user/u)
+  assert.match(frame, /Access\s+Local IPC · Same OS user/u)
   assert.match(frame, /Actions/u)
   assert.match(frame, /> Copy client command/u)
   assert.match(frame, /Disable ACP…\s+Disconnects active ACP clients/u)

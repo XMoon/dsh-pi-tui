@@ -1,5 +1,5 @@
 /**
- * Host-owned local ACP v1 front door over a pathname Unix domain socket.
+ * Host-owned local ACP v1 front door over a local endpoint (Unix socket or Windows Named Pipe).
  *
  * The one Host process that already owns a canonical profile scope opens a
  * bounded `acp.sock` on ONE platform-specific physical endpoint: Linux keeps the
@@ -7,7 +7,9 @@
  * pathname still fits the kernel `sun_path`; Darwin publishes the same
  * private-bind inode onto a short profile-scoped
  * `/private/tmp/dpt-<uid>-<scope40>/acp.sock` pathname that stays within the
- * Darwin `sockaddr_un.sun_path` byte limit. The listener speaks ACP v1 with
+ * Darwin `sockaddr_un.sun_path` byte limit; native Windows binds one local Named
+ * Pipe `\\.\pipe\dsh-pi-tui-acp-<scopeId>` whose pipe object carries the
+ * one-shot owner-only/NETWORK-deny DACL. The listener speaks ACP v1 with
  * the official `@agentclientprotocol/sdk` stream and request/notification
  * dispatch, but it owns NO Agent, Session or business method in this phase: a
  * valid `initialize` is answered with the installed bundle's own identity and
@@ -49,6 +51,8 @@ import {
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { type LocalScope } from './local-scope.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
+import { secureWin32AcpPipe } from '../../runtime/native-process/win32.ts'
+import { acpPipeAddress } from './local-acp-endpoint.ts'
 import {
   AcpSessionViewRegistry,
   LocalAcpViewError,
@@ -288,19 +292,21 @@ export class LocalAcpError extends Error {
 /** The one Host-entry-local lifecycle handle for the bound local ACP listener. */
 export interface LocalAcpListener {
   /**
-   * The PUBLIC contract socket pathname this listener published: Linux
-   * `<scope.dir>/acp.sock` and Darwin the short profile-scoped
-   * `/private/tmp/dpt-<uid>-<scope40>/acp.sock`. Never the private bind name and
-   * never a client-side fd-shortened alias.
+   * The PUBLIC contract endpoint this listener published: Linux
+   * `<scope.dir>/acp.sock`, Darwin the short profile-scoped
+   * `/private/tmp/dpt-<uid>-<scope40>/acp.sock`, and native Windows the local
+   * Named Pipe `\\.\pipe\dsh-pi-tui-acp-<scopeId>`. Never the private bind name
+   * and never a client-side fd-shortened alias.
    */
   readonly socketPath: string
   /** The number of live connections this listener currently owns. */
   readonly connectionCount: () => number
   /**
    * Read-only proof that THIS listener is still valid: the bound `net.Server`
-   * is listening AND the logical path still carries this process's exact saved
-   * socket inode. Never rebinds, never reclaims a foreign inode and never
-   * mutates state — it only observes the authoritative ownership facts.
+   * is listening and, on POSIX, the logical path still carries this process's
+   * exact saved socket inode; on Windows the bound server is listening and the
+   * one-shot ACL was applied. Never rebinds, never reclaims a foreign inode and
+   * never mutates state — it only observes the authoritative ownership facts.
    */
   isListening(): boolean
   /** Stop accepting, tear down every connection, then retire the server. Idempotent. */
@@ -1828,6 +1834,158 @@ function readSavedInode(path: string, uid: number): SavedInode {
   return { dev: info.dev, ino: info.ino, uid: info.uid }
 }
 
+interface ListenerRuntime {
+  readonly context: ListenerContext
+  readonly releasePromptFacts: () => void
+  readonly disposeFactsWhenSettled: () => void
+}
+
+/**
+ * The ONE connection/fact runtime shared by the POSIX and Windows listeners.
+ * A BIND-LOCAL registry is owned by this listener and is disposed after its
+ * accepted work settles; a CONTROLLER-owned (shared) registry outlives listener
+ * rebinds and is disposed by the controller, so an Off -> On overlap never
+ * registers the same registry twice (R701-03). Installation is idempotent
+ * either way. Nothing here performs IO or binds a transport.
+ */
+function createListenerRuntime(options: StartLocalAcpListenerOptions): ListenerRuntime {
+  const { scope, diag, sessionAccess, views: sharedViews } = options
+  const context: ListenerContext = {
+    diag,
+    bundleVersion: scope.bundleVersion,
+    connections: new Set<Socket>(),
+    connectionStates: new Map<Socket, ConnectionState>(),
+    ...(sessionAccess === undefined
+      ? {}
+      : { sessionAccess, views: sharedViews ?? new AcpSessionViewRegistry(diag) }),
+  }
+  const views = context.views
+  const ownsFacts = views !== undefined && sessionAccess !== undefined && sharedViews === undefined
+  if (views !== undefined && sessionAccess !== undefined) views.observeFacts(sessionAccess)
+  const releasePromptFacts = (): void => {
+    if (!ownsFacts) return
+    views?.disposeFacts()
+  }
+  /**
+   * Dispose the ONE Host fact subscription once every ACCEPTED piece of work
+   * has settled on real Host facts (a pending admission inserted/classified,
+   * a queued removal committed, the owned turn's terminal drained, or a
+   * retired-turn fence ended). It never cancels work the ACP View may not
+   * cancel (D23 mixed turns) and never guesses with a timer: the registry's
+   * own settlement transitions resolve it. Detached, so retirement and Host
+   * shutdown are never blocked by a shared turn's duration.
+   */
+  const disposeFactsWhenSettled = (): void => {
+    if (views === undefined || !ownsFacts) return
+    runDetached('local acp: Host fact subscription retirement', async () => {
+      await views.whenHostWorkSettled()
+      releasePromptFacts()
+    }, { diag })
+  }
+  return { context, releasePromptFacts, disposeFactsWhenSettled }
+}
+
+/**
+ * The native Windows family of the ONE listener: a profile-scoped Named Pipe
+ * with the same accept callback, capacity bound, `serveConnection`, ACP SDK,
+ * View registry and fact subscription as the POSIX endpoint. The one-shot
+ * owner-only/NETWORK-deny DACL is applied BEFORE the handle can report
+ * `enabled`; retirement is kernel name lifetime only (no filesystem inode).
+ */
+async function startWin32LocalAcpListener(
+  options: StartLocalAcpListenerOptions,
+  runtime: ListenerRuntime,
+): Promise<LocalAcpListener> {
+  const { scope, maxConnections, diag } = options
+  const { context, releasePromptFacts, disposeFactsWhenSettled } = runtime
+  const pipeName = acpPipeAddress(scope.scopeId)
+  let server: Server | undefined
+  let stopping = false
+  let closed: Promise<void> | undefined
+  let secured = false
+
+  const retire = (): Promise<void> => {
+    if (closed !== undefined) return closed
+    stopping = true
+    closed = (async () => {
+      for (const socket of context.connections) socket.destroy()
+      if (server !== undefined) {
+        await new Promise<void>(resolveClose => {
+          server!.close(() => resolveClose())
+        })
+      }
+      disposeFactsWhenSettled()
+    })()
+    return closed
+  }
+
+  try {
+    server = createServer(socket => {
+      if (stopping) {
+        socket.destroy()
+        return
+      }
+      if (context.connections.size >= maxConnections) {
+        diag.warn('local-acp.connection.reject', { code: 'LOCAL_ACP_CAPACITY_EXCEEDED', connections: context.connections.size })
+        socket.on('error', () => socket.destroy())
+        socket.end(CAPACITY_ERROR_LINE, () => socket.destroy())
+        return
+      }
+      context.connections.add(socket)
+      diag.info('local-acp.connection.open', { connections: context.connections.size })
+      serveConnection(socket, context)
+    })
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server!.once('error', rejectListen)
+      server!.listen(pipeName, () => {
+        server!.off('error', rejectListen)
+        resolveListen()
+      })
+    })
+    server.on('error', error => {
+      diag.warn('local-acp.error', { code: (error as NodeJS.ErrnoException).code ?? 'LOCAL_ACP_SERVER_ERROR' })
+    })
+    try {
+      secureWin32AcpPipe(pipeName)
+      secured = true
+    } catch (error) {
+      throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the Windows named-pipe endpoint could not be secured', error)
+    }
+    diag.info('local-acp.listen', { connections: 0 })
+  } catch (error) {
+    for (const socket of context.connections) socket.destroy()
+    releasePromptFacts()
+    if (server !== undefined) {
+      try {
+        await new Promise<void>(resolveClose => {
+          server!.close(() => resolveClose())
+        })
+      } catch {
+        // The bind may never have completed; closing is best effort here.
+      }
+    }
+    if (error instanceof LocalAcpError) throw error
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'EADDRINUSE') {
+      throw new LocalAcpError('LOCAL_ACP_SOCKET_IN_USE', 'local acp: a live listener already answers on the named-pipe endpoint', error)
+    }
+    throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the Windows named-pipe endpoint could not be bound', error)
+  }
+
+  const isListening = (): boolean => {
+    if (stopping || closed !== undefined || server === undefined || !server.listening) return false
+    return secured
+  }
+
+  return {
+    socketPath: pipeName,
+    connectionCount: () => context.connections.size,
+    isListening,
+    close: retire,
+    cleanupSync: () => {},
+  }
+}
+
 /**
  * Start the one Host-owned local ACP listener for this scope.
  *
@@ -1836,18 +1994,22 @@ function readSavedInode(path: string, uid: number): SavedInode {
  * responsible for committing Ready AFTER this resolves.
  */
 export async function startLocalAcpListener(options: StartLocalAcpListenerOptions): Promise<LocalAcpListener> {
-  const { scope, maxConnections, diag, sessionAccess, views: sharedViews } = options
-  const uid = process.getuid?.()
-  if (typeof uid !== 'number') {
-    throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the current uid is unavailable')
-  }
+  const { scope, maxConnections, diag } = options
   if (!Number.isInteger(maxConnections) || maxConnections < 1 || maxConnections > 16) {
     throw new LocalAcpError('LOCAL_ACP_INVALID_MAX_CONNECTIONS', 'local acp: maxConnections must be an integer in 1..16')
   }
   const platform = process.platform
   const darwin = platform === 'darwin'
-  if (platform !== 'linux' && !darwin) {
-    throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the local ACP endpoint is supported on Linux and macOS only')
+  if (platform !== 'linux' && !darwin && platform !== 'win32') {
+    throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the local ACP endpoint is supported on Linux, macOS and Windows only')
+  }
+  if (platform === 'win32') {
+    const runtime = createListenerRuntime(options)
+    return await startWin32LocalAcpListener(options, runtime)
+  }
+  const uid = process.getuid?.()
+  if (typeof uid !== 'number') {
+    throw new LocalAcpError('LOCAL_ACP_SOCKET_PATH_UNSUPPORTED', 'local acp: the current uid is unavailable')
   }
   // ONE platform-specific physical endpoint: Linux keeps the scope directory and
   // shortens the bind through /proc/self/fd; Darwin publishes the inode onto the
@@ -1885,28 +2047,8 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
   let stopping = false
   let closed: Promise<void> | undefined
 
-  const context: ListenerContext = {
-    diag,
-    bundleVersion: scope.bundleVersion,
-    connections: new Set<Socket>(),
-    connectionStates: new Map<Socket, ConnectionState>(),
-    ...(sessionAccess === undefined
-      ? {}
-      : { sessionAccess, views: sharedViews ?? new AcpSessionViewRegistry(diag) }),
-  }
-
-  // The ONE Host fact/approval subscription. A BIND-LOCAL registry is owned by
-  // this listener and is disposed after its accepted work settles; a
-  // CONTROLLER-owned (shared) registry outlives listener rebinds and is
-  // disposed by the controller, so an Off -> On overlap never registers the
-  // same registry twice (R701-03). Installation is idempotent either way.
-  const views = context.views
-  const ownsFacts = views !== undefined && sessionAccess !== undefined && sharedViews === undefined
-  if (views !== undefined && sessionAccess !== undefined) views.observeFacts(sessionAccess)
-  const releasePromptFacts = (): void => {
-    if (!ownsFacts) return
-    views?.disposeFacts()
-  }
+  const runtime = createListenerRuntime(options)
+  const { context, releasePromptFacts, disposeFactsWhenSettled } = runtime
 
   const closeScopeDirFd = (): void => {
     if (scopeDirFdClosed || scopeDirFd === undefined) return
@@ -1985,23 +2127,6 @@ export async function startLocalAcpListener(options: StartLocalAcpListenerOption
       disposeFactsWhenSettled()
     })()
     return closed
-  }
-
-  /**
-   * Dispose the ONE Host fact subscription once every ACCEPTED piece of work
-   * has settled on real Host facts (a pending admission inserted/classified,
-   * a queued removal committed, the owned turn's terminal drained, or a
-   * retired-turn fence ended). It never cancels work the ACP View may not
-   * cancel (D23 mixed turns) and never guesses with a timer: the registry's
-   * own settlement transitions resolve it. Detached, so retirement and Host
-   * shutdown are never blocked by a shared turn's duration.
-   */
-  const disposeFactsWhenSettled = (): void => {
-    if (views === undefined || !ownsFacts) return
-    runDetached('local acp: Host fact subscription retirement', async () => {
-      await views.whenHostWorkSettled()
-      releasePromptFacts()
-    }, { diag })
   }
 
   try {

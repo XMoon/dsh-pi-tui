@@ -1,6 +1,6 @@
 /**
  * The private `piTuiAcpAccess` Host service — the ONE facade the Client reaches
- * to read or toggle the local Host ACP v1 Unix socket listener.
+ * to read or toggle the local Host ACP v1 listener.
  *
  * ```text
  * service    piTuiAcpAccess                       (Host Cordis service key)

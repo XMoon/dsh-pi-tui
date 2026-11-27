@@ -56,6 +56,7 @@ import type {
   LocalInstanceRecord,
 } from '../../src/app/remote-process/local-discovery.ts'
 import { darwinAcpSocketPaths } from '../../src/app/remote-process/local-acp-listener.ts'
+import { acpPipeAddress } from '../../src/app/remote-process/local-acp-endpoint.ts'
 import type { DarwinKernelProcessIdentity, KernelObservation } from '../../src/runtime/native-process/identity.ts'
 
 const DARWIN_SKIP = process.platform !== 'darwin' ? 'the launchd manager uses the macOS native plist decoder' : false
@@ -539,6 +540,25 @@ test('status derives the Darwin public endpoint from the frozen path helper', as
   assert.ok(expected.startsWith('/private/tmp/dpt-'), 'the example is the frozen public Darwin path')
 })
 
+test('status reports an enabled Windows ACP listener and the canonical local Named Pipe', async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    platform: 'win32',
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    observeAcpStatus: async () => ({ state: 'enabled' }),
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^acp=enabled$/mu)
+  const endpoint = acpPipeAddress(fx.scope.scopeId)
+  assert.ok(result.stdout.split('\n').includes(`acp-socket=${endpoint}`),
+    `the Windows enabled listener prints its local Named Pipe:\n${result.stdout}`)
+  assert.doesNotMatch(result.stdout, new RegExp(`acp-socket=.*acp\\.sock`, 'u'), 'Windows never prints a POSIX socket path')
+})
+
 test('the status formatter keeps the pre-ACP bytes and prints the ACP fields only when supplied', () => {
   const base = {
     profile: 'pi-tui',
@@ -588,6 +608,23 @@ test('readAcpStdioTarget returns the enabled public socket and exact Host instan
   })
   assert.deepEqual(observed, [{ cookie: 'signed-cookie', instanceId: record.instanceId }],
     'the observation uses the SAME authenticated Host/cookie exactly once')
+})
+
+test('readAcpStdioTarget returns the Windows local Named Pipe and exact Host instance', async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  const target = await readAcpStdioTarget(fx.profile, undefined, depsOf(fx, {
+    platform: 'win32',
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    observeAcpStatus: async () => ({ state: 'enabled' }),
+  }))
+  assert.deepEqual(target, {
+    kind: 'ready',
+    socketPath: acpPipeAddress(fx.scope.scopeId),
+    instanceId: record.instanceId,
+  })
 })
 
 test('readAcpStdioTarget maps missing Host, disabled listener and unavailable listener', async t => {

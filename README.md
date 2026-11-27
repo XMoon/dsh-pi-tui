@@ -123,7 +123,7 @@ dsh --profile pi-tui daemon install   # 仅 Linux / macOS
 dsh --profile pi-tui daemon uninstall # 仅 Linux / macOS
 ~~~
 
-Windows 的**当前 main 线（尚未包含在已发布的 0.5.8 npm 包中）**支持独立 Host、交互式 Daemon Client、`status`、`start`、`stop`、`restart`、`logs` 与官方 Web；`install`/`uninstall` 和 ACP 仍不可用。Windows 的 `/reload-client` 不提供：会在任何 reload 开始前明确拒绝并保留当前 Client/Session/草稿；需要采用更新构建时请 `/exit` 后正常重启。Windows 的 `status` 对已认证 Host 报告 `manager=process`，无 Host 报告 `manager=unmanaged`；`unit=none`，不调用 systemd/launchd；`stop` 通过该实例的原生 stop Event 进入官方 shutdown。
+Windows 的**当前 main 线（尚未包含在已发布的 0.5.8 npm 包中）**支持独立 Host、交互式 Daemon Client、`status`、`start`、`stop`、`restart`、`logs`、官方 Web 以及本地 ACP（Named Pipe）；`install`/`uninstall` 仍不可用。Windows 的 `/reload-client` 不提供：会在任何 reload 开始前明确拒绝并保留当前 Client/Session/草稿；需要采用更新构建时请 `/exit` 后正常重启。Windows 的 `status` 对已认证 Host 报告 `manager=process`，无 Host 报告 `manager=unmanaged`；`unit=none`，不调用 systemd/launchd；`stop` 通过该实例的原生 stop Event 进入官方 shutdown。
 
 `daemon install` 仅选择性地创建/验证当前 Profile 的用户服务定义，**不会**自动启动、启用或迁移 Host。`daemon stop` / `restart` 可能中断所有连接 Client 的进行中 Turn/Job；manager 显示运行中不代表 Host 已 Ready，须以认证身份确认。
 
@@ -166,7 +166,7 @@ dsh --profile pi-tui daemon status        # 确认 host=ready、acp=enabled
 dsh --profile pi-tui acp stdio
 ~~~
 
-受信默认 Profile 保证该命令的 stdout 只承载 ACP 协议字节；第三方插件若在早期启动阶段直接写 stdout，仍可能污染它（属于接受的部署约束）。本地 ACP 支持 `initialize`、`session/new|resume|load|list|prompt|cancel|close`、能力协商后的图片输入，以及客户端在 `session/new|resume|load` 中声明的 **Agent-scoped stdio 与 Streamable HTTP** MCP Server（stdio 与 HTTP 合计每个 Session 最多 4 个）。一条 ACP 连接可持有**至多 8 个**不同 Session 的 View；同一 Host Session 同时只由一条 ACP 连接持有 View，而多个 TUI 不受此限制。这里的 HTTP 仅指 MCP Server 的 Streamable HTTP 传输；ACP 本身仍是同 UID 本地 Unix socket，不是网络监听。它**不**提供 Host 级 MCP Server 管理，也不支持 Legacy SSE（无官方 DSH transport）、`session/delete`/`fork` 或未证明的文件传输，仍是 **Limited ACP v1**，不等于完整 ACP v1。接入步骤见 [Daemon 指南的外部 ACP 客户端章节](docs/guides/daemon.md#external-acp-client-over-stdio)；直接使用 SDK 连接 Listener 的例子仍作为高级用法保留在 [ACP v1 SDK 例子](docs/guides/daemon.md#local-acp-v1-sdk-client-example)。
+受信默认 Profile 保证该命令的 stdout 只承载 ACP 协议字节；第三方插件若在早期启动阶段直接写 stdout，仍可能污染它（属于接受的部署约束）。本地 ACP 支持 `initialize`、`session/new|resume|load|list|prompt|cancel|close`、能力协商后的图片输入，以及客户端在 `session/new|resume|load` 中声明的 **Agent-scoped stdio 与 Streamable HTTP** MCP Server（stdio 与 HTTP 合计每个 Session 最多 4 个）。一条 ACP 连接可持有**至多 8 个**不同 Session 的 View；同一 Host Session 同时只由一条 ACP 连接持有 View，而多个 TUI 不受此限制。这里的 HTTP 仅指 MCP Server 的 Streamable HTTP 传输；ACP 本身仍是同用户本地接口（Linux/macOS 为 Unix socket，Windows 为 Named Pipe），不是网络监听。它**不**提供 Host 级 MCP Server 管理，也不支持 Legacy SSE（无官方 DSH transport）、`session/delete`/`fork` 或未证明的文件传输，仍是 **Limited ACP v1**，不等于完整 ACP v1。接入步骤见 [Daemon 指南的外部 ACP 客户端章节](docs/guides/daemon.md#external-acp-client-over-stdio)；直接使用 SDK 连接 Listener 的例子仍作为高级用法保留在 [ACP v1 SDK 例子](docs/guides/daemon.md#local-acp-v1-sdk-client-example)。
 
 > **发行边界：** `acp stdio` 与 `acp status|enable|disable` 属于当前 `main` 的候选实现；已发布的 **v0.5.8** 发行文件**不包含**这些新入口，因此上文“0.5.8 安装”段落不能作为这些命令可用的安装保证。它们进入 npm `@latest` 需要独立的后续发行；请对实际安装的版本运行 `dsh --profile pi-tui acp --help` 确认。
 

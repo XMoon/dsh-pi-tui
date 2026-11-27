@@ -96,12 +96,15 @@ interface Win32Bridge {
   readonly createEventW: (attributes: Buffer | null, manualReset: number, initialState: number, name: string | null) => Win32Handle | null
   readonly openEventW: (access: number, inherit: number, name: string) => Win32Handle | null
   readonly setEvent: (handle: Win32Handle) => boolean
+  readonly createNamedPipeW: (name: string, openMode: number, pipeMode: number, maxInstances: number, outBuffer: number, inBuffer: number, timeout: number, attributes: Buffer | null) => Win32Handle | null
   readonly createDirectoryW: (path: string, attributes: Buffer | null) => boolean
   readonly createFileW: (path: string, access: number, share: number, attributes: Buffer | null, disposition: number, flags: number, template: null) => Win32Handle | null
   readonly getFileAttributesW: (path: string) => number
   readonly getDriveTypeW: (root: string) => number
   readonly getVolumeInformationW: (root: string, name: Buffer | null, nameLen: number, serial: Buffer | null, maxComponent: Buffer | null, flags: Buffer | null, fsName: Buffer, fsNameLen: number) => boolean
   readonly convertStringSecurityDescriptor: (sddl: string, revision: number, sdOut: Buffer, sizeOut: Buffer) => boolean
+  readonly getSecurityDescriptorDacl: (sd: Win32Handle, presentOut: Buffer, daclOut: Buffer, defaultedOut: Buffer) => boolean
+  readonly setSecurityInfo: (handle: Win32Handle, objectType: number, securityInfo: number, owner: Buffer | null, group: Buffer | null, dacl: Win32Handle | null, sacl: Buffer | null) => number
   readonly getSecurityInfo: (handle: Win32Handle, objectType: number, securityInfo: number, ownerOut: Buffer, groupOut: Buffer, daclOut: Buffer, saclOut: Buffer, sdOut: Buffer) => number
   readonly getSecurityDescriptorLength: (sd: Win32Handle) => number
   readonly getSecurityDescriptorControl: (sd: Win32Handle, controlOut: Buffer, revisionOut: Buffer) => boolean
@@ -120,6 +123,16 @@ const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 const SYNCHRONIZE = 0x100000
 const TOKEN_QUERY = 0x0008
 const EVENT_MODIFY_STATE = 0x0002
+const FILE_FLAG_OVERLAPPED = 0x40000000
+const WRITE_DAC = 0x00040000
+const PIPE_ACCESS_DUPLEX = 0x00000003
+const PIPE_TYPE_BYTE = 0x00000000
+const PIPE_READMODE_BYTE = 0x00000000
+const PIPE_WAIT = 0x00000000
+const PIPE_UNLIMITED_INSTANCES = 255
+const FILE_ALL_ACCESS = 0x001f01ff
+const NETWORK_SID = 'S-1-5-2'
+const INVALID_HANDLE_VALUE = 0xffffffffffffffffn as unknown as Win32Handle
 const READ_CONTROL = 0x00020000
 const FILE_READ_ATTRIBUTES = 0x80
 const FILE_ATTRIBUTE_DIRECTORY = 0x10
@@ -135,6 +148,7 @@ const OBJECT_INHERIT_ACE = 0x1
 const CONTAINER_INHERIT_ACE = 0x2
 const OWNER_SECURITY_INFORMATION = 0x1
 const DACL_SECURITY_INFORMATION = 0x4
+const PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
 const SE_DACL_PRESENT = 0x0004
 const SE_DACL_PROTECTED = 0x1000
 const SDDL_REVISION_1 = 1
@@ -175,12 +189,15 @@ function loadBridge(): { readonly ok: true; readonly bridge: Win32Bridge } | { r
         createEventW: bind(context, kernel32, 'CreateEventW', 'void *', ['void *', 'int', 'int', 'const char16_t *']) as unknown as Win32Bridge['createEventW'],
         openEventW: bind(context, kernel32, 'OpenEventW', 'void *', ['uint32', 'int', 'const char16_t *']) as unknown as Win32Bridge['openEventW'],
         setEvent: bind(context, kernel32, 'SetEvent', 'int', ['void *']) as unknown as Win32Bridge['setEvent'],
+        createNamedPipeW: bind(context, kernel32, 'CreateNamedPipeW', 'void *', ['const char16_t *', 'uint32', 'uint32', 'uint32', 'uint32', 'uint32', 'uint32', 'void *']) as unknown as Win32Bridge['createNamedPipeW'],
         createDirectoryW: bind(context, kernel32, 'CreateDirectoryW', 'int', ['const char16_t *', 'void *']) as unknown as Win32Bridge['createDirectoryW'],
         createFileW: bind(context, kernel32, 'CreateFileW', 'void *', ['const char16_t *', 'uint32', 'uint32', 'void *', 'uint32', 'uint32', 'void *']) as unknown as Win32Bridge['createFileW'],
         getFileAttributesW: bind(context, kernel32, 'GetFileAttributesW', 'uint32', ['const char16_t *']) as unknown as Win32Bridge['getFileAttributesW'],
         getDriveTypeW: bind(context, kernel32, 'GetDriveTypeW', 'uint32', ['const char16_t *']) as unknown as Win32Bridge['getDriveTypeW'],
         getVolumeInformationW: bind(context, kernel32, 'GetVolumeInformationW', 'int', ['const char16_t *', 'void *', 'uint32', 'void *', 'void *', 'void *', 'void *', 'uint32']) as unknown as Win32Bridge['getVolumeInformationW'],
         convertStringSecurityDescriptor: bind(context, advapi32, 'ConvertStringSecurityDescriptorToSecurityDescriptorW', 'int', ['const char16_t *', 'uint32', 'void *', 'void *']) as unknown as Win32Bridge['convertStringSecurityDescriptor'],
+        getSecurityDescriptorDacl: bind(context, advapi32, 'GetSecurityDescriptorDacl', 'int', ['void *', 'void *', 'void *', 'void *']) as unknown as Win32Bridge['getSecurityDescriptorDacl'],
+        setSecurityInfo: bind(context, advapi32, 'SetSecurityInfo', 'uint32', ['void *', 'int', 'uint32', 'void *', 'void *', 'void *', 'void *']) as unknown as Win32Bridge['setSecurityInfo'],
         getSecurityInfo: bind(context, advapi32, 'GetSecurityInfo', 'uint32', ['void *', 'int', 'uint32', 'void *', 'void *', 'void *', 'void *', 'void *']) as unknown as Win32Bridge['getSecurityInfo'],
         getSecurityDescriptorLength: bind(context, advapi32, 'GetSecurityDescriptorLength', 'uint32', ['void *']) as unknown as Win32Bridge['getSecurityDescriptorLength'],
         getSecurityDescriptorControl: bind(context, advapi32, 'GetSecurityDescriptorControl', 'int', ['void *', 'void *', 'void *']) as unknown as Win32Bridge['getSecurityDescriptorControl'],
@@ -778,4 +795,110 @@ export function ensureWin32PrivateDirectory(path: string): void {
   }
   if (createError !== 183) throw new Error(`native win32: the private directory could not be created (${String(createError)})`)
   if (!win32PrivateDirectorySafe(path)) throw new Error('native win32: an existing private directory is not owner-only')
+}
+
+/** A valid Win32 handle; `CreateNamedPipeW` reports failure as INVALID_HANDLE_VALUE. */
+function validWin32Handle(handle: Win32Handle | null): handle is Win32Handle {
+  return handle !== null && handle !== undefined && handle !== INVALID_HANDLE_VALUE
+}
+
+/**
+ * Whether one read-back descriptor is exactly the product ACP pipe boundary:
+ * a protected DACL owned by the current user with one NETWORK deny and one
+ * current-SID allow ACE, both carrying full file/pipe access. This is the
+ * descriptor written by {@link secureWin32AcpPipe}; it is not a general ACL
+ * policy engine and never inspects another user's objects.
+ */
+function isProtectedAcpPipe(view: Win32SecurityView | undefined, sid: string): boolean {
+  if (view === undefined || !view.daclPresent || !view.daclProtected || view.daclNull) return false
+  if (view.ownerSid !== sid || view.aces.length !== 2) return false
+  const deny = view.aces.find(ace => ace.type === 1 && ace.sid === NETWORK_SID)
+  const allow = view.aces.find(ace => ace.type === 0 && ace.sid === sid)
+  return deny !== undefined && allow !== undefined
+    && (deny.mask & FILE_ALL_ACCESS) === FILE_ALL_ACCESS
+    && (allow.mask & FILE_ALL_ACCESS) === FILE_ALL_ACCESS
+}
+
+/** Create ONE auxiliary instance handle on an existing pipe name for DACL work. */
+function createAcpPipeAuxiliary(bridge: Win32Bridge, pipeName: string): Win32Handle {
+  bridge.setLastError(0)
+  const handle = bridge.createNamedPipeW(
+    pipeName,
+    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | WRITE_DAC,
+    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+    PIPE_UNLIMITED_INSTANCES,
+    65536,
+    65536,
+    0,
+    null,
+  )
+  if (!validWin32Handle(handle)) {
+    throw new Error(`native win32: the ACP named-pipe auxiliary instance could not be created (${String(lastError(bridge))})`)
+  }
+  return handle
+}
+
+/**
+ * Apply the one-shot owner-only + local-only DACL to an already-created Node
+ * Named Pipe listener, then prove it through a FRESH auxiliary instance.
+ *
+ * The auxiliary instance is never connected, accepted or read; it only carries
+ * the WRITE_DAC access needed for `SetSecurityInfo`, and it is closed before
+ * this function returns. The verified descriptor is a property of the named
+ * pipe object and therefore constrains the Node server's subsequent instances.
+ * Any failure throws: callers must not report the listener enabled.
+ */
+export function secureWin32AcpPipe(pipeName: string): Win32SecurityView {
+  const load = loadBridge()
+  if (!load.ok) throw new Error(`native win32: ${load.code}`)
+  const bridge = load.bridge
+  const sid = win32CurrentTokenSid()
+  if (sid === undefined) throw new Error('native win32: the current token SID is unavailable')
+
+  const writeAux = createAcpPipeAuxiliary(bridge, pipeName)
+  try {
+    const sddl = `D:P(D;;GA;;;${NETWORK_SID})(A;;GA;;;${sid})`
+    const sd = Buffer.alloc(8)
+    const size = Buffer.alloc(4)
+    if (!bridge.convertStringSecurityDescriptor(sddl, SDDL_REVISION_1, sd, size)) {
+      throw new Error(`native win32: the ACP named-pipe security descriptor is invalid (${String(lastError(bridge))})`)
+    }
+    const sdPtr = sd.readBigUInt64LE(0) as unknown as Win32Handle
+    try {
+      const present = Buffer.alloc(4)
+      const dacl = Buffer.alloc(8)
+      const defaulted = Buffer.alloc(4)
+      if (!bridge.getSecurityDescriptorDacl(sdPtr, present, dacl, defaulted) || present.readInt32LE(0) === 0) {
+        throw new Error('native win32: the ACP named-pipe DACL is unavailable')
+      }
+      const daclPtr = dacl.readBigUInt64LE(0) as unknown as Win32Handle
+      const result = bridge.setSecurityInfo(
+        writeAux,
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        null,
+        null,
+        daclPtr,
+        null,
+      )
+      if (result !== 0) {
+        throw new Error(`native win32: the ACP named-pipe DACL could not be applied (${String(result)})`)
+      }
+    } finally {
+      bridge.localFree(sdPtr)
+    }
+  } finally {
+    bridge.closeHandle(writeAux)
+  }
+
+  const verifyAux = createAcpPipeAuxiliary(bridge, pipeName)
+  try {
+    const view = readSecurityInfo(verifyAux, SE_KERNEL_OBJECT)
+    if (view === undefined || !isProtectedAcpPipe(view, sid)) {
+      throw new Error('native win32: the ACP named-pipe descriptor is not the protected owner-only/NETWORK-deny descriptor')
+    }
+    return view
+  } finally {
+    bridge.closeHandle(verifyAux)
+  }
 }

@@ -91,7 +91,7 @@ export function acpAccessStatusDetail(outcome: AcpAccessReadOutcome | undefined)
     case 'disabled':
       return 'The local ACP v1 listener is not bound on this Host.'
     case 'enabled':
-      return "The local ACP v1 listener is bound on this Host's Unix socket."
+      return 'The local ACP v1 listener is enabled on this Host.'
     case 'changing':
       return 'An ACP enable/disable request is still running; wait for it to settle.'
     case 'unavailable':

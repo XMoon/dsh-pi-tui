@@ -18,6 +18,7 @@ import {
   AcpProjectionError,
   compactionUpdate,
   encodeSessionCursor,
+  isAbsolutePath,
   planEntriesFromTodos,
   planRemoval,
   planEntriesOf,
@@ -384,6 +385,17 @@ test('malformed, non-canonical and oversized cursors are refused', () => {
   const spaced = Buffer.from('[5, "a", ""]', 'utf8').toString('base64url')
   assert.notEqual(spaced, canonical)
   assert.throws(() => selectSessionPage(rows, { cursor: spaced }), /cursor/u)
+})
+
+test('the ACP absolute-path shape follows the Host OS local domain', () => {
+  assert.equal(isAbsolutePath('/host/proj', 'linux'), true)
+  assert.equal(isAbsolutePath('/host/proj', 'darwin'), true)
+  assert.equal(isAbsolutePath('C:\\host\\proj', 'win32'), true)
+  assert.equal(isAbsolutePath('C:/host/proj', 'win32'), true)
+  for (const invalid of ['', 'proj', 'C:proj', '\\\\server\\share', '\\?\\C:\\x', 'C:\\bad\u0000path']) {
+    assert.equal(isAbsolutePath(invalid, 'win32'), false, JSON.stringify(invalid))
+  }
+  assert.equal(isAbsolutePath('C:\\host', 'linux'), false, 'the POSIX shape never accepts a Windows drive path')
 })
 
 test('the list request accepts an omitted/null filter and refuses a relative cwd', () => {

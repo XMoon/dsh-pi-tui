@@ -1121,7 +1121,7 @@ export interface BackendStartupPreferenceConfig {
 
 /**
  * The profile-owned ACP startup preference (`pi-tui-acp-preferences.autoStart`):
- * whether a NEW Split Host binds the local ACP v1 Unix socket listener while it
+ * whether a NEW Split Host binds the local ACP v1 listener while it
  * boots.
  *
  * This is a CONFIGURATION fact, never the current listener state: the live
