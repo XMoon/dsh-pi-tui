@@ -1488,13 +1488,20 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       return
     }
     const claim = this.sessionRepairFlights.get(sessionId)
-    if (claim?.owner === 'point') {
-      // A point replay owns the accepted remainder across new events. Its
-      // invalidated observation settles through the same claim's follow-up.
+    const unresolvedPointRepair = claim?.owner === 'point' && this.reconcilePending.has(sessionId)
+    const unresolvedCoverage = this.heldPending.has(sessionId) || this.droppedAccepted.has(sessionId)
+    if (unresolvedPointRepair || unresolvedCoverage) {
+      // The active owner has not settled its authoritative responsibility (or
+      // a short-source/evicted obligation still lacks coverage). Keep the new
+      // payload protected and record the necessary successor on the existing
+      // coalesced request; the old prefix/read may exit without another stale.
       this.heldPending.add(sessionId)
+      this.scheduleSessionRepair(sessionId, 'rebuild')
     } else {
-      // A full claim drains its own accepted work; an unowned gap-held batch
-      // may wake for an ordinary drain. Neither case releases another owner.
+      // A completed terminal has no remaining authoritative obligation. Late
+      // ordinary input stays drainable, but the still-active claim excludes a
+      // competing writer until its release wakes the bounded drain. A full
+      // claim likewise keeps its own ordinary self-drain eligible.
       this.heldPending.delete(sessionId)
     }
     this.revokeRoundSourceIdentity(sessionId, session as object)
