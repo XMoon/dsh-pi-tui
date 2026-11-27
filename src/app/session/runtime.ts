@@ -98,6 +98,16 @@ export interface SessionRuntimeSurface {
    */
   withdrawReplacedPresentation(): void
   /**
+   * Bind the Split Client's ONE recall root to the owner this commit section is
+   * publishing (or creating), together with the authenticated carrier identity.
+   * Unlike {@link beginInputHistoryScope} this is an APPLICATION-level binding
+   * (state only, no renderer call), so it also runs at the pre-mount startup
+   * resume seam where the surface does not exist yet. On Direct the injected
+   * root is absent and this is a no-op.
+   * @param owner - the published Session's id, or undefined for a sessionless start.
+   */
+  bindInputRecallScope(owner: string | undefined): void
+  /**
    * Open the editor-recall scope of the owner this commit section is about to
    * publish (or create): the owner's hydration reseeds ↕ recall from its
    * session-scoped JSONL rows, while a submission accepted in the
@@ -672,6 +682,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                   deps.surface.dropOutgoingActiveDraft()
                 }
                 core.setCurrentOwner(nextOwner, sessionId)
+                // The recall ROOT binding follows the same synchronous
+                // publication (before any renderer projection).
+                deps.surface.bindInputRecallScope(sessionId)
                 // The editor-recall scope follows the SAME synchronous
                 // publication: the new owner's hydration reseeds ↕ recall
                 // from its disk rows, and an input accepted before that
@@ -1332,6 +1345,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                 deps.surface.dropOutgoingActiveDraft()
               }
               core.setCurrentOwner(nextOwner, nextSessionId)
+              // The recall root binding follows the same synchronous commit.
+              deps.surface.bindInputRecallScope(nextSessionId)
               // The editor-recall scope follows the same synchronous
               // publication (see the ordinary commit seam).
               deps.surface.beginInputHistoryScope(nextSessionId)
@@ -1584,6 +1599,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     return runFirstSessionCommit({
       publishOwner: () => {
         core.setCurrentOwner(childOwner, deps.owners.sessionId(childOwner))
+        deps.surface.bindInputRecallScope(deps.owners.sessionId(childOwner))
         // The editor-recall scope follows the same synchronous publication:
         // the deferred first session's hydration reseeds ↕ recall afterwards,
         // and the sessionless submission that CREATED it was accepted in the
@@ -1643,6 +1659,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // reseed adopts them (the Direct startup has no await before the reset,
         // and the TSP renderer holds input until bind — both stay empty).
         core.setCurrentOwner(nextOwner, nextOwner === undefined ? undefined : deps.owners.sessionId(nextOwner))
+        // The recall root binding must exist BEFORE the surface is mounted, so
+        // the terminal-accepting hydration window starts in the resumed
+        // owner's scope instead of the sessionless pool.
+        deps.surface.bindInputRecallScope(nextOwner === undefined ? undefined : deps.owners.sessionId(nextOwner))
         // External review P2-B: a resume publishes a new owner too.
         if (nextOwner !== undefined) deps.surface.withdrawReplacedPresentation()
         return nextOwner === undefined ? undefined : deps.owners.completionIdentity(nextOwner)

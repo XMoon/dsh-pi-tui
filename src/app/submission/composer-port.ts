@@ -64,5 +64,9 @@ export interface SubmissionComposerPort {
    * the freeze; `'not-accepted'` and `'unknown'` release the freeze with
    * the draft intact. Settling an unknown attempt id is a no-op.
    */
-  settleSubmission?(attemptId: string, result: 'accepted' | 'not-accepted' | 'unknown'): void
+  settleSubmission?(
+    attemptId: string,
+    result: 'accepted' | 'not-accepted' | 'unknown',
+    officialRequestId?: string,
+  ): void
 }

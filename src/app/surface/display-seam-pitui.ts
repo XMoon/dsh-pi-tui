@@ -68,6 +68,7 @@ export function pituiDisplaySeam(app: TuiApp): SurfaceDisplaySeam {
     },
     resetInputHistory: (entries, owner, writeIds) => app.resetInputHistory(entries, owner, writeIds),
     beginInputHistoryScope: owner => app.beginInputHistoryScope(owner),
+    reseedInputRecall: () => app.reseedInputRecall(),
     settleScopeInput: settlement => app.settleScopeInput(settlement),
     setSearchResult: (index, count) => app.setSearchResult(index, count),
     notify: (text, kind) => app.notify(text, kind),

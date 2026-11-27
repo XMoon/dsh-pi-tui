@@ -108,6 +108,23 @@ async function search(client, requestPath, request, label) {
   return probe(client, requestPath, { op: 'search', ...request }, label)
 }
 
+async function readSessionRecall(client, requestPath, request, label) {
+  return probe(client, requestPath, { op: 'readSessionRecall', ...request }, label)
+}
+
+/** Wait for the bounded recall window of ONE target to leave `loading`. */
+async function recallSettled(client, requestPath, sessionId, label, timeoutMs = 120_000) {
+  const started = Date.now()
+  for (;;) {
+    const answer = await readSessionRecall(client, requestPath, { sessionId }, label)
+    if (answer.kind === 'ready') return answer
+    assert(answer.kind === 'loading' || answer.kind === 'incomplete',
+      `${label}: unexpected recall state ${JSON.stringify(answer)}`)
+    assert(Date.now() - started < timeoutMs, `${label}: the recall window never became ready`)
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+}
+
 
 /** Reach the ACTIVE All-directory scope from the captured default without
  *  assuming whether the resumed Session or a sessionless Directory default won
@@ -500,9 +517,9 @@ async function waitForBootstrapCounters(logPath, label, timeoutMs = 120_000) {
   throw new SplitSmokeAssertionError(`${label}: no history-search.bootstrap.end record in ${logPath}`)
 }
 
-/** Read the derived v2 database (Host exited, no writer) without touching sources. */
+/** Read the derived v3 database (Host exited, no writer) without touching sources. */
 function inspectDerivedHistory(profileDir) {
-  const dbPath = join(profileDir, '.dsh-pi-tui', 'history-search', 'v2.sqlite')
+  const dbPath = join(profileDir, '.dsh-pi-tui', 'history-search', 'v3.sqlite')
   const db = new DatabaseSync(dbPath, { readOnly: true })
   try {
     const userVersion = db.prepare('PRAGMA user_version').get().user_version
@@ -516,7 +533,7 @@ function inspectDerivedHistory(profileDir) {
 
 /** Read one committed proof row, if present (Host stopped). */
 function sourceProofOf(profileDir, sessionId) {
-  const dbPath = join(profileDir, '.dsh-pi-tui', 'history-search', 'v2.sqlite')
+  const dbPath = join(profileDir, '.dsh-pi-tui', 'history-search', 'v3.sqlite')
   const db = new DatabaseSync(dbPath, { readOnly: true })
   try {
     return db.prepare('SELECT source_revision, checkpoint_hash, source_path FROM history_source_proofs WHERE session_id = ?').get(sessionId)
@@ -731,6 +748,20 @@ export async function runHostHistorySearch(context) {
     }, 'W01b unknown message')
     assert(unknownMessage.kind === 'unavailable' && unknownMessage.reason === 'not-found',
       `W01b: an unknown message did not report not-found: ${JSON.stringify(unknownMessage)}`)
+
+    // ── W01c: the bounded session-recall window on the SAME private wire. ──
+    // Client B reads the accepted occurrence of the Session Client A created;
+    // the window is normalized, newest-first and never exceeds 100 rows.
+    const recall = await recallSettled(clientB, requestPath, sessionId, 'host history W01c recall')
+    assert(recall.sessionId === sessionId, `W01c: recall answered for ${JSON.stringify(recall.sessionId)}`)
+    assert(recall.items.length >= 1 && recall.items.length <= 100,
+      `W01c: recall window size ${String(recall.items.length)} is outside 1..100`)
+    const recalled = recall.items.find(item => item.messageId === firstMessage.id)
+    assert(recalled !== undefined, `W01c: the accepted occurrence is missing from recall: ${JSON.stringify(recall.items)}`)
+    assert(recalled.text === unique, `W01c: recall changed the original text: ${JSON.stringify(recalled.text)}`)
+    assert(recalled.firstEventSeq === firstEvent.seq, 'W01c: recall lost the first-admission identity')
+    assert(recalled.rpcId === undefined || (typeof recalled.rpcId === 'string' && recalled.rpcId !== ''),
+      'W01c: recall carried an unusable optional rpcId')
 
     // ── W07: the REAL packed Ctrl+R UI on an INDEPENDENT Client B. ─────────
     // Client B resumes the Session Client A created; the seed occurrence is
@@ -1022,7 +1053,7 @@ export async function runHostHistorySearch(context) {
     assert(Number(countersD.sourceProofMiss) >= 1,
       'W05: the changed revision did not miss its durable proof')
     // Complete D Owner witness: every ordered semantic row + exact full text.
-    // This is the comparison witness for the independent fresh-v2 rebuild.
+    // This is the comparison witness for the independent fresh-v3 rebuild.
     const recoveredItems = await readAllHistoryItems(clientB, requestPath, {
       scope: 'all', query: '', limit: 7,
     }, 'W05 recovery witness')
@@ -1048,23 +1079,23 @@ export async function runHostHistorySearch(context) {
     mkdirSync(join(workDir, 'history-cwd-two'), { recursive: true, mode: 0o700 })
     const cwdOne = realpathSync(join(workDir, 'history-cwd-one'))
     const cwdTwo = realpathSync(join(workDir, 'history-cwd-two'))
-    // ── S01 oracle: independent fresh-v2 cold rebuild before any new input. ─
-    // D is stopped and the seat free. Move the EXACT active v2 set aside, start
+    // ── S01 oracle: independent fresh-v3 cold rebuild before any new input. ─
+    // D is stopped and the seat free. Move the EXACT active v3 set aside, start
     // the existing W02c Host against an absent derived store, and compare its
     // complete Owner pages + readText with D's witness BEFORE opening a Session.
     const historyDir = join(context.installation.profileDir, '.dsh-pi-tui', 'history-search')
-    const backupDir = join(historyDir, `.oracle-v2-${String(process.pid)}-${Date.now().toString(36)}`)
+    const backupDir = join(historyDir, `.oracle-v3-${String(process.pid)}-${Date.now().toString(36)}`)
     mkdirSync(backupDir, { recursive: true, mode: 0o700 })
     chmodSync(backupDir, 0o700)
     let movedFiles = 0
     for (const suffix of ['', '-wal', '-shm']) {
-      const file = join(historyDir, `v2.sqlite${suffix}`)
+      const file = join(historyDir, `v3.sqlite${suffix}`)
       if (!existsSync(file)) continue
-      renameSync(file, join(backupDir, `v2.sqlite${suffix}`))
+      renameSync(file, join(backupDir, `v3.sqlite${suffix}`))
       movedFiles += 1
     }
-    assert(movedFiles >= 1, 'S01 oracle: the active v2 set was not moved')
-    assert(!existsSync(join(historyDir, 'v2.sqlite')), 'S01 oracle: the fresh v2 path is still present')
+    assert(movedFiles >= 1, 'S01 oracle: the active v3 set was not moved')
+    assert(!existsSync(join(historyDir, 'v3.sqlite')), 'S01 oracle: the fresh v3 path is still present')
     const oracleLog = join(workDir, 'history-search-host-oracle.log')
     const cwdHost = await scene.startC1Host('history-search', 'history cwd host', {
       HISTORY_SEARCH_EXTRA_PROOF: cwdProof,
@@ -1089,7 +1120,7 @@ export async function runHostHistorySearch(context) {
     }
     const countersOracle = await waitForBootstrapCounters(oracleLog, 'S01 oracle host')
     assert(Number(countersOracle.sourceProofHit) === 0,
-      `S01 oracle: a fresh v2 reused a proof: ${JSON.stringify(countersOracle)}`)
+      `S01 oracle: a fresh v3 reused a proof: ${JSON.stringify(countersOracle)}`)
     assert(Number(countersOracle.sourceProofMinted) >= 3,
       `S01 oracle: the fresh cold rebuild minted ${String(countersOracle.sourceProofMinted)} proofs`)
     assert(Number(countersOracle.directPersistenceOpenCalls) >= 3,
@@ -1156,6 +1187,12 @@ export async function runHostHistorySearch(context) {
       scope: 'session', sessionId: cwdSession, query: 'hsp-cwd-', limit: 25,
     }, 'host history search W02d fork parent'), 'W02d fork parent')
     assert(forkParent.items.length === 3, `W02d: fork inherited prefix inflated parent occurrences: ${JSON.stringify(forkParent.items)}`)
+    // The fork child's recall window carries ONLY its own post-cut input: the
+    // inherited parent prefix is never a fork occurrence.
+    const forkRecall = await recallSettled(cwdClient, requestPath, forkSession, 'host history W02d fork recall')
+    assert(forkRecall.sessionId === forkSession, 'W02d: fork recall addressed another Session')
+    assert(forkRecall.items.length === 1 && forkRecall.items[0].text === childPromptText,
+      `W02d: fork recall must carry exactly its own input: ${JSON.stringify(forkRecall.items)}`)
 
     // Stop the cwd/fork Host before the long-turn Host: the profile owns ONE Host seat.
     await scene.exitC1Client(cwdClient, 'history cwd client exit')
@@ -1268,9 +1305,9 @@ export async function runHostHistorySearch(context) {
     await scene.awaitSceneSeatFree()
     host = undefined
 
-    // W06: the active derived store is v2, private and profile-local; the
+    // W06: the active derived store is v3, private and profile-local; the
     // legacy v1 file set stayed byte/mode/inode identical.
-    const dbPath = join(historyDir, 'v2.sqlite')
+    const dbPath = join(historyDir, 'v3.sqlite')
     const dbStat = statSync(dbPath)
     const dirStat = statSync(historyDir)
     assert((dbStat.mode & 0o777) === 0o600,
@@ -1279,9 +1316,9 @@ export async function runHostHistorySearch(context) {
       `W06: the derived index directory mode ${(dirStat.mode & 0o777).toString(8)} is not private`)
     assertLegacyV1Untouched(legacySentinel)
     const derived = inspectDerivedHistory(context.installation.profileDir)
-    assert(derived.userVersion === 2, `W06: v2 user_version is ${String(derived.userVersion)}`)
-    assert(derived.sessions >= 3, `W06: v2 holds ${String(derived.sessions)} sessions`)
-    assert(derived.proofs >= 3, `W06: v2 holds ${String(derived.proofs)} durable proofs`)
+    assert(derived.userVersion === 3, `W06: v3 user_version is ${String(derived.userVersion)}`)
+    assert(derived.sessions >= 3, `W06: v3 holds ${String(derived.sessions)} sessions`)
+    assert(derived.proofs >= 3, `W06: v3 holds ${String(derived.proofs)} durable proofs`)
     trace('host-history-search/pr3a', {
       status: 'PASS',
       hostPid,
@@ -1321,8 +1358,8 @@ export async function runHostHistorySearch(context) {
       staleCursor: true,
       exactTextChunks: true,
       dbPath,
-      v2UserVersion: derived.userVersion,
-      v2Proofs: derived.proofs,
+      v3UserVersion: derived.userVersion,
+      v3Proofs: derived.proofs,
       legacyV1Untouched: true,
       hostLogs: [logA, logB, logC, logD],
       quiesced: true,

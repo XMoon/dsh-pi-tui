@@ -89,8 +89,11 @@ export interface RemoteBeginSubmissionInput {
    * accepted the prompt, whether the receipt or an Inbox row showed it
    * first. Early acceptance wins: a later transport/execute error cannot
    * turn an accepted prompt back into a refusal.
+   *
+   * The argument is the EXACT official `beginSubmission` requestId (the same
+   * value the Host stamps as `source.rpcId`), captured before prompt dispatch.
    */
-  readonly onAccept?: () => void
+  readonly onAccept?: (officialRequestId: string) => void
 }
 
 /** One official submission handle. */
@@ -275,15 +278,21 @@ export class RemoteSessionWriter implements SessionWriter {
       // connection generation and the exact pinned binding fence the callback
       // itself, so a fenced-out old accept never reaches the Composer.
       let acceptanceLatched = false
+      // Captured from the OFFICIAL submission handle BEFORE prompt dispatch.
+      // The acceptance callback can only fire after that dispatch, so this is
+      // necessarily assigned by then; it is the official request identity the
+      // Host stamps as `source.rpcId`.
+      let officialRequestId: string | undefined
       const onAccept = options?.onAccepted === undefined ? undefined : (): void => {
         if (acceptanceLatched) return
         if (this.lifetimeSignal?.aborted
           || generationChanged(this.generation, captured)
-          || !Object.is(binding, this.sessions.binding(sessionId))) {
+          || !Object.is(binding, this.sessions.binding(sessionId))
+          || officialRequestId === undefined) {
           return
         }
         acceptanceLatched = true
-        options.onAccepted?.()
+        options.onAccepted?.(officialRequestId)
       }
 
       let handle: RemoteSubmissionHandle
@@ -325,6 +334,7 @@ export class RemoteSessionWriter implements SessionWriter {
         } catch (error) {
           return preDispatchFailure('session/prompt-echo-failed', error)
         }
+        officialRequestId = handle.requestId
       } else {
         // Keep the established no-file order: register the official identity
         // before potentially expensive image serialization.
@@ -338,6 +348,7 @@ export class RemoteSessionWriter implements SessionWriter {
         } catch (error) {
           return preDispatchFailure('session/prompt-echo-failed', error)
         }
+        officialRequestId = handle.requestId
         try {
           serialized = await this.serializer.serialize(message)
         } catch (error) {

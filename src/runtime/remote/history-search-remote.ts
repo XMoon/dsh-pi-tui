@@ -22,6 +22,8 @@ import type {
   HistoryReadTextResponse,
   HistorySearchRequest,
   HistorySearchResponse,
+  HistorySessionRecallRequest,
+  HistorySessionRecallResponse,
 } from '../history-search-dto.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import type { HistorySearchReadPort } from '../history-search-read-port.ts'
@@ -29,10 +31,18 @@ import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
 
 export type { HistorySearchReadPort } from '../history-search-read-port.ts'
 
-/** The mounted private namespace slice (a missing namespace is legal). */
+/** The mounted private namespace slice (a missing namespace/method is legal). */
 export interface RemoteHistorySearchNamespace {
   search(request: HistorySearchRequest, signal?: AbortSignal): Promise<RemoteResult<HistorySearchResponse>>
   readText(request: HistoryReadTextRequest, signal?: AbortSignal): Promise<RemoteResult<HistoryReadTextResponse>>
+  /**
+   * Optional because an older Host may expose only the pre-recall methods: its
+   * absence is the truthful `service-missing`, never an empty success.
+   */
+  readSessionRecall?(
+    request: HistorySessionRecallRequest,
+    signal?: AbortSignal,
+  ): Promise<RemoteResult<HistorySessionRecallResponse>>
 }
 
 /** The authenticated Owner peer refused the read before the Host service ran. */
@@ -95,6 +105,22 @@ export class RemoteHistorySearchPort implements HistorySearchReadPort {
     if (namespace === undefined) return { kind: 'unavailable', reason: 'service-missing' }
     return await this.settle(
       captured => namespace.readText(request, captured),
+      signal,
+      { kind: 'unavailable', reason: 'service-missing' },
+    )
+  }
+
+  async readSessionRecall(
+    request: HistorySessionRecallRequest,
+    signal: AbortSignal,
+  ): Promise<HistorySessionRecallResponse> {
+    const namespace = this.namespaceOf()
+    const read = namespace?.readSessionRecall
+    if (namespace === undefined || read === undefined) {
+      return { kind: 'unavailable', reason: 'service-missing' }
+    }
+    return await this.settle(
+      captured => read.call(namespace, request, captured),
       signal,
       { kind: 'unavailable', reason: 'service-missing' },
     )

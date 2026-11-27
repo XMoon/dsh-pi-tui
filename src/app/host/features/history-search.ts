@@ -2,11 +2,13 @@
  * The Host-owned accepted-input history search service (`piTuiHistorySearch`).
  *
  * It derives a disposable, profile-local SQLite index from the OFFICIAL rc.5
- * Session event log and serves TWO Owner-only private reads:
+ * Session event log and serves THREE Owner-only private reads:
  *
  * ```text
- * search(request, signal)    -> bounded preview rows with a keyset cursor
- * readText(request, signal)  -> exact original text chunks by content hash
+ * search(request, signal)             -> bounded preview rows with a keyset cursor
+ * readText(request, signal)           -> exact original text chunks by content hash
+ * readSessionRecall(request, signal)  -> the bounded newest-first recall window
+ *                                        of ONE exact Session (full text)
  * ```
  *
  * Authority and lifecycle:
@@ -40,6 +42,9 @@ import {
 import { diagFromEnv, type Diag } from '../../../runtime/process/diagnostics.ts'
 import { runDetached, observeSettled } from '../../../runtime/process/tasks.ts'
 import {
+  HISTORY_SESSION_RECALL_LIMIT,
+  HISTORY_SESSION_RECALL_MAX_BYTES,
+  HISTORY_SESSION_RECALL_MAX_TEXT_CHARS,
   PI_TUI_HISTORY_SEARCH_NAMESPACE,
   decodeHistorySearchCursor,
   encodeHistorySearchCursor,
@@ -47,11 +52,14 @@ import {
   historySearchRequestHash,
   parseHistoryReadTextRequest,
   parseHistorySearchRequest,
+  parseHistorySessionRecallRequest,
   type HistoryReadTextResponse,
   type HistorySearchIncompleteReason,
   type HistorySearchRequest,
   type HistorySearchResponse,
   type HistorySearchUnavailableReason,
+  type HistorySessionRecallItem,
+  type HistorySessionRecallResponse,
 } from '../../../runtime/remote/pi-tui-history-search-contract.ts'
 import {
   HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION,
@@ -103,6 +111,12 @@ export interface HistorySearchSessionHeaderLike {
   readonly parentSession?: unknown
   readonly isSeeded: boolean
   readonly delegationDepth?: number
+  /**
+   * The official immutable product classification. `'subagent'` is the ONE
+   * Session-origin admission authority: such a Session admits zero occurrences
+   * (its delegated initial task is still `source.kind === 'user'`).
+   */
+  readonly origin?: 'subagent'
 }
 
 /**
@@ -220,6 +234,10 @@ type IndexState =
 interface PendingSession {
   readonly headerCwd?: string
   readonly inheritedEventCount: number
+  /** The exact immutable header identity of the live Session object. */
+  readonly headerHash: string
+  /** The exact immutable Session origin of that same header. */
+  readonly sessionOrigin: string | undefined
   readonly events: HostAdmissionEventLike[]
   bytes: number
 }
@@ -526,7 +544,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private readonly diag: Diag
   /** Random per service instance: cursors never cross a Host service lifetime. */
   private readonly incarnation = randomUUID()
-  private readonly liveSessions = new Map<string, { readonly headerCwd?: string; readonly inheritedEventCount: number }>()
+  private readonly liveSessions = new Map<string, {
+    readonly headerCwd?: string
+    readonly inheritedEventCount: number
+    readonly headerHash: string
+    readonly sessionOrigin: string | undefined
+  }>()
   private readonly pending = new Map<string, PendingSession>()
   private readonly listenerDisposers: Array<() => void> = []
   private state: IndexState = { kind: 'loading' }
@@ -798,6 +821,75 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     runSignal.throwIfAborted()
     this.assertSameLiveInvocation(invocation)
     return { kind: 'ready', chunk, nextOffset, contentLength: row.content.length }
+  }
+
+  /**
+   * The private session-scoped recall read: the bounded newest-first full-text
+   * occurrences of ONE exact verified main Session. It is a SINGLE authorized
+   * index read cut — the readiness/checkpoint proof and the row query happen
+   * synchronously after the writer wait, and the exact Owner invocation is
+   * re-checked before the answer crosses the wire.
+   */
+  async readSessionRecall(request: unknown, signal: AbortSignal): Promise<HistorySessionRecallResponse> {
+    const invocation = this.requireOwner(signal)
+    const exact = parseHistorySessionRecallRequest(request)
+    const runSignal = this.liveSignal(signal, invocation)
+    runSignal.throwIfAborted()
+    if (this.disposed) return { kind: 'unavailable', reason: 'index-unavailable' }
+    await this.awaitWrites(runSignal)
+    runSignal.throwIfAborted()
+    this.assertSameLiveInvocation(invocation)
+    // Revalidate the actual source binding AFTER the writer wait (the same rule
+    // every Owner read follows).
+    this.observeCoverageBasis()
+    const stateAnswer = this.stateAnswer()
+    if (stateAnswer !== undefined) {
+      // A verified ID may serve its exact recall rows during the healthy first
+      // cold round; every other ID keeps the truthful loading/incomplete state
+      // instead of probing an unproven old row.
+      if (stateAnswer.kind !== 'loading' || !this.partialIdQueryable(exact.sessionId)) return stateAnswer
+    }
+    const index = this.requireIndex()
+    const checkpoint = index.checkpointOf(exact.sessionId)
+    // "Verified target" is the SAME clean-checkpoint fact the read permit uses:
+    // an absent, dirty or uncertain target can never answer an authoritative
+    // empty list.
+    if (checkpoint === undefined || checkpoint.dirty || checkpoint.uncertainSources !== 0) {
+      return { kind: 'loading' }
+    }
+    const rows = index.sessionRecallRows(
+      exact.sessionId,
+      HISTORY_SESSION_RECALL_LIMIT,
+      HISTORY_SESSION_RECALL_MAX_TEXT_CHARS,
+    )
+    const items: HistorySessionRecallItem[] = []
+    for (const row of rows) {
+      // Display normalization for the editor's ↑/↓ projection: trim, skip an
+      // empty/whitespace-only body, and skip shell-mode lines (a recalled `!`
+      // line would re-run the shell branch instead of being edited). Identity
+      // is never derived from the text.
+      const text = row.content.trim()
+      if (text === '' || text.startsWith('!')) continue
+      const item: HistorySessionRecallItem = {
+        messageId: row.messageId,
+        ...(row.rpcId === undefined ? {} : { rpcId: row.rpcId }),
+        firstEventSeq: row.firstEventSeq,
+        text,
+      }
+      const candidate: HistorySessionRecallResponse = {
+        kind: 'ready',
+        sessionId: exact.sessionId,
+        items: [...items, item],
+      }
+      // The budget is measured on the ACTUAL serialized answer envelope. An
+      // unfit row is skipped whole (never truncated) and the descending order
+      // of the remaining rows is preserved.
+      if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') > HISTORY_SESSION_RECALL_MAX_BYTES) continue
+      items.push(item)
+    }
+    runSignal.throwIfAborted()
+    this.assertSameLiveInvocation(invocation)
+    return { kind: 'ready', sessionId: exact.sessionId, items }
   }
 
   /** Abort owned work, withdraw listeners, join every owned flight, close the DB. */
@@ -1226,6 +1318,57 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       || (this.index !== undefined && this.state.reason === 'service-missing')
   }
 
+  /**
+   * The exact immutable live-Session facts this service must preserve through
+   * the pending/held path: the full header hash (the same identity the committed
+   * checkpoint carries), the official origin classification, the inherited cut
+   * and the header directory. A Session object without its required immutable
+   * header is a malformed official live input, not an unknown to guess.
+   */
+  private liveSessionFactsOf(session: unknown): {
+    readonly sessionId: string
+    readonly headerCwd?: string
+    readonly inheritedEventCount: number
+    readonly headerHash: string
+    readonly sessionOrigin: string | undefined
+  } | undefined {
+    const record = session as {
+      readonly id?: unknown
+      readonly header?: HistorySearchSessionHeaderLike
+      readonly inheritedEventCount?: number
+    }
+    if (record.id === undefined) return undefined
+    const header = record.header
+    if (header === undefined || typeof header !== 'object' || header === null) return undefined
+    const inherited = typeof record.inheritedEventCount === 'number' && Number.isSafeInteger(record.inheritedEventCount)
+      && record.inheritedEventCount >= 0
+      ? record.inheritedEventCount
+      : 0
+    return {
+      sessionId: String(record.id),
+      ...(header.cwd === undefined ? {} : { headerCwd: header.cwd }),
+      inheritedEventCount: inherited,
+      headerHash: sessionHeaderHash(header),
+      sessionOrigin: header.origin,
+    }
+  }
+
+  private rememberLiveSession(session: unknown): boolean {
+    if (this.disposed) return false
+    const facts = this.liveSessionFactsOf(session)
+    if (facts === undefined) return false
+    // A creation/replacement makes any same-id official read candidate stale in
+    // this same synchronous stack, before the new fact is remembered.
+    this.invalidateCandidates(facts.sessionId)
+    this.liveSessions.set(facts.sessionId, {
+      ...(facts.headerCwd === undefined ? {} : { headerCwd: facts.headerCwd }),
+      inheritedEventCount: facts.inheritedEventCount,
+      headerHash: facts.headerHash,
+      sessionOrigin: facts.sessionOrigin,
+    })
+    return true
+  }
+
   private observeCreatedSession(session: unknown): void {
     if (this.disposed) return
     const record = session as { readonly id?: unknown }
@@ -1233,26 +1376,16 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const sessionId = String(record.id)
     // Remember/invalidate existing candidates BEFORE scheduling the repair, so
     // the repair's own witness is not invalidated by this same registration.
-    this.rememberLiveSession(session)
+    const remembered = this.rememberLiveSession(session)
     // A created/restored registration is a real source-identity producer even
     // when the restored preexisting history emits no session/event. Revoke only
     // this round's evidence; the existing per-ID repair owns re-proof.
     this.revokeRoundSourceIdentity(sessionId, session as object)
-  }
-
-  private rememberLiveSession(session: unknown): void {
-    if (this.disposed) return
-    const record = session as { readonly id?: unknown; readonly header?: { readonly cwd?: string }; readonly inheritedEventCount?: number }
-    if (record.id === undefined) return
-    const sessionId = String(record.id)
-    // A creation/replacement makes any same-id official read candidate stale in
-    // this same synchronous stack, before the new fact is remembered.
-    this.invalidateCandidates(sessionId)
-    const inherited = typeof record.inheritedEventCount === 'number' && Number.isSafeInteger(record.inheritedEventCount)
-      && record.inheritedEventCount >= 0
-      ? record.inheritedEventCount
-      : 0
-    this.liveSessions.set(sessionId, { ...(record.header?.cwd === undefined ? {} : { headerCwd: record.header.cwd }), inheritedEventCount: inherited })
+    if (!remembered) {
+      this.diag.warn('history search observed a live Session without its immutable header', { category: 'source-uncertain' })
+      this.markReconcileNeeded('source-uncertain', true)
+      this.scheduleSessionRepair(sessionId, 'rebuild')
+    }
   }
 
   private observeLiveEvent(session: unknown, event: unknown): void {
@@ -1261,7 +1394,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     // service lifetime. A MOUNTED index in a recoverable service gap still
     // preserves accepted input under the existing bounded-buffer rules.
     if (!this.acceptsLiveEvents()) return
-    const record = session as { readonly id?: unknown; readonly header?: { readonly cwd?: string }; readonly inheritedEventCount?: number }
+    const record = session as { readonly id?: unknown }
     if (record.id === undefined) return
     const sessionId = String(record.id)
     // FIRST invalidate every same-id candidate: an event accepted before this
@@ -1278,24 +1411,41 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.scheduleSessionRepair(sessionId, 'rebuild')
       return
     }
+    const facts = this.liveSessionFactsOf(session)
+    if (facts === undefined) {
+      // The buffered events cannot be attributed to an exact immutable source
+      // header, so neither their occurrence rows nor their origin classification
+      // can be proven. Rebuild this Session from the official source.
+      this.diag.warn('history search observed a live Session without its immutable header', { category: 'source-uncertain' })
+      this.markReconcileNeeded('source-uncertain', true)
+      this.scheduleSessionRepair(sessionId, 'rebuild')
+      return
+    }
     this.rememberLiveSession(session)
-    const known = this.liveSessions.get(sessionId)
-    const inherited = typeof record.inheritedEventCount === 'number' && Number.isSafeInteger(record.inheritedEventCount)
-      && record.inheritedEventCount >= 0
-      ? record.inheritedEventCount
-      : known?.inheritedEventCount ?? 0
     const existing = this.pending.get(sessionId)
     const bytes = approximateEventBytes(parsed)
     if (existing === undefined) {
       this.pending.set(sessionId, {
-        ...(record.header?.cwd === undefined ? {} : { headerCwd: record.header.cwd }),
-        inheritedEventCount: inherited,
+        ...(facts.headerCwd === undefined ? {} : { headerCwd: facts.headerCwd }),
+        inheritedEventCount: facts.inheritedEventCount,
+        headerHash: facts.headerHash,
+        sessionOrigin: facts.sessionOrigin,
         events: [parsed],
         bytes,
       })
       this.pendingEventCount += 1
       this.pendingBytes += bytes
     } else {
+      if (existing.headerHash !== facts.headerHash || existing.sessionOrigin !== facts.sessionOrigin) {
+        // The same-id live object was replaced (or its immutable origin
+        // changed): the buffered batch and the committed checkpoint can no
+        // longer prove one header identity. Discard and rebuild.
+        this.discardPendingSession(sessionId)
+        this.diag.warn('history search observed a replaced live Session header', { category: 'reconciling' })
+        this.markReconcileNeeded('reconciling', true)
+        this.scheduleSessionRepair(sessionId, 'rebuild')
+        return
+      }
       const duplicate = existing.events.find(candidate => candidate.seq === parsed.seq)
       if (duplicate !== undefined) {
         if (sessionEventHash(duplicate) === sessionEventHash(parsed)) return
@@ -1833,6 +1983,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.writeBatch({
         sessionId,
         headerHash: sessionHeaderHash(source.header),
+        sessionOrigin: source.header.origin,
         inheritedEventCount: source.inheritedEventCount,
         headerCwd,
         baseNextSeq: 0,
@@ -1920,6 +2071,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (batch.inheritedEventCount !== checkpoint.inheritedCut) {
       throw new HistorySearchConflictError(sessionId, 'the fork-inherited cut changed')
     }
+    // The buffered live events belong to ONE exact immutable header identity.
+    // The checkpoint hash covers the full header (including `origin`), so a
+    // different hash means the same-id Session object was replaced and this
+    // batch may never be folded into the old checkpoint.
+    if (batch.headerHash !== checkpoint.headerHash) {
+      throw new HistorySearchConflictError(sessionId, 'the Session header identity changed')
+    }
     if (normalizeHistoryCwd(batch.headerCwd) !== checkpoint.headerCwd) {
       throw new HistorySearchConflictError(sessionId, 'the Session header directory changed')
     }
@@ -1942,6 +2100,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.writeBatch({
       sessionId,
       headerHash: checkpoint.headerHash,
+      sessionOrigin: batch.sessionOrigin,
       inheritedEventCount: checkpoint.inheritedCut,
       headerCwd: checkpoint.headerCwd,
       baseNextSeq: checkpoint.nextSeq,
@@ -1971,6 +2130,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private writeBatch(input: {
     readonly sessionId: string
     readonly headerHash: string
+    /** The exact immutable Session origin of the same header (required input). */
+    readonly sessionOrigin: string | undefined
     readonly inheritedEventCount: number
     readonly headerCwd: string | null
     readonly baseNextSeq: number
@@ -1995,6 +2156,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
     const fold = new HostAdmissionFold({
       sessionId: input.sessionId,
+      sessionOrigin: input.sessionOrigin,
       initialCwd: input.effectiveCwd,
       inheritedEventCount: input.inheritedEventCount,
       startSeq: input.baseNextSeq - 1,
@@ -2004,6 +2166,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const lastEvent = input.events.at(-1)
     const occurrences: HistoryOccurrenceInput[] = delta.occurrences.map((occurrence: HostAdmissionOccurrence) => ({
       messageId: occurrence.messageId,
+      ...(occurrence.rpcId === undefined ? {} : { rpcId: occurrence.rpcId }),
       firstEventSeq: occurrence.firstEventSeq,
       acceptedAt: occurrence.acceptedAt,
       effectiveCwd: occurrence.cwd,
@@ -2629,6 +2792,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         const result = this.writeBatch({
           sessionId,
           headerHash,
+          sessionOrigin: handle.header.origin,
           inheritedEventCount: inherited,
           headerCwd,
           baseNextSeq: nextSeq,
@@ -2702,6 +2866,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         const result = this.writeBatch({
           sessionId,
           headerHash,
+          sessionOrigin: header.origin,
           inheritedEventCount: inherited,
           headerCwd,
           baseNextSeq: nextSeq,

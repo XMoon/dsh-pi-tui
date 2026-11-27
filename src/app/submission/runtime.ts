@@ -89,15 +89,17 @@ export interface PromptSubmission {
 export interface PromptAttemptSettlement {
   hasSettled(): boolean
   isAccepted(): boolean
-  accepted(): void
+  /** The optional argument is the official transport request identity. */
+  accepted(officialRequestId?: string): void
   rejected(): void
   unknown(): void
 }
 
 export interface PromptAttemptHooks {
   /** The Host acceptance latch: fires exactly once, before the committed
-   *  draft/attachment consumption. */
-  onAccepted(): void
+   *  draft/attachment consumption. The optional argument is the OFFICIAL
+   *  transport request identity when the backend has one. */
+  onAccepted(officialRequestId?: string): void
   /** A proven pre-acceptance refusal: the draft stays editable. */
   onRejected(): void
   /** An indeterminate outcome: the draft stays, with an uncertainty notice. */
@@ -192,7 +194,11 @@ export interface SubmissionRuntimeSurface {
    *  `beginSubmission.onAccept`). The write RESULT is never acceptance
    *  authority: a committed outcome that did not fire the callback leaves a
    *  held attempt unaccepted (settled unknown with the draft retained). */
-  prompt(sessionId: string, message: PreparedMessage, options?: { readonly onAccepted?: () => void }): Promise<WriteOutcome>
+  prompt(
+    sessionId: string,
+    message: PreparedMessage,
+    options?: { readonly onAccepted?: (officialRequestId?: string) => void },
+  ): Promise<WriteOutcome>
 }
 
 export interface SubmissionRuntimeDeps {
@@ -378,7 +384,12 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
       return {
         hasSettled: (): boolean => settled,
         isAccepted: (): boolean => accepted,
-        accepted: (): void => { if (settled) return; settled = true; accepted = true; hooks.onAccepted() },
+        accepted: (officialRequestId?: string): void => {
+          if (settled) return
+          settled = true
+          accepted = true
+          hooks.onAccepted(officialRequestId)
+        },
         rejected: (): void => { if (settled) return; settled = true; hooks.onRejected() },
         unknown: (): void => { if (settled) return; settled = true; hooks.onUnknown() },
       }
@@ -1184,11 +1195,11 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
   // PR2: one settle gate for this gesture's attempt (exactly-one hook).
   let attemptSettled = false
   let attemptWasAccepted = false
-  const attemptAccepted = (): void => {
+  const attemptAccepted = (officialRequestId?: string): void => {
     if (attemptSettled || input.attempt === undefined) return
     attemptSettled = true
     attemptWasAccepted = true
-    input.attempt.onAccepted()
+    input.attempt.onAccepted(officialRequestId)
   }
   const attemptRejected = (): void => {
     if (attemptSettled || input.attempt === undefined) return

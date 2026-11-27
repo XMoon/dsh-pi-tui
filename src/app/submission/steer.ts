@@ -97,7 +97,7 @@ export interface SteerDeps {
    * steer (`updateQueue`) never carries it. Optional; absent keeps the
    * direct/unit-call behavior.
    */
-  onDraftAccepted?: () => void
+  onDraftAccepted?: (officialRequestId?: string) => void
 }
 
 /** The notice for a submission refused by the session-transition fence. */

@@ -8946,6 +8946,18 @@ export class TuiApp {
     return this.historyRecall!.rememberAccepted(trimmed)
   }
 
+  /**
+   * Re-project the selected recall authority into the renderer after an
+   * ASYNCHRONOUS same-scope seed commit. The authority itself (the Split
+   * Client's root memory) already committed the new projection; this only
+   * rebuilds the disposable editor mirror and restores an active browse draft.
+   * Direct never calls it (its reseed path goes through `resetInputHistory`).
+   */
+  reseedInputRecall(): void {
+    if (this.memoryRecall === undefined || this.disposed) return
+    this.restoreEditorRecall(true)
+  }
+
   /** The selected recall authority's newest-first projection. */
   private recallSnapshot(): readonly string[] {
     return this.memoryRecall?.snapshot() ?? this.historyRecall!.snapshot()
@@ -25677,7 +25689,11 @@ export class TuiApp {
    * normal submit uses) and lands its recall occurrence; the refusal and
    * unknown outcomes unlock the editor with the document intact.
    */
-  settleSubmission(attemptId: string, result: 'accepted' | 'not-accepted' | 'unknown'): void {
+  settleSubmission(
+    attemptId: string,
+    result: 'accepted' | 'not-accepted' | 'unknown',
+    officialRequestId?: string,
+  ): void {
     // A disposed surface never settles again. A STOPPED surface (a real
     // stop(), not the external editor's temporary suspension) still completes
     // the LOGICAL settlement — the hold is released and the submit input
@@ -25704,7 +25720,7 @@ export class TuiApp {
         // physical effect, so its row commits now, in the same accepted
         // stack as a live settlement. The deferred record then carries only
         // the CLEAR that must wait for the re-presented screen.
-        if (hold.remember) this.memoryRecall?.remember(hold.text)
+        if (hold.remember) this.memoryRecall?.remember(hold.text, officialRequestId)
         this.deferredAcceptedSettle = { text: hold.text, remember: hold.remember }
       }
       return
@@ -25714,7 +25730,7 @@ export class TuiApp {
       // remember FIRST (the text is still available), then the clear.
       if (hold.remember) {
         if (this.memoryRecall !== undefined) {
-          this.memoryRecall.remember(hold.text)
+          this.memoryRecall.remember(hold.text, officialRequestId)
           this.editor.addToHistory(hold.text.trim())
         } else {
           this.editor.addToHistory(hold.text.trim())

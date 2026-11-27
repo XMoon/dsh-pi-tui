@@ -53,8 +53,9 @@ prevents a settings whole-file replacement from erasing another window's input.
   - **Direct only**: `HISTORY_RECALL_LIMIT` (100) session-scoped entries
     seed the editor's ↑/↓ history, and the per-cwd JSONL is the Ctrl+R search
     source and submission write target. The Daemon/Split Client has no file
-    capability at all: its ↑/↓ recall is process memory and its Ctrl+R reads
-    the Host accepted-history index (see the two Split Client sections below).
+    capability at all: its ↑/↓ recall is the Session-scoped Client-root store
+    merged with that Session's trusted Host seed, and its Ctrl+R reads the Host
+    accepted-history index (see the Split Client sections below).
     The canonical JSONL is NEVER truncated or rewritten on read — a concurrent
     append from another window must never land in an orphaned inode. No
     read-side compaction may rewrite the append-only file or replace the inode
@@ -65,8 +66,8 @@ prevents a settings whole-file replacement from erasing another window's input.
 - The runner loads the file per session on Direct (and once at boot for the
   launch cwd, so a fresh window recalls immediately — see below), and only
   Direct appends every submitted line. The Daemon/Split Client neither reads
-  nor writes these files; its ↑/↓ recall is process memory and its Ctrl+R reads
-  the Host accepted-history index.
+  nor writes these files; its ↑/↓ recall is the Session-scoped root recall plus
+  the Host seed, and its Ctrl+R reads the Host accepted-history index.
 
 ## Ctrl+R history search
 
@@ -122,6 +123,16 @@ below.
   source with a marker. `↑`/`↓`/`PgUp`/`PgDn` keep selecting in the results list;
   the list shows the prompt only, with the directory prefix in
   `All directories` only.
+- **Stable viewport**: the nominal seat grant and the
+  Header/query/Results/divider/Preview/metadata/action boundaries are derived
+  from the LIVE terminal geometry and expanded state ALONE — never from the
+  result count, body presence, searching/loading/error state or index
+  readiness. Every search state paints the same nominal slots: a status message
+  occupies the first results slot, and the remaining Results/Preview/metadata
+  slots stay as inert blank reserve. Blank reserve never acts as a selectable
+  result and never offers Copy/Use; only a ready page with a painted selected
+  row is actionable. A stale press cannot act on replacement/blank cells after a
+  material page, query or body change.
 - **Copy**: `Alt+C` copies the EXACT stored prompt (both roots); in Transcript
   Fullscreen the Preview heading also carries clickable `Copy All [Alt+C]` and
   `Use Selected [Enter]` (the verb is never bracketed; the whole item is hidden
@@ -232,6 +243,14 @@ TSP native card.
   is the only query authority; each renderer paints its committed view and
   keeps its existing row budget, keys and pointer routes. Neither renderer
   polls or reads the Host directly.
+- **Corpus membership (root-only).** Only ordinary main Sessions contribute to
+  search/readText/recall. A Session whose immutable official header says
+  `origin === 'subagent'` admits ZERO occurrences even though its delegated
+  initial task is still `source.kind === 'user'`; an ordinary fork contributes
+  only its OWN post-inherited-cut input, never the inherited parent prefix. The
+  exclusion is applied by the same admission fold that projects the occurrence,
+  before the message body is parsed, and a verified child target answers the
+  truthful ready-empty state (never another Session's rows).
 - **Statuses.** `loading` is the truthful first-cold-round warmup, `partial` is
   the same healthy round offering only already-verified IDs, and `ready` is
   the original complete result with the normal cursor/More. `incomplete`,
@@ -328,8 +347,8 @@ projection: the PiTui adapter mirrors the kernel snapshot into its editor stack
 in reverse (the editor's `addToHistory` unshifts), and the TSP composer reads
 the kernel's newest-first snapshot directly at each arrow. The runner therefore
 reverses the loaded entries before seeding. (The Daemon/Split Client reads its
-process memory newest-first and never seeds from this file; see its section
-below.) The first `↑` must recall the MOST RECENT submission —
+Session-scoped recall authority newest-first and never seeds from this file;
+see its section below.) The first `↑` must recall the MOST RECENT submission —
 this is pinned by `test/tui/input-experience.test.ts` ("seeded input history
 recalls entries with the up arrow"), `test/client/tui-app.test.ts` and the TSP
 composer tests.
@@ -337,8 +356,8 @@ composer tests.
 ### The two editors' ↑/↓ presentation
 
 Both editor adapters read the SAME newest-first projection of their selected
-recall authority — the Direct kernel, or the Daemon/Split Client's process
-memory; their vertical-caret model is deliberately different because the layout
+recall authority — the Direct kernel, or the Daemon/Split Client's
+Session-scoped root recall; their vertical-caret model is deliberately different because the layout
 owner is different:
 
 - PiTui owns its own visual soft-wrap map, so ↑/↓ first move across the lines
@@ -356,11 +375,14 @@ that browsing replaced; a real text edit ends the browse and makes the recalled
 row ordinary editable content. Browsing never submits, writes a row, switches a
 Session or paints a second input surface. A formal owner publication
 (`beginInputHistoryScope`, before the Direct kernel commit) retires the
-short-lived browse bookmark — on the Daemon/Split Client this is the ONLY
-publication effect (there is no reseed); a current-owner asynchronous Direct
-cold reseed (`resetInputHistory`) instead restores the exact pre-browse draft/caret, ends
-that browse and replaces the projection, while a settlement, a repaint or a
-pre-publication hydration window leaves the current browse alone. Entering the
+short-lived browse bookmark; on the Daemon/Split Client the publication also
+binds the root recall scope (a different Session/carrier clears the outgoing
+projection, a same-scope remount keeps it). A current-owner asynchronous reseed
+— the Direct cold reseed (`resetInputHistory`) or the Split Client's Host seed
+(`reseedInputRecall`) — restores the exact pre-browse draft/caret, ends that
+browse and replaces the projection, while a settlement, a repaint or a
+pre-publication hydration window leaves the current browse alone. A Host seed
+released for a no-longer-current scope never mutates the visible list. Entering the
 first recalled row consults the application's existing pasted-path delivery and
 plain-history eligibility; a refusal keeps the draft, caret and live paste
 leases, starts no browse, and discards the aborted attempt's pending bookmark so
@@ -375,52 +397,70 @@ With a deferred Direct start no session exists at boot, so the per-session
 seed in `initLiveSession` has not run. The runner seeds the Direct recall
 history from the LAUNCH cwd at boot too, so ↑ works immediately in a new
 window; `initLiveSession` replaces it when the first session is born (and on
-every session switch). The Daemon/Split Client does NOT do this: its boot
-recall is empty and `initLiveSession` never reseeds it (see the next section).
+every session switch). The Daemon/Split Client does NOT do this: it never reads the Client file; its
+boot recall is empty until the current Session's Host seed commits (see the
+next section).
 
-### Daemon/Split Client: process-lifetime recall (↑/↓)
+### Daemon/Split Client: Session-scoped Host recall (↑/↓)
 
 The Daemon/Split backend (`dsh --profile` with the split Client process) has a
-different ↑/↓ owner, by product decision: the recall is the **current Client
-OS process's** most recent 100 admitted main-Composer inputs, and it is NEVER
-imported from a history file, the Host, another Client or a previous process.
+different ↑/↓ owner, by product decision: ONE Client-root in-memory recall
+authority (`src/client/history/memory-recall.ts`) created by
+`startSurfaceLocalClient` OUTSIDE its surface-revision loop.
 
-- **Owner and lifetime.** ONE pure in-memory store is created by
-  `startSurfaceLocalClient` outside its surface-revision loop
-  (`src/client/history/memory-recall.ts`). A same-PID HMR/replacement revision
-  re-borrows the SAME object; the OS process exiting releases it, so a new
-  process starts empty. It holds plain strings only — no Session id, cwd, file,
-  Host identity, occurrence token or write settlement.
-- **Content and order.** Each entry is the trimmed, already-serialized draft of
-  a real main-Composer submission. Empty input is ignored, a CONSECUTIVE
-  duplicate collapses, a non-consecutive duplicate is legal history, the list
-  is newest-first and bounded by the shared 100-entry cap. No byte cap and no
-  TTL.
-- **Admission.** The store is written at the same boundaries the Direct scoped
-  kernel uses: a `holdSubmission` attempt's `accepted` settlement records its
-  captured gesture-time text exactly once (`refused` / `unknown` / retired
-  attempts never record), and a clear-first `legacy` submission records before
-  its clear (the same `shouldRememberInput` + trim policy; it is not an
-  execution-success audit). The two PiTui legacy steer entries record a real
-  non-empty deliverable draft before their clear; an empty queue sweep never
-  records. Child-Viewer drafts, attachment-bearing inputs and pending pastes
-  never enter the list. The TSP composer has no raw steer key and keeps only
-  the submissions it really supports.
-- **Projections.** Both renderers consume the SAME store. The PiTui editor
-  stack is a disposable mirror rebuilt from the store's snapshot
-  (oldest→newest through `addToHistory`), and ordinary recordings update the
-  store and the live editor together. The TSP renderer reads the store's
-  snapshot directly from its composer's `entries` getter and owns only its
-  short-lived browse position and the draft it replaced. A formal owner
-  publication (`beginInputHistoryScope`) retires the outgoing browse/bookmark
-  and never restores the old Session's draft, but it does NOT clear or reseed
-  the list — the process memory is not a Session or cwd scope.
+- **Owner and lifetime.** The same object is injected by identity into every
+  revision's PiTui and TSP renderer: a same-PID HMR/replacement revision
+  re-projects the SAME store; the OS process exiting releases it. It holds plain
+  strings plus the minimal local/Host/correlation provenance of the current
+  scope — no Client file, no durable cache, no mirrored Host index.
+- **Scope.** The authority is scoped to the authenticated carrier identity
+  (Connection generation + exact retained binding) plus the current Session id,
+  or the explicit sessionless scope. The application binds that scope at every
+  synchronous Session publication seam BEFORE any renderer projects it —
+  including the pre-mount startup resume — and re-binds it on an official
+  connection-generation rollover. A different Session or carrier CLEARS the
+  outgoing list (a same-id A→B→A or a reconnect is a different scope; the Host
+  identity is never inferred from an equal Session id). A same-scope remount
+  keeps it. `/new` and the first deferred Session import neither the old
+  Session's rows nor sessionless command history; the first prompt accepted
+  after publication belongs to the actual new Session.
+- **Content and order.** At most 100 newest-first trimmed strings. A local
+  occurrence is a real accepted main-Composer submission (the accepted renderer
+  settlement; a consecutive duplicate collapses, a non-consecutive one is legal
+  history). Child-Viewer drafts, attachment-bearing inputs and pending pastes
+  never enter. No byte cap and no TTL.
+- **Host seed.** After the current Session hydrates, the application schedules
+  ONE detached `piTuiHistorySearch/readSessionRecall` read for that exact scope
+  and carrier (no poll). `loading` retries with 1s/2s/4s/8s… capped at 10s;
+  `ready` commits the merged projection; a terminal `incomplete`/`unavailable`,
+  a missing older-Host method, a denial/failure or a superseded carrier STOPS
+  the flight and leaves the current list intact. Every result re-checks the
+  exact Session, owner generation and carrier before committing. The Host
+  answer is bounded to 100 rows and a fixed 64 KiB serialized UTF-8 budget,
+  ordered by Host acceptance time (newest first), with its original text
+  trimmed; empty/whitespace-only and `!` shell-mode rows are skipped whole,
+  never truncated.
+- **Merge.** Current-scope local occurrences stay first in admission order. A
+  seed row whose official `rpcId` equals a local occurrence's official request
+  correlation is dropped (the local original text wins and appears once). The
+  remaining Host rows follow in Host order. A same-scope repeated seed REPLACES
+  the previous seed rows instead of appending them; a seed for another/previous
+  scope never applies. Text is never an identity: only an exact official
+  correlation dedupes; only ADJACENT equal display text collapses, and the
+  shared 100-entry cap evicts only the oldest.
+- **Projections.** Both renderers consume the SAME store snapshot. The PiTui
+  editor stack is a disposable mirror rebuilt from that snapshot (publication,
+  mount and asynchronous reseat); ordinary local recordings update the store
+  and live editor together. The TSP renderer reads the snapshot directly from
+  its composer's `entries` getter and reseats its browse position after a
+  Host-seed replacement. A reseed while the user is browsing restores the exact
+  pre-browse draft/caret; it never restores a draft across a scope publication.
 - **No Client history file at all.** The Split Client constructs no
-  `FileHistorySearchSource`, no `InputHistory` writer/anchor and no known-cwd
-  set; it does not call `readSessionRecall`, does not schedule the cross-cwd
-  hydration scan and does not apply a current-cwd fallback. The Client cwd is
-  never a history key and a Client-local file row never seeds ↑/↓ or Ctrl+R.
-  The existing user-history files are left byte-for-byte untouched.
+  `FileHistorySearchSource`, `InputHistory` writer/anchor or known-cwd set; it
+  does not call the Direct `readSessionRecall`, schedule the cross-cwd hydration
+  scan or apply a current-cwd fallback. The Client cwd is never a history key
+  and a Client-local file row never seeds ↑/↓ or Ctrl+R. The existing
+  user-history files are left byte-for-byte untouched.
 
 ### Daemon/Split Client: Host accepted-history Ctrl+R
 
@@ -492,8 +532,8 @@ Client's JSONL files are neither read nor written.
 ### Editor recall scope: session-first (↑/↓), cwd-first (Ctrl+R)
 
 This section documents the DIRECT backend. The Daemon/Split Client's ↑/↓ owner
-is its process memory and its Ctrl+R is the Host accepted-history read; neither
-consumes a Client history file.
+is its Session-scoped root recall and its Ctrl+R is the Host accepted-history
+read; neither consumes a Client history file.
 
 The EDITOR's ↑/↓ recall is session-scoped once a live session exists: the
 hydration reseed reads the SAME Client-local history source's
@@ -664,12 +704,16 @@ cwd authority; a new mount starts from its own boot seed.
 ## Where the code lives
 
 - `src/client/history/memory-recall.ts` — the Daemon/Split Client's ONE
-  process-lifetime recall memory (trim, adjacent dedupe, newest-first, the
-  shared 100 cap; no IO, Session, cwd or acceptance knowledge). Created once in
-  `src/app/remote-process/client-bootstrap.ts` outside the surface-revision
-  loop; consumed by the PiTui editor mirror (`src/tui-app.ts`) and the TSP
-  composer (`src/tui/tsp/session.ts`). Pinned by
-  `test/client/memory-recall.test.ts` and the Remote runner recall cases.
+  Client-root recall authority: exact carrier+Session scope, local accepted
+  rows, the bounded Host seed and their official-rpcId merge (trim, adjacent
+  display dedupe, newest-first, the shared 100 cap; no IO or durable cache).
+  Created once in `src/app/remote-process/client-bootstrap.ts` outside the
+  surface-revision loop; bound at the application publication seams
+  (`src/app/session/runtime.ts`), seeded by the post-hydration read in
+  `src/app/bootstrap.ts`, and consumed by the PiTui editor mirror
+  (`src/tui-app.ts`) and the TSP composer (`src/tui/tsp/session.ts`). Pinned by
+  `test/client/memory-recall.test.ts`, `test/client/tui-app.test.ts` and the
+  Remote runner recall cases.
 - `src/client/history/store.ts` — the pure store: pathing (`historyFilePath`), parsing
   (`parseHistoryLines` / `parseHistoryRecords`), read-only load
   (`loadHistoryFile` / `loadHistoryRecords` / `loadRecallHistory`), append
@@ -698,16 +742,22 @@ cwd authority; a new mount starts from its own boot seed.
   `test/app/remote-history-scope.test.ts`.
 - `src/runtime/history-search-read-port.ts` / `src/runtime/remote/history-search-remote.ts`
   — the narrow read port and its Remote implementation over the mounted private
-  namespace, with denied/failed/superseded outcomes. Pinned by
+  namespace (`search`, `readText`, `readSessionRecall`), with
+  denied/failed/superseded outcomes. Pinned by
   `test/runtime/remote/history-search-remote.test.ts`.
 - `src/app/host/features/history-search.ts` / `history-search-index.ts` — the
-  Host accepted-history service and its disposable SQLite projection (cursor v2
-  row anchor, typed pages, exact readText). Pinned by
-  `test/app/pi-tui-history-search-host.test.ts` and the Host runtime tests.
+  Host accepted-history service and its disposable SQLite projection
+  (`v3.sqlite`: cursor v2 row anchor, typed pages, exact readText, the bounded
+  session-recall window, optional official rpcId, root-only corpus membership).
+  Pinned by `test/app/pi-tui-history-search-host.test.ts` and the Host runtime
+  tests.
 - `src/tui/panels/history-panel.ts` — the Ctrl+R modal panel (Direct file source
   or the shared Remote seat; query input, scope tabs, list, details, responsive
-  layout). Pinned by the Direct `test/client/history-panel.test.ts` /
-  `test/client/ctrl-r.test.ts` suites and the Remote panel composition test.
+  layout). Its nominal Results/Preview/action slots are derived from the live
+  geometry and expanded state ALONE: every search state paints the same
+  boundaries, and a blank reserve is inert. Pinned by the Direct
+  `test/client/history-panel.test.ts` / `test/client/history-seat-mouse.test.ts`
+  / `test/client/ctrl-r.test.ts` suites and the Remote panel composition test.
 - `src/app/submission/history-persist.ts` — the Direct file-write gate: the pure
   persist decision (`persistHistoryRecord`) and the deferred-start ordering
   contract (`persistAfterSession`, which still awaits session resolution when no

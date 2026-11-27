@@ -14,7 +14,16 @@
  * ```
  *
  * `source.kind` alone is the producer authority: request correlation (`rpcId`),
- * principal, time zone and presentation metadata never decide admission. An
+ * principal, time zone and presentation metadata never decide admission. The
+ * official request correlation of the first accepted user message IS carried
+ * through as optional metadata (an exact match against the official request
+ * identity later), but its absence never blocks admission and its presence
+ * never creates a second occurrence.
+ *
+ * The official immutable Session origin is the corpus-membership authority:
+ * a Session whose header says `origin === 'subagent'` admits ZERO occurrences
+ * (its delegated initial task is still `source.kind === 'user'`), while the
+ * event envelope, contiguity and cwd folding obligations stay in force. An
  * unreadable required payload of an explicit user message fails the source
  * read instead of being silently dropped; a non-user producer is excluded
  * before its body is parsed.
@@ -44,10 +53,12 @@ interface ContentBlockLike {
   readonly text?: string
 }
 
-/** One accepted user message's structural shape (never a Host/Client object). */
+/** One accepted message's structural shape (never a Host/Client object). */
 interface HostAdmissionMessageLike {
   readonly id: string
   readonly content: readonly ContentBlockLike[]
+  /** Optional official request identity carried by the first admission. */
+  readonly rpcId?: string
 }
 
 /** One accepted prompt occurrence as the Host derives it. */
@@ -64,6 +75,12 @@ export interface HostAdmissionOccurrence {
   readonly cwd: string | null
   /** Whether the accepted message carried any non-text content block. */
   readonly hasNonText: boolean
+  /**
+   * The official request correlation of this first admission. Absent when the
+   * producer carried none (or an unusable value): an absence is a legal fact,
+   * never an incomplete source.
+   */
+  readonly rpcId?: string
 }
 
 /** The immutable result of folding one Session. */
@@ -81,6 +98,11 @@ export interface HostAdmissionDelta {
 
 export interface HostAdmissionFoldOptions {
   readonly sessionId: string
+  /**
+   * The exact official immutable Session origin (`SessionHeader.origin`). The
+   * production caller MUST supply it: `'subagent'` admits zero occurrences.
+   */
+  readonly sessionOrigin: string | undefined
   /** Initial effective directory fact; absent or `null` means unknown. */
   readonly initialCwd?: string | null
   /** Exact fork-inherited event count: events before this seq never accept a prompt. */
@@ -122,6 +144,7 @@ interface MutableOccurrence {
   readonly acceptedAt: number
   readonly cwd: string | null
   readonly hasNonText: boolean
+  readonly rpcId: string | undefined
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
@@ -158,7 +181,21 @@ function readUserMessage(value: unknown): HostAdmissionMessageLike | undefined {
     }
     blocks.push({ type: block.type, ...(typeof block.text === 'string' ? { text: block.text } : {}) })
   }
-  return { id, content: blocks }
+  const rpcId = optionalRpcIdOf(source.rpcId)
+  return { id, content: blocks, ...(rpcId === undefined ? {} : { rpcId }) }
+}
+
+/** The official request-id bound this fold accepts as optional correlation. */
+const RPC_ID_MAX_CHARS = 256
+
+/**
+ * The optional official request correlation of one user source. An absent,
+ * non-string, empty or over-bound value is simply ABSENT correlation: it is
+ * never an incomplete/rejected source.
+ */
+function optionalRpcIdOf(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value === '' || value.length > RPC_ID_MAX_CHARS) return undefined
+  return value
 }
 
 /** Text projection: every text block, in order, joined by one newline. */
@@ -181,6 +218,7 @@ function occurrenceOf(occurrence: MutableOccurrence): HostAdmissionOccurrence {
     acceptedAt: occurrence.acceptedAt,
     cwd: occurrence.cwd,
     hasNonText: occurrence.hasNonText,
+    ...(occurrence.rpcId === undefined ? {} : { rpcId: occurrence.rpcId }),
   }
 }
 
@@ -195,6 +233,7 @@ function occurrenceOf(occurrence: MutableOccurrence): HostAdmissionOccurrence {
 export class HostAdmissionFold {
   readonly sessionId: string
   readonly inheritedEventCount: number
+  private readonly excludesOccurrences: boolean
   private readonly occurrences = new Map<string, MutableOccurrence>()
   private readonly newOccurrences: MutableOccurrence[] = []
   private currentCwdValue: string | null
@@ -211,6 +250,7 @@ export class HostAdmissionFold {
     }
     this.sessionId = options.sessionId
     this.inheritedEventCount = options.inheritedEventCount
+    this.excludesOccurrences = options.sessionOrigin === 'subagent'
     this.currentCwdValue = normalizeHistoryCwd(options.initialCwd)
     this.lastAppliedSeq = startSeq
   }
@@ -250,12 +290,17 @@ export class HostAdmissionFold {
           if (recordOf(candidate) === undefined) {
             throw new HostAdmissionPayloadError('an inbox insertion contains a non-message element')
           }
+          // The child corpus is excluded BEFORE parsing a potential user
+          // message: its delegated task is still `kind:'user'`, so admission
+          // cannot be decided from the message body.
+          if (this.excludesOccurrences) continue
           const message = readUserMessage(candidate)
           if (message !== undefined) this.accept(message, event.time, event.seq)
         }
         continue
       }
       if (event.type === 'user/message') {
+        if (this.excludesOccurrences) continue
         const message = readUserMessage(event.data)
         if (message !== undefined) this.accept(message, event.time, event.seq)
       }
@@ -301,6 +346,7 @@ export class HostAdmissionFold {
       acceptedAt: time,
       cwd: this.currentCwdValue,
       hasNonText: hasNonTextBlock(message.content),
+      rpcId: message.rpcId,
     }
     this.occurrences.set(message.id, occurrence)
     this.newOccurrences.push(occurrence)

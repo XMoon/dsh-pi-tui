@@ -177,7 +177,7 @@ const CASE_REGISTRY = Object.freeze([
   Object.freeze({
     suite: 'surface',
     id: 'surface.host-history-search-pr1',
-    title: 'a real Split Client searches and recovers the exact accepted input another Client submitted through the private Host accepted-history index, including keyset pages, stale cursors, fork inheritance, event-time cwd, queue mutation stability, qualified cold-proof restart recovery across real Host processes and one-changed-source rebuild after an offline official append',
+    title: 'a real Split Client searches and recovers the exact accepted input another Client submitted through the private Host accepted-history index, including keyset pages, stale cursors, the bounded session-recall window with cancellation, fork inheritance, event-time cwd, queue mutation stability, qualified cold-proof restart recovery across real Host processes and one-changed-source rebuild after an offline official append',
     platforms: LINUX_DARWIN,
     defaultLane: false,
     run: runHostHistorySearch,

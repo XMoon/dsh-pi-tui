@@ -598,7 +598,7 @@ test('the resumed Remote startup accepts and recalls an input while its hydratio
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-remote-startup-window'
   const hostPreset = 'm3-4-pr2-preset'
-  const host = await mountRemotePresentationHost(life, hostPreset)
+  const host = await mountRemotePresentationHost(life, hostPreset, { pluginManagerProfile: true })
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   {
     const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
@@ -695,8 +695,13 @@ test('the resumed Remote startup accepts and recalls an input while its hydratio
     releaseRead()
     await waitFor('the resumed hydration committed the transcript', () =>
       fixture.vt.getViewport().join('').includes('earlier remote answer'), 20_000)
-    assert.deepEqual([...editor.getInputHistory()], ['first remote prompt'],
-      'the hydration commit never reseeds ↑ from the history file')
+    // PR2-C: the resumed hydration schedules the Host recall seed of THIS
+    // Session. The local acceptance stays first; the accepted remote turn is
+    // merged from the official Host corpus (never from a Client history file).
+    await waitFor('the Host seed commits the resumed Session recall', () =>
+      [...editor.getInputHistory()].includes('earlier remote turn'), 20_000)
+    assert.deepEqual([...editor.getInputHistory()], ['first remote prompt', 'earlier remote turn'],
+      'local accepted input first, then the Host seed; no Client file row')
     assert.deepEqual(coldReads, [], 'the Split Client never runs the Direct cold cross-cwd recall read')
 
     // The REAL ↑ sink recalls the acceptance-boundary input.
@@ -715,7 +720,7 @@ test('a resumed Remote Session recalls only this process\'s accepted inputs, nev
   const mainId = 'm3-4-r11-process-pitui'
   const otherId = 'm3-4-r11-process-pitui-b'
   const presetId = 'm3-4-r11-process-pitui-preset'
-  const host = await mountRemotePresentationHost(life, presetId)
+  const host = await mountRemotePresentationHost(life, presetId, { pluginManagerProfile: true })
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   await host.harness.create(SessionId(otherId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   const appendOf = (id: string) => host.ctx.sessions.get(SessionId(id)) as unknown as {
@@ -755,8 +760,17 @@ test('a resumed Remote Session recalls only this process\'s accepted inputs, nev
     .filter(event => event.type === 'user/message' && JSON.stringify(event.data).includes(text)).length
   try {
     await waitFor('the resumed Session hydrated', () => viewport().includes('resume answer 1'), 20_000)
-    assert.deepEqual([...editor.getInputHistory()], [], 'a new process recall never imports a history file')
+    await waitFor('the Host seed commits the resumed Session recall', () =>
+      [...editor.getInputHistory()].includes('resume prompt 1'), 20_000)
+    assert.deepEqual([...editor.getInputHistory()], ['resume prompt 1'],
+      'the resumed Session seeds ITS OWN accepted Host history, never a Client file row')
     assert.deepEqual(coldReads, [], 'the Split Client never runs the Direct cold cross-cwd recall read')
+
+    // The official Host seed reaches the REAL ↑ sink before any local entry.
+    fixture.vt.sendInput('\x1b[A')
+    await waitFor('↑ recalls the Host-seeded row', () => editor.getDraft() === 'resume prompt 1', 5_000)
+    fixture.vt.sendInput('\x1b[B')
+    await waitFor('↓ returns to the empty bookmarked draft', () => editor.getDraft() === '', 5_000)
 
     // A REAL keyboard submission into the resumed Session (the production
     // admission/writer path, never a store seed).
@@ -775,32 +789,215 @@ test('a resumed Remote Session recalls only this process\'s accepted inputs, nev
     await waitFor('↑ recalls the process input', () => editor.getDraft() === submitted, 5_000)
     assert.equal(userRowsFor(mainId, submitted), 1, 'a recalled draft is never submitted by ↑')
 
+    // DECISIVE source → sink chain: the accepted submission is durable in the
+    // Host with an official request correlation; a reconnect DISCARDS the local
+    // copy and re-seeds the SAME text through the private Host recall read.
+    const acceptedRpcId = appendOf(mainId).snapshotEvents()
+      .flatMap(event => event.type === 'agent/inbox/spliced'
+        ? ((event.data as { inserted?: Array<{ source?: { rpcId?: string } }> }).inserted ?? [])
+        : [])
+      .map(message => message.source?.rpcId)
+      .filter((rpcId): rpcId is string => typeof rpcId === 'string' && rpcId !== '')
+      .at(-1)
+    assert.equal(typeof acceptedRpcId, 'string', 'the accepted Host occurrence carries the official rpcId')
+    const connection = fixture.aggregate.wire.client.connection as unknown as { reconnect(): void }
+    connection.reconnect()
+    await waitFor('the reconnect re-seeds the accepted input from the Host', () =>
+      [...editor.getInputHistory()].includes(submitted), 20_000)
+    assert.deepEqual([...editor.getInputHistory()], [submitted, 'resume prompt 1'],
+      'the local copy was discarded; the Host seed supplies the accepted occurrence once, newest first')
+    fixture.vt.sendInput('\x1b[A')
+    await waitFor('↑ recalls the re-seeded Host occurrence', () => editor.getDraft() === submitted, 5_000)
+    fixture.vt.sendInput('\x1b[B')
+    await waitFor('↓ returns to the empty bookmarked draft', () => editor.getDraft() === '', 5_000)
+
     // A real Session switch through the mounted command registry: the process
     // list survives, and the outgoing draft/bookmark is not restored into the
     // new Session.
     editor.setDraft(`/resume ${otherId}`)
     editor.submitDraft()
     await waitFor('Session B hydrated', () => viewport().includes('switch answer 1'), 20_000)
+    await waitFor('Session B Host seed replaces A\'s scope', () =>
+      [...editor.getInputHistory()].includes('switch prompt 1'), 20_000)
     const afterSwitch = [...editor.getInputHistory()]
-    assert.ok(afterSwitch.includes(submitted), `the list survives the Session switch: ${JSON.stringify(afterSwitch)}`)
-    assert.ok(afterSwitch.includes(`/resume ${otherId}`), 'the switching command itself is history')
+    assert.deepEqual(afterSwitch, ['switch prompt 1'],
+      'after publication only B\'s local/Host scope remains: A\'s list and the sessionless switch command are not imported')
+    assert.equal(afterSwitch.includes(submitted), false, 'A input never paints in B')
+    assert.equal(afterSwitch.includes(`/resume ${otherId}`), false, 'a sessionless command is not imported into B')
     assert.equal(afterSwitch.includes('current cwd disk row'), false, 'no disk row ever joins the list')
     assert.equal(afterSwitch.includes('other cwd disk row'), false, 'no other-cwd disk row either')
     assert.equal(editor.getDraft(), '', 'no old draft is restored into the new Session')
 
-    // Reconnect (Connection generation rollover): a full re-hydration of the
-    // same process must keep the list intact.
-    const connection = fixture.aggregate.wire.client.connection as unknown as { reconnect(): void }
+    // A reconnect on Session B is a NEW carrier: B's scope clears and re-seeds
+    // from the SAME trusted Host history, never from A and never from a file.
     connection.reconnect()
     await waitFor('the reconnect re-hydrated Session B', () => viewport().includes('switch answer 1'), 20_000)
+    await waitFor('the new carrier re-seeds the same Session', () =>
+      [...editor.getInputHistory()].includes('switch prompt 1'), 20_000)
     assert.deepEqual([...editor.getInputHistory()], afterSwitch,
-      'a reconnect never reseeds or clears the process recall')
+      'a reconnect on the SAME Session re-seeds the same trusted Host history')
     fixture.vt.sendInput('\x1b[A')
-    await waitFor('↑ still recalls the process input after the reconnect', () =>
-      editor.getDraft() === `/resume ${otherId}`, 5_000)
+    await waitFor('↑ still recalls B\'s accepted input after the reconnect', () =>
+      editor.getDraft() === 'switch prompt 1', 5_000)
     assert.deepEqual(coldReads, [], 'no reconnect path reads a history file for recall')
   } finally {
     FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
+    await fixture.dispose()
+  }
+})
+
+test('the mounted Client namespace carries the recall descriptor end-to-end with official correlation', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2c-l5-recall'
+  const presetId = 'm3-4-pr2c-l5-recall-preset'
+  const host = await mountRemotePresentationHost(life, presetId, { pluginManagerProfile: true })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host, productionSerializer: true })
+  const namespace = (fixture.aggregate.wire.client.remote as unknown as {
+    readonly piTuiHistorySearch: {
+      readSessionRecall(
+        request: { readonly sessionId: string },
+        signal?: AbortSignal,
+      ): Promise<{ readonly ok: boolean; readonly value?: unknown; readonly error?: unknown }>
+    }
+  }).piTuiHistorySearch
+  try {
+    await waitFor('the resumed Session hydrated', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+    // ONE official Host admission carrying the real requestId the Client sent.
+    await host.ctx.sessionController.prompt({
+      requestId: 'req-l5-recall' as never,
+      sessionId: SessionId(mainId),
+      mode: 'queue',
+      content: [{ type: 'text', text: 'l5 recall official correlation' }] as never,
+    }, new AbortController().signal)
+    let answer: { readonly ok: boolean; readonly value?: unknown; readonly error?: unknown } | undefined
+    const started = Date.now()
+    while (Date.now() - started < 20_000) {
+      answer = await namespace.readSessionRecall({ sessionId: mainId })
+      if (answer.ok && (answer.value as { kind?: string }).kind === 'ready') break
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    assert.equal(answer?.ok, true, `the real Client wire must answer: ${JSON.stringify(answer?.error)}`)
+    const value = answer?.value as {
+      kind: string
+      sessionId: string
+      items: Array<{ messageId: string; rpcId?: string; text: string }>
+    }
+    assert.equal(value.kind, 'ready', JSON.stringify(value))
+    assert.equal(value.sessionId, mainId)
+    assert.deepEqual(value.items.map(item => [item.text, item.rpcId]), [
+      ['l5 recall official correlation', 'req-l5-recall'],
+    ], 'the mounted Client namespace carries the exact official rpcId and original text')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+test('a Host seed for A released after B publication never appends A to the current scope', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2c-late-seed-a'
+  const otherId = 'm3-4-pr2c-late-seed-b'
+  const presetId = 'm3-4-pr2c-late-seed-preset'
+  const host = await mountRemotePresentationHost(life, presetId, { pluginManagerProfile: true })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  await host.harness.create(SessionId(otherId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const appendOf = (id: string) => host.ctx.sessions.get(SessionId(id)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seedTurns(appendOf(mainId), 1, 1, 'late-a')
+  seedTurns(appendOf(otherId), 1, 1, 'late-b')
+  let seedReadEntered = false
+  let releaseSeed!: () => void
+  const seedGate = new Promise<void>(resolve => { releaseSeed = resolve })
+  const fixture = await mountRemoteRunner(life, {
+    presetId,
+    resumeSessionId: mainId,
+    host,
+    productionSerializer: true,
+    beforeRunnerMount: (presentation) => {
+      const port = presentation.historySearch as unknown as {
+        readSessionRecall(request: { readonly sessionId: string }, signal: AbortSignal): Promise<unknown>
+      }
+      const real = port.readSessionRecall
+      port.readSessionRecall = async function heldSeed(
+        this: unknown,
+        request: { readonly sessionId: string },
+        signal: AbortSignal,
+      ): Promise<unknown> {
+        const answer = await real.call(this, request, signal)
+        if (request.sessionId !== mainId) return answer
+        seedReadEntered = true
+        await seedGate
+        return answer
+      }
+    },
+  })
+  const editor = fixture.runnerApp() as unknown as {
+    setDraft(text: string): void
+    submitDraft(): void
+    getInputHistory(): readonly string[]
+  }
+  try {
+    await waitFor('A\'s seed read is held', () => seedReadEntered, 20_000)
+    assert.deepEqual([...editor.getInputHistory()], [], 'the held read is not visible yet')
+
+    // A REAL publication A → B. B's own seed commits while A's answer is held.
+    editor.setDraft(`/resume ${otherId}`)
+    editor.submitDraft()
+    await waitFor('B\'s Host seed commits', () =>
+      [...editor.getInputHistory()].includes('late-b prompt 1'), 20_000)
+    assert.deepEqual([...editor.getInputHistory()], ['late-b prompt 1'])
+
+    // Release the OLD carrier/Session answer. It must not append A's rows.
+    releaseSeed()
+    await new Promise(resolve => setTimeout(resolve, 100))
+    assert.deepEqual([...editor.getInputHistory()], ['late-b prompt 1'],
+      'a late A seed cannot mutate the current B scope')
+    assert.equal([...editor.getInputHistory()].includes('late-a prompt 1'), false)
+  } finally {
+    releaseSeed()
+    await fixture.dispose()
+  }
+})
+
+test('an unavailable recall read leaves the current local recall intact', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2c-unavailable-recall'
+  const presetId = 'm3-4-pr2c-unavailable-recall-preset'
+  const host = await mountRemotePresentationHost(life, presetId, { pluginManagerProfile: true })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  seedTurns(host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }, 1, 1, 'unavailable')
+  const fixture = await mountRemoteRunner(life, {
+    presetId,
+    resumeSessionId: mainId,
+    host,
+    productionSerializer: true,
+    beforeRunnerMount: (presentation) => {
+      const port = presentation.historySearch as unknown as {
+        readSessionRecall(request: { readonly sessionId: string }, signal: AbortSignal): Promise<unknown>
+      }
+      port.readSessionRecall = async () => ({ kind: 'unavailable', reason: 'service-missing' })
+    },
+  })
+  const editor = fixture.runnerApp() as unknown as {
+    getDraft(): string
+    getInputHistory(): readonly string[]
+  }
+  try {
+    await waitFor('the resumed Session hydrated', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+    const submitted = 'local survives an unavailable seed'
+    fixture.vt.sendInput(submitted)
+    await fixture.vt.waitForRender()
+    fixture.vt.sendInput('\r')
+    await waitFor('the local accepted input is recalled despite the unavailable seed', () =>
+      [...editor.getInputHistory()].includes(submitted), 20_000)
+    assert.deepEqual([...editor.getInputHistory()], [submitted],
+      'the unavailable Host read contributes nothing and never clears the local list')
+    fixture.vt.sendInput('\x1b[A')
+    await waitFor('↑ recalls the local input', () => editor.getDraft() === submitted, 5_000)
+  } finally {
     await fixture.dispose()
   }
 })
@@ -809,7 +1006,7 @@ test('a resumed Remote TSP composer recalls only this process\'s accepted inputs
   const life = testLifecycle(t)
   const mainId = 'm3-4-r11-process-tsp'
   const presetId = 'm3-4-r11-process-tsp-preset'
-  const host = await mountRemotePresentationHost(life, presetId)
+  const host = await mountRemotePresentationHost(life, presetId, { pluginManagerProfile: true })
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   const otherId = 'm3-4-r11-process-tsp-b'
   const otherCwd = `${host.anchorDir}-b`
@@ -819,7 +1016,23 @@ test('a resumed Remote TSP composer recalls only this process\'s accepted inputs
     append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
     snapshotEvents(): Array<{ type: string; data: unknown }>
   }
-  seedTurns(appendOf(mainId), 1, 1, 'tsp-resume')
+  // Session A is deliberately assistant-only: the fresh-composer ↑ negative
+  // below needs a resumed scope with NO eligible Host seed row.
+  appendOf(mainId).append('turn/start', { turn: 1 })
+  appendOf(mainId).append('step/start', { turn: 1, step: 1 })
+  appendOf(mainId).append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: 'a-tsp-resume-1', role: 'assistant',
+      content: [{ type: 'text', text: 'tsp-resume answer 1' }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+    },
+    stream: [],
+    usage: { inputTokens: 1, outputTokens: 1 },
+  }, { surfaceOp: 'append' })
+  appendOf(mainId).append('step/end', { turn: 1, step: 1 })
+  appendOf(mainId).append('turn/end', { turn: 1, reason: { kind: 'completed' } })
   seedTurns(appendOf(otherId), 1, 1, 'tsp-b')
   const currentFile = historyFilePath(host.workRoot, host.anchorDir)
   mkdirSync(dirname(currentFile), { recursive: true })
@@ -903,17 +1116,19 @@ test('a resumed Remote TSP composer recalls only this process\'s accepted inputs
     await waitFor('Session B authoritative baseline is painted', () =>
       JSON.stringify(pane.frames()).includes('tsp-b answer 1'), 20_000)
     assert.equal(composerText(), '', 'the owner publication restores no old draft/bookmark into B')
-    // The real TSP key sink still reaches the old process inputs after the
-    // publication: newest is the accepted switch command, older is A's marker.
+    // PR2-C: A's local input and the sessionless switch command are NOT
+    // imported; B seeds its OWN accepted Host history after the publication.
+    // The real TSP key sink reaches B's own seeded row; ↓ returns to the empty
+    // bookmarked draft. Repeated ↑ stays on that ONE row: A's marker and the
+    // sessionless switch command are not in B's scope.
     pane.input.type('\x1b[A')
-    await waitFor('↑ after the publication recalls the switch command', () =>
-      composerText() === `/sessions ${otherId}`, 5_000)
+    await waitFor('↑ after the publication recalls B\'s own Host seed', () =>
+      composerText() === 'tsp-b prompt 1', 20_000)
     pane.input.type('\x1b[A')
-    await waitFor('the old process input is still recallable after the switch', () =>
-      composerText() === submitted, 5_000)
+    pane.input.type('\x1b[A')
+    await waitFor('repeated ↑ never reaches an imported A row', () => composerText() === 'tsp-b prompt 1', 5_000)
     pane.input.type('\x1b[B')
-    await waitFor('↓ moves back to the newer process input', () =>
-      composerText() === `/sessions ${otherId}`, 5_000)
+    await waitFor('↓ returns to the empty bookmarked draft', () => composerText() === '', 5_000)
     await waitFor('the old Session A input never reaches Session B', () =>
       hostTextsOf(otherId).filter(text => text === submitted).length === 0, 5_000)
     assert.equal(hostTextsOf(otherId).filter(text => text === submitted).length, 0,
@@ -2022,14 +2237,9 @@ test('navigation: switch, same-id rollover and reconnect re-init the presentatio
       statusStore: { snapshot(): { composition?: { model?: { id?: string } } } }
     }).statusStore.snapshot().composition?.model?.id === 'offline-model'
   }, 20_000)
-  // Feature History PR2-A: the process recall spans the WHOLE journey — the two
-  // `/resume` commands this Client accepted are remembered, and the switch,
-  // same-id rollover and Connection reconnect never reseed or clear the list.
-  const recalledCommands = [...(app as unknown as { getInputHistory(): readonly string[] }).getInputHistory()]
-  assert.ok(recalledCommands.includes(`/resume ${sessionB}`),
-    `the process recall survives the switch: ${JSON.stringify(recalledCommands)}`)
-  assert.ok(recalledCommands.includes(`/resume ${sessionA}`),
-    `the process recall survives the same-id rollover and reconnect: ${JSON.stringify(recalledCommands)}`)
+  // History PR2-C supersedes the PR2-A process-global recall claim: the recall
+  // list is now scoped to the current carrier+Session (proved by the dedicated
+  // recall cases above), so this navigation case asserts only presentation.
 
   // ── /fork: the Host forks the current session at its latest completed
   // prefix and the TUI ADOPTS the child. The inherited prefix alone cannot

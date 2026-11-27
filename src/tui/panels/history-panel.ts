@@ -89,15 +89,6 @@ export interface HistorySeatGeometry {
   readonly chromeRows: (width: number) => number
 }
 
-/** What the layout must know about the CURRENT content (`actualContent`): a
- *  selectable result body exists to preview. It is the only content fact the
- *  row allocator needs — acceptance is decided separately by the live search
- *  state and the last PAINTED rows. */
-export interface HistorySeatContent {
-  /** Whether a selectable result body exists (no error, at least one row). */
-  readonly previewable: boolean
-}
-
 /** The pure row plan of one History frame. */
 export interface HistorySeatLayout {
   /** The width every painted row is clamped to. */
@@ -135,7 +126,8 @@ export interface HistorySeatLayout {
 
 /**
  * Derive the History seat row plan from the LIVE frame (B3-A plan §2's exact
- * algorithm + the B3-B Owner decision D15 boundary rules):
+ * algorithm + the B3-B Owner decision D15 boundary rules + the PR2-C stable
+ * viewport):
  *
  * 1. `target = floor(terminalRows × (expanded ? .80 : .63))`;
  * 2. `granted = min(target, max(0, terminalRows - nonHistoryChrome - 1))` — the
@@ -144,22 +136,26 @@ export interface HistorySeatLayout {
  *    transcript/footer row;
  * 3. the boundary rules are PREFERRED decoration (Owner decision D15): they may
  *    compress the Results/Preview regions, but a rule is never drawn at the cost
- *    of the mandatory header/query/action bar, at least one result row or at
- *    least one Preview content row. When the budget cannot satisfy all of those,
- *    the bottom rule is removed first, then the top rule;
+ *    of the mandatory header/query/action bar or at least one result row. When
+ *    the budget cannot satisfy that, the bottom rule is removed first, then the
+ *    top one;
  * 4. Header → query → footer have first claim on the content budget, then the
  *    shrinkable body: one divider, the results window
  *    (`min(8, max(1, floor((body-1)×.55)))`) and the Preview remainder;
  * 5. the trailing metadata row exists only at `previewRegion >= 3`, the Preview
  *    heading only when it can keep at least one content row;
- * 6. `granted` is never exceeded.
+ * 6. `granted` is never exceeded;
+ * 7. the allocation is derived from the geometry and expanded state ALONE —
+ *    never from the result count, body presence, searching/error state or
+ *    index readiness. Every search state paints exactly these nominal slots;
+ *    a slot with no eligible content is an INERT blank reserve, never an
+ *    actionable result.
  */
 export function planHistorySeatLayout(
   terminalCols: number,
   terminalRows: number,
   chromeRows: number,
   expanded: boolean,
-  content: HistorySeatContent,
 ): HistorySeatLayout {
   const width = Math.max(1, Math.floor(Number.isFinite(terminalCols) ? terminalCols : 1))
   const rows = Math.max(1, Math.floor(Number.isFinite(terminalRows) ? terminalRows : 1))
@@ -168,17 +164,14 @@ export function planHistorySeatLayout(
   const grant = Math.min(target, Math.max(0, rows - chrome - 1))
 
   // One candidate rule count: 2 = both boundaries, 1 = top only (the bottom
-  // rule is removed first), 0 = none. A candidate is affordable only while the
-  // content still keeps the mandatory chrome AND a usable body — at least one
-  // result row and (when previewable) at least one Preview content row — so a
-  // rule may compress the Results/Preview regions but can never push the
-  // Preview below one content row; when even the top-only rule cannot afford
-  // that, both rules are dropped.
+  // rule is removed first), 0 = none. The reference allocation is the old
+  // PREVIEWABLE one: a candidate rule set is affordable only while it keeps
+  // the mandatory chrome, at least one result row and at least one Preview
+  // content row (the tiny grants fall back to zero rules exactly as before).
   const affordable = (rules: number): boolean => {
-    const inner = planHistoryContent(width, Math.max(0, grant - rules), content)
+    const inner = planHistoryContent(width, Math.max(0, grant - rules))
     if (!inner.header || !inner.query || !inner.footer) return false
-    if (content.previewable) return inner.resultsRows > 0 && inner.previewRows > 0
-    return inner.resultsRows > 0
+    return inner.resultsRows > 0 && inner.previewRows > 0
   }
   let rules = 0
   for (const candidate of [2, 1, 0]) {
@@ -192,7 +185,7 @@ export function planHistorySeatLayout(
     grant,
     topRule: rules >= 1,
     bottomRule: rules >= 2,
-    ...planHistoryContent(width, Math.max(0, grant - rules), content),
+    ...planHistoryContent(width, Math.max(0, grant - rules)),
   }
 }
 
@@ -201,25 +194,12 @@ export function planHistorySeatLayout(
 function planHistoryContent(
   width: number,
   grant: number,
-  content: HistorySeatContent,
 ): Omit<HistorySeatLayout, 'width' | 'grant' | 'topRule' | 'bottomRule'> {
   const header = grant >= 1
   const query = grant >= 2
   const footer = grant >= 3
   const chromePainted = (header ? 1 : 0) + (query ? 1 : 0) + (footer ? 1 : 0)
   const body = Math.max(0, grant - chromePainted)
-
-  if (!content.previewable) {
-    // Loading / empty / failed: ONE message row and nothing else — no divider,
-    // no Preview and no acceptance of an unpainted row.
-    const messageRows = Math.min(body, 1)
-    return {
-      header, query, footer,
-      divider: false, previewHeading: false, metadata: false,
-      resultsRows: messageRows, resultRows: 0, previewRows: 0, listPage: 1,
-      acceptEnabled: false,
-    }
-  }
 
   if (body <= 2) {
     // Cramped: the visible selected result row(s) win over any Preview.
@@ -1230,26 +1210,45 @@ export class HistoryPanel implements Component, Focusable {
     // Which of the Preview heading's two actions THIS frame really painted: the
     // Footer only offers the matching fallback when one was dropped whole.
     const paintedHeadingActions = new Set<HistoryFooterActionKind>()
-    if (!previewable) {
-      if (layout.resultsRows > 0) push(this.renderMessage(layout.width), { kind: 'inert' })
-    } else {
-      const list = this.renderList(layout.width, layout)
-      listTop = lines.length
-      for (const line of list.lines) push(line.text, line.hit)
-      listBottom = lines.length - 1
-      for (const id of list.paintedIds) paintedResultIds.add(id)
-      if (layout.divider) push(color.border('─'.repeat(layout.width)), { kind: 'inert' })
-      const preview = this.renderPreview(layout)
-      previewTop = lines.length
-      for (const line of preview) {
-        if (line.kind === 'heading' && line.hit.kind === 'actions') {
-          for (const action of line.hit.actions) paintedHeadingActions.add(action.action.kind)
+    // The nominal list region is painted in EVERY search state. A state with no
+    // selectable body paints its truthful status in the first slot and leaves
+    // the remaining slots as inert blank reserve (they are never actionable
+    // rows); a ready/searching state paints the real list and pads it to the
+    // same row count.
+    if (layout.resultsRows > 0) {
+      if (!previewable) {
+        listTop = lines.length
+        push(this.renderMessage(layout.width), { kind: 'inert' })
+        for (let index = 1; index < layout.resultsRows; index += 1) {
+          push('', { kind: 'inert' })
         }
-        if (line.kind === 'content' && previewContentTop === undefined) previewContentTop = lines.length
-        push(line.text, line.hit)
+        listBottom = lines.length - 1
+      } else {
+        const list = this.renderList(layout.width, layout)
+        listTop = lines.length
+        for (const line of list.lines) push(line.text, line.hit)
+        for (let index = list.lines.length; index < layout.resultsRows; index += 1) {
+          push('', { kind: 'inert' })
+        }
+        listBottom = lines.length - 1
+        for (const id of list.paintedIds) paintedResultIds.add(id)
       }
-      previewBottom = lines.length - 1
     }
+    if (layout.divider) push(color.border('─'.repeat(layout.width)), { kind: 'inert' })
+    // The Preview region is ALWAYS the nominal one: the heading, the content
+    // rows and the metadata row keep their exact physical offsets. A frame with
+    // no current body paints an inert `Preview` heading and blank reserve —
+    // never fabricated selected text, metadata or action affordances.
+    const preview = this.renderPreview(layout, previewable)
+    previewTop = preview.length === 0 ? undefined : lines.length
+    for (const line of preview) {
+      if (line.kind === 'heading' && line.hit.kind === 'actions') {
+        for (const action of line.hit.actions) paintedHeadingActions.add(action.action.kind)
+      }
+      if (line.kind === 'content' && previewable && previewContentTop === undefined) previewContentTop = lines.length
+      push(line.text, line.hit)
+    }
+    previewBottom = preview.length === 0 ? undefined : lines.length - 1
     if (layout.footer) {
       // Paint-time eligibility against THE FRAME BEING BUILT (the committed
       // frame is still the previous one): a fallback is only offered when the
@@ -1305,7 +1304,6 @@ export class HistoryPanel implements Component, Focusable {
       this.geometry.rows(),
       this.geometry.chromeRows(Math.max(1, Math.floor(width))),
       this.expanded,
-      { previewable: this.previewable() },
     )
   }
 
@@ -1580,12 +1578,26 @@ export class HistoryPanel implements Component, Focusable {
 
   /** The Preview region: the heading (with its actions), the soft-wrapped
    *  ORIGINAL source rows and the trailing metadata. */
-  private renderPreview(layout: HistorySeatLayout): Array<{
+  private renderPreview(layout: HistorySeatLayout, previewable: boolean): Array<{
     kind: 'heading' | 'content' | 'metadata'
     text: string
     hit: HistoryMouseHit
   }> {
     const out: Array<{ kind: 'heading' | 'content' | 'metadata'; text: string; hit: HistoryMouseHit }> = []
+    if (!previewable) {
+      // Stable-geometry reserve: the heading/content/metadata slots stay
+      // painted as inert rows, with no selected text, metadata or action.
+      if (layout.previewHeading) {
+        out.push({ kind: 'heading', text: color.textDim('Preview'), hit: { kind: 'inert' } })
+      }
+      for (let offset = 0; offset < layout.previewRows; offset += 1) {
+        out.push({ kind: 'content', text: '', hit: { kind: 'inert' } })
+      }
+      if (layout.metadata) {
+        out.push({ kind: 'metadata', text: '', hit: { kind: 'inert' } })
+      }
+      return out
+    }
     const selected = this.selected()
     const visual = this.previewLayoutAt(layout.width, selected?.content ?? '')
     const rows = visual.rows

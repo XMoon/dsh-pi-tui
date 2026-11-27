@@ -279,6 +279,7 @@ function buildSessionFixture(life: TestLifecycle, options: {
     dropOutgoingActiveDraft: () => {},
     // The real app entry (the mounted surface half of the publication).
     beginInputHistoryScope: (owner) => { app.beginInputHistoryScope(owner) },
+    bindInputRecallScope: () => {},
     // The real publication-commit retirement, with an in-commit observation:
     // the focus seat AFTER the app retired, still inside the synchronous
     // publishOwner section (before any post-commit await).

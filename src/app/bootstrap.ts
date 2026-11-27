@@ -103,6 +103,8 @@ import {
 } from '../client/program-resume/target.ts'
 import { herdrSessionProjection, type HerdrResumeTarget } from '../client/herdr/session.ts'
 import { safeErrorMessage } from '../runtime/process/errors.ts'
+import type { HistorySearchReadPort } from '../runtime/history-search-read-port.ts'
+import { RemoteHistorySearchSupersededError } from '../runtime/remote/history-search-remote.ts'
 import { DraftImageStore } from '../client/media/image/draft-store.ts'
 import { DraftFileStore } from '../client/media/attachment/file-draft.ts'
 import { openExternalUrl } from '../client/url/open.ts'
@@ -1189,6 +1191,26 @@ export function applyRunnerWithRuntime(
      */
     const inputRecall = override?.inputRecall
     /**
+     * Feature History PR2-C: the exact recall ROOT scope of this Client root —
+     * the authenticated carrier identity (Connection generation + exact binding
+     * object) plus the published Session id. The Session runtime binds it at
+     * every synchronous publication seam (including the pre-mount resume), and
+     * the seed read below re-proves the same facts before committing.
+     */
+    const recallCarrierOf = (sessionId: string | undefined): { readonly connection: unknown; readonly binding: unknown } => {
+      if (remoteSources === undefined) return { connection: undefined, binding: undefined }
+      const token = sessionId === undefined
+        ? undefined
+        : remoteSources.sessionFacts.captureTransportToken(sessionId) as { readonly binding?: unknown } | undefined
+      return {
+        connection: remoteSources.commandSource.connectionGeneration(),
+        binding: token?.binding,
+      }
+    }
+    const bindRecallScope = (owner: string | undefined): void => {
+      inputRecall?.bindScope({ sessionId: owner, carrier: recallCarrierOf(owner) })
+    }
+    /**
      * The lazy Direct-only accessor: the Direct helpers below read the ONE
      * Direct runtime the selection seam constructed. On the Direct branch
      * (the only branch bootstrap selects in PR1) it is already constructed.
@@ -1409,16 +1431,22 @@ export function applyRunnerWithRuntime(
           // hydration), never only at the later `initLiveSession` reconcile.
           surface.withdrawReplacedPresentation()
         },
+        bindInputRecallScope: (owner) => {
+          // PR2-C: bind the Split Client's ONE recall root to the exact
+          // publication BEFORE any renderer projects it. Direct passes no root.
+          bindRecallScope(owner)
+        },
         beginInputHistoryScope: (owner) => {
-          // The editor-recall scope of the owner this commit section publishes
-          // or creates. On Direct the owner's hydration reseeds ↕ recall from
-          // its session-scoped disk rows afterwards, while a submission accepted
-          // in between has its own append ordered behind the transition (submit
-          // FIFO turn + ensureSession), so the row can land after that read;
-          // recording the scope-bound temporary submissions lets the reseed
-          // reconcile them instead of dropping them (PiTui editor history). The
-          // Daemon/Split Client's process recall is not a Session scope: this
-          // commit only retires the outgoing browse/bookmark and keeps the list.
+          // The editor-recall projection of the owner this commit section
+          // publishes or creates. On Direct the owner's hydration reseeds ↕
+          // recall from its session-scoped disk rows afterwards, while a
+          // submission accepted in between has its own append ordered behind the
+          // transition (submit FIFO turn + ensureSession), so the row can land
+          // after that read; recording the scope-bound temporary submissions
+          // lets the reseed reconcile them instead of dropping them (PiTui
+          // editor history). The Split Client's root scope was bound above; the
+          // renderer only retires its outgoing browse bookmark and re-projects
+          // the (already scoped) list.
           surface.display.beginInputHistoryScope(owner)
         },
         dropOutgoingActiveDraft: () => {
@@ -2265,6 +2293,114 @@ export function applyRunnerWithRuntime(
       remoteInitRetryHandle?.dispose()
       remoteInitRetryHandle = undefined
     }
+    /**
+     * PR2-C: the ONE cancellable Host recall-seed flight of the current Remote
+     * scope. A `loading` Host answer retries with 1s/2s/4s/8s… capped at 10s;
+     * `ready` commits the merged projection, and any terminal/fault answer
+     * stops the flight. The timer belongs to the same flight and is cancelled
+     * with it by scope replacement, carrier rollover or disposal.
+     */
+    let recallSeedAbort: AbortController | undefined
+    let recallSeedFlight = 0
+    let recallSeedGenerationUnsubscribe: (() => void) | undefined
+    const cancelRemoteRecallSeed = (): void => {
+      recallSeedAbort?.abort()
+      recallSeedAbort = undefined
+    }
+    const waitRecallRetry = async (delayMs: number, signal: AbortSignal): Promise<void> => {
+      signal.throwIfAborted()
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          signal.removeEventListener('abort', onAbort)
+          resolve()
+        }, delayMs)
+        const onAbort = (): void => {
+          clearTimeout(timer)
+          reject(signal.reason instanceof Error ? signal.reason : new Error('session recall retry aborted'))
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+    }
+    const scheduleRemoteRecallSeed = (sessionId: string): void => {
+      const port = remoteSources?.historySearch as HistorySearchReadPort | undefined
+      if (inputRecall === undefined || port === undefined || cleanedUp || lifecycleController.signal.aborted) return
+      cancelRemoteRecallSeed()
+      const flight = ++recallSeedFlight
+      const ownerGeneration = ownership.generation()
+      const carrier = recallCarrierOf(sessionId)
+      const controller = new AbortController()
+      recallSeedAbort = controller
+      const signal = AbortSignal.any([controller.signal, lifecycleController.signal])
+      const isCurrent = (): boolean => !cleanedUp
+        && recallSeedAbort === controller
+        && flight === recallSeedFlight
+        && ownership.currentSessionId() === sessionId
+        && ownership.generation() === ownerGeneration
+        && Object.is(recallCarrierOf(sessionId).connection, carrier.connection)
+        && Object.is(recallCarrierOf(sessionId).binding, carrier.binding)
+      runDetached('remote session recall seed', async () => {
+        let retryMs = 1000
+        try {
+          for (;;) {
+            const answer = await port.readSessionRecall({ sessionId }, signal)
+            signal.throwIfAborted()
+            if (!isCurrent()) return
+            if (answer.kind === 'ready') {
+              // A ready answer that addresses another Session is never used.
+              if (answer.sessionId !== sessionId) {
+                diag.error('remote session recall answered for another Session', {})
+                return
+              }
+              inputRecall.applySeed(answer.items, sessionId)
+              surface.display.reseedInputRecall()
+              return
+            }
+            if (answer.kind !== 'loading') {
+              // Terminal incomplete/unavailable/missing capability: stop
+              // silently (an older Host is not an error-spam path).
+              diag.debug('remote session recall stopped', { reason: answer.kind })
+              return
+            }
+            await waitRecallRetry(retryMs, signal)
+            retryMs = Math.min(retryMs * 2, 10_000)
+          }
+        } catch (error) {
+          if (signal.aborted || error instanceof RemoteHistorySearchSupersededError) return
+          diag.warn('remote session recall read failed', { session: sessionId, error: safeErrorMessage(error) })
+        } finally {
+          if (recallSeedAbort === controller) recallSeedAbort = undefined
+        }
+      }, { diag, sessionId: () => sessionId })
+    }
+    const ensureRemoteRecallGenerationWatch = (): void => {
+      if (remoteSources === undefined || recallSeedGenerationUnsubscribe !== undefined) return
+      recallSeedGenerationUnsubscribe = remoteSources.commandSource.subscribeConnectionGeneration(() => {
+        const sessionId = ownership.currentSessionId()
+        if (cleanedUp || lifecycleController.signal.aborted || sessionId === undefined) return
+        // A carrier rollover is a DIFFERENT scope: the old carrier's rows are
+        // discarded before the new generation is read (never inferred same Host).
+        bindRecallScope(sessionId)
+        if (remoteIngressHandle !== undefined) scheduleRemoteRecallSeed(sessionId)
+      })
+    }
+    ensureRemoteRecallGenerationWatch()
+
+    /** Release the recall generation subscription without letting a throwing
+     *  surface disposer truncate the remaining owner teardown. */
+    const retireRemoteRecallGenerationWatch = (): void => {
+      const unsubscribe = recallSeedGenerationUnsubscribe
+      recallSeedGenerationUnsubscribe = undefined
+      if (unsubscribe === undefined) return
+      try {
+        unsubscribe()
+      } catch (error) {
+        try {
+          diag.error('session recall generation unsubscribe failed', { error: safeErrorMessage(error) })
+        } catch {
+          // No lower sink.
+        }
+      }
+    }
     const disposeRemoteLiveSurface = (): void => {
       // H1: a retired Remote live surface (owner switch, generation rollover,
       // watch re-init, teardown) no longer proves the Host Agent state. Stop
@@ -2273,6 +2409,11 @@ export function applyRunnerWithRuntime(
       // old watch is still the authority (never a fabricated `idle`).
       herdrReporter?.setQualified(false)
       disposeRemoteInitRetry()
+      cancelRemoteRecallSeed()
+      // Keep the generation observer alive across owner/init replacement: it
+      // IS the root's rollover signal. It is released only at the final
+      // lifecycle abort, where the same disposal also runs.
+      if (lifecycleController.signal.aborted) retireRemoteRecallGenerationWatch()
       retireRemoteProgressGeneration()
       remoteIngressHandle?.dispose()
       remoteIngressHandle = undefined
@@ -2378,6 +2519,10 @@ export function applyRunnerWithRuntime(
       if (remoteSources === undefined || cleanedUp) return
       const attempt = ++remoteInitAttempt
       disposeRemoteLiveSurface()
+      // Re-bind the root scope with the CURRENT carrier (a reconnect may have
+      // replaced it) before this init reads anything.
+      ensureRemoteRecallGenerationWatch()
+      bindRecallScope(sessionId)
       // §6.5 lifecycle fence (subscribe side): the token is captured BEFORE
       // the hydrate await; a superseded owner (switch/new/fork or a same-id
       // rollover — every commit shape bumps the generation) must not install
@@ -2521,6 +2666,9 @@ export function applyRunnerWithRuntime(
       // already live, so nothing merges the cut) — a real lost-event window that
       // a reconnect's fresh generation can land in.
       surface.openingJournal.close(sessionId)
+      // PR2-C: the post-hydration detached recall-seed tail. Same-scope local
+      // recall stays available while this read is in flight.
+      scheduleRemoteRecallSeed(sessionId)
       // R2 §7.1/§7.2/§7.3: the Remote terminal-progress authority. The Host
       // evidence stream is the ONLY writer of the main interval on this branch
       // (the durable ingress above keeps feeding the transcript and is gated

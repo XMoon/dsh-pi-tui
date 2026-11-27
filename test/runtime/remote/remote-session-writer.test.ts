@@ -919,16 +919,18 @@ test('PR2: an ordinary prompt forwards onAccepted into the official beginSubmiss
   const harness = writerHarness()
   const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer({ text: 'hi' }))
   let accepted = 0
+  let acceptedWith: string | undefined
   const outcome = await writer.prompt('session-a', { text: 'hi' }, 'queue', {
-    onAccepted: () => { accepted += 1 },
+    onAccepted: (officialRequestId?: string) => { accepted += 1; acceptedWith = officialRequestId },
   })
   assert.equal(outcome.kind, 'committed')
   assert.equal(accepted, 0, 'the official face here never fires onAccept')
   const input = harness.calls.beginInputs[0]!
   assert.equal(typeof input.onAccept, 'function', 'the callback is carried on the official echo input')
-  input.onAccept?.()
+  input.onAccept?.('rpc-test')
   assert.equal(accepted, 1)
-  input.onAccept?.()
+  assert.equal(acceptedWith, 'req-1', 'the adapter forwards the official handle requestId, not the callback argument')
+  input.onAccept?.('rpc-test')
   assert.equal(accepted, 1, 'a hostile double-fire from the official face is deduped by the adapter latch')
 })
 
@@ -947,8 +949,8 @@ test('PR2: the writer latches acceptance once even if the official face double-f
     onAccepted: () => { accepted += 1 },
   })
   const input = harness.calls.beginInputs[0]!
-  input.onAccept?.()
-  input.onAccept?.()
+  input.onAccept?.('rpc-test')
+  input.onAccept?.('rpc-test')
   assert.equal(accepted, 1, 'the adapter-side latch keeps the Composer settle exactly-once')
 })
 
@@ -962,6 +964,6 @@ test('PR2: a late official acceptance after a carrier failure still wins as acce
   })
   assert.equal(outcome.kind, 'indeterminate')
   // The official face fires acceptance AFTER the prompt already settled.
-  harness.calls.beginInputs[0]!.onAccept?.()
+  harness.calls.beginInputs[0]!.onAccept?.('rpc-test')
   assert.equal(accepted, 1, 'the acceptance latch proves Host acceptance even after a late transport error')
 })

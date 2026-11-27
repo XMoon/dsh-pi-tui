@@ -37,8 +37,14 @@ export type { WriteError, WriteOutcome } from './write-outcome.ts'
  * it is not the write's terminal state: an accepted prompt can still fail
  * later during execution. */
 export interface PromptOptions {
-  /** Called exactly once when the Host accepted this prompt. */
-  readonly onAccepted?: () => void
+  /**
+   * Called exactly once when the Host accepted this prompt. The optional
+   * argument is the OFFICIAL transport request identity when the backend has
+   * one (Remote: the exact `beginSubmission` requestId the Host stamps as
+   * `source.rpcId`); Direct has no wire identity and passes nothing. It is
+   * correlation metadata only, never acceptance authority.
+   */
+  readonly onAccepted?: (officialRequestId?: string) => void
 }
 
 /** The session WRITE domain port. */

@@ -3363,6 +3363,7 @@ test('a reopen of the Session a /new command replaced waits for its deferred rel
     dropOutgoingActiveDraft: () => {},
     withdrawReplacedPresentation: () => {},
     beginInputHistoryScope: () => {},
+    bindInputRecallScope: () => {},
     retireStaleHistorySeat: () => {},
     reportSwitchFailure: () => {},
     warnCommittedDurability: () => {},

@@ -60,6 +60,7 @@ import type { ProfileDaemonAdmin } from './local-profile-daemon-admin.ts'
 import type { SplitClientInteractionDeliveryOwner } from './client-interaction-delivery.ts'
 import {
   parseHistoryReadTextRequest,
+  parseHistorySessionRecallRequest,
   parseHistorySearchRequest,
 } from '../../runtime/remote/pi-tui-history-search-contract.ts'
 
@@ -1835,6 +1836,35 @@ async function startSurfaceLocalClient(
             const result = await domains.remote.piTuiHistorySearch.readText(exact)
             if (!result.ok) {
               emit({ phase: 'failed', errorCode: result.error.code, error: 'the Host refused the history-read request' })
+              return
+            }
+            emit({ phase: 'result', answer: result.value })
+            return
+          }
+          if (op === 'readSessionRecall') {
+            const { abort, ...recallInput } = input
+            const exact = parseHistorySessionRecallRequest(recallInput)
+            if (abort === true) {
+              // Qualification-only cancellation control: the REAL generated
+              // namespace method observed against an already-aborted signal.
+              const controller = new AbortController()
+              controller.abort(new Error('history session recall qualification abort'))
+              try {
+                await domains.remote.piTuiHistorySearch.readSessionRecall(exact, controller.signal)
+              } catch (error) {
+                emit({
+                  phase: 'failed',
+                  errorCode: 'aborted',
+                  error: error instanceof Error ? error.message : String(error),
+                })
+                return
+              }
+              emit({ phase: 'failed', error: 'an aborted session-recall read unexpectedly resolved' })
+              return
+            }
+            const result = await domains.remote.piTuiHistorySearch.readSessionRecall(exact)
+            if (!result.ok) {
+              emit({ phase: 'failed', errorCode: result.error.code, error: 'the Host refused the session-recall request' })
               return
             }
             emit({ phase: 'result', answer: result.value })

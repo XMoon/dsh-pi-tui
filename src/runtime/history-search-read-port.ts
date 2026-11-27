@@ -15,9 +15,16 @@ import type {
   HistoryReadTextResponse,
   HistorySearchRequest,
   HistorySearchResponse,
+  HistorySessionRecallRequest,
+  HistorySessionRecallResponse,
 } from './history-search-dto.ts'
 
 export interface HistorySearchReadPort {
   search(request: HistorySearchRequest, signal: AbortSignal): Promise<HistorySearchResponse>
   readText(request: HistoryReadTextRequest, signal: AbortSignal): Promise<HistoryReadTextResponse>
+  /** ONE bounded session-scoped recall read; no query, cursor or caller limit. */
+  readSessionRecall(
+    request: HistorySessionRecallRequest,
+    signal: AbortSignal,
+  ): Promise<HistorySessionRecallResponse>
 }
