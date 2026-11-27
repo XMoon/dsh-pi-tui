@@ -200,6 +200,8 @@ interface SeatHarness {
   scope(): TestScope
   readonly copies: Copied[]
   readonly restored: string[]
+  readonly reveals: string[]
+  readonly scrolls: Array<{ readonly id: string; readonly to: string }>
   renders(): number
   sourceCalls(): number
 }
@@ -210,6 +212,8 @@ function makeSeat(t: { after(fn: () => unknown): void }, options: SeatOptions = 
   const port = createScriptedPort()
   const copies: Copied[] = []
   const restored: string[] = []
+  const reveals: string[] = []
+  const scrolls: Array<{ readonly id: string; readonly to: string }> = []
   let renders = 0
   let sourceCalls = 0
   const cwd = '/client/cwd'
@@ -227,8 +231,8 @@ function makeSeat(t: { after(fn: () => unknown): void }, options: SeatOptions = 
     restoreToComposer: (raw) => { restored.push(raw) },
     composerWritable: () => options.composerWritable ?? true,
     copyRaw: (raw, live) => { copies.push({ raw, live: live() }) },
-    reveal: () => {},
-    scroll: () => {},
+    reveal: (id) => { reveals.push(id) },
+    scroll: (id, to) => { scrolls.push({ id, to: String(to) }) },
     reportFatal: (error) => { throw error },
     reportSecondaryFailure: () => {},
   }, {
@@ -262,6 +266,8 @@ function makeSeat(t: { after(fn: () => unknown): void }, options: SeatOptions = 
     },
     copies,
     restored,
+    reveals,
+    scrolls,
     renders: () => renders,
     sourceCalls: () => sourceCalls,
   }
@@ -874,6 +880,16 @@ test('a material partial reorder advances the action identity and refuses the st
   await waitUntil('the exact partial body', () => h.seat.renderState()?.actionsEnabled === true)
   const painted = h.seat.renderState()
   assert.ok(painted)
+  const commitFrame = (): void => {
+    const state = h.seat.renderState()
+    assert.ok(state)
+    h.seat.indexFrame(historySearchView({ state, onIntent: () => {}, wide: true }))
+  }
+  // Consume the initial open/body frame so the next counts measure only the
+  // three material-refresh branches.
+  commitFrame()
+  const revealBase = h.reveals.length
+  const scrollBase = h.scrolls.length
 
   // The seat's one warmup tick asks for the next first page.
   await waitUntil('the progress refresh', () => h.port.pendingSearches() === 1, 3_000)
@@ -887,6 +903,9 @@ test('a material partial reorder advances the action identity and refuses the st
   assert.ok(progressOnly)
   assert.equal(progressOnly.pageRevision, painted.pageRevision, 'progress-only does not advance the page identity')
   assert.equal(progressOnly.copyKey, painted.copyKey, 'progress-only keeps the same action key')
+  commitFrame()
+  assert.equal(h.reveals.length, revealBase, 'progress-only reveals nothing')
+  assert.equal(h.scrolls.length, scrollBase, 'progress-only keeps the Preview anchor')
 
   await waitUntil('the second progress refresh', () => h.port.pendingSearches() === 1, 3_000)
   h.port.answerSearch({
@@ -901,6 +920,9 @@ test('a material partial reorder advances the action identity and refuses the st
   assert.notEqual(reordered.copyKey, painted.copyKey)
   assert.equal(reordered.selectedId, painted.selectedId, 'the same row identity keeps selection')
   assert.equal(reordered.actionsEnabled, true, 'the verified body survives the reorder')
+  commitFrame()
+  assert.equal(h.reveals.length, revealBase + 1, 'the moved preserved selection is revealed')
+  assert.equal(h.scrolls.length, scrollBase, 'an unchanged row keeps its Preview anchor across a reorder')
   const copiesBefore = h.copies.length
   h.seat.handleIntent({
     kind: 'copy',
@@ -918,6 +940,7 @@ test('a material partial reorder advances the action identity and refuses the st
     pageRevision: reordered.pageRevision,
   })
   assert.equal(h.copies.length, copiesBefore + 1, 'the current action intent acts on the exact row')
+
 })
 
 
