@@ -435,9 +435,11 @@ export async function runAcpV1ConformanceB3(context) {
       && mainCaps?.sessionCapabilities?.delete === undefined
       && mainCaps?.sessionCapabilities?.fork === undefined
       && mainCaps?.sessionCapabilities?.additionalDirectories === undefined
-      && mainCaps?.sessionCapabilities?.options === undefined
-      && mainCaps?.sessionCapabilities?.systemPrompt === undefined,
+      && mainCaps?.sessionCapabilities?.options === undefined,
     `B3-04: unsupported Session capabilities must stay absent: ${JSON.stringify(mainCaps?.sessionCapabilities)}`)
+    assert(mainCaps?.sessionCapabilities?.systemPrompt !== undefined
+      && mainCaps.sessionCapabilities.systemPrompt.mode?.override === undefined,
+    `B3-04: the real Host must advertise the append-only systemPrompt capability: ${JSON.stringify(mainCaps?.sessionCapabilities?.systemPrompt)}`)
     assert(mainCaps?.promptCapabilities?.audio === false && mainCaps?.promptCapabilities?.embeddedContext === true,
       'B3-04: audio stays false and embeddedContext is real on the complete Host')
     assert(typeof mainCaps?.promptCapabilities?.image === 'boolean', 'B3-04: image prompt capability must be an explicit boolean')
@@ -613,9 +615,10 @@ export async function runAcpV1ConformanceB3(context) {
     assert(unknownMethod.error?.code === -32601, `B3-07: unknown method must be method-not-found: ${JSON.stringify(unknownMethod)}`)
     optional.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: sessionA } })
     assert(await optional.silent(200), 'B3-07: session/cancel must not receive a response')
-    // B3-10: an unadvertised systemPrompt is refused on every lifecycle entry
-    // BEFORE any Host side effect. The pinned v1 schema accepts the field, so a
-    // raw frame is the only way to prove the View does not silently ignore it.
+    // B3-10: the advertised `systemPrompt` capability accepts the standard
+    // append shape but refuses every unsupported value on every lifecycle entry
+    // BEFORE any Host side effect. A raw frame is used because the pinned v1
+    // schema accepts the field; the View must classify the value itself.
     // `sessionA` was closed in B3-06, so it has no ACP claim and its resume/load
     // refusal cannot be masked by a busy/foreign rejection.
     const historyBefore = eventsOf(sessionA)
@@ -626,30 +629,33 @@ export async function runAcpV1ConformanceB3(context) {
     `B3-10: sessionA must carry its proven durable history before the refusals: ${JSON.stringify(historyBefore)}`)
     const systemPrompt = {
       mode: 'append',
-      content: [{ type: 'text', text: `b3-unannounced-prompt-${digestOf(`b3-prompt-${runNonce}`).slice(0, 16)}` }],
+      content: [{ type: 'text', text: `b3-append-prompt-${digestOf(`b3-prompt-${runNonce}`).slice(0, 16)}` }],
     }
-    // A schema-valid but empty content array must not be read as "nothing to
-    // apply": the capability is absent, so the field's presence alone decides.
+    // A schema-valid but empty content array is not "nothing to apply".
     const emptySystemPrompt = { mode: 'append', content: [] }
-    // The standard override mode is the representative "other advertised mode"
-    // that a client might send; it must be refused exactly like append.
+    // The standard override mode is not advertised (`mode.override` absent).
     const overrideSystemPrompt = { mode: 'override', content: [{ type: 'text', text: systemPrompt.content[0].text }] }
-    const promptNew = await optional.request(7, 'session/new', { cwd: hostCwd, mcpServers: [], systemPrompt })
+    // A schema-valid image block is not a supported system prompt content type.
+    const imageSystemPrompt = {
+      mode: 'append',
+      content: [{ type: 'image', data: 'AA==', mimeType: 'image/png' }],
+    }
+    const promptNew = await optional.request(7, 'session/new', { cwd: hostCwd, mcpServers: [], systemPrompt: imageSystemPrompt })
     assert(promptNew.error?.code === -32602
       && promptNew.error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
-    `B3-10: session/new must refuse an unadvertised systemPrompt: ${JSON.stringify(promptNew)}`)
+    `B3-10: session/new must refuse non-text append content: ${JSON.stringify(promptNew)}`)
     const promptResume = await optional.request(8, 'session/resume', {
       sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt: emptySystemPrompt,
     })
     assert(promptResume.error?.code === -32602
       && promptResume.error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
-    `B3-10: session/resume must refuse an unadvertised systemPrompt: ${JSON.stringify(promptResume)}`)
+    `B3-10: session/resume must refuse an empty append content: ${JSON.stringify(promptResume)}`)
     const promptLoad = await optional.request(9, 'session/load', {
       sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt: overrideSystemPrompt,
     })
     assert(promptLoad.error?.code === -32602
       && promptLoad.error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
-    `B3-10: session/load must refuse an unadvertised systemPrompt: ${JSON.stringify(promptLoad)}`)
+    `B3-10: session/load must refuse the unadvertised override mode: ${JSON.stringify(promptLoad)}`)
     assert(await optional.silent(200), 'B3-10: a refused session/load must not replay Session history')
     assert(JSON.stringify(eventsOf(sessionA)) === JSON.stringify(historyBefore),
       'B3-10: the refused requests must not alter sessionA durable records')
@@ -673,6 +679,18 @@ export async function runAcpV1ConformanceB3(context) {
     const nullPromptClose = await optional.requestSkippingNotifications(11, 'session/close', { sessionId: nullPromptNew.result.sessionId })
     assert(JSON.stringify(nullPromptClose.result) === '{}',
       `B3-10: the null-prompt positive Session must close with {}: ${JSON.stringify(nullPromptClose)}`)
+    // The advertised capability accepts exactly the standard append shape: a
+    // real create + attach + close proves the wire acceptance; the full model
+    // sink/lifetime contract is owned by `acp.system-prompt-append`.
+    const appendPromptNew = await optional.requestSkippingNotifications(14, 'session/new', {
+      cwd: hostCwd, mcpServers: [], systemPrompt,
+    })
+    const appendSession = appendPromptNew.result?.sessionId
+    assert(typeof appendSession === 'string' && appendSession.length > 0,
+      `B3-10: the advertised append shape must be accepted: ${JSON.stringify(appendPromptNew)}`)
+    const appendClose = await optional.requestSkippingNotifications(15, 'session/close', { sessionId: appendSession })
+    assert(JSON.stringify(appendClose.result) === '{}',
+      `B3-10: the append Session must close with {}: ${JSON.stringify(appendClose)}`)
     const resumedA = await optional.requestSkippingNotifications(12, 'session/resume', { sessionId: sessionA, cwd: hostCwd, mcpServers: [] })
     assert(resumedA.error === undefined,
       `B3-10: the refused resume must leave no residual claim: ${JSON.stringify(resumedA)}`)

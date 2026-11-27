@@ -584,6 +584,12 @@ test('every registry entry declares a conservative platform list and the audited
     // selected run passed.
     'acp.command-invocation',
     'acp.session-config',
+    // PR-B drives only the shared Split harness (real TUI Client, official SDK
+    // clients, the platform-specific ACP endpoint and the scripted provider)
+    // plus the real TUI `/new`/`/preset` commands; no Linux-only process
+    // primitive is used. Its packed-candidate Linux and Darwin selected runs
+    // are part of the PR qualification evidence.
+    'acp.system-prompt-append',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {

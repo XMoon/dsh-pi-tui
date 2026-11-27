@@ -1,0 +1,529 @@
+/**
+ * G-ACP2 supplemental PR-B — real packaged ACP v1 client system prompt append.
+ *
+ * ONE real installed Split Host + real TUI Client + independent official ACP v1
+ * SDK clients. The case proves the advertised `sessionCapabilities.systemPrompt`
+ * contract end to end: a valid `append` becomes ONE ordinary official scoped
+ * section in the EXACT Agent's Cordis scope (so the human TUI turn on the SAME
+ * Session receives it), the real model request is the sink, a sibling Session
+ * or a retired View never receives it, the official complete minimal preset
+ * legitimately suppresses it, and close / same-connection reattach / null /
+ * Off retire the contribution before the View is released. No production hook
+ * is added: the scripted offline model only records sanitized request facts.
+ *
+ * @module split-process/acp-system-prompt-append
+ */
+
+import { closeSync, existsSync, mkdirSync, openSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
+import { connect } from 'node:net'
+import { join } from 'node:path'
+import { Readable, Writable } from 'node:stream'
+import { spawnSync } from 'node:child_process'
+import * as acp from '@agentclientprotocol/sdk'
+
+import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import { readC1WorkEvents } from '../../lib/split-smoke-fixtures.mjs'
+import { hostSessionEvents, waitForHostSessionEventAfter } from '../../lib/split-smoke-sessions.mjs'
+import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
+import { createC1Scene } from './c1-scene.mjs'
+
+const CASE_ID = 'acp.system-prompt-append'
+const MARKER_IDS = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
+
+function markerOf(id) {
+  return `ACP_SYSTEM_PROMPT_APPEND_${id}_MARKER`
+}
+
+function appendRequest(id, extraBlock) {
+  return {
+    mode: 'append',
+    content: [
+      { type: 'text', text: markerOf(id) },
+      ...(extraBlock === undefined ? [] : [{ type: 'text', text: extraBlock }]),
+    ],
+  }
+}
+
+function requireFact(condition, label) {
+  if (!condition) throw new SplitSmokeAssertionError(`${CASE_ID}: ${label}`)
+}
+
+function sleep(ms) {
+  return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
+}
+
+async function deadline(promise, label, timeoutMs = 180_000) {
+  let timer
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new SplitSmokeAssertionError(`${CASE_ID}: ${label} timed out`)), timeoutMs)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** One real ACP v1 client owned by the official public SDK. */
+async function openSdkClient(endpoint, onUpdate, onPermission) {
+  let socket
+  if (endpoint.dir !== undefined) {
+    const dirFd = openSync(endpoint.dir, 'r')
+    try {
+      socket = connect(`/proc/self/fd/${String(dirFd)}/acp.sock`)
+    } finally {
+      closeSync(dirFd)
+    }
+  } else {
+    socket = connect(endpoint.path)
+  }
+  try {
+    await deadline(new Promise((resolve, reject) => {
+      socket.once('connect', resolve)
+      socket.once('error', reject)
+    }), 'ACP socket connect', 30_000)
+  } catch (error) {
+    socket.destroy()
+    throw error
+  }
+  const socketClosed = new Promise(resolve => socket.once('close', resolve))
+  const app = acp.client({ name: 'acp-system-prompt-append-qualification' })
+  if (onUpdate !== undefined) app.onNotification(acp.methods.client.session.update, ({ params }) => { onUpdate(params) })
+  if (onPermission !== undefined) {
+    app.onRequest(acp.methods.client.session.requestPermission, async ({ params }) => await onPermission(params))
+  }
+  const connection = app.connect(acp.ndJsonStream(Writable.toWeb(socket), Readable.toWeb(socket)))
+  return {
+    connection,
+    socket,
+    socketClosed,
+    async request(method, params) {
+      return await deadline(connection.agent.request(method, params), `ACP ${method}`)
+    },
+    async close() {
+      try { await connection.close() } catch { /* already closed by the peer */ }
+      socket.destroy()
+      await deadline(Promise.allSettled([connection.closed, socketClosed]), 'ACP connection close', 30_000).catch(() => {})
+    },
+  }
+}
+
+async function expectRequestError(promise, label) {
+  try {
+    await promise
+  } catch (error) {
+    requireFact(error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
+      `${label}: expected LOCAL_ACP_VIEW_INVALID_REQUEST, got ${JSON.stringify({ code: error?.code, data: error?.data })}`)
+    requireFact(error?.code === -32602, `${label}: expected -32602, got ${JSON.stringify(error?.code)}`)
+    return
+  }
+  throw new SplitSmokeAssertionError(`${CASE_ID}: ${label} unexpectedly succeeded`)
+}
+
+export async function runAcpSystemPromptAppend(context) {
+  const { EntryProcess, entries, base, dshHome, workDir, installation, trace } = context
+  const scene = createC1Scene(context)
+  const workRoot = scene.c1WorkRoot('acp-system-prompt')
+  const controlPath = join(workRoot, 'acp-system-prompt-control.json')
+  const workspace = join(workDir, 'acp-system-prompt-workspace')
+  mkdirSync(workspace, { recursive: true, mode: 0o700 })
+  const hostCwd = realpathSync(workspace)
+  const peers = []
+  const acpClients = []
+  let tui
+  let host
+  let hostIdentity
+  let actionSequence = 0
+  let endpoint
+  let sessionA
+  let sessionC
+  let conn1
+  let conn2
+  let sequence = 0
+
+  const hostIdentityFacts = async () => await scene.hostIdentityFacts(host)
+  const assertSameHost = async (before, label) => {
+    const after = await hostIdentityFacts()
+    requireFact(after.hostPid === before.hostPid && after.instanceId === before.instanceId
+      && after.scopeId === before.scopeId, `${label}: the Host identity changed`)
+  }
+  const runDsh = args => {
+    const [executable, ...prefix] = installation.dshInvocation
+    return spawnSync(executable, [...prefix, '--profile', 'pi-tui', ...args], {
+      cwd: installation.profileDir,
+      env: installation.env,
+      encoding: 'utf8',
+      timeout: 120_000,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  }
+  const daemonStatus = label => {
+    const result = runDsh(['daemon', 'status'])
+    requireFact(result.status === 0, `${label}: daemon status exited ${String(result.status)}: ${result.stderr.slice(-500)}`)
+    const fields = {}
+    for (const line of result.stdout.split('\n')) {
+      const at = line.indexOf('=')
+      if (at > 0) fields[line.slice(0, at)] = line.slice(at + 1)
+    }
+    return fields
+  }
+  const startPeer = async label => {
+    const process = new EntryProcess('peer', entries.client, {
+      ...base,
+      env: { ...base.env, SPLIT_PROCESS_CLIENT_MODE: 'peer' },
+    })
+    process.qualificationLabel = label
+    peers.push(process)
+    await process.waitFor(record => record.m4a0 === 'ready', `${label} peer ready`, 180_000)
+    return process
+  }
+  const acpAccess = async (process, label, value) => {
+    const requestId = `asp-acp-access-${String(++sequence)}-${String(process.pid)}`
+    process.send({
+      op: 'qualification-acp-access',
+      requestId,
+      ...(value === undefined ? {} : { acpEnabled: value }),
+    })
+    return await process.waitFor(entry => entry.op === 'acp-access' && entry.requestId === requestId,
+      `${label} acp-access`, 120_000)
+  }
+  const openClient = async (label, onUpdate) => {
+    const client = await openSdkClient(endpoint, onUpdate, async () => ({ outcome: { outcome: 'cancelled' } }))
+    acpClients.push(client)
+    const initialized = await client.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
+    requireFact(initialized?.protocolVersion === 1, `${label}: initialize must answer v1`)
+    return { client, initialized }
+  }
+  const closeClient = async client => { await client.close().catch(() => {}) }
+  const openNewTui = async (client, label) => {
+    // Type, prove the command is painted, then submit as a separate real key
+    // (a coalesced PTY write can keep the CR inside the editor's paste path).
+    client.send('/new')
+    await client.waitForScreen('/new', `${label} command painted`, 120_000)
+    await sleep(100)
+    client.send('\r')
+    await sleep(100)
+    const status = await waitForSurfaceStatus(client, record => record.sessionOpen === true
+      && typeof record.openSessionId === 'string' && record.openSessionId !== ''
+      && record.transport === 'connected', `${label} Session open`, 180_000)
+    return status.openSessionId
+  }
+  const sendTuiPrompt = async (client, text, label) => {
+    // Type, prove the draft is painted, then submit as ONE separate real key.
+    // A single write with the text can be coalesced into the editor's paste
+    // path on some PTY/timing combinations, so the submit key is explicit.
+    client.send(text)
+    await client.waitForScreen(text.slice(0, Math.min(32, text.length)), `${label} prompt painted`, 120_000)
+    await sleep(100)
+    client.send('\r')
+    await sleep(100)
+  }
+  const turnEndAfter = async (sessionId, afterIndex, label) =>
+    await waitForHostSessionEventAfter(dshHome, sessionId, afterIndex, event => event.type === 'turn/end', label, 180_000)
+  /**
+   * Wait for a model request record of one Session that appeared AFTER
+   * `fromCount` (the proof-file length captured before the triggering action).
+   * The same Session legitimately produces several records with identical
+   * system text, so a plain "first match" wait could return an earlier turn.
+   */
+  const sessionMarker = async (sessionId, label, predicate, fromCount) => {
+    const started = Date.now()
+    while (Date.now() - started < 180_000) {
+      const match = readC1WorkEvents(workRoot).slice(fromCount)
+        .find(event => event.kind === 'acp-system-prompt-request'
+          && event.sessionId === sessionId && predicate(event))
+      if (match !== undefined) return match
+      await sleep(25)
+    }
+    throw new SplitSmokeAssertionError(`${CASE_ID}: ${label} timed out`)
+  }
+  const allMarkerCounts = (request, channel = 'markers') =>
+    MARKER_IDS.map(id => request[channel]?.[id] ?? 0)
+  const assertOnly = (request, label, expected) => {
+    for (const id of MARKER_IDS) {
+      requireFact((request.markers?.[id] ?? 0) === (expected === id ? 1 : 0),
+        `${label}: marker ${id} count was ${String(request.markers?.[id])}, expected ${expected === id ? 1 : 0}`)
+    }
+  }
+  const systemNodes = sessionId => (hostSessionEvents(dshHome, sessionId) ?? [])
+    .filter(event => event.type === 'system/message')
+
+  try {
+    const started = await scene.startC1Host('acp-system-prompt', 'asp host', {
+      DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
+    }, workRoot)
+    host = started.host
+    const ready = started.ready
+    hostIdentity = await hostIdentityFacts()
+    requireFact(typeof ready.localHost?.scopeId === 'string' && ready.localHost.scopeId.length === 64,
+      'Host Ready must publish the scope id')
+    requireFact(/^[0-9a-f]{64}$/u.test(context.candidateSha256), 'candidate SHA256 must be a real digest')
+
+    const peer = await startPeer('asp peer')
+    const disabled = await acpAccess(peer, 'ASP-01 initial ACP status', undefined)
+    requireFact(disabled.ok === true && disabled.status?.state === 'disabled', `ASP-01: ACP must start disabled: ${JSON.stringify(disabled)}`)
+    const enabled = await acpAccess(peer, 'ASP-01 enable ACP', true)
+    requireFact(enabled.ok === true && enabled.status?.state === 'enabled', `ASP-01: ACP must enable: ${JSON.stringify(enabled)}`)
+    const status = daemonStatus('ASP-01 daemon status')
+    const expectedSocket = process.platform === 'darwin'
+      ? `/private/tmp/dpt-${String(process.getuid())}-${ready.localHost.scopeId.slice(0, 40)}/acp.sock`
+      : join(dshHome, 'run', 'dsh-pi-tui', ready.localHost.scopeId, 'acp.sock')
+    requireFact(status['acp-socket'] === expectedSocket, `ASP-01: daemon status endpoint: ${JSON.stringify(status)}`)
+    endpoint = process.platform === 'darwin'
+      ? { path: status['acp-socket'] }
+      : { path: expectedSocket, dir: join(dshHome, 'run', 'dsh-pi-tui', ready.localHost.scopeId) }
+    const tuiStarted = await scene.startC1Client('asp tui', {}, { cwd: hostCwd })
+    tui = tuiStarted.client
+    sessionA = await openNewTui(tui, 'ASP-02 TUI A')
+    requireFact(typeof sessionA === 'string' && sessionA.length > 0, 'ASP-02: the TUI Session must be real')
+    // ASP-03: the frozen capability is advertised on a real Host (append only).
+    const main = await openClient('ASP-03', () => {})
+    conn1 = main.client
+    const sessionCaps = main.initialized.agentCapabilities?.sessionCapabilities
+    requireFact(sessionCaps?.systemPrompt !== undefined && sessionCaps.systemPrompt?.mode?.override === undefined,
+      `ASP-03: systemPrompt append must be advertised without override: ${JSON.stringify(sessionCaps)}`)
+    requireFact(main.initialized.agentCapabilities?.loadSession === true
+      && sessionCaps.resume !== undefined && sessionCaps.close !== undefined && sessionCaps.list !== undefined,
+    'ASP-03: the real View still advertises load/list/resume/close')
+    // ASP-04: invalid values are invalid params before any Host effect.
+    await expectRequestError(conn1.request(acp.methods.agent.session.new, {
+      cwd: hostCwd, mcpServers: [], systemPrompt: { mode: 'override', content: [{ type: 'text', text: 'x' }] },
+    }), 'ASP-04 override mode')
+    await expectRequestError(conn1.request(acp.methods.agent.session.resume, {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt: { mode: 'append', content: [] },
+    }), 'ASP-04 empty content')
+    await expectRequestError(conn1.request(acp.methods.agent.session.load, {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [],
+      systemPrompt: { mode: 'append', content: [{ type: 'image', data: 'AA==', mimeType: 'image/png' }] },
+    }), 'ASP-04 non-text content')
+    // ASP-05: valid append on the shared Session, visible to the human TUI turn.
+    const resumedA = await conn1.request(acp.methods.agent.session.resume, {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [],
+      systemPrompt: appendRequest('A', 'second block {{literal}}'),
+    })
+    requireFact(typeof resumedA?.sessionId === 'string' || resumedA?.sessionId === undefined,
+      `ASP-05: resume A: ${JSON.stringify(resumedA)}`)
+    const aBefore = (hostSessionEvents(dshHome, sessionA) ?? []).length
+    const sharedFrom = readC1WorkEvents(workRoot).length
+    await sendTuiPrompt(tui, 'asp-tui-a', 'ASP-05 TUI shared A')
+    let sharedA
+    try {
+      sharedA = await sessionMarker(sessionA, 'TUI shared A', request => request.markers?.A === 1, sharedFrom)
+    } catch (error) {
+      const frame = await tui.viewport().catch(() => [])
+      throw new SplitSmokeAssertionError(`${CASE_ID}: TUI shared A timed out; screen=${JSON.stringify(frame.slice(-24))}`)
+    }
+    requireFact(sharedA.literalPreserved === true && sharedA.harnessIdentity === true,
+      'ASP-05: the TUI turn on the SAME Agent must carry the literal append and the default instructions')
+    requireFact((sharedA.systemChannelMarkers?.A ?? 0) + (sharedA.historyChannelMarkers?.A ?? 0) === 1,
+      'ASP-05: the append must be present exactly once across the effective system channels')
+    await turnEndAfter(sessionA, aBefore, 'ASP-05 TUI turn end')
+
+    // ASP-06: the ACP-owned prompt of the same View carries it too.
+    const acpFrom = readC1WorkEvents(workRoot).length
+    const promptA = await conn1.request(acp.methods.agent.session.prompt, {
+      sessionId: sessionA, prompt: [{ type: 'text', text: 'asp-acp-a' }],
+    })
+    requireFact(promptA?.stopReason === 'end_turn', `ASP-06: ACP prompt stop reason: ${JSON.stringify(promptA)}`)
+    const acpA = await sessionMarker(sessionA, 'ACP prompt A', request => request.markers?.A === 1, acpFrom)
+    requireFact(acpA.markers?.B === 0, 'ASP-06: Session A must never see the other View marker')
+
+    // ASP-07: a second Session/connection is isolated in both directions.
+    const second = await openClient('ASP-07', () => {})
+    conn2 = second.client
+    const createdB = await conn2.request(acp.methods.agent.session.new, {
+      cwd: hostCwd, mcpServers: [], systemPrompt: appendRequest('B'),
+    })
+    const sessionB = createdB?.sessionId
+    requireFact(typeof sessionB === 'string' && sessionB !== sessionA, `ASP-07: Session B: ${JSON.stringify(createdB)}`)
+    const bFrom = readC1WorkEvents(workRoot).length
+    const promptB = await conn2.request(acp.methods.agent.session.prompt, {
+      sessionId: sessionB, prompt: [{ type: 'text', text: 'asp-acp-b' }],
+    })
+    requireFact(promptB?.stopReason === 'end_turn', `ASP-07: B prompt: ${JSON.stringify(promptB)}`)
+    const requestB = await sessionMarker(sessionB, 'ACP prompt B', request => request.markers?.B === 1, bFrom)
+    assertOnly(requestB, 'ASP-07 B request', 'B')
+    const a2From = readC1WorkEvents(workRoot).length
+    const promptA2 = await conn1.request(acp.methods.agent.session.prompt, {
+      sessionId: sessionA, prompt: [{ type: 'text', text: 'asp-acp-a2' }],
+    })
+    requireFact(promptA2?.stopReason === 'end_turn', 'ASP-07: A remains usable')
+    const requestA2 = await sessionMarker(sessionA, 'ACP prompt A2', request => request.markers?.A === 1, a2From)
+    assertOnly(requestA2, 'ASP-07 A request', 'A')
+
+    // ASP-08: explicit close retires the contribution; the human TUI Session lives on.
+    const closedA = await conn1.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    requireFact(closedA !== null && typeof closedA === 'object', 'ASP-08: close must settle')
+    const aAfterClose = (hostSessionEvents(dshHome, sessionA) ?? []).length
+    const afterCloseFrom = readC1WorkEvents(workRoot).length
+    await sendTuiPrompt(tui, 'asp-tui-after-close', 'ASP-08 TUI after close')
+    const afterClose = await sessionMarker(sessionA, 'TUI after close', request => allMarkerCounts(request).every(count => count === 0)
+      && request.harnessIdentity === true, afterCloseFrom)
+    requireFact(afterClose.markers?.A === 0, 'ASP-08: the retired append must not reach the next real turn')
+    await turnEndAfter(sessionA, aAfterClose, 'ASP-08 TUI turn end')
+    const repeatedClose = await conn1.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    requireFact(repeatedClose !== null && typeof repeatedClose === 'object', 'ASP-08: a repeated close stays idempotent')
+
+    // ASP-09: same-connection reattach replaces the value; null clears it.
+    await conn1.request(acp.methods.agent.session.resume, {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt: appendRequest('C'),
+    })
+    const cFrom = readC1WorkEvents(workRoot).length
+    await sendTuiPrompt(tui, 'asp-tui-c', 'ASP-09 TUI C')
+    const requestC = await sessionMarker(sessionA, 'TUI C', request => request.markers?.C === 1, cFrom)
+    assertOnly(requestC, 'ASP-09 C request', 'C')
+    await conn1.request(acp.methods.agent.session.resume, {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt: null,
+    })
+    const clearedFrom = readC1WorkEvents(workRoot).length
+    await sendTuiPrompt(tui, 'asp-tui-cleared', 'ASP-09 TUI cleared')
+    const cleared = await sessionMarker(sessionA, 'TUI cleared', request => allMarkerCounts(request).every(count => count === 0), clearedFrom)
+    requireFact(cleared.literalPreserved === false, 'ASP-09: null must clear the literal append too')
+
+    // ASP-10: cold load carries no opaque value; an explicit resend applies.
+    await conn1.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    await closeClient(conn1)
+    conn1 = undefined
+    const loader = await openClient('ASP-10', () => {})
+    const loaded = await loader.client.request(acp.methods.agent.session.load, {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [],
+    })
+    requireFact(loaded !== null && typeof loaded === 'object', 'ASP-10: plain cold load must succeed')
+    const coldFrom = readC1WorkEvents(workRoot).length
+    const loadPrompt = await loader.client.request(acp.methods.agent.session.prompt, {
+      sessionId: sessionA, prompt: [{ type: 'text', text: 'asp-load-no-append' }],
+    })
+    requireFact(loadPrompt?.stopReason === 'end_turn', 'ASP-10: loaded prompt must answer end_turn')
+    const coldRequest = await sessionMarker(sessionA, 'cold load request', request => allMarkerCounts(request).every(count => count === 0), coldFrom)
+    requireFact(systemNodes(sessionA).some(node => JSON.stringify(node).includes(markerOf('A'))),
+      'ASP-10: the original durable system record is retained (never rewritten)')
+    await loader.client.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    await closeClient(loader.client)
+    const resender = await openClient('ASP-10b', () => {})
+    await resender.client.request(acp.methods.agent.session.load, {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt: appendRequest('D'),
+    })
+    const resendFrom = readC1WorkEvents(workRoot).length
+    const resendPrompt = await resender.client.request(acp.methods.agent.session.prompt, {
+      sessionId: sessionA, prompt: [{ type: 'text', text: 'asp-load-resend' }],
+    })
+    requireFact(resendPrompt?.stopReason === 'end_turn', 'ASP-10: explicit append resend must answer end_turn')
+    const resendRequest = await sessionMarker(sessionA, 'cold load resend', request => request.markers?.D === 1, resendFrom)
+    assertOnly(resendRequest, 'ASP-10 resend request', 'D')
+    await resender.client.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    await closeClient(resender.client)
+
+    // ASP-11: the official complete minimal preset keeps its authority.
+    sessionC = await openNewTui(tui, 'ASP-11 TUI C')
+    tui.send('/preset minimal')
+    await tui.waitForScreen('/preset minimal', 'ASP-11 preset command painted', 120_000)
+    await sleep(100)
+    tui.send('\r')
+    // The official durable `agent-preset/selected` append is the authority for
+    // the switch; a painted notice can scroll out of the captured viewport.
+    const presetDeadline = Date.now() + 120_000
+    for (;;) {
+      const selected = (hostSessionEvents(dshHome, sessionC) ?? [])
+        .some(event => event.type === 'agent-preset/selected' && event.data?.agentPreset === 'minimal')
+      if (selected) break
+      if (Date.now() > presetDeadline) {
+        const frame = await tui.viewport().catch(() => [])
+        throw new SplitSmokeAssertionError(`${CASE_ID}: minimal preset switch did not commit; screen=${JSON.stringify(frame.slice(-24))}`)
+      }
+      await sleep(50)
+    }
+    const completer = await openClient('ASP-11', () => {})
+    await completer.client.request(acp.methods.agent.session.resume, {
+      sessionId: sessionC, cwd: hostCwd, mcpServers: [], systemPrompt: appendRequest('E'),
+    })
+    const completeFrom = readC1WorkEvents(workRoot).length
+    const completePrompt = await completer.client.request(acp.methods.agent.session.prompt, {
+      sessionId: sessionC, prompt: [{ type: 'text', text: 'asp-complete' }],
+    })
+    requireFact(completePrompt?.stopReason === 'end_turn', 'ASP-11: the complete preset prompt must answer end_turn')
+    const completeRequest = await sessionMarker(sessionC, 'complete request', request => request.markers?.E === 0, completeFrom)
+    requireFact(completeRequest.harnessIdentity === false && completeRequest.systemLength < 1024,
+      `ASP-11: the complete minimal prompt must be the sole authority: ${JSON.stringify(completeRequest)}`)
+    await completer.client.request(acp.methods.agent.session.close, { sessionId: sessionC })
+    await closeClient(completer.client)
+
+    // ASP-12: Off retires the live contribution; On serves a fresh View.
+    const fresh = await openClient('ASP-12', () => {})
+    await fresh.client.request(acp.methods.agent.session.resume, {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt: appendRequest('F'),
+    })
+    const disabledAgain = await acpAccess(peer, 'ASP-12 disable ACP', false)
+    requireFact(disabledAgain.ok === true && disabledAgain.status?.state === 'disabled', 'ASP-12: ACP must disable')
+    for (let attempt = 0; attempt < 400 && existsSync(endpoint.path); attempt += 1) await sleep(10)
+    requireFact(!existsSync(endpoint.path), 'ASP-12: Off must retire the socket')
+    const enabledAgain = await acpAccess(peer, 'ASP-12 re-enable ACP', true)
+    requireFact(enabledAgain.ok === true && enabledAgain.status?.state === 'enabled', 'ASP-12: ACP must enable again')
+    endpoint = process.platform === 'darwin'
+      ? { path: daemonStatus('ASP-12 status')['acp-socket'] }
+      : { path: expectedSocket, dir: join(dshHome, 'run', 'dsh-pi-tui', ready.localHost.scopeId) }
+    const afterOff = await openClient('ASP-12b', () => {})
+    await afterOff.client.request(acp.methods.agent.session.resume, {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt: appendRequest('G'),
+    })
+    const offFrom = readC1WorkEvents(workRoot).length
+    const offPrompt = await afterOff.client.request(acp.methods.agent.session.prompt, {
+      sessionId: sessionA, prompt: [{ type: 'text', text: 'asp-after-off' }],
+    })
+    requireFact(offPrompt?.stopReason === 'end_turn', 'ASP-12: the post-Off View must serve a real turn')
+    const offRequest = await sessionMarker(sessionA, 'post-Off request', request => request.markers?.G === 1, offFrom)
+    assertOnly(offRequest, 'ASP-12 post-Off request', 'G')
+    await afterOff.client.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    await closeClient(afterOff.client)
+
+    await assertSameHost(hostIdentity, 'ASP-13')
+    requireFact(!host.exited, 'ASP-13: the Host must survive the whole case')
+    requireFact(conn2 !== undefined, 'ASP-13: the second connection was established')
+    await closeClient(conn2)
+    conn2 = undefined
+
+    const result = {
+      status: 'PASS',
+      scope: 'REAL_SPLIT_PROCESS_L6',
+      officialSdkClient: true,
+      appendAdvertised: true,
+      overrideNotAdvertised: true,
+      invalidValuesRejected: true,
+      tuiSharedAgent: true,
+      acpOwnedPrompt: true,
+      siblingIsolated: true,
+      closeRetired: true,
+      reattachReplaced: true,
+      nullCleared: true,
+      coldLoadNoCarrier: true,
+      explicitResendApplied: true,
+      completePresetSuppressed: true,
+      offRetired: true,
+      onFreshView: true,
+      hostIdentityKept: true,
+      candidateSha256: context.candidateSha256,
+      sessionA,
+      sessionB: createdB?.sessionId,
+      sessionC,
+      evidence: {
+        sharedA,
+        acpA,
+        requestB,
+        requestA2,
+        afterClose,
+        requestC,
+        cleared,
+        coldRequest,
+        resendRequest,
+        completeRequest,
+        offRequest,
+      },
+    }
+    context.trace(`${CASE_ID}/evidence`, result)
+    return result
+  } finally {
+    await scene.dispose()
+  }
+}

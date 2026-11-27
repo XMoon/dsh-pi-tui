@@ -359,6 +359,13 @@ interface ConnectionState {
   /** Whether THIS connection negotiated standard embedded text/blob resources. */
   resourceEnabled: boolean
   /**
+   * Whether THIS connection was actually advertised the standard client
+   * `systemPrompt` append capability at `initialize`. It is frozen for the whole
+   * connection with the other capabilities and is the ONLY admission fact a
+   * non-null lifecycle `systemPrompt` is checked against.
+   */
+  systemPromptAppend: boolean
+  /**
    * Whether THIS connection declared the standard ACP v1 form-based
    * elicitation capability during its initialize. A connection that did not
    * declare it never receives an `elicitation/create` request: an ACP-owned
@@ -942,6 +949,13 @@ function buildAgentApp(
       state.resourceEnabled = context.sessionAccess !== undefined
         && state.views !== undefined
         && context.sessionAccess.supportsFileInput() === true
+      // The client append capability is frozen ONCE for this connection, exactly
+      // like the resource/image capabilities: the real shared Session View and
+      // the official scoped section seam must both exist, or the capability is
+      // never advertised and every non-null request stays invalid params.
+      state.systemPromptAppend = context.sessionAccess !== undefined
+        && state.views !== undefined
+        && context.sessionAccess.supportsSystemPromptAppend() === true
       if (context.sessionAccess !== undefined && state.views !== undefined) {
         const imageEnabled = await context.sessionAccess.supportsImagePrompts()
         const bounds = imageEnabled ? deriveImageInputBounds(context.sessionAccess.imageLimits()) : undefined
@@ -973,7 +987,12 @@ function buildAgentApp(
           // installed the connection-scoped View; `list` joins it only when the
           // authorized roster and canonical history read seams are ready.
           sessionCapabilities: context.sessionAccess !== undefined
-            ? { resume: {}, close: {}, ...(sessionReadReady ? { list: {} } : {}) }
+            ? {
+              resume: {},
+              close: {},
+              ...(sessionReadReady ? { list: {} } : {}),
+              ...(state.systemPromptAppend ? { systemPrompt: {} } : {}),
+            }
             : {},
         },
         authMethods: [],
@@ -1209,6 +1228,7 @@ function buildAgentApp(
       notifyProjection: projectionNotifierFor(client),
       capabilities: state.capabilities,
       maxOutputFrameBytes: state.maxOutputFrameBytes,
+      systemPromptAppend: state.systemPromptAppend,
       ...state.elicitationForm ? { requestElicitation: requestElicitationFor(client) } : {},
     })
     app.onRequest(methods.agent.session.new, async ({ params, client, signal }) => {
@@ -1520,6 +1540,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
     closed: false,
     imageEnabled: false,
     resourceEnabled: false,
+    systemPromptAppend: false,
     elicitationForm: false,
     capabilities: { plan: false, compaction: false, subagents: false, notices: false, booleanConfigOptions: false },
     inputBounds: TEXT_ONLY_BOUNDS,

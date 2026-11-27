@@ -485,6 +485,66 @@ test('an image-widened raw frame never widens the legacy embedded-resource budge
   await listener.close()
 })
 
+test('initialize advertises the client system prompt append only for the real scoped seam, and a valid append reaches the exact Agent', async t => {
+  for (const [seam, expected] of [[true, true], [false, false]] as const) {
+    const { scope } = newScope(t)
+    const fake = makeFakeAccess({ systemPromptAppend: seam })
+    const agent = fake.seed('session-system-prompt', '/host')
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access, views: registry })
+    t.after(() => listener.close())
+    const client = await RawClient.open(listener.socketPath)
+    try {
+      initialize(client, 1)
+      const init = (await client.next()) as {
+        result?: { agentCapabilities: { sessionCapabilities: Record<string, unknown> } }
+      }
+      const capability = init.result?.agentCapabilities.sessionCapabilities.systemPrompt
+      assert.equal(capability !== undefined, expected,
+        seam
+          ? 'a real scoped append seam must advertise the systemPrompt capability'
+          : 'a Host without the scoped append seam must not advertise it')
+      if (seam) assert.deepEqual(capability, {}, 'append mode is advertised, override is never offered')
+      client.send({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/resume',
+        params: {
+          sessionId: 'session-system-prompt',
+          cwd: '/host',
+          systemPrompt: {
+            mode: 'append',
+            content: [{ type: 'text', text: 'LISTENER_APPEND' }, { type: 'text', text: '{{literal}}' }],
+          },
+        },
+      })
+      const reply = (await client.next()) as { result?: unknown; error?: { code: number; data?: { code?: string } } }
+      if (seam) {
+        assert.deepEqual(reply.result, {})
+        assert.equal(fake.systemPromptAppendRegistrations.length, 1)
+        const registration = fake.systemPromptAppendRegistrations[0]
+        assert.equal(registration?.agent, agent, 'the seam must receive the exact borrowed Agent')
+        assert.equal(registration?.session, agent.session, 'the seam must receive the exact borrowed Session')
+        assert.equal(registration?.text, 'LISTENER_APPEND\n\n{{literal}}',
+          'the listener must forward the literal two-newline normalized append')
+        assert.equal(registration?.stillCurrent(), true, 'the committed View provider gate is live')
+        client.send({ jsonrpc: '2.0', id: 3, method: 'session/close', params: { sessionId: 'session-system-prompt' } })
+        assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+        assert.equal(registration?.disposeCalls, 1, 'the real close boundary must run the exact disposer')
+        assert.equal(registration?.stillCurrent(), false, 'the provider gate must fail closed before release')
+      } else {
+        assert.equal(reply.error?.code, -32602)
+        assert.equal(reply.error?.data?.code, 'LOCAL_ACP_VIEW_INVALID_REQUEST')
+        assert.equal(fake.systemPromptAppendRegistrations.length, 0)
+        assert.equal(registry.hasClaim('session-system-prompt'), false)
+      }
+    } finally {
+      client.close()
+    }
+    await listener.close()
+  }
+})
+
 test('two connections reuse JSON-RPC id 1 independently and one closing does not affect the other', async t => {
   const { scope } = newScope(t)
   const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
@@ -1487,6 +1547,7 @@ test('a stale PRIVATE bind socket left by SIGKILL is recovered on the next start
 /** A minimal in-memory Host Session access that keeps EXACT object identity. */
 function makeFakeAccess(options: {
   readonly fileInput?: boolean
+  readonly systemPromptAppend?: boolean
   readonly imageLimits?: AcpImageLimits
   readonly supportsImagePrompts?: () => Promise<boolean>
   readonly readOutputImage?: (ref: AcpStoredImageRef, signal: AbortSignal) => Promise<AcpStoredImage>
@@ -1532,6 +1593,13 @@ function makeFakeAccess(options: {
   readonly sessionTodosValue?: unknown
 } = {}): {
   access: HostAcpSessionAccess
+  systemPromptAppendRegistrations: Array<{
+    readonly agent: LiveAgentViewIdentity
+    readonly session: object
+    readonly text: string
+    readonly stillCurrent: () => boolean
+    disposeCalls: number
+  }>
   seed: (id: string, cwd: string) => LiveAgentViewIdentity
   agentOf: (id: string) => LiveAgentViewIdentity | undefined
   prompts: AcpSessionPromptRequest[]
@@ -1563,10 +1631,26 @@ function makeFakeAccess(options: {
   let sessionListReads = 0
   const sessionHistoryReads: string[] = []
   const resolveCalls: string[] = []
+  const systemPromptAppendRegistrations: Array<{
+    readonly agent: LiveAgentViewIdentity
+    readonly session: object
+    readonly text: string
+    readonly stillCurrent: () => boolean
+    disposeCalls: number
+  }> = []
   return {
     access: {
       supportsFileInput() {
         return options.fileInput === true
+      },
+      supportsSystemPromptAppend() {
+        return options.systemPromptAppend === true
+      },
+      registerSystemPromptAppend(agent: LiveAgentViewIdentity, session: object, text: string, stillCurrent: () => boolean) {
+        if (options.systemPromptAppend !== true) throw new Error('systemPrompt append is not configured for this listener test')
+        const registration = { agent, session, text, stillCurrent, disposeCalls: 0 }
+        systemPromptAppendRegistrations.push(registration)
+        return { dispose: () => { registration.disposeCalls += 1 } }
       },
       async stageFile() {
         throw new Error('file staging is not configured for this listener test')
@@ -1770,6 +1854,7 @@ function makeFakeAccess(options: {
       },
     },
     prompts,
+    systemPromptAppendRegistrations,
     facts: () => facts,
     observeCalls: () => observeCalls,
     sessionListReads: () => sessionListReads,
@@ -2932,6 +3017,12 @@ test('session/new carries the authoritative created session id in JSON-RPC error
   const access: HostAcpSessionAccess = {
     supportsFileInput() {
       return false
+    },
+    supportsSystemPromptAppend() {
+      return false
+    },
+    registerSystemPromptAppend() {
+      throw new Error('systemPrompt append is not configured for this listener test')
     },
     async stageFile() {
       throw new Error('file staging is not configured for this listener test')

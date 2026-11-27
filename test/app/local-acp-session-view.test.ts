@@ -26,6 +26,9 @@ import {
 } from '../../src/app/remote-process/local-acp-session-policy.ts'
 import {
   AcpSessionViewRegistry,
+  AcpSystemPromptAppendError,
+  ACP_SYSTEM_PROMPT_SECTION_NAME,
+  ACP_SYSTEM_PROMPT_SECTION_ORDER,
   LocalAcpViewError,
   type AcpContinuedAnswerOutcome,
   type AcpCreateSessionOutcome,
@@ -232,6 +235,45 @@ class FakeAccess implements HostAcpSessionAccess {
   }
 
   supportsFileInput(): boolean { return true }
+
+  /** Whether this fake Host reports the official scoped append seam. */
+  systemPromptAppendEnabled = true
+  /** Every registration this fake received, in call order. */
+  readonly systemPromptAppendRegistrations: Array<{
+    readonly agent: LiveAgentViewIdentity
+    readonly session: object
+    readonly text: string
+    readonly stillCurrent: () => boolean
+    disposeCalls: number
+  }> = []
+  /** Scripted registration failure/observation. */
+  registerSystemPromptAppendImpl: (
+    agent: LiveAgentViewIdentity,
+    session: object,
+    text: string,
+    stillCurrent: () => boolean,
+  ) => void = () => {}
+  /** Inject the official change-notification throw after the effect undo. */
+  systemPromptDisposeThrows = false
+
+  supportsSystemPromptAppend(): boolean { return this.systemPromptAppendEnabled }
+
+  registerSystemPromptAppend(
+    agent: LiveAgentViewIdentity,
+    session: object,
+    text: string,
+    stillCurrent: () => boolean,
+  ): { readonly dispose: () => void } {
+    this.registerSystemPromptAppendImpl(agent, session, text, stillCurrent)
+    const registration = { agent, session, text, stillCurrent, disposeCalls: 0 }
+    this.systemPromptAppendRegistrations.push(registration)
+    return {
+      dispose: () => {
+        registration.disposeCalls += 1
+        if (this.systemPromptDisposeThrows) throw new Error('injected change notification throw')
+      },
+    }
+  }
 
   async stageFile(
     agent: LiveAgentViewIdentity,
@@ -645,6 +687,185 @@ test('session lifecycle requests carrying an unadvertised systemPrompt are refus
   }
 })
 
+test('a valid client append registers ONE scoped section in the exact Agent and retires it at the real detach boundary', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S43', '/work/a')
+  access.createSessionImpl = async () => { access.seed(agent); return { kind: 'created', sessionId: 'S43' } }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  assert.deepEqual(await registry.newSession(conn, access, {
+    ...NEW,
+    systemPrompt: {
+      mode: 'append',
+      content: [{ type: 'text', text: 'BLOCK_ONE' }, { type: 'text', text: '{{literal}}' }],
+    },
+  }, { systemPromptAppend: true }), { sessionId: 'S43' })
+  assert.equal(access.systemPromptAppendRegistrations.length, 1)
+  const registration = access.systemPromptAppendRegistrations[0]
+  assert.equal(registration.agent, agent, 'the registration must name the exact attached Agent')
+  assert.equal(registration.session, agent.session, 'the registration must name the exact attached Session')
+  assert.equal(registration.text, 'BLOCK_ONE\n\n{{literal}}',
+    'the ordered text blocks must stay literal and be joined with exactly two newlines')
+  assert.equal(registration.stillCurrent(), true, 'the committed View provider gate must be live')
+  assert.deepEqual(await registry.closeSession(conn, access, 'S43'), {})
+  assert.equal(registration.disposeCalls, 1, 'the exact official disposer must retire the section')
+  assert.equal(registration.stillCurrent(), false, 'the provider gate must fail closed before release')
+  assert.equal(registry.hasClaim('S43'), false)
+  // An attach without a client append registers nothing at all.
+  access.createSessionImpl = async () => {
+    access.seed(makeAgent('S44', '/work/a'))
+    return { kind: 'created', sessionId: 'S44' }
+  }
+  await registry.newSession(conn, access, NEW, { systemPromptAppend: true })
+  assert.equal(access.systemPromptAppendRegistrations.length, 1)
+})
+
+test('malformed, unsupported or over-budget client appends are invalid params before any Host effect', async () => {
+  const invalidValues: unknown[] = [
+    { mode: 'override', content: [{ type: 'text', text: 'x' }] },
+    { mode: 'append', content: [] },
+    { mode: 'append', content: [{ type: 'image', data: 'AA==', mimeType: 'image/png' }] },
+    { mode: 'append', content: [{ type: 'text', text: 5 }] },
+    { mode: 'append', content: [{ type: 'text', text: 'x'.repeat(1024 * 1024 + 1) }] },
+    // Two 512 KiB blocks fit the block bytes but not the two-newline separator.
+    { mode: 'append', content: [{ type: 'text', text: 'x'.repeat(512 * 1024) }, { type: 'text', text: 'x'.repeat(512 * 1024) }] },
+    'append',
+  ]
+  for (const value of invalidValues) {
+    const access = new FakeAccess()
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const conn = registry.createConnection()
+    await assert.rejects(
+      registry.newSession(conn, access, { ...NEW, systemPrompt: value }, { systemPromptAppend: true }),
+      isViewError('LOCAL_ACP_VIEW_INVALID_REQUEST'),
+    )
+    assert.deepEqual(access.createWorkspaceCalls, [], 'an invalid append must not reach the Host workspace')
+    assert.equal(registry.phaseOf(conn), 'idle')
+  }
+  // Exactly the 1 MiB budget is legal and registers; a single empty string is
+  // legal text and contributes nothing but still owns the same lifecycle.
+  for (const [text, expected] of [['y'.repeat(1024 * 1024), 1024 * 1024], ['', 0]] as const) {
+    const access = new FakeAccess()
+    access.createSessionImpl = async () => {
+      access.seed(makeAgent(`S-${String(expected)}`, '/work/a'))
+      return { kind: 'created', sessionId: `S-${String(expected)}` }
+    }
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const conn = registry.createConnection()
+    await registry.newSession(conn, access, {
+      ...NEW,
+      systemPrompt: { mode: 'append', content: [{ type: 'text', text }] },
+    }, { systemPromptAppend: true })
+    assert.equal(access.systemPromptAppendRegistrations[0]?.text.length, expected)
+  }
+})
+
+test('a failed append registration fails the attach with the real session identity and a stable reason', async () => {
+  const access = new FakeAccess()
+  access.createSessionImpl = async () => {
+    access.seed(makeAgent('S45', '/work/a'))
+    return { kind: 'created', sessionId: 'S45' }
+  }
+  access.registerSystemPromptAppendImpl = () => {
+    throw new AcpSystemPromptAppendError('registration-failed', 'injected registration failure')
+  }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  await assert.rejects(
+    registry.newSession(conn, access, {
+      ...NEW,
+      systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'FAIL' }] },
+    }, { systemPromptAppend: true }),
+    (error: unknown) => error instanceof LocalAcpViewError
+      && error.code === 'LOCAL_ACP_VIEW_HOST_ERROR'
+      && error.rpcCode === -32603
+      && error.data.reason === 'system-prompt-registration-failed'
+      && error.data.sessionId === 'S45',
+  )
+  assert.equal(access.systemPromptAppendRegistrations.length, 0)
+  assert.equal(registry.hasClaim('S45'), false)
+  assert.equal(registry.phaseOf(conn), 'idle')
+
+  // A stale seam identity keeps the standard Agent-unavailable classification.
+  access.createSessionImpl = async () => {
+    access.seed(makeAgent('S46', '/work/a'))
+    return { kind: 'created', sessionId: 'S46' }
+  }
+  access.registerSystemPromptAppendImpl = () => {
+    throw new AcpSystemPromptAppendError('stale', 'injected stale identity')
+  }
+  await assert.rejects(
+    registry.newSession(conn, access, {
+      ...NEW,
+      systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'STALE' }] },
+    }, { systemPromptAppend: true }),
+    isViewError('LOCAL_ACP_VIEW_AGENT_UNAVAILABLE'),
+  )
+  assert.equal(registry.hasClaim('S46'), false)
+})
+
+test('a change-notification throw at disposer time still follows the exact retirement and never blocks a successor', async () => {
+  const access = new FakeAccess()
+  access.createSessionImpl = async () => {
+    access.seed(makeAgent('S47', '/work/a'))
+    return { kind: 'created', sessionId: 'S47' }
+  }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  await registry.newSession(conn, access, {
+    ...NEW,
+    systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'NOTIFY' }] },
+  }, { systemPromptAppend: true })
+  access.systemPromptDisposeThrows = true
+  assert.deepEqual(await registry.closeSession(conn, access, 'S47'), {},
+    'the G0-proven post-undo notification throw must not turn a real detach into a fake failure')
+  assert.equal(access.systemPromptAppendRegistrations[0]?.disposeCalls, 1)
+  assert.equal(registry.hasClaim('S47'), false)
+  // The successor attach is accepted: no overlapping live contribution is kept.
+  access.systemPromptDisposeThrows = false
+  access.createSessionImpl = async () => {
+    access.seed(makeAgent('S48', '/work/a'))
+    return { kind: 'created', sessionId: 'S48' }
+  }
+  await registry.newSession(conn, access, {
+    ...NEW,
+    systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'SUCCESSOR' }] },
+  }, { systemPromptAppend: true })
+  assert.equal(access.systemPromptAppendRegistrations.length, 2)
+  assert.equal(access.systemPromptAppendRegistrations[1]?.text, 'SUCCESSOR')
+})
+
+test('same-connection reattach retires the outgoing append before the replacement; null clears it', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S50', '/work/a')
+  access.seed(agent)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  await registry.resumeSession(conn, access, {
+    sessionId: 'S50', cwd: '/work/a',
+    systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'FIRST' }] },
+  }, { systemPromptAppend: true })
+  assert.equal(access.systemPromptAppendRegistrations.length, 1)
+  const first = access.systemPromptAppendRegistrations[0]
+  await registry.resumeSession(conn, access, {
+    sessionId: 'S50', cwd: '/work/a',
+    systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'SECOND' }] },
+  }, { systemPromptAppend: true }, undefined, true)
+  assert.equal(first?.disposeCalls, 1, 'the outgoing exact disposer must run before the replacement')
+  assert.equal(access.systemPromptAppendRegistrations.length, 2)
+  assert.equal(access.systemPromptAppendRegistrations[1]?.text, 'SECOND')
+  const second = access.systemPromptAppendRegistrations[1]
+  await registry.resumeSession(conn, access, {
+    sessionId: 'S50', cwd: '/work/a', systemPrompt: null,
+  }, { systemPromptAppend: true }, undefined, true)
+  assert.equal(second?.disposeCalls, 1, 'a null reattach clears the previous contribution')
+  assert.equal(access.systemPromptAppendRegistrations.length, 2, 'null registers no replacement')
+  // Agent disposal is the exact owning-scope terminal: the View does not
+  // fabricate a second disposer call and releases its claim.
+  registry.onAgentDisposed(agent)
+  assert.equal(registry.hasClaim('S50'), false)
+})
+
 test('session/new reports an unconfirmed workspace outcome instead of a client directory error', async () => {
   const access = new FakeAccess()
   // The official Workspace Controller wraps persistence failures as
@@ -1046,6 +1267,81 @@ test('the production Host pending lookup reads both official inbox lists and rej
   assert.equal(access.pendingMessage('S', agent, session, 'next-turn'), 'absent', 'each lookup uses the live official list')
   agent.session = { id: 'S', header: {} }
   assert.equal(access.pendingMessage('S', agent, session, 'absent'), 'stale', 'the Agent must still drive the exact Session')
+})
+
+test('the production Host system-prompt seam registers in the exact Agent scope and gates the provider on the exact assembly', () => {
+  const session = { id: 'S', header: { cwd: '/w' } }
+  const sectionInputs: Array<{
+    readonly name: string
+    readonly order: number
+    readonly interpolate?: boolean
+    readonly text: (assembly: { readonly scope?: unknown }) => string
+  }> = []
+  let disposeCalls = 0
+  const agentPrompt = {
+    section(input: (typeof sectionInputs)[number]) {
+      sectionInputs.push(input)
+      return () => { disposeCalls += 1 }
+    },
+  }
+  const agent = { id: 'S', session, ctx: { get: (name: string) => name === 'systemPrompt' ? agentPrompt : undefined } }
+  // The root service must NOT be the receiver: only the Agent context may
+  // provide the scoped section.
+  const rootPrompt = { section() { throw new Error('the root service must not receive the scoped section') } }
+  const agents = { get: (id: string) => id === 'S' ? agent : undefined }
+  const sessions = { get: (id: string) => id === 'S' ? session : undefined }
+  const makeContext = (withRootSeam: boolean) => ({
+    reflect: {
+      get(name: string) {
+        if (name === 'workspaceController') return { create: async () => ({ workspace: { workspaceId: 'ws', path: '/w' }, created: true }) }
+        if (name === 'sessionController') return {
+          create: async () => ({ sessionId: 'S' }),
+          resolveAgent: async () => ({ agent }),
+          prompt: async () => ({ accepted: true }),
+          modelCatalog: async () => ({ groups: [] }),
+        }
+        if (name === 'agents') return agents
+        if (name === 'sessions') return sessions
+        if (name === 'llm') return { resolveModelInfo: async () => ({}) }
+        if (name === 'tools') return { definitions: () => [] }
+        if (name === 'systemPrompt' && withRootSeam) return rootPrompt
+        return undefined
+      },
+    },
+  }) as unknown as Parameters<typeof createHostAcpSessionAccess>[0]
+
+  const access = createHostAcpSessionAccess(makeContext(true))
+  assert.equal(access.supportsSystemPromptAppend(), true)
+  assert.equal(createHostAcpSessionAccess(makeContext(false)).supportsSystemPromptAppend(), false,
+    'no real root seam must mean no advertised capability')
+  let live = true
+  const handle = access.registerSystemPromptAppend(agent, session, 'SEAM_TEXT', () => live)
+  assert.equal(sectionInputs.length, 1)
+  const input = sectionInputs[0]
+  assert.equal(input?.name, ACP_SYSTEM_PROMPT_SECTION_NAME)
+  assert.equal(input?.order, ACP_SYSTEM_PROMPT_SECTION_ORDER)
+  assert.equal(input?.interpolate, false)
+  assert.equal(input?.text({ scope: agent }), 'SEAM_TEXT')
+  assert.equal(input?.text({ scope: { ...agent } }), '', 'a sibling/different scope must never receive the append')
+  assert.equal(input?.text({}), '')
+  live = false
+  assert.equal(input?.text({ scope: agent }), '', 'a retired View generation cannot contribute')
+  handle.dispose()
+  assert.equal(disposeCalls, 1)
+
+  // A lost exact live identity is the standard stale class; a section throw is
+  // the content-free registration-failure class.
+  agents.get = () => undefined
+  assert.throws(
+    () => access.registerSystemPromptAppend(agent, session, 'STALE', () => true),
+    (error: unknown) => error instanceof AcpSystemPromptAppendError && error.kind === 'stale',
+  )
+  agents.get = (id: string) => id === 'S' ? agent : undefined
+  agentPrompt.section = () => { throw new Error('injected official section failure') }
+  assert.throws(
+    () => access.registerSystemPromptAppend(agent, session, 'FAIL', () => true),
+    (error: unknown) => error instanceof AcpSystemPromptAppendError && error.kind === 'registration-failed',
+  )
 })
 
 test('the Host file facade stages on the exact identity and performs cleanup-only retirement', async () => {

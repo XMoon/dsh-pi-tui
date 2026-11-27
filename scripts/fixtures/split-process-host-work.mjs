@@ -135,6 +135,9 @@ const SCENARIOS = new Set([
   // real `ctx.subprocess` spawn. The probes are run-owned executables; the
   // scenario exposes no arbitrary command input.
   'host-default-environment',
+  // ACP v1 client system prompt append: only real scripted text answers plus
+  // the sanitized model-facing system facts; the case owns every assertion.
+  'acp-system-prompt',
 ])
 
 /**
@@ -451,6 +454,42 @@ function recordPromptFacts(options) {
     responseSection: systemText.includes('# Response style:'),
     gitSection: systemText.includes('# Git attribution'),
   }) + '\n', { mode: 0o600 })
+}
+
+/**
+ * ACP system prompt append scenario: the case-owned marker suffixes. The model
+ * request is the real sink; a count is kept per marker so a sibling/child or a
+ * retired generation can never pass by sharing one aggregate value.
+ */
+const ACP_SYSTEM_PROMPT_MARKER_IDS = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
+
+/** The exact marker text one ACP append case sends for a suffix. */
+function acpSystemPromptMarker(id) {
+  return `ACP_SYSTEM_PROMPT_APPEND_${id}_MARKER`
+}
+
+/** Sanitized model-facing facts of ONE real request in this scenario. */
+function acpSystemPromptRequestFacts(options, sessionId) {
+  const systemChannel = textOf(options.system)
+  const historyChannel = (options.messages ?? [])
+    .filter(message => message?.role === 'system')
+    .map(message => textOf(message.content)).join('\n')
+  const systemText = [systemChannel, historyChannel].join('\n')
+  const perChannel = channel => Object.fromEntries(ACP_SYSTEM_PROMPT_MARKER_IDS
+    .map(id => [id, channel.split(acpSystemPromptMarker(id)).length - 1]))
+  return {
+    sessionId,
+    markers: perChannel(systemText),
+    systemChannelMarkers: perChannel(systemChannel),
+    historyChannelMarkers: perChannel(historyChannel),
+    systemChannelLength: systemChannel.length,
+    historyChannelLength: historyChannel.length,
+    systemLength: systemText.length,
+    systemSha256: createHash('sha256').update(systemText).digest('hex'),
+    harnessIdentity: systemText.includes('You are an AI agent powered by DeepSeek Harness.'),
+    literalPreserved: systemText.includes('{{literal}}'),
+    afterTool: Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool',
+  }
 }
 
 /** G-ACP1B/B0 prompt markers and the official MCP public tool names. */
@@ -1467,6 +1506,15 @@ class C1Model extends LlmAdapter {
     if (registry !== undefined) this.record('live-registry', registry)
     const afterTool = Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool'
     const token = `${this.scenario}-${sessionId}`
+
+    // ACP v1 system prompt append: record the exact model-facing system facts
+    // of the real request (both channels), then answer with ordinary text. The
+    // markers are case-owned literals; no prompt text selects a behavior.
+    if (this.scenario === 'acp-system-prompt') {
+      this.record('acp-system-prompt-request', acpSystemPromptRequestFacts(options, sessionId))
+      yield* this.textAnswer(`acp-system-prompt answer ${sessionId}`)
+      return
+    }
 
     if (this.scenario === 'host-default-environment') {
       // The ONLY authored markers this scenario accepts. Each maps to a fixed

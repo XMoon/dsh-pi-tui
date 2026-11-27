@@ -97,7 +97,10 @@ import {
 } from './local-acp-commands.ts'
 import {
   AcpSessionViewRegistry,
+  AcpSystemPromptAppendError,
   ACP_IMAGE_MEDIA_TYPES,
+  ACP_SYSTEM_PROMPT_SECTION_NAME,
+  ACP_SYSTEM_PROMPT_SECTION_ORDER,
   type AcpImageLimits,
   type AcpContinuedAnswerOutcome,
   type AcpCreateSessionOutcome,
@@ -903,6 +906,32 @@ function hasContext(agent: LiveAgentViewIdentity): agent is HostAgentLike {
   return typeof (agent as { readonly ctx?: unknown }).ctx === 'object' && (agent as { readonly ctx?: unknown }).ctx !== null
 }
 
+/** The exact official scoped SystemPrompt seam this Host may borrow. */
+interface ScopedSystemPromptLike {
+  section(input: {
+    readonly name: string
+    readonly order: number
+    readonly interpolate: boolean
+    readonly text: (assembly: { readonly scope?: unknown }) => string
+  }): () => void
+}
+
+/**
+ * Resolve the official `systemPrompt` service THROUGH the exact Agent's own
+ * Cordis context, so `section()` registers in that Agent's scope and the
+ * returned disposer is owned by that exact scope. Never the root service.
+ */
+function scopedSystemPromptOf(agent: LiveAgentViewIdentity): ScopedSystemPromptLike | undefined {
+  if (!hasContext(agent)) return undefined
+  const getter = (agent.ctx as { readonly get?: unknown }).get
+  if (typeof getter !== 'function') return undefined
+  const service = (getter as (name: string) => unknown).call(agent.ctx, 'systemPrompt')
+  if (service === null || typeof service !== 'object') return undefined
+  return typeof (service as { readonly section?: unknown }).section === 'function'
+    ? service as ScopedSystemPromptLike
+    : undefined
+}
+
 /** The active modules of the exact retained preset revision. */
 function retainedInspection(
   agent: LiveAgentViewIdentity,
@@ -1343,6 +1372,44 @@ export function createHostAcpSessionAccess(
       && typeof fileUploads.resolve === 'function'
       && typeof fileUploads.bindPrompt === 'function'
       && typeof fileUploads.retirePrompt === 'function',
+
+    // The capability prerequisite is the REAL root-installed official service;
+    // the actual registration below still resolves it through the exact Agent.
+    supportsSystemPromptAppend: () => {
+      const service = context.reflect.get('systemPrompt') as { readonly section?: unknown } | undefined
+      return service !== undefined && typeof service.section === 'function'
+    },
+    registerSystemPromptAppend: (agent, session, text, stillCurrent) => {
+      const liveAgent = agents.get(agent.id)
+      const liveSession = sessions.get(agent.id)
+      // The exact objects are re-proved synchronously, immediately before the
+      // official `section()` call: a replaced Agent/Session never receives a
+      // stale client contribution.
+      if (liveAgent !== agent || liveSession !== session || agent.session !== session) {
+        throw new AcpSystemPromptAppendError('stale', 'the captured Agent/Session is no longer the live Host identity')
+      }
+      const service = scopedSystemPromptOf(agent)
+      if (service === undefined) {
+        throw new AcpSystemPromptAppendError('unavailable', 'the exact Agent cannot resolve the official scoped systemPrompt service')
+      }
+      try {
+        return {
+          dispose: service.section({
+            name: ACP_SYSTEM_PROMPT_SECTION_NAME,
+            order: ACP_SYSTEM_PROMPT_SECTION_ORDER,
+            interpolate: false,
+            // Only the exact Agent's own assembly consumes the append. A
+            // sibling/child scope or a retired View generation gets an empty
+            // contribution, which the official renderer drops.
+            text: assembly => assembly?.scope === agent && stillCurrent() ? text : '',
+          }),
+        }
+      } catch {
+        // The official effect already rolled back: no live section remains. No
+        // client text, stack or service detail crosses this stable class.
+        throw new AcpSystemPromptAppendError('registration-failed', 'the official scoped systemPrompt section could not be registered')
+      }
+    },
 
     stageFile: async (agent, session, data, name, signal) => {
       if (fileUploads === undefined) {
