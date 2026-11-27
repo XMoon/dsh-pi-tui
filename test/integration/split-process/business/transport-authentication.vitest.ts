@@ -472,10 +472,9 @@ test('replaces dropped transport generations without retaining wrappers or socke
       const requestId = `drop-generation-${String(cycle)}`
       await scene.qualificationControl(client!, { op: 'qualification-drop-websocket', requestId })
       await scene.waitEntryRecord(client!, { m4a0: 'qualification', op: 'drop-websocket', requestId })
-      await waitFor(async () => {
-        const status = await scene.entryStatus(client!)
-        return status.transport !== 'connected' && status.generationId === undefined
-      }, `the dropped generation ${String(cycle)} to clear its transport and generation identity`, 30_000)
+      const cleared = await scene.waitEntryRecord(client!,
+        { m4a0: 'qualification', op: 'drop-generation-cleared', requestId }, 30_000)
+      expect(cleared.previousGenerationId).toBe(generation)
       const replaced = await waitForValue(async () => {
         const status = await scene.entryStatus(client!)
         return status.transport === 'connected'
@@ -502,11 +501,12 @@ test('replaces dropped transport generations without retaining wrappers or socke
     const retryableBaseline = await scene.entryStatus(retryable!)
     expect(retryableBaseline.activeWrappers).toBe(1)
     expect(retryableBaseline.liveSockets).toBe(1)
+    expect(Number.isInteger(retryableBaseline.generationId)).toBe(true)
     await scene.qualificationControl(retryable!, { op: 'qualification-drop-websocket', requestId: 'retryable-drop' })
-    await waitFor(async () => {
-      const status = await scene.entryStatus(retryable!)
-      return status.transport !== 'connected' && status.generationId === undefined
-    }, 'the retryable refresh actual interruption and cleared generation', 30_000)
+    await scene.waitEntryRecord(retryable!, { m4a0: 'qualification', op: 'drop-websocket', requestId: 'retryable-drop' })
+    const retryableCleared = await scene.waitEntryRecord(retryable!,
+      { m4a0: 'qualification', op: 'drop-generation-cleared', requestId: 'retryable-drop' }, 30_000)
+    expect(retryableCleared.previousGenerationId).toBe(retryableBaseline.generationId)
     const recovered = await waitForValue(async () => {
       const status = await scene.entryStatus(retryable!)
       return status.transport === 'connected'
