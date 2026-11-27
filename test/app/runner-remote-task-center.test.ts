@@ -162,25 +162,10 @@ function seedTurns(append: Append, from: number, to: number, label: string): voi
   }
 }
 
-/** One settled reasoning + tool Activity. The result text is a body-only marker:
+/** One settled tool Activity. The result text is a body-only marker plus CJK:
  *  collapsed headers may name the path, but never this unique payload. */
 function seedActivityGroup(append: Append, turn: number, step: number, marker: string): void {
-  const reasoning = `reasoning for activity step ${step} · 边界检查`
   const callId = ToolCallId(`call-${marker}`)
-  append('assistant/message', {
-    turn, step,
-    message: {
-      id: MessageId(`thinking-${marker}`), role: 'assistant',
-      content: [{ type: 'reasoning', text: reasoning }],
-      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
-    },
-    stream: [
-      { type: 'chunk', time: Date.now(), chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
-      { type: 'chunk', time: Date.now(), chunk: { type: 'reasoning-delta', index: 0, text: reasoning } },
-      { type: 'chunk', time: Date.now(), chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: reasoning } } },
-    ],
-    usage: { inputTokens: 1, outputTokens: 1 },
-  }, { surfaceOp: 'append' })
   append('tool/call', {
     turn, step, callId, name: 'activity_probe', arguments: JSON.stringify({ path: `${marker.replace('boundary-body-', 'source-')}.txt` }),
   })
@@ -562,6 +547,7 @@ test('`/tasks` renders the REAL Remote descendant tree and the child row opens t
     return result
   }
   life.defer(() => { releasePage() })
+  life.defer(() => { reader.loadOlder = originalLoadOlder })
 
   app.setFullscreen(true)
   await fixture.vt.waitForRender()
@@ -792,6 +778,12 @@ for (const { preset, columns, rows, pointer } of boundaryCases) {
     // and prove the body itself survived, without moving the top-anchor oracle.
     for (let attempt = 0; attempt < 5 && !viewport().includes(ALPHA_MARKER); attempt += 1) {
       fixture.vt.sendInput('\x1b[<65;12;12M')
+      await fixture.vt.waitForRender()
+    }
+    if (!viewport().includes(ALPHA_MARKER)) {
+      // At the bottom the right-aligned Latest hint can share/truncate the
+      // marker row. Step back once so the complete body line is observable.
+      fixture.vt.sendInput('\x1b[<64;12;12M')
       await fixture.vt.waitForRender()
     }
     assert.ok(viewport().includes(ALPHA_MARKER),
