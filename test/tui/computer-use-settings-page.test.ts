@@ -600,14 +600,23 @@ test('a Host without durable application storage states it and still paints the 
 test('a zero-body grant keeps only the page real safe bar in both projections', async () => {
   const mounted = mount()
   await settle(mounted, 'Bundle: Enabled')
-  // Overview H0: the grant is the ONE physical bar; no body row exists.
+  // Overview H0: the grant is the ONE physical safe bar; no body row exists.
   mounted.page.setMaxRows(1)
   const overview = mounted.render(44)
   assert.equal(overview.length, 1)
   assert.match(overview[0]!, /Back \[Esc\]/u)
-  assert.notEqual(mounted.page.paintedEscapeSpan(), undefined, 'the safe escape route is painted')
-  assert.deepEqual(mounted.page.paintedBarSpans().filter(span => span.id.startsWith('request:')), [],
-    'no permission action is reachable from a zero-body bar')
+  assert.doesNotMatch(overview[0]!, /Refresh|Help|Up\/Down select|Enter activate/u,
+    'a zero-body Overview bar advertises no hidden action')
+  assert.deepEqual(mounted.page.paintedBarSpans(), [],
+    'no business bar span is published without a body row')
+  assert.notEqual(mounted.page.paintedEscapeSpan(), undefined, 'only the real escape route is published')
+  const readsBefore = mounted.calls.filter(call => call.startsWith('read:')).length
+  mounted.page.handleInput('r')
+  mounted.page.handleInput('\r')
+  mounted.page.handleInput('\t')
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(mounted.calls.filter(call => call.startsWith('read:')).length, readsBefore,
+    'a zero-body frame runs no read for a key it did not advertise')
   // Applications H0 at the list root and at an armed risk confirmation.
   mounted.page.setMaxRows(20)
   selectOverviewAction(mounted, 'Manage applications')
@@ -616,6 +625,9 @@ test('a zero-body grant keeps only the page real safe bar in both projections', 
   const list = mounted.render(96)
   assert.equal(list.length, 1)
   assert.match(list[0]!, /Back \[Esc\]/u)
+  assert.doesNotMatch(list[0]!, /Refresh|Help|Enter open|Tab detail/u)
+  assert.deepEqual(mounted.page.paintedBarSpans(), [], 'no list/detail verb is published at H0')
+  assert.notEqual(mounted.page.paintedEscapeSpan(), undefined)
   grantWorkbench(mounted, { width: 96, rows: 20, barWidth: 120, allowDual: false })
   mounted.render(96)
   mounted.page.activateBarSpan('bar:open')

@@ -462,6 +462,47 @@ test('a 44x8 pointer-only user walks Settings → Tools → Computer Use and req
   assert.equal(h.page(), undefined, 'the painted Back retires the page')
 })
 
+test('a zero-body Root frame paints only the safe CUA bar and starts no read', async () => {
+  const h = setup({ columns: 44, rows: 20 })
+  await openComputerUse(h)
+  await waitForText(h, 'Screen Recording: Not allowed')
+  const readsBefore = h.calls.filter(call => call.startsWith('read:')).length
+  h.vt.resize(44, 2)
+  await frames(h.vt)
+  await flushOwnedTurns()
+  await frames(h.vt)
+  const lines = h.view().split('\n').map(line => line.trimEnd())
+  const bar = lines[lines.length - 1] ?? ''
+  assert.match(bar, /Back \[Esc\]/u, 'the zero-body frame keeps the real Back')
+  assert.doesNotMatch(bar, /Refresh|Help|Enter open|Up\/Down|Enter activate/u,
+    `no hidden body action is advertised without a body row:\n${h.view()}`)
+  // Pointer: clicking any former bar cell must not start a Host read.
+  for (const col of [20, 30, 40]) {
+    sgrMouse(h, 'press', col, lines.length - 1)
+    sgrMouse(h, 'release', col, lines.length - 1)
+    await frames(h.vt)
+    await flushOwnedTurns()
+  }
+  // Keyboard: r / Enter / Tab are inert on the same frame.
+  await press(h.vt, 'r')
+  await press(h.vt, '\r')
+  await press(h.vt, '\t')
+  assert.equal(h.calls.filter(call => call.startsWith('read:')).length, readsBefore,
+    'a zero-body frame starts no Host read')
+  assert.match(h.view(), /Back \[Esc\]/u, 'the safe bar stays painted')
+  // The restored grant re-paints the SAME mounted instance with no fresh read.
+  const page = h.page()
+  assert.notEqual(page, undefined)
+  h.vt.resize(44, 20)
+  await frames(h.vt)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.equal(h.page(), page, 'resizing back never remounts the page')
+  assert.match(h.view(), /Screen Recording: Not allowed/u)
+  assert.equal(h.calls.filter(call => call.startsWith('read:')).length, readsBefore,
+    'the whole zero-body round trip starts no read')
+})
+
 test('the Applications workbench completes a real pointer select → open → confirm → readback journey', async () => {
   const h = setup({ columns: 120, rows: 40 })
   await openComputerUse(h)

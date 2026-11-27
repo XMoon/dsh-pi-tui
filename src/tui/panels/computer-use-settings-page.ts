@@ -269,6 +269,9 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   // ── grants ───────────────────────────────────────────────────────────────
   /** The Standard Detail tenant grant: body rows PLUS the one physical bar. */
   private detailGrant = 1
+  /** The body rows of the LAST render: a zero-body frame paints only its safe
+   *  bar, and no key the bar did not advertise may run an action. */
+  private lastBodyRows = 0
   /** The Adaptive Workbench grant of the CURRENT frame, when that projection
    *  is live. The Root installs it before every render. */
   private workbenchGrant: WebWorkbenchGrant | undefined
@@ -620,7 +623,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         })
       }
     }
-    const bar = this.renderOverviewBar(width, snapshot)
+    this.lastBodyRows = bodyRows
+    const bar = this.renderOverviewBar(width, snapshot, bodyRows)
     return { lines: [...out, fit(bar.text, width)], bodyRows, bodyWidth: width, bar, targets }
   }
 
@@ -823,9 +827,14 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     return [...essential, ...prose]
   }
 
-  private renderOverviewBar(width: number, snapshot: CuaAccessSettingsSnapshot): BarRender {
+  private renderOverviewBar(width: number, snapshot: CuaAccessSettingsSnapshot, bodyRows: number): BarRender {
     if (snapshot.busy) {
       return this.layoutBar(width, [{ id: 'bar:wait', text: 'Waiting for the action to settle…', priority: 1000 }])
+    }
+    // H0: no body row exists, so only the truthful safe escape is painted (and
+    // published); refresh/help/select/activate would be hidden actions.
+    if (bodyRows === 0) {
+      return this.layoutBar(width, [{ id: 'bar:escape', text: 'Back [Esc]', priority: 1000 }])
     }
     return this.layoutBar(width, [
       ...(this.overviewActions.length > 0 ? [{ id: 'bar:select', text: 'Up/Down select', priority: 30 }] : []),
@@ -865,12 +874,14 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   } {
     const grant = this.liveWorkbenchGrant(width)
     const bodyRows = Math.max(0, grant.rows)
+    this.lastBodyRows = bodyRows
     const bodyWidth = grant.width
     const targets: PaintedTarget[] = []
     this.visibleActionIds.clear()
     this.detailActions = []
     const out: string[] = []
     if (this.confirmation !== undefined) {
+      this.lastBodyRows = bodyRows
       const built = this.buildConfirmation(snapshot, bodyWidth, bodyRows)
       for (let index = 0; index < bodyRows; index += 1) out.push(fit(built.lines[index] ?? '', bodyWidth))
       for (const target of built.targets) targets.push(target)
@@ -934,10 +945,21 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         targets.push({ kind: 'focus', row, startCol: listWidth + 2, endCol: bodyWidth, region: 'detail' })
       }
     }
-    const bar = this.listRegion === 'list'
-      ? this.renderApplicationListBar(grant.barWidth)
-      : this.renderApplicationDetailBar(grant.barWidth)
+    const bar = bodyRows === 0
+      ? this.renderWorkbenchSafeBar(grant.barWidth, snapshot)
+      : this.listRegion === 'list'
+        ? this.renderApplicationListBar(grant.barWidth)
+        : this.renderApplicationDetailBar(grant.barWidth)
     return { lines: [...out, fit(bar.text, grant.barWidth)], bodyRows, bodyWidth, bar, targets }
+  }
+
+  /** H0: the ONE safe bar of a frame with no body row. An accepted action still
+   *  owns the page (Waiting only); otherwise Back is the only route. */
+  private renderWorkbenchSafeBar(width: number, snapshot: CuaAccessSettingsSnapshot): BarRender {
+    if (snapshot.busy) {
+      return this.layoutBar(width, [{ id: 'bar:wait', text: 'Waiting for the action to settle…', priority: 1000 }])
+    }
+    return this.layoutBar(width, [{ id: 'bar:escape', text: 'Back [Esc]', priority: 1000 }])
   }
 
   private applicationGroups(snapshot: CuaAccessSettingsSnapshot): Array<{
@@ -1194,6 +1216,9 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    // H0: the frame paints only Back (or Waiting); a key it did not advertise
+    // must not start a read, a mode switch or an action.
+    if (this.lastBodyRows === 0 && !matchesKey(data, 'escape')) return
     const current = this.frameCurrent()
     if (this.notice !== undefined) {
       this.notice = undefined
