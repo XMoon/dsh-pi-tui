@@ -1247,7 +1247,11 @@ detach commit; a same-connection reattach makes the outgoing provider invisible
 and retires its exact handle before the fresh generation registers, so an
 omitted/`null` reattach clears the old value; EOF/Off, Agent disposal, a failed
 attach, a failed load and a replaced generation use the same ONE exact
-responsibility. The provider fails closed BEFORE the exact disposer runs, so no
+responsibility. A cancelled fresh attach (`session/new`, `session/resume` or
+`session/load`) owns no successful View: only its own generation is released
+(an exact MCP lease keeps its fence), so a request the client cancelled can
+never leave a live append or a phantom claim behind. The provider fails closed
+BEFORE the exact disposer runs, so no
 assembly after detachment can consume the contribution. The exact official
 disposer (or the destruction of its exact owning scope) is the retirement
 terminal: the scoped undo runs before the official change notification, so a
