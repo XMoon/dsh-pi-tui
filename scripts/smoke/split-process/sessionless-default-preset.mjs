@@ -262,6 +262,12 @@ export async function runSessionlessDefaultPreset(context) {
     const { client: b, ready: bReady } = await startC1Client('UX-PR3 client B', { HOME: homeB }, { cwd: workDir })
     assert(bReady.sessionOpen === false, 'UX-PR3 client B is not sessionless')
     await assertPresetChip(b, DEFAULT_PRESET, '[default]', 'UX-PR3 restarted Host default readback')
+    // This case shares the packed Profile with later split scenarios. Restore
+    // the lane's standard baseline through the same real writer after the
+    // persistence proof, so the following blank-session case does not inherit
+    // `minimal` as its current preset and lose its Set-default action.
+    await setDefault(b, 'standard', 'UX-PR3 restore lane baseline default')
+    await assertPresetChip(b, 'standard', '[default]', 'UX-PR3 restored baseline readback')
     await exitC1Client(b, 'UX-PR3 client B')
 
     context.trace?.('ux-pr3-sessionless-default-preset', {
