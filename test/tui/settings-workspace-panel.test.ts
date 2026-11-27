@@ -608,6 +608,8 @@ class FakePluginPage implements EmbeddedPluginPage {
   readonly viewports: PluginContentViewport[] = []
   disposed = false
   focused = false
+  /** SUX-08: simulate a Plugin Manager write that still owns the page. */
+  pending = false
   private view: PluginWorkspaceView = 'list'
   private readonly yieldNavigation: () => void
   constructor(yieldNavigation: () => void) {
@@ -623,7 +625,7 @@ class FakePluginPage implements EmbeddedPluginPage {
     return this.view === 'list'
   }
   pendingMutation(): boolean {
-    return false
+    return this.pending
   }
   gestureRevision(): number {
     return 0
@@ -694,6 +696,8 @@ interface Harness {
   readonly specialistRefreshes: () => number
   readonly computerUsePages: FakeSpecialistPage[]
   readonly computerUseBuilds: () => number
+  /** SUX-08: the Root's Plugin-card `Manage Computer Use…` intent. */
+  readonly manageComputerUse: () => (() => string | undefined) | undefined
   /** PR-A: every `Host · Web UI` page the factory really built. */
   readonly webUiPages: FakeSpecialistPage[]
   readonly webUiBuilds: () => number
@@ -742,6 +746,7 @@ function setup(options: {
   const specialistPages: FakeSpecialistPage[] = []
   const webPages: FakeWebSettingsPage[] = []
   let webBuilds = 0
+  let manageComputerUse: (() => string | undefined) | undefined
   let specialistBuilds = 0
   let specialistRefreshes = 0
   let closes = 0
@@ -762,7 +767,8 @@ function setup(options: {
       settlements.push(settle)
     },
     onOpenPlugins: options.pluginPage === true
-      ? (onYieldNavigation) => {
+      ? (onYieldNavigation, onManageComputerUse) => {
+          manageComputerUse = onManageComputerUse
           const page = new FakePluginPage(onYieldNavigation)
           pluginPages.push(page)
           return page
@@ -892,6 +898,7 @@ function setup(options: {
     specialistBuilds: () => specialistBuilds,
     computerUsePages,
     computerUseBuilds: () => computerUseBuilds,
+    manageComputerUse: () => manageComputerUse,
     webUiPages,
     webUiBuilds: () => webUiBuilds,
     acpAccessPages,
@@ -4346,6 +4353,66 @@ test('the Computer Use page projection change is fenced until the Root repaints 
   plain(h, 120)
   ;(page as unknown as { done?: () => void }).done?.() // the page own Back retires THIS instance
   assert.equal(page.disposed, true)
+})
+
+test('the Plugin card Manage Computer Use intent switches the SAME lease and refuses stale/pending/too-small requests', () => {
+  const withComputerUse = (): SettingsWorkspaceSnapshot => ({
+    ...SNAPSHOT,
+    rows: [...SNAPSHOT.rows, {
+      id: 'computer-use',
+      category: 'tools' as const,
+      label: 'Computer Use',
+      summary: 'Permissions · applications · PTC',
+      scope: 'DSH Host · official Computer Use provider',
+      freshness: 'runtime' as const,
+      description: 'the official Computer Use provider page',
+      specialist: 'computer-use' as const,
+    }],
+  })
+  const mountPlugins = (): Harness => {
+    const h = setup({ columns: 120, rows: 40, pluginPage: true, specialistPage: true, snapshot: withComputerUse })
+    walkTo(h, 'plugins')
+    plain(h, 120)
+    assert.equal(h.pluginPages.length, 1, 'the Plugins category mounts its ONE page')
+    return h
+  }
+  // POSITIVE: the card intent is accepted, deferred to the next frame, and then
+  // retires the Plugin child while mounting the SAME-lease CUA page.
+  const h = mountPlugins()
+  const manage = h.manageComputerUse()
+  assert.notEqual(manage, undefined)
+  assert.equal(manage!(), undefined, 'the intent is accepted with no reason')
+  assert.equal(h.computerUseBuilds(), 0, 'the switch is deferred to the next frame')
+  assert.equal(h.pluginPages[0]!.disposed, false)
+  const frame = plain(h, 120)
+  assert.equal(h.computerUseBuilds(), 1, 'the next frame mounts the Computer Use page once')
+  assert.equal(h.pluginPages[0]!.disposed, true, 'the Plugin child is retired on the way')
+  assert.equal(h.computerUsePages[0]!.disposed, false)
+  assert.match(frame, /SPECIALIST HEADER/u, 'the CUA Detail tenant owns the body')
+  h.panel.dispose()
+
+  // STALE: a newer input supersedes the deferred destination.
+  const stale = mountPlugins()
+  stale.manageComputerUse()!()
+  stale.panel.handleInput('\x1b')
+  plain(stale, 120)
+  assert.equal(stale.computerUseBuilds(), 0, 'a superseded intent never mounts')
+  stale.panel.dispose()
+
+  // PENDING: a Plugin Manager write still owns the page.
+  const blocked = mountPlugins()
+  blocked.pluginPages[0]!.pending = true
+  assert.match(blocked.manageComputerUse()!() ?? '', /still saving/u)
+  assert.equal(blocked.computerUseBuilds(), 0)
+  blocked.panel.dispose()
+
+  // ZERO BODY: a frame without a real content row refuses the destination.
+  const small = mountPlugins()
+  small.resize(120, 2)
+  assert.match(small.manageComputerUse()!() ?? '', /too small/u)
+  plain(small, 120)
+  assert.equal(small.computerUseBuilds(), 0, 'an invisible body never starts the page')
+  small.panel.dispose()
 })
 
 test('any non-zero wheel on the bar revokes a painted open press (positive and cancel contrast)', () => {

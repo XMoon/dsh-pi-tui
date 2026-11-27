@@ -574,6 +574,71 @@ test('a workbench notice row never keeps the hidden action it overwrote', async 
   mounted.page.dispose()
 })
 
+test('an unreadable application list keeps the real reason and never offers a fake empty list', async () => {
+  const mounted = mount({
+    cua: { readApplications: async () => { throw new Error('applications read failed') } },
+  })
+  const frame = await settle(mounted, 'Applications: applications read failed')
+  const text = frame.join('\n').replace(/\s+/gu, ' ')
+  assert.match(text, /Applications: applications read failed/u)
+  assert.doesNotMatch(text, /none saved yet/u, 'an unreadable list is never painted as an empty one')
+  assert.doesNotMatch(text, /Manage applications/u, 'no management verb is offered without a readable list')
+  mounted.page.dispose()
+})
+
+test('a Host without durable application storage states it and still paints the true counts', async () => {
+  const mounted = mount({
+    cua: { readApplications: async () => ({ ...APPLICATIONS, persistentAvailable: false }) },
+  })
+  await settle(mounted, 'Bundle: Enabled')
+  const text = mounted.view(52).replace(/\s+/gu, '')
+  assert.match(text, /Applications:1alwaysallowed·1refused/u, 'the counts stay the real observation')
+  assert.match(text, /durableapplicationstorageisunavailable/u)
+  mounted.page.dispose()
+})
+
+test('a zero-body grant keeps only the page real safe bar in both projections', async () => {
+  const mounted = mount()
+  await settle(mounted, 'Bundle: Enabled')
+  // Overview H0: the grant is the ONE physical bar; no body row exists.
+  mounted.page.setMaxRows(1)
+  const overview = mounted.render(44)
+  assert.equal(overview.length, 1)
+  assert.match(overview[0]!, /Back \[Esc\]/u)
+  assert.notEqual(mounted.page.paintedEscapeSpan(), undefined, 'the safe escape route is painted')
+  assert.deepEqual(mounted.page.paintedBarSpans().filter(span => span.id.startsWith('request:')), [],
+    'no permission action is reachable from a zero-body bar')
+  // Applications H0 at the list root and at an armed risk confirmation.
+  mounted.page.setMaxRows(20)
+  selectOverviewAction(mounted, 'Manage applications')
+  mounted.page.handleInput('\r')
+  grantWorkbench(mounted, { width: 96, rows: 0, barWidth: 120, allowDual: false })
+  const list = mounted.render(96)
+  assert.equal(list.length, 1)
+  assert.match(list[0]!, /Back \[Esc\]/u)
+  grantWorkbench(mounted, { width: 96, rows: 20, barWidth: 120, allowDual: false })
+  mounted.render(96)
+  mounted.page.activateBarSpan('bar:open')
+  const detail = mounted.render(96)
+  const actionRow = detail.findIndex(line => line.includes('Revoke access…'))
+  assert.ok(actionRow >= 0)
+  const start = detail[actionRow]!.indexOf('Revoke access…')
+  const press = { type: 'press', x: start + 1, y: actionRow, width: 96, height: 20 } as TuiMouseEvent
+  mounted.page.handleMouse(press)
+  mounted.page.handleMouse({ ...press, type: 'click' } as TuiMouseEvent)
+  assert.match(mounted.render(96).join('\n'), /Revoke this application decision\?/u)
+  grantWorkbench(mounted, { width: 96, rows: 0, barWidth: 120, allowDual: false })
+  const risk = mounted.render(96)
+  assert.equal(risk.length, 1)
+  assert.match(risk[0]!, /Cancel \[Esc\]/u)
+  assert.doesNotMatch(risk[0]!, /Confirm/u, 'a zero-row risk frame never advertises Confirm')
+  mounted.page.handleInput('y')
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.deepEqual(mounted.calls.filter(call => call.startsWith('revoke:')), [],
+    'a zero-row risk frame cannot be confirmed')
+  mounted.page.dispose()
+})
+
 test('a non-Darwin Host paints Unsupported and the Plugins recovery route', async () => {
   const mounted = mount({
     cua: {
