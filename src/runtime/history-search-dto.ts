@@ -55,12 +55,25 @@ export interface HistoryReadTextRequest {
   readonly limit: number
 }
 
+/** Bounded first-cold-round progress: settled expected IDs out of the fixed roster. */
+export interface HistorySearchProgress {
+  /** Expected IDs currently queryable; may decrease when a source is revoked. */
+  readonly settled: number
+  /** The fixed expected roster sampled for this first healthy cold round. */
+  readonly total: number
+}
+
 export type HistorySearchResponse =
   | {
     readonly kind: 'ready'
     readonly generation: string
     readonly items: readonly HistorySearchItem[]
     readonly nextCursor: string | null
+  }
+  | {
+    readonly kind: 'partial'
+    readonly items: readonly HistorySearchItem[]
+    readonly progress: HistorySearchProgress
   }
   | { readonly kind: 'loading' }
   | { readonly kind: 'incomplete'; readonly reason: HistorySearchIncompleteReason }

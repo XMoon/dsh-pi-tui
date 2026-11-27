@@ -1825,7 +1825,7 @@ or the current Ctrl+R/↑↓ contract owned by
 | Durable cold source proof | ONE row per Session in the same `v2.sqlite` records the exact official source path, opaque revision, install/config scope digest and checkpoint digest of one COMPLETE cold replay. Any checkpoint-changing batch, marker rewrite, reset or delete revokes it in the SAME transaction. An aborted transaction may restore the OLD valid proof together with the old checkpoint; a failed or partial NEW replay must never create a new proof |
 | Restart recovery | Only a qualified runtime/backend may compare a committed persisted proof across Host restarts; unqualified sources replay through official handles. The upstream revision API itself remains instance-scoped. A qualified hit performs no official `open`/`read`/`stat`/replay, releases no accepted obligation and settles only the per-ID round evidence; a stale or refused hit keeps the ordinary round barrier and hands the official replay to the existing repair owner |
 | Source binding | Proof eligibility is bound to the exact pass-scoped official persistence binding (raw service, official Symbol, Loader provider entry/activation, effective root/codec and installed release identity) plus the selected snapshot classification. A replaced service binding, an invalidated runtime authority, a missing required official service on a mounted index, or changed snapshot metadata retires prior-proof reuse and coverage; absence stays `unavailable` (`service-missing`) and a present observation only returns `incomplete`/unproven until a complete full pass replays and re-proves officially |
-| Completeness | the index publishes `loading`, `ready`, `incomplete` (`source-uncertain`, `reconciling`, `resource-limit`, `source-read-failed`) or `unavailable` (`index-unavailable`, `service-missing`); a partial or failing pass never answers an authoritative empty list. First/full coverage is proven only by a full round that visited and settled every authoritative Session; storage health and one-Session repair do not prove coverage, and a failed/partial pass remains `loading`/`incomplete` until a complete full round. A legal optional metadata absence (no correlation metadata, an unknown event-time directory, non-text content) is not a source fault; a malformed required payload of an explicit user message never becomes a silent omission |
+| Completeness | the index publishes `loading`, `ready`, `incomplete` (`source-uncertain`, `reconciling`, `resource-limit`, `source-read-failed`) or `unavailable` (`index-unavailable`, `service-missing`); a partial or failing pass never answers an authoritative empty list. The search additionally answers a cursor-free `partial` under the first-cold-round contract below. First/full coverage is proven only by a full round that visited and settled every authoritative Session; storage health and one-Session repair do not prove coverage, and a failed/partial pass remains `loading`/`incomplete` until a complete full round. A legal optional metadata absence (no correlation metadata, an unknown event-time directory, non-text content) is not a source fault; a malformed required payload of an explicit user message never becomes a silent omission |
 | Live growth | the official `session/event` plane feeds a bounded buffer; reaching the bound marks the affected Sessions dirty and re-reads the official source instead of dropping accepted rows |
 | Destructive round | before the first known destructive publication of a full round (deletion, rebuild or marker rewrite), the round establishes an `incomplete` barrier and holds it through every required deletion, accepted-payload/repair settlement and per-ID terminal commit. Read-only discovery preserves the prior `ready` epoch; the round-local deletion cut and its cut-bound witness fence derived deletion |
 | Full/point ownership | one full-inventory round and independent exact-ID repairs share ONE per-ID single-flight claim: a repair requested while the full round owns that id is coalesced and handed off after the full candidate settles. The terminal `commitWitness` is the second, non-substitutable fence |
@@ -1833,10 +1833,42 @@ or the current Ctrl+R/↑↓ contract owned by
 | Remote surface | the private `piTuiHistorySearch` namespace with exactly two Owner-only unary methods: `search` (three scopes, keyset cursor, bounded preview + immutable content hash) and `readText` (exact original text chunks by content hash) |
 | Direct | unchanged: the Direct Host never mounts this index and keeps its existing Client-local input history |
 
+A HEALTHY first cold round may answer `partial` while official coverage is
+still unproven. `partial` carries up to the requested limit of rows plus
+`progress { settled, total }`: `total` is the fixed expected roster sampled by
+that one round, and `settled` is the number of expected IDs that currently
+satisfy the SAME read permit (never a replay/batch/query-hit count). The permit
+is derived synchronously from that round, not from a second registry: expected
+membership, a terminal that is a complete authoritative replay or a qualified
+durable proof hit, the exact captured live object (or absence), no pending/
+held/dropped/reconcile/active-candidate/repair/disposal/rebuild obligation for
+the ID, and a committed clean `history_sessions` row (`dirty = 0`,
+`uncertain_sources = 0`). Disposal prefix proofs, no-read seeds and
+coverage-only settlements never grant it. A partial page has no cursor and
+never claims `ready`; `settled === total` stays partial until the round's full
+terminal proof, and a cursor/More request against a cold partial answer is
+`stale`. `readText` uses the same permit and otherwise answers `loading`
+instead of probing an unproven old row. Any real fault (malformed/conflicting
+live input, source read failure, writer failure, buffer overflow, or a failed
+disposal proof) stops partial publication and keeps the existing incomplete
+reason; ordinary warmup lag, unvisited IDs and normal repairs only exclude
+their own IDs. The complete first round still publishes the original `ready`
+result/cursor/empty behaviour and complete-coverage proof.
+
+The first cold round traverses the official roster in ONE bounded recent-first
+order: live Sessions first, then the newer of the official header creation time
+and the cached accepted-time hint (DESC), with an exact code-unit Session-id
+tie-break. The cached hint only schedules work; it never grants search or body
+eligibility. Periodic maintenance rounds keep roster order and add no
+per-ID official `stat`/`list`.
+
 The Host actively prewarms the complete index without blocking Host readiness;
-the first import answers `loading` until every official Session, every buffered
-live event and the error verdict have settled, and it answers `incomplete`
-rather than `ready` if the first full round was partial or failed. Coverage is
+a first search/read answers `loading` only until an eligible verified partial
+subset exists, then the cursor-free `partial` page. `ready` is published only
+after every official Session, every buffered live event and the error verdict
+have settled; a partial or failed first full round answers `incomplete` rather
+than `ready`. Destructive maintenance barriers are gated by proven/full
+coverage, not by hiding already eligible first-cold partial rows. Coverage is
 a round-local proof: a successful point repair of one Session never proves an
 unvisited or unsettled ID; a later complete full round may establish it. The
 30 s roster check and the per-Session official repairs are single-flight
