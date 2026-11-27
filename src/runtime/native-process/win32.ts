@@ -14,7 +14,7 @@
  */
 
 import { createRequire } from 'node:module'
-import { realpathSync } from 'node:fs'
+import { lstatSync, realpathSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { KernelObservation, KernelReadFailureCode, Win32KernelProcessIdentity } from './identity.ts'
 import { installedDshAnchor, resolveDshKoffi } from './installed-dsh.ts'
@@ -49,7 +49,7 @@ export interface Win32SecurityView {
   readonly daclPresent: boolean
   readonly daclProtected: boolean
   readonly daclNull: boolean
-  readonly aces: readonly { readonly sid: string; readonly mask: number; readonly type: number }[]
+  readonly aces: readonly { readonly sid: string; readonly mask: number; readonly type: number; readonly flags: number }[]
 }
 
 /** A held named kernel seat. */
@@ -87,21 +87,18 @@ interface Win32Bridge {
   readonly setLastError: (code: number) => void
   readonly openProcess: (access: number, inherit: boolean, pid: number) => Win32Handle | null
   readonly getProcessTimes: (handle: Win32Handle, creation: Buffer, exit: Buffer, kernel: Buffer, user: Buffer) => boolean
-  readonly getExitCodeProcess: (handle: Win32Handle, exitCode: Buffer) => boolean
   readonly waitForSingleObject: ((handle: Win32Handle, milliseconds: number) => number) & { async(handle: Win32Handle, milliseconds: number, callback: (error: Error | null, code: number) => void): void }
   readonly waitForMultipleObjects: ((count: number, handles: BigInt64Array | bigint[], waitAll: number, milliseconds: number) => number) & { async(count: number, handles: BigInt64Array | bigint[], waitAll: number, milliseconds: number, callback: (error: Error | null, code: number) => void): void }
   readonly openProcessToken: (handle: Win32Handle, access: number, tokenOut: Buffer) => boolean
   readonly getTokenInformation: (token: Win32Handle, cls: number, info: Buffer, len: number, retLen: Buffer) => boolean
   readonly createMutexW: (attributes: Buffer | null, initialOwner: number, name: string) => Win32Handle | null
   readonly releaseMutex: (handle: Win32Handle) => boolean
-  readonly createEventW: (attributes: Buffer | null, manualReset: number, initialState: number, name: string) => Win32Handle | null
+  readonly createEventW: (attributes: Buffer | null, manualReset: number, initialState: number, name: string | null) => Win32Handle | null
   readonly openEventW: (access: number, inherit: number, name: string) => Win32Handle | null
   readonly setEvent: (handle: Win32Handle) => boolean
-  readonly resetEvent: (handle: Win32Handle) => boolean
   readonly createDirectoryW: (path: string, attributes: Buffer | null) => boolean
   readonly createFileW: (path: string, access: number, share: number, attributes: Buffer | null, disposition: number, flags: number, template: null) => Win32Handle | null
   readonly getFileAttributesW: (path: string) => number
-  readonly getFileInformationByHandleEx: (handle: Win32Handle, cls: number, info: Buffer, size: number) => boolean
   readonly getDriveTypeW: (root: string) => number
   readonly getVolumeInformationW: (root: string, name: Buffer | null, nameLen: number, serial: Buffer | null, maxComponent: Buffer | null, flags: Buffer | null, fsName: Buffer, fsNameLen: number) => boolean
   readonly convertStringSecurityDescriptor: (sddl: string, revision: number, sdOut: Buffer, sizeOut: Buffer) => boolean
@@ -122,7 +119,6 @@ const WAIT_FAILED = 0xffffffff
 const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 const SYNCHRONIZE = 0x100000
 const TOKEN_QUERY = 0x0008
-const MUTEX_ALL_ACCESS = 0x1f0001
 const EVENT_MODIFY_STATE = 0x0002
 const READ_CONTROL = 0x00020000
 const FILE_READ_ATTRIBUTES = 0x80
@@ -135,6 +131,8 @@ const OPEN_EXISTING = 3
 const DRIVE_FIXED = 3
 const SE_FILE_OBJECT = 1
 const SE_KERNEL_OBJECT = 6
+const OBJECT_INHERIT_ACE = 0x1
+const CONTAINER_INHERIT_ACE = 0x2
 const OWNER_SECURITY_INFORMATION = 0x1
 const DACL_SECURITY_INFORMATION = 0x4
 const SE_DACL_PRESENT = 0x0004
@@ -168,7 +166,6 @@ function loadBridge(): { readonly ok: true; readonly bridge: Win32Bridge } | { r
         setLastError: bind(context, kernel32, 'SetLastError', 'void', ['uint32']) as unknown as Win32Bridge['setLastError'],
         openProcess: bind(context, kernel32, 'OpenProcess', 'void *', ['uint32', 'bool', 'uint32']) as unknown as Win32Bridge['openProcess'],
         getProcessTimes: bind(context, kernel32, 'GetProcessTimes', 'int', ['void *', 'void *', 'void *', 'void *', 'void *']) as unknown as Win32Bridge['getProcessTimes'],
-        getExitCodeProcess: bind(context, kernel32, 'GetExitCodeProcess', 'int', ['void *', 'void *']) as unknown as Win32Bridge['getExitCodeProcess'],
         waitForSingleObject: bind(context, kernel32, 'WaitForSingleObject', 'uint32', ['void *', 'uint32']) as unknown as Win32Bridge['waitForSingleObject'],
         waitForMultipleObjects: bind(context, kernel32, 'WaitForMultipleObjects', 'uint32', ['uint32', 'uintptr_t *', 'int', 'uint32']) as unknown as Win32Bridge['waitForMultipleObjects'],
         openProcessToken: bind(context, kernel32, 'OpenProcessToken', 'int', ['void *', 'uint32', 'void *']) as unknown as Win32Bridge['openProcessToken'],
@@ -178,11 +175,9 @@ function loadBridge(): { readonly ok: true; readonly bridge: Win32Bridge } | { r
         createEventW: bind(context, kernel32, 'CreateEventW', 'void *', ['void *', 'int', 'int', 'const char16_t *']) as unknown as Win32Bridge['createEventW'],
         openEventW: bind(context, kernel32, 'OpenEventW', 'void *', ['uint32', 'int', 'const char16_t *']) as unknown as Win32Bridge['openEventW'],
         setEvent: bind(context, kernel32, 'SetEvent', 'int', ['void *']) as unknown as Win32Bridge['setEvent'],
-        resetEvent: bind(context, kernel32, 'ResetEvent', 'int', ['void *']) as unknown as Win32Bridge['resetEvent'],
         createDirectoryW: bind(context, kernel32, 'CreateDirectoryW', 'int', ['const char16_t *', 'void *']) as unknown as Win32Bridge['createDirectoryW'],
         createFileW: bind(context, kernel32, 'CreateFileW', 'void *', ['const char16_t *', 'uint32', 'uint32', 'void *', 'uint32', 'uint32', 'void *']) as unknown as Win32Bridge['createFileW'],
         getFileAttributesW: bind(context, kernel32, 'GetFileAttributesW', 'uint32', ['const char16_t *']) as unknown as Win32Bridge['getFileAttributesW'],
-        getFileInformationByHandleEx: bind(context, kernel32, 'GetFileInformationByHandleEx', 'int', ['void *', 'uint32', 'void *', 'uint32']) as unknown as Win32Bridge['getFileInformationByHandleEx'],
         getDriveTypeW: bind(context, kernel32, 'GetDriveTypeW', 'uint32', ['const char16_t *']) as unknown as Win32Bridge['getDriveTypeW'],
         getVolumeInformationW: bind(context, kernel32, 'GetVolumeInformationW', 'int', ['const char16_t *', 'void *', 'uint32', 'void *', 'void *', 'void *', 'void *', 'uint32']) as unknown as Win32Bridge['getVolumeInformationW'],
         convertStringSecurityDescriptor: bind(context, advapi32, 'ConvertStringSecurityDescriptorToSecurityDescriptorW', 'int', ['const char16_t *', 'uint32', 'void *', 'void *']) as unknown as Win32Bridge['convertStringSecurityDescriptor'],
@@ -359,14 +354,6 @@ export async function waitWin32Handle(handle: Win32Handle, timeoutMs: number): P
   })
 }
 
-/** Read the exact Win32 exit code from a terminal process handle (diagnostic only). */
-export function readWin32ExitCode(handle: Win32Handle): number | undefined {
-  const load = loadBridge()
-  if (!load.ok) return undefined
-  const code = Buffer.alloc(4)
-  return load.bridge.getExitCodeProcess(handle, code) ? code.readUInt32LE(0) : undefined
-}
-
 /** Read the security descriptor of one open kernel/file handle. */
 function readSecurityInfo(handle: Win32Handle, objectType: number): Win32SecurityView | undefined {
   const load = loadBridge()
@@ -390,15 +377,16 @@ function readSecurityInfo(handle: Win32Handle, objectType: number): Win32Securit
     const flags = control.readUInt16LE(0)
     const ownerOffset = bytes.readUInt32LE(4)
     const daclOffset = bytes.readUInt32LE(16)
-    const aces: { sid: string; mask: number; type: number }[] = []
+    const aces: { sid: string; mask: number; type: number; flags: number }[] = []
     if (daclOffset !== 0) {
       const aceCount = bytes.readUInt16LE(daclOffset + 4)
       let offset = daclOffset + 8
       for (let i = 0; i < aceCount; i += 1) {
         const type = bytes[offset]!
+        const aceFlags = bytes[offset + 1]!
         const size = bytes.readUInt16LE(offset + 2)
         const mask = bytes.readUInt32LE(offset + 4)
-        aces.push({ sid: parseSid(bytes, offset + 8), mask, type })
+        aces.push({ sid: parseSid(bytes, offset + 8), mask, type, flags: aceFlags })
         offset += size
       }
     }
@@ -439,6 +427,16 @@ function isOwnerOnly(view: Win32SecurityView | undefined, sid: string): boolean 
     && view.ownerSid === sid
     && view.aces.length === 1
     && view.aces[0]?.sid === sid
+}
+
+/** A product-created directory must also pass its owner-only ACE to ordinary
+ * children. A protected owner-only DACL without OI/CI would leave a new file
+ * with no inheritable grant at all; that is not a private directory for this
+ * product. */
+function isOwnerOnlyContainer(view: Win32SecurityView | undefined, sid: string): boolean {
+  if (!isOwnerOnly(view, sid)) return false
+  const flags = view!.aces[0]!.flags
+  return (flags & OBJECT_INHERIT_ACE) !== 0 && (flags & CONTAINER_INHERIT_ACE) !== 0
 }
 
 /** A private file inherits the protected directory ACE; inheritance does not
@@ -503,12 +501,13 @@ export async function acquireWin32KernelSeat(name: string, conflictCode: 'HOST_A
   if (sid === undefined) throw new Error('native win32: the current token SID is unavailable')
   const security = securityAttributesForSddl(bridge, `D:P(A;;GA;;;${sid})`)
   let handle: Win32Handle | null
+  let createError = 0
   try {
     handle = bridge.createMutexW(security.attributes, 0, name)
+    createError = handle === null ? lastError(bridge) : 0
   } finally {
     bridge.localFree(security.sd)
   }
-  const createError = handle === null ? lastError(bridge) : 0
   if (handle === null || handle === undefined) {
     if (createError === ERROR_ACCESS_DENIED) throw new Error('native win32: the named seat is owned by another account')
     if (createError === ERROR_INVALID_HANDLE) throw new Error('native win32: the named seat is another object type')
@@ -536,10 +535,6 @@ export function win32SeatName(scopeId: string, purpose: 'host' | 'admin'): strin
 /** The deterministic per-instance stop event name. */
 export function win32StopEventName(scopeId: string, instanceId: string): string {
   return `Global\\dsh-pi-tui-stop-${scopeId.slice(0, 24)}-${instanceId}`
-}
-
-function win32CancelEventName(scopeId: string, instanceId: string): string {
-  return `Global\\dsh-pi-tui-cancel-${scopeId.slice(0, 24)}-${instanceId}`
 }
 
 /** Open one control-side per-instance stop event and verify its owner-only descriptor. */
@@ -591,18 +586,22 @@ export function createWin32StopWaiter(scopeId: string, instanceId: string): Win3
   let stopHandle: Win32Handle | null
   let cancelHandle: Win32Handle | null
   let stopExists = false
-  let cancelExists = false
+  let createError = 0
+  let cancelError = 0
   try {
     bridge.setLastError(0)
     stopHandle = bridge.createEventW(security.attributes, 0, 0, eventName)
+    createError = stopHandle === null ? lastError(bridge) : 0
     stopExists = stopHandle !== null && lastError(bridge) === 183
     bridge.setLastError(0)
-    cancelHandle = bridge.createEventW(security.attributes, 0, 0, win32CancelEventName(scopeId, instanceId))
-    cancelExists = cancelHandle !== null && lastError(bridge) === 183
+    // The cancellation wakeup has no cross-process consumer. Keep it unnamed:
+    // no second Global name, stale-object branch or accidental public handle.
+    cancelHandle = bridge.createEventW(security.attributes, 0, 0, null)
+    cancelError = cancelHandle === null ? lastError(bridge) : 0
   } finally {
     bridge.localFree(security.sd)
   }
-  if (stopExists || cancelExists) {
+  if (stopExists) {
     if (stopHandle !== null && stopHandle !== undefined) bridge.closeHandle(stopHandle)
     if (cancelHandle !== null && cancelHandle !== undefined) bridge.closeHandle(cancelHandle)
     throw new Error('native win32: a stale per-instance stop event already exists')
@@ -610,7 +609,7 @@ export function createWin32StopWaiter(scopeId: string, instanceId: string): Win3
   if (stopHandle === null || stopHandle === undefined || cancelHandle === null || cancelHandle === undefined) {
     if (stopHandle !== null && stopHandle !== undefined) bridge.closeHandle(stopHandle)
     if (cancelHandle !== null && cancelHandle !== undefined) bridge.closeHandle(cancelHandle)
-    throw new Error(`native win32: the per-instance stop event could not be created (${String(lastError(bridge))})`)
+    throw new Error(`native win32: the per-instance stop event could not be created (${String(stopHandle === null ? createError : cancelError)})`)
   }
   if (!isOwnerOnly(readSecurityInfo(stopHandle, SE_KERNEL_OBJECT), sid) || !isOwnerOnly(readSecurityInfo(cancelHandle, SE_KERNEL_OBJECT), sid)) {
     bridge.closeHandle(stopHandle)
@@ -682,9 +681,10 @@ export function isWin32LocalFixedNtfs(path: string): boolean {
   const root = path.slice(0, 2) + '\\'
   if (!/^[A-Za-z]:\\/u.test(root)) return false
   if (bridge.getDriveTypeW(root) !== DRIVE_FIXED) return false
-  const fsName = Buffer.alloc(32)
+  const fsNameChars = 32
+  const fsName = Buffer.alloc(fsNameChars * 2)
   const flags = Buffer.alloc(4)
-  return bridge.getVolumeInformationW(root, null, 0, null, null, flags, fsName, 32)
+  return bridge.getVolumeInformationW(root, null, 0, null, null, flags, fsName, fsNameChars)
     && fsName.toString('utf16le').replace(/\0.*$/u, '').toUpperCase() === 'NTFS'
 }
 
@@ -716,7 +716,7 @@ export function win32PrivateDirectorySafe(path: string): boolean {
   if (handle === undefined) return false
   try {
     const sid = win32CurrentTokenSid()
-    return sid !== undefined && isOwnerOnly(readSecurityInfo(handle, SE_FILE_OBJECT), sid)
+    return sid !== undefined && isOwnerOnlyContainer(readSecurityInfo(handle, SE_FILE_OBJECT), sid)
   } finally {
     closeWin32Handle(handle)
   }
@@ -736,6 +736,21 @@ export function win32PrivateFileSafe(path: string): boolean {
   }
 }
 
+/** Classify one existing product file before any write/append/cleanup. Only a
+ * true missing path is `missing`; every other lstat/open/type/ACL failure is
+ * `unsafe` so a caller cannot treat a dangling link or unreadable target as
+ * absent. */
+export function win32PrivateFileStatus(path: string): 'missing' | 'private' | 'unsafe' {
+  let info
+  try {
+    info = lstatSync(path)
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unsafe'
+  }
+  if (info.isSymbolicLink() || !info.isFile()) return 'unsafe'
+  return win32PrivateFileSafe(path) ? 'private' : 'unsafe'
+}
+
 /** Create one directory with a protected owner-only DACL; existing safe dirs are reused. */
 export function ensureWin32PrivateDirectory(path: string): void {
   const load = loadBridge()
@@ -745,8 +760,10 @@ export function ensureWin32PrivateDirectory(path: string): void {
   if (sid === undefined) throw new Error('native win32: the current token SID is unavailable')
   const security = securityAttributesForSddl(bridge, `D:P(A;OICI;FA;;;${sid})`)
   let created: boolean
+  let createError = 0
   try {
     created = bridge.createDirectoryW(path, security.attributes)
+    if (!created) createError = lastError(bridge)
   } finally {
     bridge.localFree(security.sd)
   }
@@ -754,7 +771,6 @@ export function ensureWin32PrivateDirectory(path: string): void {
     if (!win32PrivateDirectorySafe(path)) throw new Error('native win32: the created private directory did not retain its owner-only descriptor')
     return
   }
-  const error = lastError(bridge)
-  if (error !== 183) throw new Error(`native win32: the private directory could not be created (${String(error)})`)
+  if (createError !== 183) throw new Error(`native win32: the private directory could not be created (${String(createError)})`)
   if (!win32PrivateDirectorySafe(path)) throw new Error('native win32: an existing private directory is not owner-only')
 }

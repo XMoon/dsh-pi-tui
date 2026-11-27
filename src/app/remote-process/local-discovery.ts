@@ -41,7 +41,7 @@ import {
   type KernelProcessIdentity,
   type Win32KernelProcessIdentity,
 } from '../../runtime/native-process/identity.ts'
-import { win32PrivateFileSafe } from '../../runtime/native-process/win32.ts'
+import { win32PrivateFileStatus } from '../../runtime/native-process/win32.ts'
 import { spawnHostCandidate, startManagedHostCandidate } from './local-host-manager.ts'
 
 /** Registry file name inside the private scope directory. */
@@ -616,15 +616,16 @@ export function assertHostPublicationIdentity(record: LocalInstanceRecord, scope
  */
 function readPrivateJsonFile(path: string, maxBytes: number, label: string): unknown | undefined {
   if (process.platform === 'win32') {
+    const status = win32PrivateFileStatus(path)
+    if (status === 'missing') return undefined
+    if (status !== 'private') {
+      throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${label} must be a private regular file`)
+    }
     let info
     try {
       info = lstatSync(path)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${label} is not readable`, error)
-    }
-    if (info.isSymbolicLink() || !info.isFile() || !win32PrivateFileSafe(path)) {
-      throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${label} must be a private regular file`)
     }
     if (info.size > maxBytes) {
       throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${label} exceeds ${String(maxBytes)} bytes`)
@@ -1039,20 +1040,31 @@ function writePrivateJsonFile(path: string, value: unknown): void {
   const text = `${JSON.stringify(value)}\n`
   const temp = join(dirname(path), `.${basename(path)}.${String(process.pid)}.${randomUUID()}.tmp`)
   if (process.platform === 'win32') {
+    if (win32PrivateFileStatus(path) === 'unsafe') {
+      throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} has a foreign or non-private existing target`)
+    }
     let fd: number | undefined
+    let renamed = false
     try {
       fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+      if (win32PrivateFileStatus(temp) !== 'private') {
+        throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} cannot inherit a private file boundary`)
+      }
       writeFileSync(fd, text, 'utf8')
       fsyncSync(fd)
       closeSync(fd)
       fd = undefined
       renameSync(temp, path)
-      if (!win32PrivateFileSafe(path)) {
+      renamed = true
+      if (win32PrivateFileStatus(path) !== 'private') {
         throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} lost its private boundary`)
       }
     } catch (error) {
       if (fd !== undefined) closeSync(fd)
       try { unlinkSync(temp) } catch { /* the temp file may not exist */ }
+      if (renamed) {
+        try { unlinkSync(path) } catch { /* the published file may already be gone */ }
+      }
       if (error instanceof LocalScopeError) throw error
       throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} could not be written atomically`, error)
     }
@@ -1106,10 +1118,7 @@ export function cleanupOwnedFiles(scope: LocalScope, instanceId: string): void {
   for (const file of [REGISTRY_FILE, LAUNCH_FILE]) {
     const path = join(scope.dir, file)
     try {
-      if (process.platform === 'win32') {
-        const info = lstatSync(path)
-        if (info.isSymbolicLink() || !info.isFile()) continue
-      }
+      if (process.platform === 'win32' && win32PrivateFileStatus(path) !== 'private') continue
       const value = JSON.parse(readFileSync(path, 'utf8')) as { readonly instanceId?: unknown }
       if (value.instanceId === instanceId) unlinkSync(path)
     } catch {

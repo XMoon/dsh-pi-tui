@@ -65,8 +65,9 @@ provenance, not an ownership requirement. `status` reports
 profile.
 
 On Windows `daemon status`, `start`, `stop`, `restart` and `logs` operate on
-the independent process: `manager=process`, `user-manager=not-checked`,
-`unit=none`, no `systemctl`/`launchctl`, and `acp=unavailable`. `install` and
+the independent process: an authenticated Host reports `manager=process`; no
+Host reports `manager=unmanaged`. `user-manager=not-checked`, `unit=none`, no
+`systemctl`/`launchctl`, and `acp=unavailable`. `install` and
 `uninstall` exit 3 before any scope or manager work because Windows has no
 service manager in this contract.
 

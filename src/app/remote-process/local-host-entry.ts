@@ -1746,10 +1746,10 @@ function remoteErrorSessionId(error: unknown): string | undefined {
  */
 export function createAcpController(options: AcpControlControllerOptions): AcpControlController {
   if (process.platform === 'win32') {
-    // PR2 keeps the ACP ingress truthfully unavailable on Windows. The same
+    // The ACP ingress remains truthfully unavailable on Windows. The same
     // controller interface answers unavailable for both reads and mutations;
     // no socket, pipe or second listener is created.
-    const unavailable = (): AcpAccessStatus => ({ state: 'unavailable', reason: 'ACP is not available on Windows before PR4' })
+    const unavailable = (): AcpAccessStatus => ({ state: 'unavailable', reason: 'ACP is not available on Windows' })
     return {
       getStatus: async () => unavailable(),
       setEnabled: async () => unavailable(),
@@ -2194,6 +2194,28 @@ async function publishLocalHost(
  * launcher's native signal handler during `runProfile` bypasses the async
  * finally, so a synchronous exit mirror below removes the same owned scratch.
  */
+/**
+ * Route the Host-side native waiter settlement into the existing stop owner.
+ * A native failure is not a diagnostic-only event: it requests the same
+ * pending/owner-governed stop, then still rejects so the detached-task owner
+ * records the failure. Success requests the same stop exactly once.
+ */
+export async function routeNativeStopWaiter(
+  stopped: Promise<void>,
+  requestStop: () => void,
+  onFailure: (error: Error) => void,
+): Promise<void> {
+  try {
+    await stopped
+    requestStop()
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error))
+    requestStop()
+    onFailure(failure)
+    throw failure
+  }
+}
+
 export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise<void> {
   // The Host is a real independent process. Before the official profile boot
   // snapshots the environment, remove any OSC capability that could only be
@@ -2559,13 +2581,29 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         return
       }
 
+      let nativeStopWaitFailure: Error | undefined
       if (process.platform === 'win32') {
         nativeStopWaiter = createWin32StopWaiter(scope.scopeId, instanceId)
         const waiter = nativeStopWaiter
-        runDetached('local host: native stop event', async () => {
-          await waiter.stopped
-          requestStop(0, 'EVENT')
-        }, { diag: createEntryDiag('host') })
+        runDetached('local host: native stop event', () => routeNativeStopWaiter(
+          waiter.stopped,
+          () => requestStop(0, 'EVENT'),
+          error => {
+            nativeStopWaitFailure = error
+            writeEntryRecord({
+              m4a0: 'native-stop-wait-failure',
+              processRole: 'host',
+              pid: process.pid,
+              phase: published === undefined ? 'publication' : 'running',
+              error: error.message,
+            })
+          },
+        ), { diag: createEntryDiag('host') })
+      }
+      if (nativeStopWaitFailure !== undefined) {
+        await stop(0, undefined)
+        releaseSignalAdmission()
+        return
       }
       const publishedHost = await publishLocalHost(handle.ctx, scope, hostProcessIdentity, seat, instanceId, acpController)
       published = publishedHost

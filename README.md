@@ -121,7 +121,7 @@ dsh --profile pi-tui daemon install   # 仅 Linux / macOS
 dsh --profile pi-tui daemon uninstall # 仅 Linux / macOS
 ~~~
 
-Windows 当前只支持独立 headless Host 的 `status`、`start`、`stop`、`restart`、`logs` 与官方 Web；交互式 Daemon Client、`install`/`uninstall` 和 ACP 仍不可用。Windows 的 `status` 报告 `manager=process`、`unit=none`，不调用 systemd/launchd；`stop` 通过该实例的原生 stop Event 进入官方 shutdown。
+Windows 当前只支持独立 headless Host 的 `status`、`start`、`stop`、`restart`、`logs` 与官方 Web；交互式 Daemon Client、`install`/`uninstall` 和 ACP 仍不可用。Windows 的 `status` 对已认证 Host 报告 `manager=process`，无 Host 报告 `manager=unmanaged`；`unit=none`，不调用 systemd/launchd；`stop` 通过该实例的原生 stop Event 进入官方 shutdown。
 
 `daemon install` 仅选择性地创建/验证当前 Profile 的用户服务定义，**不会**自动启动、启用或迁移 Host。`daemon stop` / `restart` 可能中断所有连接 Client 的进行中 Turn/Job；manager 显示运行中不代表 Host 已 Ready，须以认证身份确认。
 

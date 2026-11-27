@@ -121,7 +121,7 @@ dsh --profile pi-tui daemon install   # Linux / macOS only
 dsh --profile pi-tui daemon uninstall # Linux / macOS only
 ~~~
 
-On Windows this release supports the independent headless Host through `status`, `start`, `stop`, `restart`, `logs` and the official Web frontend. The interactive Daemon Client, `install`/`uninstall` and ACP remain unavailable. Windows `status` reports `manager=process`, `unit=none` and never invokes systemd/launchd; `stop` enters the official shutdown through that instance's native stop Event.
+On Windows this release supports the independent headless Host through `status`, `start`, `stop`, `restart`, `logs` and the official Web frontend. The interactive Daemon Client, `install`/`uninstall` and ACP remain unavailable. Windows `status` reports `manager=process` for an authenticated Host and `manager=unmanaged` with no Host; `unit=none`, and it never invokes systemd/launchd; `stop` enters the official shutdown through that instance's native stop Event.
 
 `daemon install` only creates/verifies the optional Profile-scoped OS user service definition; it does **not** start, enable or migrate the Host. `daemon stop` and `restart` can interrupt in-flight Turns/Jobs across connected Clients. A manager reporting “running” is not proof of authenticated Host readiness.
 

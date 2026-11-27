@@ -45,13 +45,35 @@ import {
 import { LOCAL_PROTOCOL, LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
 import { clientFatalErrorDetails } from '../../src/app/remote-process/client-fatal-diagnostics.ts'
 import { collectHostEntryStatus } from '../../src/app/remote-process/host-bootstrap.ts'
-import { drainHmrTransactions, finishHostFailureCleanup, HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
+import { drainHmrTransactions, finishHostFailureCleanup, HOST_ONLY_PATCH, routeNativeStopWaiter } from '../../src/app/remote-process/local-host-entry.ts'
 import {
   assertRemoteHostPrerequisites,
   REMOTE_HOST_PREREQUISITE_SERVICES,
 } from '../../src/app/remote/host-prerequisites.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { decodeProgramResumeHandoff, PROGRAM_RESUME_HANDOFF_ENV, PROGRAM_RESUME_TOKEN_ENV } from '../../src/client/program-resume/handoff.ts'
+
+test('a failed native stop waiter enters the same stop owner and still rejects', async () => {
+  let requests = 0
+  let failures = 0
+  await assert.rejects(
+    routeNativeStopWaiter(Promise.reject(new Error('native wait failed')), () => { requests += 1 }, error => {
+      failures += 1
+      assert.match(error.message, /native wait failed/u)
+    }),
+    /native wait failed/u,
+  )
+  assert.equal(requests, 1, 'the failed waiter requests the existing stop owner exactly once')
+  assert.equal(failures, 1, 'the failure remains observable to the detached-task owner')
+})
+
+test('a successful native stop waiter requests stop once and does not report failure', async () => {
+  let requests = 0
+  let failures = 0
+  await routeNativeStopWaiter(Promise.resolve(), () => { requests += 1 }, () => { failures += 1 })
+  assert.equal(requests, 1)
+  assert.equal(failures, 0)
+})
 
 test('the Host-only overlay disables the TUI runner and the Client UI rows only', () => {
   // The value matters as much as the id: matching only `- id:` lets a broken

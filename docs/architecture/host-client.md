@@ -253,12 +253,13 @@ unsupported because no Windows service manager owns the Host; ACP ingress is
 truthfully unavailable on Windows.
 
 - **Scope.** The official `resolveDshHome()` / `resolveProfileDir()` results
-  canonicalized through `realpath` plus the current UID decide the scope. The
-  private run directory is `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/`: on Linux,
-  components THIS product creates are 0700, while an existing user layout (an
-  existing 0755/0775 directory, legal directory symlink or another owner) is
-  used as-is and never chmodded or rejected by a UID/mode gate. On macOS the
-  per-DSH-home run directory is created and proved 0700; the Darwin Host seat
+  canonicalized through `realpath` plus the current POSIX UID or Windows token
+  SID decide the scope. The private run directory is
+  `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/`. On Linux, components THIS product
+  creates are 0700, while an existing user layout (an existing 0755/0775
+  directory, legal directory symlink or another owner) is used as-is and never
+  chmodded or rejected by a UID/mode gate. On macOS the per-DSH-home run
+  directory is created and proved 0700; the Darwin Host seat
   uses the account-home root described below. On Windows the official home and
   profile must resolve to a local fixed NTFS path; the drive prefix is
   canonicalized but the remaining filesystem case is preserved, and the
@@ -303,7 +304,8 @@ truthfully unavailable on Windows.
   concurrently and share its exact PID/starttime/`instanceId`. Kernel release on
   process death is the only stale-seat recovery.
 - **Identity is authenticated, never registry-only.** The registry
-  (`instance.json`; a newly written file is 0600) is an unauthenticated hint
+  (`instance.json`; a newly written POSIX file is 0600 and a Windows file
+  inherits the private owner-only DACL) is an unauthenticated hint
   containing the scope, canonical profile path, `instanceId`, Host PID,
   loopback origin, the local protocol identity, installed bundle/DSH versions
   and the installed-build fingerprint. Its identity material is versioned by
@@ -362,12 +364,12 @@ truthfully unavailable on Windows.
   point is the connection's own re-admit before a socket RE-open, which
   re-publishes both sides on the new operator.
 - **Secret boundary.** The launch token lives only in the Host process and its
-  `launch.json` (a new file is written 0600 with an atomic same-directory
-  rename); the Client keeps its own Cookie in memory only. Neither token,
+  `launch.json` (a new POSIX file is written 0600 with an atomic
+  same-directory rename; on Windows it inherits the private owner-only DACL); the Client keeps its own Cookie in memory only. Neither token,
   Cookie nor `connectUrl` may appear in the registry, stdout/stderr, logs, argv
-  or environment. New registry/launch files are 0600 and a new run directory is
-  0700; an existing user-chosen owner or mode is not a read policy and is never
-  rewritten. The managed internal files still fail closed on a final-path
+  or environment. New POSIX registry/launch files are 0600 and a new POSIX run directory is 0700;
+  on Windows the new files inherit the private owner-only DACL. An existing
+  POSIX user-chosen owner or mode is not a read policy and is never rewritten. The managed internal files still fail closed on a final-path
   symlink (`O_NOFOLLOW`), a non-regular file, an oversized record, a malformed
   schema, a registry/launch mismatch and any unauthenticated Host identity.
 - **Lifecycle.** A Client exit, crash or HUP disposes only its own Client

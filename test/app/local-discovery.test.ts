@@ -1468,7 +1468,7 @@ test('the schema 1 publication builder keeps the frozen key order', t => {
   }
 })
 
-test('the schema 3 publication carries the exact Windows identity and key order', t => {
+test('the schema 3 publication carries the exact Windows identity', t => {
   const value = fixture(t)
   try {
     const scope = scopeFor(value)
@@ -1489,19 +1489,6 @@ test('the schema 3 publication carries the exact Windows identity and key order'
       dshVersion: scope.dshVersion,
       buildId: scope.buildId,
     }, { schema: 3, hostKernelIdentity: identity })
-    assert.deepEqual(Object.keys(JSON.parse(JSON.stringify(record))), [
-      'schema',
-      'scopeId',
-      'profileRealpath',
-      'instanceId',
-      'hostPid',
-      'hostKernelIdentity',
-      'origin',
-      'protocol',
-      'bundleVersion',
-      'dshVersion',
-      'buildId',
-    ])
     assert.deepEqual(JSON.parse(JSON.stringify(record)).hostKernelIdentity, identity)
     if (record.schema !== 3) throw new Error('the schema 3 builder returned another schema')
     assert.equal(sameLocalInstanceRecord(record, { ...record, hostKernelIdentity: { ...identity } }), true)

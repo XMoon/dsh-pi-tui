@@ -55,7 +55,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
 import { installedPackageRootFromEntry, LocalScopeError, type LocalScope } from './local-scope.ts'
-import { win32PrivateFileSafe } from '../../runtime/native-process/win32.ts'
+import { win32PrivateFileStatus } from '../../runtime/native-process/win32.ts'
 import {
   inspectOwnedLaunchdUnit,
   startLaunchdService,
@@ -1604,13 +1604,16 @@ export function spawnHostCandidate(options: HostStartOptions): HostStartObservat
   try {
     let logFlags = constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND
     if (process.platform === 'win32') {
-      if (existsSync(logPath) && !win32PrivateFileSafe(logPath)) {
+      if (win32PrivateFileStatus(logPath) === 'unsafe') {
         throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'managed Host: the existing Host log is not a private regular file')
       }
     } else {
       logFlags |= constants.O_NOFOLLOW
     }
     fd = openSync(logPath, logFlags, 0o600)
+    if (process.platform === 'win32' && win32PrivateFileStatus(logPath) !== 'private') {
+      throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'managed Host: the Host log did not inherit a private boundary')
+    }
     const env = hostCandidateEnvironment(options)
     const child = spawn(process.execPath, [options.hostEntryPath], {
       cwd: options.scope.profileRealpath,

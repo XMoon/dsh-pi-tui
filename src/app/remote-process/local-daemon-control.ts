@@ -91,7 +91,7 @@ import {
   openWin32Process,
   openWin32StopSignal,
   waitWin32Handle,
-  win32PrivateFileSafe,
+  win32PrivateFileStatus,
   type Win32StopSignal,
 } from '../../runtime/native-process/win32.ts'
 
@@ -887,20 +887,6 @@ async function waitForHostStopped(
   const now = deps.now ?? Date.now
   const sleep = deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
   const deadline = now() + (deps.stopTimeoutMs ?? 20_000)
-  if (platformOf(deps) === 'win32') {
-    if (record === undefined || record.schema !== 3) {
-      throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Windows Host kernel identity is unavailable for the stop proof')
-    }
-    const readKernel = deps.readKernel ?? readKernelProcess
-    for (;;) {
-      const classification = sameKernelProcess(record.hostKernelIdentity, readKernel(record.hostPid))
-      if (classification === 'gone' || classification === 'different') return
-      if (now() >= deadline) {
-        throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the old Host process did not exit within the bounded window')
-      }
-      await sleep(100)
-    }
-  }
   if (platformOf(deps) === 'darwin') {
     if (record === undefined || record.schema !== 2) {
       throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the Host kernel identity is unavailable for the stop proof')
@@ -1884,54 +1870,34 @@ function runJournalctl(unit: string, lines: number): Promise<{ code: number; std
 }
 
 /**
- * Read the tail of the scope `host.log`. The read is bounded and never follows
- * a final symlink, but it does not judge the user's existing owner/mode: an
- * existing 0644 log chosen by the user is readable. New logs are still created
- * 0600 by `spawnHostCandidate`.
+ * Read a bounded tail of the scope `host.log`. POSIX never follows a final
+ * symlink and preserves the existing owner/mode read policy; Windows admits
+ * only the product's private regular file. The bounded read itself is shared.
  */
 async function tailHostLog(path: string, lines: number): Promise<string | undefined> {
   let fd: number
   if (process.platform === 'win32') {
+    const status = win32PrivateFileStatus(path)
+    if (status === 'missing') return undefined
+    if (status !== 'private') {
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the Host log is not a private regular file')
+    }
     try {
-      const info = lstatSync(path)
-      if (info.isSymbolicLink() || !info.isFile() || !win32PrivateFileSafe(path)) {
-        throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the Host log is not a private regular file')
-      }
       fd = openSync(path, constants.O_RDONLY)
-    } catch (error) {
-      if (error instanceof DaemonControlError) throw error
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    } catch {
       throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the Host log could not be opened')
     }
+  } else {
     try {
-      const info = fstatSync(fd)
-      const length = Math.min(info.size, HOST_LOG_MAX_BYTES)
-      const start = info.size - length
-      const buffer = Buffer.alloc(length)
-      let offset = 0
-      while (offset < buffer.length) {
-        const read = readSync(fd, buffer, offset, buffer.length - offset, start + offset)
-        if (read <= 0) break
-        offset += read
-      }
-      const text = buffer.toString('utf8', 0, offset)
-      const all = text.split('\n')
-      if (all.length > 0 && all[all.length - 1] === '') all.pop()
-      const tail = all.slice(Math.max(0, all.length - lines))
-      return `${start > 0 ? `${LOG_TRUNCATION_MARKER}\n` : ''}${tail.join('\n')}${tail.length === 0 ? '' : '\n'}`
-    } finally {
-      closeSync(fd)
+      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      // A missing log, or an existing final symlink (never followed), means there
+      // is no readable source. Any other failure is a real read failure and is
+      // reported instead of being disguised as "no log".
+      if (code === 'ENOENT' || code === 'ELOOP') return undefined
+      throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the Host log could not be opened')
     }
-  }
-  try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code
-    // A missing log, or an existing final symlink (never followed), means there
-    // is no readable source. Any other failure is a real read failure and is
-    // reported instead of being disguised as "no log".
-    if (code === 'ENOENT' || code === 'ELOOP') return undefined
-    throw new DaemonControlError('LOG_SOURCE_UNAVAILABLE', 'the Host log could not be opened')
   }
   try {
     const info = fstatSync(fd)
@@ -2187,7 +2153,7 @@ export async function runDaemonControl(
 ): Promise<DaemonControlResult> {
   try {
     if (platformOf(deps) === 'win32' && (intent.verb === 'install' || intent.verb === 'uninstall')) {
-      throw new DaemonControlError('UNSUPPORTED_PLATFORM', `daemon ${intent.verb} is not supported on Windows; there is no Windows service manager in PR2`)
+      throw new DaemonControlError('UNSUPPORTED_PLATFORM', `daemon ${intent.verb} is not supported on Windows; there is no Windows service manager`)
     }
     switch (intent.verb) {
       case 'status':

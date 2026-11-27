@@ -986,7 +986,7 @@ export async function bindProfileKernelSeat(
   }
   if (process.platform === 'win32') {
     if (kind === 'qualification-client') {
-      throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'local scope: the Windows qualification Client seat is not part of PR2')
+      throw new LocalScopeError('B1_PLATFORM_UNSUPPORTED', 'local scope: the Windows qualification Client seat is not available')
     }
     try {
       return await acquireWin32KernelSeat(win32SeatName(scope.scopeId, kind), conflictCode)
