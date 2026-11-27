@@ -1295,8 +1295,9 @@ export function createHostAcpSessionAccess(
       }
     },
 
-    prompt: async (request, signal) => {
+    prompt: async (request, signal, finalCheck) => {
       if (!request.content.some(part => part.type === 'image')) {
+        finalCheck?.()
         return await sessionController.prompt(request, signal)
       }
       signal.throwIfAborted()
@@ -1330,6 +1331,9 @@ export function createHostAcpSessionAccess(
         || currentRoute?.provider !== route.provider || currentRoute.model !== route.model) {
         throw imageRouteError('IMAGE_ROUTE_CHANGED', 'the attached Agent route changed during image capability verification')
       }
+      // The LAST synchronous View authority check is adjacent to the actual
+      // official Controller call, after every async image/model await.
+      finalCheck?.()
       return await sessionController.prompt(request, signal)
     },
     supportsFileInput: () => fileUploads !== undefined && attachments !== undefined

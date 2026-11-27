@@ -575,8 +575,18 @@ async function inputScene(context) {
     requireFact(po4eProbe.sha256 === hash(po4eBytes) && po4eProbe.bytes === po4eBytes.length
       && po4eProbe.refBytes === po4eBytes.length, 'PO-4E official Store read is byte/hash exact')
     requireFact(po4eProbe.contentTypes.join(',') === 'text,file,text', 'PO-4E durable content order')
-    requireFact(po4eProbe.text.includes(po4eHeader) && po4eProbe.text.includes(po4eNote)
-      && po4eProbe.text.includes('after'), 'PO-4E descriptive header/literal text is the ordinary user content')
+    const po4eText = `${po4eMarker}\nbefore${po4eHeader}`
+      + `\n[resource uri="urn:po4e:note"]\n${po4eNote}\nafter`
+    requireFact(po4eProbe.text === po4eText,
+      `PO-4E descriptive header/literal text is exactly the ordinary user content (got ${JSON.stringify(po4eProbe.text)})`)
+    const po4eBind = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-bind'
+      && event.sessionId === sessionId && event.requestId === po4eProbe.rpcId,
+    'PO-4E normal prompt bound exact receipt', 120_000)
+    const po4eUpload = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-upload-returned'
+      && event.sessionId === sessionId && event.name === '报告 1 (file).bin',
+    'PO-4E normal prompt uploaded receipt', 120_000)
+    requireFact(po4eBind.receiptIds.length === 1 && po4eBind.receiptIds[0] === po4eUpload.receiptId,
+      'PO-4E normal prompt bound the exact returned file receipt')
     requireFact(typeof po4eProbe.rpcId === 'string' && po4eProbe.rpcId.length > 0, 'PO-4E real source.rpcId')
     const po4eModel = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-model'
       && event.sessionId === sessionId && event.afterTool === false, 'PO-4E model file handle', 120_000)
@@ -704,10 +714,22 @@ async function inputScene(context) {
     }).then(value => ({ ok: true, value }), error => ({ ok: false, error }))
     const held = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-upload-held'
       && event.sessionId === sessionId, 'PO-4E held real upload', 120_000)
-    const closeStarted = sdk.request(acp.methods.agent.session.close, { sessionId })
+    let closeResolved = false
+    const closeStarted = sdk.request(acp.methods.agent.session.close, { sessionId }).then(value => {
+      closeResolved = true
+      return value
+    }, error => {
+      closeResolved = true
+      throw error
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    const closeWasPending = closeResolved === false
+    requireFact(closeWasPending, 'PO-4E close stays pending while the real upload is held')
     writeFileSync(po4eHold, '', { mode: 0o600 })
     assert.deepEqual(await closeStarted, {}, 'PO-4E real close settles after the held upload returns')
-    await holdPrompt
+    const holdOutcome = await holdPrompt
+    requireFact(holdOutcome.ok === false || holdOutcome.value?.stopReason === 'cancelled',
+      'PO-4E closed held prompt reports a terminal, not a dispatch')
     const holdRetire = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-retire'
       && event.receiptIds.includes(held.receiptId) && event.liveAfter.every(live => live === false),
     'PO-4E late receipt cleanup after close', 120_000)
@@ -725,7 +747,7 @@ async function inputScene(context) {
       po4eFileAttachmentId: po4eFile.attachment.attachmentId, po4eFileBytes: po4eBytes.length, po4eFileSha256: hash(po4eBytes),
       po4eFileTurn: po4eFlight.turn, po4eFileRpcId: po4eProbe.rpcId, po4eModelHandleCount: po4eModel.handleCount,
       po4eToolSha256: po4eTool.toolSha256, po4eNegativeRetiredReceipt: a4Retire.receiptIds[0],
-      po4eHeldRetiredReceipt: held.receiptId, po4eHeldCloseStopped: true,
+      po4eHeldRetiredReceipt: held.receiptId, po4eHeldCloseStopped: closeWasPending,
       po4eQueuedRetiredReceipt: queueRetire.receiptIds[0], po4eQueuedTuiTurnCompleted: true,
       po4eQueuedStopReason: queueOutcome.ok ? queueOutcome.value?.stopReason : undefined,
     }

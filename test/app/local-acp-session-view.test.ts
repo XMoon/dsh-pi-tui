@@ -126,7 +126,7 @@ class FakeAccess implements HostAcpSessionAccess {
       : { agent }
   }
 
-  promptImpl: (request: AcpSessionPromptRequest, signal: AbortSignal) => Promise<{ readonly accepted: true }> =
+  promptImpl: (request: AcpSessionPromptRequest, signal: AbortSignal, finalCheck?: () => void) => Promise<{ readonly accepted: true }> =
     async () => ({ accepted: true })
 
   cancelPendingImpl: (messageId: string) => 'removed' | 'not-pending' | 'stale' =
@@ -253,9 +253,9 @@ class FakeAccess implements HostAcpSessionAccess {
     this.retiredRequestIds.push(requestId)
   }
 
-  async prompt(request: AcpSessionPromptRequest, signal: AbortSignal): Promise<{ readonly accepted: true }> {
+  async prompt(request: AcpSessionPromptRequest, signal: AbortSignal, finalCheck?: () => void): Promise<{ readonly accepted: true }> {
     this.promptCalls.push(request)
-    return await this.promptImpl(request, signal)
+    return await this.promptImpl(request, signal, finalCheck)
   }
 
   pendingMessage(sessionId: string, agent: LiveAgentViewIdentity, session: object, messageId: string):
@@ -1905,6 +1905,29 @@ test('resource shape, aggregate budget and the 16-blob cap are atomic before upl
     view.start('', undefined, [{ type: 'resource', resource: { uri: 'u', text: '12345' } }], true, true, 5),
     isPromptError('LOCAL_ACP_PROMPT_INVALID_CONTENT'),
   )
+  // Aggregate E is UTF-8 bytes of uri + present mimeType + text/blob.
+  const utf8 = promptView()
+  await utf8.attach()
+  const exact = utf8.start('', undefined, [{
+    type: 'resource', resource: { uri: 'é', mimeType: 'm', text: 'x' },
+  }], false, true, 4)
+  const exactRequest = utf8.access.promptCalls[0]!
+  utf8.insert(exactRequest.requestId, 'm-utf8')
+  utf8.claim('m-utf8', 1, exactRequest.requestId)
+  utf8.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await exact, { stopReason: 'end_turn' })
+  await assert.rejects(
+    utf8.start('', undefined, [{ type: 'resource', resource: { uri: 'é', mimeType: 'm', text: 'x' } }], false, true, 3),
+    isPromptError('LOCAL_ACP_PROMPT_INVALID_CONTENT'),
+  )
+  const malformedSuffix = promptView()
+  await malformedSuffix.attach()
+  await assert.rejects(malformedSuffix.start('', undefined, [
+    { type: 'resource', resource: { uri: 'file:///ok.bin', blob: 'AQID' } },
+    { type: 'resource', resource: { uri: 'file:///bad.bin' } },
+  ], false, true), isPromptError('LOCAL_ACP_PROMPT_INVALID_CONTENT'))
+  assert.equal(malformedSuffix.access.stageCalls.length, 0, 'a malformed later shape is refused before any upload')
+
   const boundary = promptView()
   await boundary.attach()
   const attempt = boundary.start('', undefined, [{ type: 'resource', resource: { uri: 'u', text: '1234' } }], false, true, 5)
@@ -2013,6 +2036,72 @@ test('an unconfirmed file receipt retirement is never reported as a clean reject
   assert.equal(view.access.promptCalls.length, 1, 'the original Controller call is never retried')
 })
 
+test('disposal during a pending Controller admission waits for the original call before cleanup or detach', async () => {
+  const view = promptView()
+  await view.attach()
+  const admission = deferred<{ readonly accepted: true }>()
+  view.access.promptImpl = () => admission.promise
+  let settled = false
+  const attempt = view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///controller.bin', blob: 'AQID' } }], false, true)
+  attempt.then(() => { settled = true }, () => { settled = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(view.access.stageCalls.length, 1)
+  assert.equal(view.access.promptCalls.length, 1)
+  view.registry.onAgentDisposed(view.agent)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, false, 'disposal must not settle before the actual Controller Promise')
+  assert.equal(view.access.cleanupCalls.length, 0, 'cleanup must wait for the original call')
+  assert.equal(view.registry.claimCount(), 1, 'the claim stays fenced until the call settles')
+  let closed = false
+  const closing = view.registry.closeSession(view.conn, view.access, 'P1').then(value => {
+    closed = true
+    return value
+  }, (error: unknown) => {
+    closed = true
+    throw error
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(closed, false, 'close must join the pending original admission')
+  admission.reject(new Error('controller rejected after disposal'))
+  await assert.rejects(attempt, (error: unknown) => error instanceof LocalAcpViewError
+    && error.code === 'LOCAL_ACP_PROMPT_TURN_FAILED' && error.data.reason === 'agent-disposed')
+  await closing
+  assert.equal(view.access.cleanupCalls.at(-1)?.receiptIds[0], 'receipt-1')
+})
+
+test('a Controller rejection after an observed insertion keeps the indeterminate fence and cleans after settlement', async () => {
+  const view = promptView()
+  await view.attach()
+  const admission = deferred<{ readonly accepted: true }>()
+  view.access.promptImpl = () => admission.promise
+  const attempt = view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///observed.bin', blob: 'AQID' } }], false, true)
+  await new Promise(resolve => setImmediate(resolve))
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-observed')
+  admission.reject(new Error('controller rejected after insertion'))
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_DISPATCH_INDETERMINATE'))
+  assert.equal(view.access.cleanupCalls.at(-1)?.receiptIds[0], 'receipt-1')
+  assert.equal(view.registry.hasUnsettledHostWork(), true, 'the inserted message remains a real Host obligation')
+})
+
+test('the final Host admission callback refuses a cancelled file prompt before dispatch', async () => {
+  const view = promptView()
+  await view.attach()
+  let finalCheck: (() => void) | undefined
+  view.access.promptImpl = async (_request, _signal, callback) => {
+    finalCheck = callback
+    view.registry.cancelSession(view.conn, view.access, 'P1')
+    callback?.()
+    return { accepted: true }
+  }
+  await assert.rejects(
+    view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///final.bin', blob: 'AQID' } }], false, true),
+    isPromptError('LOCAL_ACP_PROMPT_ABORTED'),
+  )
+  assert.equal(typeof finalCheck, 'function')
+  assert.deepEqual(view.access.cleanupCalls.at(-1)?.receiptIds, ['receipt-1'])
+})
+
 test('disposal during a rejecting held upload retains the disposal failure, not a clean cancel', async () => {
   const view = promptView()
   await view.attach()
@@ -2049,7 +2138,7 @@ test('disposal during a held upload also clears a previous dead retiring-turn fe
   assert.equal(view.registry.claimCount(), 0, 'the dead retiring-turn fence must be released')
 })
 
-test('a queued removal whose receipt retirement fails is not reported as clean cancellation', async () => {
+test('a close whose queued receipt retirement fails reports once and then detaches', async () => {
   const view = promptView()
   await view.attach()
   view.access.retirePromptReceipts = () => { throw new Error('retirement unavailable') }
@@ -2057,15 +2146,16 @@ test('a queued removal whose receipt retirement fails is not reported as clean c
   await new Promise(resolve => setImmediate(resolve))
   const request = view.access.promptCalls[0]!
   view.insert(request.requestId, 'm-queued-fail')
-  view.registry.cancelSession(view.conn, view.access, 'P1')
-  await assert.rejects(attempt, (error: unknown) => error instanceof LocalAcpViewError
-    && error.code === 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'
-    && error.data.reason === 'file-receipt-retirement-unconfirmed')
   await assert.rejects(view.registry.closeSession(view.conn, view.access, 'P1'),
     (error: unknown) => error instanceof LocalAcpViewError
       && error.code === 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'
       && error.data.reason === 'file-receipt-retirement-unconfirmed',
-    'a retried close must not claim a clean detach after unconfirmed retirement')
+    'the close must report the unconfirmed resource terminal')
+  await assert.rejects(attempt, (error: unknown) => error instanceof LocalAcpViewError
+    && error.code === 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'
+    && error.data.reason === 'file-receipt-retirement-unconfirmed')
+  assert.deepEqual(await view.registry.closeSession(view.conn, view.access, 'P1'), {},
+    'the operation is settled, so a repeated close is idempotent')
 })
 
 test('a proved queued removal retires the same request receipts exactly once', async () => {
@@ -3508,7 +3598,7 @@ test('a detached retired claim cannot dispatch a prompt after the same connectio
   view.access.seed(makeAgent('B', '/w'))
   await view.registry.resumeSession(view.conn, view.access, { sessionId: 'B', cwd: '/w' })
   view.access.promptImpl = async () => { throw new Error('unexpected dispatch to retired Session') }
-  await assert.rejects(view.start(), isViewError('LOCAL_ACP_VIEW_NOT_OWNED'))
+  await assert.rejects(view.start(), isPromptError('LOCAL_ACP_PROMPT_IN_FLIGHT'))
   assert.equal(view.access.promptCalls.length, 1, 'the retired reservation is observation-only')
   assert.equal(view.registry.phaseOf(view.conn), 'attached')
   view.registry.onAgentDisposed(view.agent)

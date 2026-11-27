@@ -299,15 +299,20 @@ profile's independent `autoStart` preference enables it (see below).
     retention-neutral immutable objects; the adapter never writes a second
     attachment copy and never deletes stored bytes.
   - **Uncommitted receipts and cancellation.** The View mints ONE real flight
-    request id before staging. If it definitely will not call the Controller, or
-    the Controller rejects without an insertion, it retires every still-live
-    receipt with the official `bindPrompt` → `retirePrompt` → guard
-    `Symbol.dispose` sequence on the captured receiver, never `commit`, never a
-    fake queue fact and never a Store deletion. A close/cancel/disposal during a
-    real upload waits for that Promise, records the actual returned receipt and
-    cleans it only after the upload settles. If the Controller accepted and the
-    exact user message was observed, the official message owns the receipts and
-    the View does not retire them early. A queued occurrence removed through the
+    request id before staging. If it definitely will not call the Controller, it
+    retires every still-live receipt with the official `bindPrompt` →
+    `retirePrompt` → guard `Symbol.dispose` sequence on the captured receiver,
+    never `commit`, never a fake queue fact and never a Store deletion. If the
+    original Controller Promise actually rejects, cleanup runs only after that
+    settlement, including when an insertion fact was already observed; it never
+    turns that outcome into a definite rejection and never overrides the
+    inserted message/turn ownership. An accepted call without an observed
+    insertion is not by itself a cleanup trigger. A close/cancel/disposal during
+    a real upload or pending Controller admission waits for the original
+    Promise, records the actual returned receipt and cleans it only after that
+    settlement. If the Controller accepted and the exact user message was
+    observed, the official message owns the receipts and the View does not
+    retire them early. A queued occurrence removed through the
     official exact `agent.inbox.remove` also invokes the official
     `retirePrompt` for that real request id before settling `cancelled`;
     external queue removal is idempotent and edit/steer same-id reinsertion is
@@ -750,12 +755,13 @@ profile's independent `autoStart` preference enables it (see below).
     on the exact Host identity proves there was no inserted message. The
     Session, Agent and writer keep their Host authority; a pending
     create/resume whose connection closed never publishes an attached View.
-  - MCP prompts, ACP client filesystem/terminal routes and client-to-Agent
-    file/artifact INPUT transfer are NOT provided by this View and fail closed
-    with their stable `LOCAL_ACP_*` code. A generic file already COMMITTED in the
-    durable Session is still replayed/output as a standard embedded `resource`
-    blob under the contract above; that is output projection, not an input
-    capability. `session/list` is served by
+  - Standard embedded `resource` text/blob input described above IS provided.
+    ACP client filesystem/terminal routes and arbitrary client path/artifact
+    transfer are NOT provided by this View and fail closed with their stable
+    `LOCAL_ACP_*` code. A generic file already COMMITTED in the durable Session
+    is still replayed/output as a standard embedded `resource` blob under the
+    contract above; that is output projection, not an input capability.
+    `session/list` is served by
     the local ACP front door when the official authorized roster read seam is
     bound (see “Official session facts on the stable v1 wire” below); without
     that seam it is not advertised and fails closed with
