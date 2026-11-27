@@ -1795,7 +1795,9 @@ with the truthful unavailable/refusal status. A confirmed Delete likewise
 returns to the List once the roster proves the deleted target gone; a nearest
 fallback selection is never presented as the original target. A removal receipt
 is retained only for a saved Delete, and the next explicit configuration action
-clears it; an unconfirmed/refused Delete never becomes a success receipt. An
+clears it; an unconfirmed/refused Delete never becomes a success receipt. A
+refused/unknown Delete, or an explicit open of another target, retires the old
+return intent so it cannot redirect the new Detail. An
 exact Edit/Delete target means the same roster entry instance, not merely the
 same name: a removed and same-name re-added entry is a new instance.
 
@@ -1843,8 +1845,10 @@ then a fresh explicit decision. A form Back while the write is unknown asks
 undo it.` and only an explicit leave drops the local draft. With no form open,
 Detail → List stays legal, but the List's parent leave first states that the
 prior outcome may have been applied and offers the explicit leave or `Refresh`.
-Leaving the page still never retries, cancels or rewrites the dispatched Host
-operation. The parent-leave warning is admission-bound like every other question:
+The transient `Waiting …` notice is derived from the current pending state and
+disappears when that operation/config write settles, so the real receipt/notice
+is never masked. Leaving the page still never retries, cancels or rewrites the
+dispatched Host operation. The parent-leave warning is admission-bound like every other question:
 if its complete consequence does not fit the CURRENT grant, only Keep (plus the
 read-only Refresh recovery) is published; Leave is absent and its key/pointer is
 inert until a fresh frame paints the whole warning. The form likewise publishes

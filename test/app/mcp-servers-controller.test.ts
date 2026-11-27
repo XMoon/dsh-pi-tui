@@ -323,6 +323,13 @@ test('a saving configuration retired before settlement stays unconfirmed and blo
   h.configuration.value = configOf(GENERATION_2, 4, [{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
   h.port.roster([view('mine')], GENERATION_2)
   await h.flush()
+  assert.equal(h.controller.snapshot().configOutcomeUnconfirmed, true,
+    'an unsolicited ready roster never releases the retirement gate')
+  const writes = h.configuration.mutations.length
+  h.controller.beginToggle()
+  h.controller.answerConfigConfirm(true)
+  await h.flush()
+  assert.equal(h.configuration.mutations.length, writes, 'no second write before explicit R')
   h.controller.refresh()
   h.port.roster([view('mine')], GENERATION_2)
   await h.flush()

@@ -354,10 +354,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   /** The exact server an Edit opened from; a fallback selection is not it. */
   private formTargetName: string | undefined
   private formTargetToken: object | undefined
-  /** A delete that may remove the current Detail target; return to the List. */
+  /** The optional exact Delete/Detail owner that should return to the List
+   *  after the roster proves its own target gone. */
   private detailRemovalTarget: { readonly name: string; readonly token: object | undefined } | undefined
-  /** The delete settlement must win even if an early frame cleared the target. */
-  private deleteReturnPending = false
   /** The ACTIVE text input of the form (its row + the value being typed). */
   private formInput: { readonly row: McpFormRow; readonly input: Input; readonly initial: string } | undefined
   /** A pending discard question. `unknown` states that the write may already
@@ -372,9 +371,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private unknownLeave = false
   /** The one current configuration receipt's region (never painted twice). */
   private receiptRegion: 'list' | 'detail' = 'detail'
-  /** A page-local informational notice (e.g. a running operation keeps the
-   *  page on its List Back). It is presentation-only and dies with the page. */
-  private localNotice: { readonly text: string; readonly kind: 'info' | 'error' } | undefined
+  /** A refused List Back asked for the transient Waiting notice; the text is
+   *  derived from the CURRENT pending state and disappears at settlement. */
+  private waitingNoticeRequested = false
   /** The number of leading List rows that are header/search chrome, never item
    *  targets or wheel owners. */
   private listHeaderRows = 0
@@ -581,9 +580,8 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       }
       if (data === 'r' || data === 'R') {
         this.unknownLeave = false
-        this.deleteReturnPending = false
         this.detailRemovalTarget = undefined
-            this.controller.refresh()
+        this.controller.refresh()
         this.bumpRevision()
         return
       }
@@ -608,8 +606,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
               name: targetName,
               token: snapshot.rows.find(row => row.name === targetName)?.entryToken,
             }
-            this.deleteReturnPending = true
-                      }
+          }
           this.controller.answerConfigConfirm(true)
         }
       }
@@ -653,6 +650,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         this.bumpRevision()
         return
       }
+      if (this.formFieldRowsVisible < 1 || !this.formInputPainted) return
       if (matchesKey(data, 'enter')) {
         this.commitFormInput()
         return
@@ -704,12 +702,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       // List Back is the REAL parent exit. A dispatched operation keeps the
       // page mounted and states that it is still being observed.
       if (snapshot.operation?.phase === 'running') {
-        this.localNotice = { text: 'Waiting for the Host MCP operation…', kind: 'info' }
+        this.waitingNoticeRequested = true
         this.bumpRevision()
         return
       }
       if (snapshot.configStatus?.kind === 'saving') {
-        this.localNotice = { text: 'Waiting for the Host config write…', kind: 'info' }
+        this.waitingNoticeRequested = true
         this.bumpRevision()
         return
       }
@@ -740,7 +738,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       return
     }
     if (data === 'r' || data === 'R') {
-      this.deleteReturnPending = false
       this.detailRemovalTarget = undefined
       this.controller.refresh()
       return
@@ -780,7 +777,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         return
       }
       if (data === 'd' || data === 'D') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) this.controller.beginDelete()
+        if (this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) {
+          this.detailRemovalTarget = undefined
+          this.controller.beginDelete()
+        }
         return
       }
       if (data === 'u' || data === 'U') {
@@ -848,17 +848,19 @@ export class McpServersPage implements EmbeddedSpecialistPage {
    *  old target gone, the Detail has no subject: return to the List with the
    *  receipt instead of presenting the nearest fallback server. */
   private reconcileDetailRemoval(snapshot: McpServersSnapshot): void {
-    if (!this.deleteReturnPending) return
     const target = this.detailRemovalTarget
-    const targetGone = target !== undefined && !snapshot.rows.some(row => row.name === target.name
+    if (target === undefined) return
+    const targetGone = !snapshot.rows.some(row => row.name === target.name
       && (target.token === undefined || row.entryToken === target.token))
     if (!targetGone) {
-      // A receipt or ACK is not removal proof. Keep the Detail until the
-      // roster stops listing the exact instance.
+      // A receipt or ACK is not removal proof. A refused/unknown settlement
+      // ends this exact return intent; otherwise keep waiting for the roster.
+      if (snapshot.configStatus?.kind === 'rejected'
+        || snapshot.configStatus?.kind === 'conflict'
+        || snapshot.configStatus?.kind === 'unconfirmed') this.detailRemovalTarget = undefined
       return
     }
     const alreadyList = this.region === 'list' && this.receiptRegion === 'list'
-    this.deleteReturnPending = false
     this.detailRemovalTarget = undefined
     this.region = 'list'
     this.receiptRegion = 'list'
@@ -1291,8 +1293,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
               name: targetName,
               token: snapshot.rows.find(row => row.name === targetName)?.entryToken,
             }
-            this.deleteReturnPending = true
-                      }
+          }
           this.controller.answerConfigConfirm(true)
         } else if (snapshot.confirmingName !== undefined) this.controller.answerRestart(true)
         return
@@ -1311,7 +1312,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         if (this.unknownLeave) this.unknownLeave = false
         return
       case 'leave-anyway':
-        if (this.unknownLeave) {
+        if (this.unknownLeave && this.confirmationVerdict(snapshot) === 'ready') {
           this.unknownLeave = false
           this.done()
         }
@@ -1337,7 +1338,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         return
       case 'delete':
         if (this.region === 'detail' && this.visibleSelection(snapshot) !== undefined
-          && this.controller.canEditConfiguration()) this.controller.beginDelete()
+          && this.controller.canEditConfiguration()) {
+          this.detailRemovalTarget = undefined
+          this.controller.beginDelete()
+        }
         return
       case 'reset':
         if (this.region === 'detail' && this.visibleSelection(snapshot) !== undefined
@@ -1353,9 +1357,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
           && snapshot.restartOutcomeUnconfirmed !== true) this.controller.beginRestart()
         return
       case 'refresh':
-        this.deleteReturnPending = false
+        if (this.unknownLeave) {
+          this.unknownLeave = false
+          this.paintedWarning = undefined
+        }
         this.detailRemovalTarget = undefined
-            this.controller.refresh()
+        this.controller.refresh()
         return
       case 'save':
         if (snapshot.editor !== undefined && snapshot.configOutcomeUnconfirmed !== true) this.handleInput('s')
@@ -1565,7 +1572,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   }
 
   private openSelectedDetail(snapshot: McpServersSnapshot): void {
-    if (this.visibleSelection(snapshot) === undefined) return
+    const selected = this.visibleSelection(snapshot)
+    if (selected === undefined) return
+    const target = this.detailRemovalTarget
+    if (target !== undefined) {
+      const row = snapshot.rows.find(candidate => candidate.name === selected)
+      if (selected !== target.name || row?.entryToken !== target.token) this.detailRemovalTarget = undefined
+    }
     this.region = 'detail'
     this.detailOffset = 0
     this.bumpRevision()
@@ -1616,10 +1629,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private renderForGrant(bodyWidth: number, bodyRows: number, rawWidth: number): string[] {
     const snapshot = this.controller.snapshot()
     this.currentBarWidth = this.barWidth(rawWidth)
-    const newDeleteQuestion = snapshot.configConfirm?.kind === 'delete' && this.deleteReturnPending
+    if (snapshot.operation?.phase !== 'running' && snapshot.configStatus?.kind !== 'saving') {
+      this.waitingNoticeRequested = false
+    }
     if (snapshot.editor !== undefined || snapshot.phase === 'loading'
-      || (snapshot.configConfirm !== undefined && !newDeleteQuestion)) {
-      this.deleteReturnPending = false
+      || (snapshot.configConfirm !== undefined && snapshot.configConfirm.kind !== 'delete')) {
       this.detailRemovalTarget = undefined
     }
     this.reconcileDetailRemoval(snapshot)
@@ -1771,6 +1785,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const rendered = renderMcpConfigForm(editor, width, Math.max(1, fieldRows), this.formFocus, this.formOffset,
       (field, key) => this.controller.dictValueForm(field, key),
       (field, key) => this.controller.canRemoveDictKey(field, key))
+    const focusId = allRows[this.formFocus]?.id
+    this.formFocusedRowPainted = focusId !== undefined && rendered.painted.some(candidate =>
+      candidate.row.id === focusId
+      && Math.max(candidate.line, this.formOffset) <= Math.min(candidate.lineEnd, this.formOffset + fieldRows - 1))
     const fieldTop = lines.length
     lines.push(...rendered.lines.slice(0, fieldRows))
     // The bar's explicit verb is the primary route; when the bar really drops
@@ -1917,7 +1935,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private renderList(snapshot: McpServersSnapshot, width: number, rows: number, targets: McpPaintedTarget[]): string[] {
     const lines: string[] = []
     const visible = this.visibleRows(snapshot)
-    const notice = this.localNotice ?? snapshot.notice
+    const notice = (this.waitingNoticeRequested ? this.waitingNotice(snapshot) : undefined) ?? snapshot.notice
     const columns = this.listColumns(width, visible)
     const showHeader = rows >= 4 && width >= 24
     this.listHeaderRows = 0
@@ -2069,6 +2087,18 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     return color.warning(truncateToWidth(`READ ERROR · ${snapshot.phaseReason ?? 'observation lost'} (showing last known)`, width, '…', false))
   }
 
+  /** The transient Waiting notice is derived from the CURRENT pending state,
+   *  never stored past the settlement it describes. */
+  private waitingNotice(snapshot: McpServersSnapshot): { readonly text: string; readonly kind: 'info' } | undefined {
+    if (snapshot.operation?.phase === 'running') {
+      return { text: 'Waiting for the Host MCP operation…', kind: 'info' }
+    }
+    if (snapshot.configStatus?.kind === 'saving') {
+      return { text: 'Waiting for the Host config write…', kind: 'info' }
+    }
+    return undefined
+  }
+
   private noticeLine(notice: { readonly text: string; readonly kind: 'info' | 'error' }, width: number): string {
     const text = truncateToWidth(sanitizedPhysicalLine(notice.text), width, '…', false)
     return notice.kind === 'error' ? color.error(text) : color.textDim(text)
@@ -2177,7 +2207,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   ): string[] {
     const lines: string[] = []
     this.listHeaderRows = 0
-    const notice = this.localNotice ?? snapshot.notice
+    const notice = (this.waitingNoticeRequested ? this.waitingNotice(snapshot) : undefined) ?? snapshot.notice
     const noticeRows = notice === undefined || (this.allowDual() && this.region !== 'detail') ? 0 : 1
     const viewport = Math.max(1, rows - noticeRows)
     const content = this.detailContent(snapshot, width)
@@ -2384,8 +2414,8 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       if (this.confirmationVerdict(snapshot) !== 'ready') {
         return paintBar([
           { text: 'Resize to review the warning', short: 'Resize to review', priority: 1000 },
-          { text: 'Keep [Esc]', priority: 999, action: 'keep-editing' },
           { text: 'Refresh [R]', priority: 30, action: 'refresh' },
+          { text: 'Keep [Esc]', priority: 999, action: 'keep-editing' },
         ], width, true)
       }
       return paintBar([
@@ -2425,6 +2455,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (snapshot.editor !== undefined) {
       if (this.formInput !== undefined) {
         if (zeroBody) return paintBar([{ text: 'Esc cancel', priority: 1000, action: 'cancel' }], width, true)
+        if (!this.formInputPainted) {
+          return paintBar([
+            { text: 'Resize to review the input', short: 'Resize to review', priority: 1000 },
+            { text: 'Cancel [Esc]', priority: 999, action: 'cancel' },
+          ], width, true)
+        }
         return paintBar([
           { text: 'Apply [Enter]', short: 'Apply', priority: 40, action: 'apply-input', ink: 'primary' },
           { text: 'Cancel [Esc]', priority: 1000, action: 'cancel' },

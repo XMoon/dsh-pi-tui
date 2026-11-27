@@ -1129,6 +1129,7 @@ test('an explicit empty Enter commits an empty literal, while Esc keeps the valu
     page.handleInput('\x1b[B')
   }
   page.handleInput('\r')
+  render(page, 100, 20)
   page.handleInput('\r') // empty commit on a LITERAL
   assert.ok(controller.calls.includes('setDictValue:env:E=:literal'),
     `an explicit empty literal must be committed: ${controller.calls.join(',')}`)
@@ -2245,4 +2246,101 @@ test('List Back during a saving configuration stays mounted and never drops the 
   render(page, 100, 16)
   page.handleInput('\x1b')
   assert.equal(done, 1)
+})
+
+test('a refused Delete return intent cannot redirect a different Detail target', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
+  render(page, 100, 16)
+  page.handleInput('\r')
+  const detail = controller.snapshotValue
+  controller.snapshotValue = {
+    ...detail,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 3 },
+  }
+  render(page, 100, 16)
+  page.handleInput('y')
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    configConfirm: undefined,
+    configStatus: { kind: 'rejected', text: 'Not saved · the Host refused this write' },
+  }
+  render(page, 100, 16)
+  // Move to beta and open its Detail after the old Delete was refused.
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    selectedName: 'beta',
+    selectedConfig: { ...CONFIG_FACET, name: 'beta' },
+  }
+  render(page, 100, 16)
+  page.handleInput('\r')
+  render(page, 100, 16)
+  assert.equal(pageRegion(page), 'detail')
+  // A later removal of the old alpha target must not yank beta's Detail to List.
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    rows: controller.snapshotValue.rows.filter(row => row.name !== 'alpha'),
+    selectedName: 'beta',
+    selectedConfig: { ...CONFIG_FACET, name: 'beta' },
+  }
+  const frame = render(page, 100, 16).join('\n')
+  assert.equal(pageRegion(page), 'detail', 'the refused target is no longer a return owner')
+  assert.match(frame, /Server: beta/u)
+})
+
+test('an input hidden by a short non-zero grant cannot stage text or Apply until it repaints', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot(),
+  }))
+  ;(page as unknown as { formFocus: number }).formFocus = 3
+  render(page, 100, 20)
+  page.handleInput('\r')
+  render(page, 100, 20)
+  page.handleInput('x')
+  assert.match(render(page, 100, 20).join('\n'), /edit: > \/bin\/echox/u)
+  const clipped = render(page, 100, 2).join('\n')
+  assert.match(clipped, /Resize to review the input/u)
+  assert.doesNotMatch(clipped, /Apply \[Enter\]/u)
+  const input = (page as unknown as { formInput: { input: { getValue(): string } } }).formInput
+  page.handleInput('y')
+  page.handleInput('\r')
+  assert.equal(input.input.getValue(), '/bin/echox', 'hidden typing is refused')
+  assert.equal(controller.calls.some(call => call.startsWith('setField:command=')), false,
+    'a hidden Enter cannot commit the staged input')
+  const restored = render(page, 100, 20).join('\n')
+  assert.match(restored, /edit: > \/bin\/echox/u, 'the same input value survives the resize')
+  assert.match(restored, /Apply \[Enter\]/u)
+  page.handleInput('\r')
+  assert.equal(controller.calls.some(call => call.startsWith('setField:command=/bin/echox')), true)
+})
+
+test('a wide form paints the current field verb only once (bar, not duplicated body fallback)', () => {
+  const { page } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot(),
+  }))
+  ;(page as unknown as { formFocus: number }).formFocus = 3
+  const frame = render(page, 100, 20).join('\n')
+  assert.equal((frame.match(/Edit \[Enter\]/gu) ?? []).length, 1,
+    'the bar primary is not duplicated by a body fallback')
+})
+
+test('a clipped warning pointer Refresh retires the warning through the real recovery sink', () => {
+  let done = 0
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configOutcomeUnconfirmed: true,
+    restartOutcomeUnconfirmed: true,
+  }), () => { done += 1 })
+  render(page, 100, 16)
+  page.handleInput('\x1b')
+  const clipped = render(page, 100, 3).join('\n')
+  assert.doesNotMatch(clipped, /Leave \[D\]/u)
+  const refresh = page.paintedBarSpans().find(span => span.id.includes('refresh'))
+  assert.ok(refresh !== undefined, 'the wide bar still publishes the legal recovery')
+  page.activateBarSpan(refresh.id)
+  assert.equal(controller.calls.includes('refresh'), true)
+  assert.equal(done, 0)
+  assert.doesNotMatch(render(page, 100, 16).join('\n'), /Outcome unconfirmed/u,
+    'the recovery transfer closes the warning')
 })
