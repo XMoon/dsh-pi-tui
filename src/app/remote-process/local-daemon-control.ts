@@ -218,8 +218,9 @@ export interface DaemonControlStatus {
    */
   readonly acp?: 'enabled' | 'disabled' | 'unavailable'
   /**
-   * The public logical UDS endpoint. Present ONLY when {@link acp} is `enabled`
-   * and the derived path is one safe `key=value` line.
+   * The public local endpoint (POSIX UDS logical path or Windows Named Pipe).
+   * Present ONLY when {@link acp} is `enabled` and the derived address is one
+   * safe `key=value` line.
    */
   readonly acpSocket?: string
 }
@@ -1322,9 +1323,9 @@ async function observeAcpFacts(snapshot: Snapshot, deps: DaemonControlDeps): Pro
 /**
  * The ONE read-only target seam for the trusted-profile ACP stdio bridge. It
  * runs the same scope inspection, authenticated snapshot and ACP listener
- * observation as `daemon status`, then returns either the public logical UDS
- * path plus the exact authenticated Host instance identity, or one fixed
- * rejection category. It never starts a Host, changes listener state or
+ * observation as `daemon status`, then returns either the public local endpoint
+ * (POSIX UDS path or Windows Named Pipe) plus the exact authenticated Host
+ * instance identity, or one fixed rejection category. It never starts a Host, changes listener state or
  * persists a target.
  */
 export async function readAcpStdioTarget(

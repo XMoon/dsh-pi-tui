@@ -182,12 +182,12 @@ const SETUP_NO_COMMAND = 'Client command unavailable · Profile identity not ver
  * Platform shell quoting for the ONE copied client command: a profile name
  * made only of safe portable characters is emitted verbatim; anything else is
  * quoted for the target shell (POSIX single-quote escaping, or a PowerShell
- * double-quoted literal with backtick escapes).
+ * single-quoted literal whose recognized single-quote classes are doubled).
  */
 function shellQuoteForProfile(value: string, platform: NodeJS.Platform): string {
   if (platform !== 'win32') return posixShellQuote(value)
   if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
-  return `"${value.replace(/([`"$])/gu, '`$1')}"`
+  return `'${value.replace(/['\u2018\u2019\u201a\u201b]/gu, character => character + character)}'`
 }
 
 function posixShellQuote(value: string): string {

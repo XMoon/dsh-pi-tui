@@ -27,7 +27,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installedPackageRootFromEntry, readInstalledDshVersion } from './local-scope.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { createEntryDiag } from './entry-control.ts'
-import type { TuiAcpControlStartup, TuiAcpStdioStartup, TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues, TuiWebControlStartup } from '../../startup.ts'
+import { shellQuoteProfileFor, type TuiAcpControlStartup, type TuiAcpStdioStartup, type TuiDaemonClientStartup, type TuiDaemonControlStartup, type TuiDaemonStartupValues, type TuiWebControlStartup } from '../../startup.ts'
 import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
 import { daemonProgramResumeCapability } from '../../client/program-resume/target.ts'
 import { admitProgramResume } from '../program-resume-admission.ts'
@@ -221,12 +221,6 @@ export function buildAcpStdioEnvironment(
   return env
 }
 
-/** POSIX-safe single-argument quoting for the copy-paste fatal line. */
-function shellQuote(value: string): string {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
-  return `'${value.replace(/'/gu, `'\\''`)}'`
-}
-
 /**
  * The one copy-pasteable re-run command for a Client spawn failure. POSIX keeps
  * its environment-assignment form; Windows gets the PowerShell-equivalent form
@@ -237,25 +231,16 @@ function daemonClientRerunCommand(
   profile: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const profileArg = platform === 'win32' ? powershellQuote(profile) : shellQuote(profile)
+  const profileArg = shellQuoteProfileFor(profile, platform)
   return platform === 'win32'
     ? `$env:DSH_PI_TUI_BACKEND='daemon'; dsh --profile ${profileArg}`
     : `DSH_PI_TUI_BACKEND=daemon dsh --profile ${profileArg}`
 }
 
-/** PowerShell single-quoted literal: an embedded quote is doubled (`''`), not
- *  the POSIX close-reopen sequence. */
-function powershellQuote(value: string): string {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
-  // Double-quoted PowerShell literal: backtick-escape `"`, `$` and the escape
-  // character. This keeps smart single quotes literal instead of letting the
-  // tokenizer treat them as string terminators.
-  return `"${value.replace(/([`"$])/gu, '`$1')}"`
-}
-
-/** The copy-paste Profile literal for the ACTUAL CLI shell. */
+/** The copy-paste Profile literal for the ACTUAL CLI shell; the startup
+ *  compatibility island owns the one POSIX/PowerShell quoting rule. */
 function platformProfileQuote(value: string): string {
-  return process.platform === 'win32' ? powershellQuote(value) : shellQuote(value)
+  return shellQuoteProfileFor(value, process.platform)
 }
 
 /** The child-exit mapping: a real code, or 128+signal when the child was signalled. */

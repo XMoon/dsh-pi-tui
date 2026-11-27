@@ -391,14 +391,20 @@ test('a Windows missing-Host hint quotes the profile for PowerShell, not POSIX',
     readRecord: () => undefined,
   })
   assert.equal(result.code, 3)
-  assert.match(result.stderr, /dsh --profile "pi tui's" daemon start/u)
+  assert.match(result.stderr, /dsh --profile 'pi tui''s' daemon start/u)
   assert.doesNotMatch(result.stderr, /'\\''/u, 'the POSIX close-reopen quote must not reach a PowerShell hint')
   const typographic = await runLocalAcpControl({ verb: 'status' }, { ...fx.profile, name: 'pi tui\u2019s' }, {
     platform: 'win32',
     readRecord: () => undefined,
   })
   assert.equal(typographic.code, 3)
-  assert.match(typographic.stderr, /dsh --profile "pi tui\u2019s" daemon start/u)
+  assert.match(typographic.stderr, /dsh --profile 'pi tui\u2019\u2019s' daemon start/u)
+  const smartDouble = await runLocalAcpControl({ verb: 'status' }, { ...fx.profile, name: 'pi tui\u201cs' }, {
+    platform: 'win32',
+    readRecord: () => undefined,
+  })
+  assert.equal(smartDouble.code, 3)
+  assert.match(smartDouble.stderr, /dsh --profile 'pi tui\u201cs' daemon start/u)
 })
 
 // ── enable / disable (ONE authenticated write, never replayed) ─────────────

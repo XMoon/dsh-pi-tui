@@ -265,10 +265,10 @@ function shellQuoteProfile(profile: string): string {
 export function shellQuoteProfileFor(profile: string, platform: NodeJS.Platform): string {
   if (platform !== 'win32') return shellQuoteProfile(profile)
   if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(profile)) return profile
-  // A PowerShell double-quoted literal: backtick escapes `"`, `$` and the
-  // escape character itself. Smart single quotes (U+2018/2019/201A/201B) are
-  // literal here, while they would terminate a single-quoted literal.
-  return `"${profile.replace(/([`"$])/gu, '`$1')}"`
+  // A PowerShell single-quoted literal: every recognized single-quote class
+  // (ASCII and U+2018/2019/201A/201B) is doubled. `$`, backtick and the
+  // smart-double-quote classes are literal inside it.
+  return `'${profile.replace(/['\u2018\u2019\u201a\u201b]/gu, character => character + character)}'`
 }
 
 /** The one re-run hint for a failed daemon launch: Windows gets the
