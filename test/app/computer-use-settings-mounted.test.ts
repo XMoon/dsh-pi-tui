@@ -578,7 +578,8 @@ test('the Applications workbench completes a real pointer select → open → co
   // the receipt stays visible in the ACTIVE workbench projection.
   await waitForText(h, 'Refused')
   assert.doesNotMatch(h.view(), /Decision: Always allowed/u)
-  await waitForText(h, 'Action: Application access revoked for TextEdit')
+  await waitForText(h, 'Application access revoked')
+  assert.match(h.view(), /Target: Always allowed application: TextEdit/u)
   // Applications Help is REAL content in the same projection (Esc closes it
   // first, then the normal local Back ladder still runs).
   await press(h.vt, '?')

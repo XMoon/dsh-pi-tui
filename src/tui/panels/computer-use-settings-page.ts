@@ -1208,6 +1208,9 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   ): void {
     const action = snapshot.action
     if (action === undefined) return
+    if (action.target !== undefined) {
+      for (const part of wrapText(`Target: ${action.target}`, width)) push(part, { tone: 'dim' })
+    }
     const prefix = action.state === 'ok' ? 'Action' : action.state === 'unknown' ? 'Action outcome unconfirmed' : 'Action failed'
     for (const part of wrapText(`${prefix}: ${action.text}`, width)) {
       push(part, { tone: action.state === 'ok' ? 'fact' : 'warning' })
@@ -1764,7 +1767,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     const action = snapshot.action
     if (action === undefined) return 0
     const prefix = action.state === 'ok' ? 'Action' : action.state === 'unknown' ? 'Action outcome unconfirmed' : 'Action failed'
-    let count = wrapText(`${prefix}: ${action.text}`, width).length
+    let count = action.target === undefined ? 0 : wrapText(`Target: ${action.target}`, width).length
+    count += wrapText(`${prefix}: ${action.text}`, width).length
     if (action.state === 'unknown') {
       count += wrapText('Refresh to read the authoritative state before deciding again.', width).length
     }

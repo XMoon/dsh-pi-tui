@@ -511,6 +511,31 @@ test('an unconfirmed outcome requires a fresh observation before the next write'
   await page.dispose()
 })
 
+test('the receipt target uses the exact decision group, not the other group with the same opaque id', async () => {
+  const applications: CuaApplicationState = {
+    allowedApps: [{ id: 'shared', name: 'Allowed Name', executablePath: '/Allowed.app' }],
+    blockedApps: [{ id: 'shared', name: 'Refused Name', executablePath: '/Refused.app' }],
+    persistentAvailable: true,
+  }
+  const calls: string[] = []
+  const page = manualController({
+    port: {
+      ...cuaPort().port,
+      readApplications: async () => applications,
+      revoke: async (id) => { calls.push(`revoke:${id}`) },
+      retryApproval: async (id) => { calls.push(`retry:${id}`) },
+    },
+  })
+  await page.refresh()
+  await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'shared', applicationGroup: 'allowed' }))
+  assert.equal(page.getSnapshot().action?.target, 'Always allowed application: Allowed Name (/Allowed.app)')
+  assert.deepEqual(calls, ['revoke:shared'])
+  await page.retryApproval(capture(page.getSnapshot(), 'retry', { applicationId: 'shared', applicationGroup: 'refused' }))
+  assert.equal(page.getSnapshot().action?.target, 'Refused application: Refused Name (/Refused.app)')
+  assert.deepEqual(calls, ['revoke:shared', 'retry:shared'])
+  await page.dispose()
+})
+
 test('a same-basis unobservable failure keeps its receipt and only an adequate explicit Refresh rearms', async () => {
   let fail = true
   let applicationsFail = false
@@ -630,7 +655,7 @@ test('a basis change during the synchronous acceptance notification sends nothin
   })
   await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
   assert.deepEqual(calls, [], 'the acceptance notification invalidation stops the dispatch')
-  assert.equal(page.getSnapshot().action?.state, 'unknown')
+  assert.equal(page.getSnapshot().action?.state, 'failed')
   assert.match(page.getSnapshot().action?.text ?? '', /nothing was sent/u)
   assert.notEqual(page.getSnapshot().action?.requiresRecovery, true, 'a zero-write refusal needs no recovery')
   await page.dispose()
@@ -743,7 +768,7 @@ test('a silent Direct replacement before an action dispatches nothing and states
   await page.requestPermission(capture)
   assert.deepEqual(calls.filter(call => call.startsWith('request:')), [],
     'the old-provider capture dispatches zero writes on the replaced provider')
-  assert.equal(page.getSnapshot().action?.state, 'unknown')
+  assert.equal(page.getSnapshot().action?.state, 'failed')
   assert.match(page.getSnapshot().action?.text ?? '', /nothing was sent/u)
   await page.dispose()
 })

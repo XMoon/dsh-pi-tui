@@ -845,22 +845,28 @@ test('a removed target keeps its own attribution visible at a short grant', asyn
   mounted.page.handleInput('\r') // the visible Revoke verb
   assert.match(mounted.render(96).join('\n'), /Revoke this application decision\?/u)
   mounted.page.handleInput('y')
-  await settle(mounted, 'Application access revoked for TextEdit')
+  await settle(mounted, 'Application access revoked')
   // A short grant still reveals the abnormal result at the TOP of the active
   // projection, and the deterministic fallback is not labelled as the target.
   grantWorkbench(mounted, { width: 96, rows: 4, barWidth: 120, allowDual: false })
   const short = mounted.render(96).join('\n')
-  assert.match(short, /Action: Application access revoked for TextEdit/u)
-  assert.match(short, /\/Applications\/TextEdit\.app/u)
-  assert.doesNotMatch(short, /revoked for Example/u)
+  assert.match(short, /Action: Application access revoked/u)
+  assert.match(short, /Target: Always allowed application: TextEdit \(\/Applications\/TextEdit\.app\)/u)
+  assert.doesNotMatch(short, /Target: Refused application: Example/u)
   mounted.page.dispose()
 })
 
 test('an unconfirmed revoke keeps its receipt visible at a short grant and only Refresh rearms', async () => {
   const basis = 1
+  let applications: CuaApplicationState = {
+    allowedApps: [{ id: 'app-1', name: 'TextEdit', executablePath: '/Applications/TextEdit.app' }],
+    blockedApps: [{ id: 'app-2', name: 'Example' }],
+    persistentAvailable: true,
+  }
   const mounted = mount({
     cua: {
       observation: { readSnapshot: () => basis, subscribe: () => () => {} },
+      readApplications: async () => applications,
       revoke: async () => { throw new Error('lost receipt after dispatch') },
     },
   })
@@ -880,8 +886,14 @@ test('an unconfirmed revoke keeps its receipt visible at a short grant and only 
     mounted.controller.getSnapshot(),
     { epoch: mounted.controller.getSnapshot().epoch, kind: 'revoke', applicationId: 'app-2', applicationGroup: 'refused' },
   ).ok, false, 'an unconfirmed effect retires the write actions')
-  grantWorkbench(mounted, { width: 96, rows: 4, barWidth: 120, allowDual: false })
-  assert.match(mounted.render(96).join('\n'), /Action outcome unconfirmed/u)
+  // The roster changes after the lost dispatch; the original target identity
+  // must survive (captured from the exact decision, not re-resolved).
+  applications = { allowedApps: [], blockedApps: [], persistentAvailable: true }
+  await mounted.controller.refresh()
+  grantWorkbench(mounted, { width: 96, rows: 6, barWidth: 120, allowDual: false })
+  const retained = mounted.render(96).join('\n')
+  assert.match(retained, /Action outcome unconfirmed/u)
+  assert.match(retained, /Target: Always allowed application: TextEdit \(\/Applications\/TextEdit\.app\)/u)
   // An explicit Refresh settles the application authority and rearms the action.
   mounted.page.handleInput('r')
   await new Promise(resolve => setTimeout(resolve, 10))
@@ -951,14 +963,14 @@ test('after a settled receipt, moving the List selection keeps it painted and Op
   mounted.page.handleInput('\r') // arm and confirm the visible revoke
   assert.match(mounted.render(96).join('\n'), /Revoke this application decision\?/u)
   mounted.page.handleInput('y')
-  await settle(mounted, 'Application access revoked for App 1')
+  await settle(mounted, 'Application access revoked')
   // The receipt is first in the short List; the fallback selection and one Down
   // must both remain really painted (the reveal hint uses the same layout).
   grantWorkbench(mounted, { width: 96, rows: 5, barWidth: 96, allowDual: false })
   mounted.render(96)
   mounted.page.handleInput('\x1b') // Detail -> List
   mounted.render(96)
-  assert.match(mounted.render(96).join('\n'), /Application access revoked for App 1/u)
+  assert.match(mounted.render(96).join('\n'), /Target: Always allowed application: App 1/u)
   mounted.page.handleInput('\x1b[B')
   const frame = mounted.render(96)
   assert.ok(frame.slice(0, -1).some(line => /^> /u.test(line)), 'the moved selection is painted')

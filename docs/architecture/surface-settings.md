@@ -1939,9 +1939,15 @@ The mounted instance has exactly TWO projections:
   the ACTIVE Applications projection (List and Detail), are revealed once at
   their first line, retain the original target's safe public identity (never the
   opaque id, never a fallback row), and the same Help content is real there
-  instead of an invisible Esc step. A newer observation retires an armed risk in
-  the page's observation subscription BEFORE the Root composes the next frame;
-  render never changes the projection.
+  instead of an invisible Esc step. The target is captured ONCE from the exact
+  painted decision kind (application group + public name/path, permission, or
+  preset/PTC fact) and is painted on every terminal outcome, so the same opaque
+  id in the other decision group can never supply it and a later roster change
+  cannot re-resolve it; a `nothing was sent` pre-dispatch refusal is the
+  existing definite-refusal category and never enters the unconfirmed recovery
+  state. A newer observation retires an armed risk in the page's observation
+  subscription BEFORE the Root composes the next frame; render never changes the
+  projection.
 
 Authority is never the page: the bundle selection/availability comes from the
 existing Plugin Manager roster, the saved default preset from the existing

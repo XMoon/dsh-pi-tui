@@ -99,6 +99,10 @@ export interface CuaActionReceipt {
   readonly permission?: CuaPermission
   readonly applicationId?: CuaApplicationId
   readonly at: number
+  /** The affected decision's SAFE public identity captured from the exact
+   *  painted decision (group + name/path or permission). It is preserved on
+   *  every terminal outcome, including unknown/refusal, never the opaque id. */
+  readonly target?: string
   /** The dispatched effect is UNOBSERVED. Only a terminal unknown outcome sets
    *  it; a zero-write predispatch refusal does not. Every new write stays
    *  retired until ONE explicit Refresh settles an authority adequate for the
@@ -149,6 +153,12 @@ export interface CuaAccessSettingsDeps {
   /** The runner's diagnostics channel: it owns every read this controller STARTS. */
   readonly diag: Diag
   readonly locale: () => string
+}
+
+function permissionLabel(permission: CuaPermission | undefined): string | undefined {
+  if (permission === 'accessibility') return 'Accessibility'
+  if (permission === 'screenRecording') return 'Screen Recording'
+  return undefined
 }
 
 function reasonOf(error: unknown): string {
@@ -395,21 +405,21 @@ export class CuaAccessSettingsController {
   /** Request one macOS privilege through the official native guide. */
   async requestPermission(capture: CuaActionCapture): Promise<void> {
     await this.runAction(capture,
-      { kind: 'request', permission: capture.permission, text: 'Request sent. Complete the guidance on the Host Mac, then Refresh; this action does not grant permission.' },
+      { kind: 'request', permission: capture.permission, target: permissionLabel(capture.permission), text: 'Request sent. Complete the guidance on the Host Mac, then Refresh; this action does not grant permission.' },
       async () => { await this.deps.cuaAccess.requestPermission(capture.permission!, this.deps.locale()) })
   }
 
   /** Open the Host's macOS privacy pane (an action, not a permission grant). */
   async openSettings(capture: CuaActionCapture): Promise<void> {
     await this.runAction(capture,
-      { kind: 'open', permission: capture.permission, text: 'Opened the Host System Settings attempt. No permission is granted by this action; confirm the exact helper there.' },
+      { kind: 'open', permission: capture.permission, target: permissionLabel(capture.permission), text: 'Opened the Host System Settings attempt. No permission is granted by this action; confirm the exact helper there.' },
       async () => { await this.deps.cuaAccess.openSettings(capture.permission!, this.deps.locale()) })
   }
 
   /** Persist PTC execution; the official runtime may reload. */
   async enablePersistentPtc(capture: CuaActionCapture): Promise<void> {
     await this.runAction(capture,
-      { kind: 'persistent-ptc', text: 'Persistent PTC requested. The official runtime may reload; refresh to observe the new state.' },
+      { kind: 'persistent-ptc', target: 'PTC execution (persistent)', text: 'Persistent PTC requested. The official runtime may reload; refresh to observe the new state.' },
       async () => { await this.deps.cuaAccess.enablePersistentPtc() })
   }
 
@@ -426,7 +436,7 @@ export class CuaAccessSettingsController {
     const decision = this.state.preset.decision
     const guarded = this.deps.presetDefault.setGuarded
     await this.runAction(capture,
-      { kind: 'preset', text: 'Default preset set to PTC for new Sessions. An existing Session keeps its own preset.' },
+      { kind: 'preset', target: 'Saved default preset (New Sessions)', text: 'Default preset set to PTC for new Sessions. An existing Session keeps its own preset.' },
       async (stillCurrent) => {
         if (decision === undefined || guarded === undefined) {
           return { state: 'failed' as const, text: 'The Host preset authority cannot be proven; nothing was saved. Refresh and act again.' }
@@ -458,34 +468,44 @@ export class CuaAccessSettingsController {
 
   /** Revoke the exact painted application decision; the page confirms first. */
   async revoke(capture: CuaActionCapture): Promise<void> {
-    const target = this.publicApplicationIdentity(capture.applicationId)
+    const target = this.publicApplicationIdentity(capture.applicationGroup, capture.applicationId)
     await this.runAction(capture,
-      { kind: 'revoke', applicationId: capture.applicationId, text: `Application access revoked${target}. Affected Computer Use work may stop; dispatched input is not undone.` },
+      { kind: 'revoke', applicationId: capture.applicationId, target, text: 'Application access revoked. Affected Computer Use work may stop; dispatched input is not undone.' },
       async () => { await this.deps.cuaAccess.revoke(capture.applicationId!) })
   }
 
   /** Clear refusals so the next selection may ask again; it grants nothing. */
   async retryApproval(capture: CuaActionCapture): Promise<void> {
-    const target = this.publicApplicationIdentity(capture.applicationId)
+    const target = this.publicApplicationIdentity(capture.applicationGroup, capture.applicationId)
     await this.runAction(capture,
-      { kind: 'retry', applicationId: capture.applicationId, text: `Refusal record cleared${target}. The next selection will ask again; this action grants no access.` },
+      { kind: 'retry', applicationId: capture.applicationId, target, text: 'Refusal record cleared. The next selection will ask again; this action grants no access.' },
       async () => { await this.deps.cuaAccess.retryApproval(capture.applicationId!) })
   }
 
-  /** The receipt's safe public target attribution: never the opaque id. */
-  private publicApplicationIdentity(id: CuaApplicationId | undefined): string {
+  /** The receipt's safe public target attribution captured from the EXACT
+   *  painted decision kind: the same opaque id in the other group is a
+   *  different decision and never supplies this target's identity. */
+  private publicApplicationIdentity(
+    group: 'allowed' | 'refused' | undefined,
+    id: CuaApplicationId | undefined,
+  ): string {
     if (id === undefined) return ''
     const value = this.state.applications.phase === 'ready' ? this.state.applications.value : undefined
-    const entries = value === undefined ? [] : [...value.allowedApps, ...value.blockedApps]
-    const application = entries.find(candidate => candidate.id === id)
-    if (application === undefined) return ''
+    const applications = group === 'allowed'
+      ? value?.allowedApps
+      : group === 'refused' ? value?.blockedApps : undefined
+    const label = group === 'allowed'
+      ? 'Always allowed application'
+      : group === 'refused' ? 'Refused application' : 'Application decision'
+    const application = applications?.find(candidate => candidate.id === id)
+    if (application === undefined) return label
     const safe = (text: string, limit: number): string =>
       text.replace(/\p{Cc}/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, limit)
     const name = safe(application.name, 80)
     const path = application.executablePath === undefined ? '' : safe(application.executablePath, 160)
-    if (name === '' && path === '') return ''
-    if (path === '') return ` for ${name}`
-    return name === '' ? ` for ${path}` : ` for ${name} (${path})`
+    if (name === '' && path === '') return label
+    if (path === '') return `${label}: ${name}`
+    return name === '' ? `${label}: ${path}` : `${label}: ${name} (${path})`
   }
 
   /**
@@ -832,7 +852,7 @@ export class CuaAccessSettingsController {
       action: {
         ...receipt,
         kind,
-        state: 'unknown',
+        state: 'failed',
         text: 'The Host CUA provider changed or the captured action was superseded; nothing was sent. Refresh and act again.',
         at: Date.now(),
       },
