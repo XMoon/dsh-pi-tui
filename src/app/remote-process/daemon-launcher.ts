@@ -277,7 +277,7 @@ export class DaemonCoordinator {
   private readonly spawnFailureExitCode: number
   private readonly shutdownBudgetMs: number
   private child: ChildProcess | undefined
-  private childExit: Promise<void> | undefined
+  private childExited: Promise<void> | undefined
   private started = false
   private disposed = false
   private settled = false
@@ -328,9 +328,10 @@ export class DaemonCoordinator {
     }
     this.child = child
     this.spawnCount += 1
-    this.childExit = new Promise<void>(resolve => {
+    // Exit-only truth: an 'error' (for example a refused kill/TerminateProcess)
+    // is NOT an actual exit and must never satisfy the dispose cleanup budget.
+    this.childExited = new Promise<void>(resolve => {
       child.once('exit', () => resolve())
-      child.once('error', () => resolve())
     })
     child.once('error', (error: Error) => { this.settle(this.spawnFailureExitCode, error) })
     child.once('exit', (code, signal) => { this.settle(exitCodeFor(code, signal), undefined) })
@@ -368,7 +369,7 @@ export class DaemonCoordinator {
     this.disposed = true
     this.disposePromise = (async (): Promise<boolean> => {
       const child = this.child
-      const exited = this.childExit
+      const exited = this.childExited
       if (child === undefined || child.exitCode !== null || child.signalCode !== null || exited === undefined) return true
       const start = Date.now()
       const budgetEnd = start + this.shutdownBudgetMs

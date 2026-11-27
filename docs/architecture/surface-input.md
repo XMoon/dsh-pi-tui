@@ -545,7 +545,7 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   a sessionless surface with no selected Workspace answers `unavailable` with no
   Host read and no Client fallback. A Host refusal never falls back to Client
   PATH or filesystem, and a Workspace that is unregistered, revoked or unreadable
-  during the completion is `unavailable` rather than a stale or empty success. A
+  during the completion is `unavailable` rather than a stale or empty success.
   On Windows the Remote Host exposes ONLY literal-path completion: command,
   variable and git-subcommand candidates are explicitly unavailable, and the
   accepted path becomes ONE single-quoted PowerShell literal. The Remote

@@ -7,7 +7,7 @@ English | [简体中文](README.md)
 
 **A terminal frontend for DeepSeek Harness. One Host, with TUI, Web and ACP clients accessing the same Agent Session.**
 
-**Direct** remains the default, ready-to-use mode. Starting in **0.5.8**, Linux, macOS and native Windows 11 x64 users can explicitly choose a **Daemon**: an independent local Host retains sessions and ongoing work as terminal Clients disconnect and reconnect. Other TUIs, the official Web frontend and an opt-in local ACP client can access sessions belonging to that same Host.
+**Direct** remains the default, ready-to-use mode. Starting in the published **0.5.8**, Linux and macOS users can explicitly choose a **Daemon**. The **current main line (not yet in the published 0.5.8 npm release)** extends the same Daemon mode to native Windows 11 x64: an independent local Host retains sessions and ongoing work as terminal Clients disconnect and reconnect. Other TUIs, the official Web frontend and an opt-in local ACP client can access sessions belonging to that same Host.
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) remains the authority for the Agent Loop, models, tools, persistence, permissions and concurrent writes. `dsh-pi-tui` is a third-party frontend, not a second Agent Runtime.
 
@@ -62,7 +62,7 @@ dsh --profile pi-tui
 
 ### Two modes, one DSH Session authority
 
-| | Direct (default) | Daemon (opt-in from 0.5.8) |
+| | Direct (default) | Daemon (opt-in from 0.5.8 on Linux/macOS; Windows current main candidate) |
 |---|---|---|
 | Launch | `dsh --profile pi-tui` | `DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui` (PowerShell: `$env:DSH_PI_TUI_BACKEND='daemon'; dsh --profile pi-tui`) |
 | Process | TUI and Host in one process | Independent Host; TUI is a detachable Client |
@@ -121,7 +121,7 @@ dsh --profile pi-tui daemon install   # Linux / macOS only
 dsh --profile pi-tui daemon uninstall # Linux / macOS only
 ~~~
 
-On Windows this release supports the independent Host, the interactive Daemon Client, `status`, `start`, `stop`, `restart`, `logs` and the official Web frontend. `install`/`uninstall` and ACP remain unavailable. `/reload-client` is not available on Windows: it refuses before any reload starts and keeps the current Client/Session/draft; exit with `/exit` and relaunch to adopt an updated build. Windows `status` reports `manager=process` for an authenticated Host and `manager=unmanaged` with no Host; `unit=none`, and it never invokes systemd/launchd; `stop` enters the official shutdown through that instance's native stop Event.
+On Windows the **current main line (not yet in the published 0.5.8 npm release)** supports the independent Host, the interactive Daemon Client, `status`, `start`, `stop`, `restart`, `logs` and the official Web frontend. `install`/`uninstall` and ACP remain unavailable. `/reload-client` is not available on Windows: it refuses before any reload starts and keeps the current Client/Session/draft; exit with `/exit` and relaunch to adopt an updated build. Windows `status` reports `manager=process` for an authenticated Host and `manager=unmanaged` with no Host; `unit=none`, and it never invokes systemd/launchd; `stop` enters the official shutdown through that instance's native stop Event.
 
 `daemon install` only creates/verifies the optional Profile-scoped OS user service definition; it does **not** start, enable or migrate the Host. `daemon stop` and `restart` can interrupt in-flight Turns/Jobs across connected Clients. A manager reporting “running” is not proof of authenticated Host readiness.
 

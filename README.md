@@ -7,7 +7,7 @@
 
 **面向 DeepSeek Harness 的终端交互界面；一个 Host，让终端、Web 和 ACP 客户端访问同一个 Agent Session。**
 
-默认以 **Direct** 模式运行，开箱即用；从 **0.5.8** 起，可在 Linux/macOS 及原生 Windows 11 x64 显式选择 **Daemon**：独立的本地 Host 持有 Session 和执行中的工作，终端 Client 可以断开、重新连接；其他 TUI、官方 Web 与本地 ACP 客户端也可以访问同一 Host 的会话。
+默认以 **Direct** 模式运行，开箱即用；从已发布的 **0.5.8** 起，Linux/macOS 用户可显式选择 **Daemon**。**当前 main 线（尚未包含在已发布的 0.5.8 npm 包中）** 把同一 Daemon 模式扩展到原生 Windows 11 x64：独立的本地 Host 持有 Session 和执行中的工作，终端 Client 可以断开、重新连接；其他 TUI、官方 Web 与本地 ACP 客户端也可以访问同一 Host 的会话。
 
 Agent Loop、模型、工具、持久化、权限和并发写入权威都属于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)；`dsh-pi-tui` 是第三方前端，而不是另一套 Agent Runtime。
 
@@ -62,7 +62,7 @@ dsh --profile pi-tui
 
 ### 两种运行方式，同一套 DSH 会话语义
 
-| | Direct（默认） | Daemon（0.5.8 起，可选） |
+| | Direct（默认） | Daemon（0.5.8 起 Linux/macOS；Windows 为当前 main 候选，可选） |
 |---|---|---|
 | 启动 | `dsh --profile pi-tui` | `DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui`（PowerShell：`$env:DSH_PI_TUI_BACKEND='daemon'; dsh --profile pi-tui`） |
 | 进程 | TUI 与 Host 同进程 | Host 独立运行，TUI 是可断开的 Client |
@@ -121,7 +121,7 @@ dsh --profile pi-tui daemon install   # 仅 Linux / macOS
 dsh --profile pi-tui daemon uninstall # 仅 Linux / macOS
 ~~~
 
-Windows 支持独立 Host、交互式 Daemon Client、`status`、`start`、`stop`、`restart`、`logs` 与官方 Web；`install`/`uninstall` 和 ACP 仍不可用。Windows 的 `/reload-client` 本版不提供：会在任何 reload 开始前明确拒绝并保留当前 Client/Session/草稿；需要采用更新构建时请 `/exit` 后正常重启。Windows 的 `status` 对已认证 Host 报告 `manager=process`，无 Host 报告 `manager=unmanaged`；`unit=none`，不调用 systemd/launchd；`stop` 通过该实例的原生 stop Event 进入官方 shutdown。
+Windows 的**当前 main 线（尚未包含在已发布的 0.5.8 npm 包中）**支持独立 Host、交互式 Daemon Client、`status`、`start`、`stop`、`restart`、`logs` 与官方 Web；`install`/`uninstall` 和 ACP 仍不可用。Windows 的 `/reload-client` 不提供：会在任何 reload 开始前明确拒绝并保留当前 Client/Session/草稿；需要采用更新构建时请 `/exit` 后正常重启。Windows 的 `status` 对已认证 Host 报告 `manager=process`，无 Host 报告 `manager=unmanaged`；`unit=none`，不调用 systemd/launchd；`stop` 通过该实例的原生 stop Event 进入官方 shutdown。
 
 `daemon install` 仅选择性地创建/验证当前 Profile 的用户服务定义，**不会**自动启动、启用或迁移 Host。`daemon stop` / `restart` 可能中断所有连接 Client 的进行中 Turn/Job；manager 显示运行中不代表 Host 已 Ready，须以认证身份确认。
 

@@ -204,8 +204,14 @@ class FakeChild extends EventEmitter {
   autoExitSignal: NodeJS.Signals | undefined
   /** Windows `kill()` carries no signal: the OS forcibly terminates. */
   autoExitForced = false
+  /** A refused OS kill: emits `error`, never `exit`, and leaves the child live. */
+  killError = false
   kill(signal?: NodeJS.Signals): boolean {
     this.kills.push(signal)
+    if (this.killError) {
+      setImmediate(() => this.emit('error', Object.assign(new Error('kill failed'), { code: 'EACCES' })))
+      return false
+    }
     const forced = signal === undefined
     const signalExit = this.autoExitSignal !== undefined && this.autoExitSignal === signal
     if (((forced && this.autoExitForced) || signalExit)
@@ -398,6 +404,23 @@ test('an unresponsive Windows child is an abnormal result, never a graceful clai
   assert.equal(fatalLines.length, 1)
   assert.match(fatalLines[0], /forced process termination/u)
   assert.doesNotMatch(fatalLines[0], /SIGKILL|SIGTERM/u)
+})
+
+test('a refused Windows kill is not mistaken for an actual exit', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const fatalLines: string[] = []
+  const exitCodes: number[] = []
+  const c = coordinator(children, exitCodes, spawnImpl, {
+    shutdownBudgetMs: 60,
+    reportFatal: (line: string) => { fatalLines.push(line) },
+  })
+  c.start()
+  children[0].killError = true
+  const disposition = await withPlatform('win32', () => c.dispose())
+  assert.equal(disposition, false, 'an error event is not the actual exit required by the shutdown budget')
+  assert.deepEqual(children[0].kills, [undefined], 'one forced termination request')
+  assert.ok(fatalLines.some(line => /did not exit after forced process termination/u.test(line)), 'the abnormal result is reported')
+  assert.ok(!fatalLines.some(line => /client exited after forced process termination/u.test(line)), 'no false success line')
 })
 
 test('a Windows spawn throw prints the PowerShell environment hint, never the POSIX one', async () => {

@@ -301,13 +301,12 @@ truthfully unavailable on Windows.
   binds the second, qualification-only claim for its lifetime; a second
   qualification Client fails `CLIENT_ALREADY_ACTIVE` before spawning or touching
   a Host. On Windows no qualification/Client seat is created; the Host and the
-  short-lived admin seat are the only mutex users, while a real `surface`
-  Client and the non-TUI `peer` are admitted by the authenticated chain below.
-  A real `surface` Client — and the non-TUI `peer` — binds no
-  profile-global seat; it is admitted automatically by the authenticated
-  `/connect` + identity chain described below. Zero or more independent Surface
-  Clients, each with its own PTY, Cordis Client Context, official transport,
-  Session reference and physical surface, may attach to the SAME Host
+  short-lived admin seat are the only mutex users. A real `surface` Client — and
+  the non-TUI `peer` — binds no profile-global seat; it is admitted automatically
+  by the authenticated `/connect` + identity chain described below. Zero or more
+  independent Surface Clients, each with its own PTY, Cordis Client Context,
+  official transport, Session reference and physical surface, may attach to the
+  SAME Host
   concurrently and share its exact PID/starttime/`instanceId`. Kernel release on
   process death is the only stale-seat recovery.
 - **Identity is authenticated, never registry-only.** The registry
@@ -446,7 +445,7 @@ truthfully unavailable on Windows.
   the Client's direct child are forcibly terminated by the OS, and only their
   ACTUAL exit inside the bounded shutdown budget is observed — the Host is
   never addressed, signalled or stopped by that path. Windows `/reload-client`
-  is DEFERRED for this release: the refusal is decided before any reexec intent,
+  is not available: the refusal is decided before any reexec intent,
   surface release or stop, the current Client/Host/Session/draft are kept, and
   the fixed notice tells the user to exit and relaunch. The Windows normal exit
   plus relaunch path is the supported way to adopt an updated build. On

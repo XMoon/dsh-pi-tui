@@ -104,8 +104,9 @@ const CLIENT_LAUNCH_CWD = process.cwd()
 /** The DIRECTORY OBJECT the Client started in, captured at the same instant as
  *  `CLIENT_LAUNCH_CWD`. A later rename+recreation of the path must not be
  *  mistaken for the launch directory (external review EXT-P1). An unreadable
- *  capture stays `undefined`; the classifier then falls back to its own real
- *  `stat('.')` object and still fails closed. */
+ *  capture stays `undefined`; the POSIX classifier then falls back to its own
+ *  real `stat('.')` object, while the Windows classifier requires the captured
+ *  object and fails closed. */
 const CLIENT_LAUNCH_OBJECT = ((): { device: string; inode: string } | undefined => {
   try {
     // Exact bigint device/inode: a 64-bit inode must never be truncated by JS

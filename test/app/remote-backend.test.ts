@@ -129,6 +129,30 @@ function fakeRuntime(settingsDescribe: () => Promise<unknown>): {
   return { runtime: runtime as never, describeCalls: () => describeCalls }
 }
 
+test('the authenticated Host dialect reaches the Remote shell completion port, with the POSIX Bash default', async () => {
+  const validConfig = async () => ({ ok: true as const, value: { writable: true, hasDocument: true, namespaces: [], revision: 1 } })
+  const powershellFake = fakeRuntime(validConfig)
+  const powershell = await createRemoteBackendRuntime({
+    runtime: powershellFake.runtime,
+    promptSerializer: { preflight: () => ({ kind: 'unsupported', reason: 'test' }), serialize: async () => ({ kind: 'unsupported', reason: 'test' }) },
+    fetch: async () => new Response(null, { status: 404 }),
+    hostShellPathLiteralDialect: 'powershell',
+  })
+  assert.equal((powershell.backend.hostShellCompletion as unknown as { pathLiteralDialect: string }).pathLiteralDialect, 'powershell',
+    'the authenticated Host fact must survive the whole composition into the port')
+  powershell.dispose()
+
+  const defaultFake = fakeRuntime(validConfig)
+  const defaulted = await createRemoteBackendRuntime({
+    runtime: defaultFake.runtime,
+    promptSerializer: { preflight: () => ({ kind: 'unsupported', reason: 'test' }), serialize: async () => ({ kind: 'unsupported', reason: 'test' }) },
+    fetch: async () => new Response(null, { status: 404 }),
+  })
+  assert.equal((defaulted.backend.hostShellCompletion as unknown as { pathLiteralDialect: string }).pathLiteralDialect, 'bash',
+    'an in-process POSIX caller that omits the fact keeps the historical Bash grammar')
+  defaulted.dispose()
+})
+
 test('the assembly performs the config FIRST mirror read as its readiness barrier', async () => {
   const fake = fakeRuntime(async () => ({
     ok: true,

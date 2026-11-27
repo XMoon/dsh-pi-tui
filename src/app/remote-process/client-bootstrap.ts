@@ -290,7 +290,6 @@ export interface LocalClientHandle {
   dispose(): Promise<void>
 }
 
-/** Project the authenticated record without the profile path. */
 /** The ONE split-Client Host shell dialect projection: the AUTHENTICATED Host
  *  publication schema decides the Host shell's literal grammar. Schema 3 is the
  *  Windows Host (PowerShell); schema 1/2 keep the POSIX Bash grammar. The Client
@@ -300,6 +299,7 @@ export function hostShellPathLiteralDialectOf(host: Pick<LocalInstanceRecord, 's
   return host.schema === 3 ? 'powershell' : 'bash'
 }
 
+/** Project the authenticated record without the profile path. */
 function hostFacts(record: LocalInstanceRecord): LocalClientHostFacts {
   const shared = {
     schema: record.schema,
