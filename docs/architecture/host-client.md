@@ -1863,9 +1863,12 @@ eligibility. Periodic maintenance rounds keep roster order and add no
 per-ID official `stat`/`list`.
 
 The Host actively prewarms the complete index without blocking Host readiness;
-the first import answers `loading` until every official Session, every buffered
-live event and the error verdict have settled, and it answers `incomplete`
-rather than `ready` if the first full round was partial or failed. Coverage is
+a first search/read answers `loading` only until an eligible verified partial
+subset exists, then the cursor-free `partial` page. `ready` is published only
+after every official Session, every buffered live event and the error verdict
+have settled; a partial or failed first full round answers `incomplete` rather
+than `ready`. Destructive maintenance barriers are gated by proven/full
+coverage, not by hiding already eligible first-cold partial rows. Coverage is
 a round-local proof: a successful point repair of one Session never proves an
 unvisited or unsettled ID; a later complete full round may establish it. The
 30 s roster check and the per-Session official repairs are single-flight

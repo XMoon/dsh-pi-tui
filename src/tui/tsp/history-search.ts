@@ -585,8 +585,23 @@ export function createTspHistorySearch(
     owner.queryRevision = view.queryRevision
     owner.selectedId = view.selectedId
     owner.status = projectRemoteStatus(view.status)
-    if (view.selectedId !== previous?.selectedId) {
+    const selectedBefore = previous?.rows.find(row => row.id === previous.selectedId)
+    const selectedAfter = view.rows.find(row => row.id === view.selectedId)
+    const selectedIndexBefore = previous?.rows.findIndex(row => row.id === view.selectedId) ?? -1
+    const selectedIndexAfter = view.rows.findIndex(row => row.id === view.selectedId)
+    const materialChanged = selectedBefore !== undefined && selectedAfter !== undefined
+      && (selectedBefore.preview !== selectedAfter.preview
+        || selectedBefore.contentLength !== selectedAfter.contentLength
+        || selectedBefore.contentSha256 !== selectedAfter.contentSha256
+        || selectedBefore.hasNonText !== selectedAfter.hasNonText)
+    if (view.selectedId !== previous?.selectedId || materialChanged) {
+      // A different row or different exact material starts its Preview at the
+      // top; a progress-only publish keeps the client's reading position.
       owner.previewResetPending = true
+      owner.revealPending = true
+    } else if (selectedIndexAfter >= 0 && selectedIndexAfter !== selectedIndexBefore) {
+      // The preserved selection moved on a material reorder: keep it visible,
+      // but do not reset an unchanged row's Preview.
       owner.revealPending = true
     }
     change(owner)

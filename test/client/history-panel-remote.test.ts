@@ -838,6 +838,96 @@ test('a first cold partial paints progress, keeps the selected body and clears o
   assert.equal(port.searchCalls.length, callsAtReady, 'ready stops the warmup refresh')
 })
 
+test('an automatic Remote refresh cannot be acted on through its old painted frame', async () => {
+  const harness = makeHarness({
+    items: [
+      { id: 'a', preview: 'alpha prompt', text: 'alpha exact' },
+      { id: 'b', preview: 'beta prompt', text: 'beta exact' },
+      { id: 'c', preview: 'gamma prompt', text: 'gamma exact' },
+    ],
+    defaultScope: 'all',
+    pointerEnabled: () => true,
+    columns: 120,
+    rows: 40,
+    refreshMs: 500,
+  })
+  const { panel, port, accepted, copied } = harness
+  const a = item('a', 'alpha prompt', 'alpha exact')
+  const b = item('b', 'beta prompt', 'beta exact')
+  const c = item('c', 'gamma prompt', 'gamma exact')
+  port.responses.push({ kind: 'partial', items: [a, b], progress: { settled: 1, total: 3 } })
+  port.responses.push({ kind: 'partial', items: [b, c], progress: { settled: 2, total: 3 } })
+  panel.start()
+  await renderUntil(panel, 120,
+    lines => lines.some(line => line.includes('Indexing 1/3 (33%)')) && lines.some(line => line.includes('Copy All [Alt+C]')),
+    'the painted initial partial page')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000a')
+
+  // The seat's one warmup tick commits B as the new selected row (A left the
+  // page) and reads B's exact body. Deliberately DO NOT render: the visible
+  // frame still shows A selected.
+  const deadline = Date.now() + 3_000
+  for (;;) {
+    const view = harness.seat.view()
+    if (view.selectedId === 'ses_a\u0000b' && view.body.kind === 'ready' && view.body.row.id === 'ses_a\u0000b') break
+    if (Date.now() > deadline) assert.fail(`the refreshed selection/body never committed: ${JSON.stringify(view)}`)
+    await new Promise<void>(resolve => setTimeout(resolve, 5))
+  }
+  assert.equal(panel.selected()?.id, 'ses_a\u0000b', 'the committed selection is B')
+  assert.equal(panel.canAccept(), false, 'B is not accepted through A\'s old painted frame')
+  panel.handleInput('\r') // Enter
+  panel.handleInput('\x1bc') // Alt+C
+  assert.deepEqual(accepted, [], 'stale Enter sends no restored row')
+  assert.deepEqual(copied, [], 'stale Alt+C copies no row')
+
+  // One real repaint publishes the current generation; the same actions now
+  // act on exactly B's verified body.
+  const repainted = plain(panel.render(120))
+  assert.ok(repainted.some(line => line.includes('beta prompt')), repainted.join('\n'))
+  panel.handleInput('\r')
+  panel.handleInput('\x1bc')
+  assert.deepEqual(accepted, [{ id: 'ses_a\u0000b', content: 'beta exact' }])
+  assert.deepEqual(copied, ['beta exact'])
+})
+
+test('a stale painted pointer row cannot select a different row after an automatic refresh', async () => {
+  const harness = makeHarness({
+    items: [
+      { id: 'a', preview: 'alpha prompt', text: 'alpha exact' },
+      { id: 'b', preview: 'beta prompt', text: 'beta exact' },
+      { id: 'c', preview: 'gamma prompt', text: 'gamma exact' },
+    ],
+    defaultScope: 'all',
+    pointerEnabled: () => true,
+    columns: 120,
+    rows: 40,
+    refreshMs: 500,
+  })
+  const { panel, port } = harness
+  const a = item('a', 'alpha prompt', 'alpha exact')
+  const b = item('b', 'beta prompt', 'beta exact')
+  const c = item('c', 'gamma prompt', 'gamma exact')
+  port.responses.push({ kind: 'partial', items: [a, b], progress: { settled: 1, total: 3 } })
+  port.responses.push({ kind: 'partial', items: [c, b], progress: { settled: 2, total: 3 } })
+  panel.start()
+  const painted = await renderUntil(panel, 120,
+    lines => lines.some(line => line.includes('Indexing 1/3 (33%)')) && lines.some(line => line.includes('beta prompt')),
+    'the initial painted page')
+  const staleRow = painted.findIndex(line => line.includes('beta prompt'))
+  assert.ok(staleRow >= 0, painted.join('\n'))
+  const deadline = Date.now() + 3_000
+  for (;;) {
+    const view = harness.seat.view()
+    if (view.selectedId === 'ses_a\u0000c' && view.body.kind === 'ready' && view.body.row.id === 'ses_a\u0000c') break
+    if (Date.now() > deadline) assert.fail(`the refreshed C selection/body never committed: ${JSON.stringify(view)}`)
+    await new Promise<void>(resolve => setTimeout(resolve, 5))
+  }
+  assert.equal(panel.selected()?.id, 'ses_a\u0000c')
+  assert.equal(panel.handleMouse(pointer('press', 2, staleRow, 120, painted.length)), undefined,
+    'the old row hit is not resolved against the new page')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000c', 'the current selected row stays C')
+})
+
 test('a partial empty page is distinct from ready empty and auto-refresh paints it without input', async () => {
   const harness = makeHarness({ items: [], defaultScope: 'all' })
   const { panel, port } = harness

@@ -723,7 +723,14 @@ export class HistoryPanel implements Component, Focusable {
     if (!this.plan(this.lastWidth()).acceptEnabled) return false
     const selected = this.selected()
     if (selected === undefined) return false
-    if (this.remote !== undefined && !this.remoteExactBodyReady(selected)) return false
+    if (this.remote !== undefined) {
+      // The last painted frame must still describe the CURRENT Remote commit:
+      // an automatic refresh may have replaced the page/selection underneath
+      // these cells, and the exact-body check alone cannot prove which row the
+      // user is looking at. Direct keeps its historical paint behavior.
+      if (!this.remoteFrameCurrent()) return false
+      if (!this.remoteExactBodyReady(selected)) return false
+    }
     return this.frame?.paintedResultIds.has(selected.id) === true
   }
 
@@ -866,7 +873,9 @@ export class HistoryPanel implements Component, Focusable {
       }
       if (hit.kind === 'result') {
         // A result row click only SELECTS; the explicit `Use Selected [Enter]` item
-        // (or Enter) accepts.
+        // (or Enter) accepts. A stale Remote hit id must not select a different
+        // row that the new automatic page now owns.
+        if (!this.remoteFrameCurrent(frame)) return undefined
         const index = this.state.results.findIndex(candidate => candidate.id === hit.id)
         if (index === -1) return undefined
         this.gesture = { kind: 'result', generation: frame.generation, x: event.x, y: event.y, id: hit.id }
@@ -882,6 +891,7 @@ export class HistoryPanel implements Component, Focusable {
         return { handled: true }
       }
       if (hit.kind === 'actions') {
+        if (!this.remoteFrameCurrent(frame)) return undefined
         const action = this.actionAt(hit, event.x)
         if (action === undefined) return undefined
         // The ACTION is only armable while the row it belongs to is a real,
@@ -891,6 +901,7 @@ export class HistoryPanel implements Component, Focusable {
         return { handled: true }
       }
       if (hit.kind === 'footer') {
+        if (!this.remoteFrameCurrent(frame)) return undefined
         // A Footer press only arms the EXACT painted action; the release must
         // re-prove the same frame, seat state and (for Use/Copy) result id.
         const action = this.footerActionAt(hit, event.x)
@@ -912,6 +923,7 @@ export class HistoryPanel implements Component, Focusable {
         return { handled: true }
       }
       if (hit.kind === 'preview') {
+        if (!this.remoteFrameCurrent(frame)) return undefined
         // A press inside the painted Preview starts the exact source drag — ONLY
         // when a Remote body is verified: a bounded preview is never draggable
         // into an "exact" copy.
@@ -2062,6 +2074,10 @@ export class HistoryPanel implements Component, Focusable {
   private handleWheel(event: TuiMouseEvent, frame: HistoryMouseFrame): TuiMouseEventResult | undefined {
     const delta = event.wheelDelta ?? 0
     if (delta === 0) return undefined
+    // The list/preview regions come from the painted frame; a wheel consumed
+    // against a new automatic page before its repaint would retarget the new
+    // selection/preview through old coordinates.
+    if (!this.remoteFrameCurrent(frame)) return undefined
     const inList = frame.listTop !== undefined && frame.listBottom !== undefined
       && event.y >= frame.listTop && event.y <= frame.listBottom
     if (inList) {
@@ -2124,9 +2140,18 @@ export class HistoryPanel implements Component, Focusable {
     if (selected === undefined) return false
     if (this.remote !== undefined) {
       if (this.state.loading) return false
+      if (!this.remoteFrameCurrent()) return false
       if (!this.remoteExactBodyReady(selected)) return false
     }
     return this.frame?.paintedResultIds.has(selected.id) === true
+  }
+
+  /** A Remote data target (row, action, footer or wheel region) is only
+   *  consumable from the last PAINTED generation. Chrome/cancel/search input
+   *  stays live while an automatic refresh is waiting for its repaint. */
+  private remoteFrameCurrent(frame = this.frame): boolean {
+    return this.remote === undefined
+      || (frame !== undefined && frame.generation === this.state.generation)
   }
 
   /** Whether the selected Remote row owns a verified, non-empty exact body. */
