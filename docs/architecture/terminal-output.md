@@ -60,8 +60,9 @@ home, backend, launch cwd, Node executable and `@deepseek-ai/dsh` entry; the
 command is exactly
 `/usr/bin/env DSH_HOME=… DSH_PI_TUI_BACKEND=… <node> <dsh-bin.js> --profile <p>
 --session <canonical-id>` with the cwd carried by the protocol field. An
-overlay, explicit preset, telemetry override, special Node option, multiplexer/
-SSH topology, non-TTY launch, an explicit `DSH_PI_TUI_RENDERER=tsp` opt-in
+overlay, explicit preset (`--preset` or a non-empty `DSH_PI_TUI_PRESET`),
+telemetry override, special Node option, multiplexer/SSH topology, non-TTY
+launch, an explicit `DSH_PI_TUI_RENDERER=tsp` opt-in
 (including an SDK decline that later mounts the PiTUI fallback), or a
 non-canonical Session id fails closed and never guesses a target.
 
@@ -73,10 +74,15 @@ and only an admitted foreground Client receives it. The Host never writes OSC
 the real mounted PiTUI surface, not suspended, and the application must own the
 tty. No bytes are written before that mount or while an external editor holds
 the terminal. A sessionless/unrepresentable target, a human exit and an accepted
-reload whose replacement cannot consume the v1 handoff use the protocol's
-clear, but only under that same grant; signal, PTY loss, fatal, generic disposal
-and a compatible Client reexec never withdraw the record. A valid report whose
-terminal write fails leaves the previous record in place and is retried only on
+reload whose replacement cannot consume the v1 handoff use the protocol's clear,
+but only under that same grant. A compatible reexec normally keeps the record.
+If the replacement can validate the inherited v1 handoff but its current launch
+carries a non-empty `DSH_PI_TUI_PRESET`, it installs a withdrawal-only reporter at
+the same mounted-surface boundary, sends one best-effort clear for the inherited
+supervisor owner, and never reports. A failed clear leaves the old record; the
+protocol has no ACK. Signal, PTY loss, fatal, generic disposal and every other
+compatible Client reexec never withdraw the record. A valid report whose terminal
+write fails leaves the previous record in place and is retried only on
 the next legitimate owner notification or regain; it is never converted to a
 clear. A synchronous write throw and the write-completion failure reported by
 the existing guarded writer share the same state: the offer is marked dirty and

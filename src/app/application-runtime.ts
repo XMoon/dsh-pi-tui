@@ -416,12 +416,13 @@ export interface RemoteApplicationOverride {
 
 /** The process-private OSC 7577 owner shared by the Client entry and bootstrap. */
 export interface ProgramResumeClientHandle {
-  readonly capability: import('../client/program-resume/target.ts').ProgramResumeCapability
+  readonly capability?: import('../client/program-resume/target.ts').ProgramResumeCapability
+  readonly withdrawal?: import('../client/program-resume/target.ts').ProgramResumeWithdrawal
   attach(reporter: import('../client/program-resume/reporter.ts').ProgramResumeReporter): void
   /** An accepted reload targets a build without the v1 Client handoff. */
   unsupportedReloadAccepted(): void
   /** The exact capability a compatible replacement Client may receive. */
-  forReexec(): import('../client/program-resume/target.ts').ProgramResumeCapability
+  forReexec(): import('../client/program-resume/target.ts').ProgramResumeCapability | undefined
 }
 
 /**

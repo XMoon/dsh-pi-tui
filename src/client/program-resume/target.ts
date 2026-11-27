@@ -54,6 +54,12 @@ export interface ProgramResumeCapability {
   readonly facts: ProgramResumeLaunchFacts
 }
 
+/** The authority for one inherited-record withdrawal; never a resume target. */
+export interface ProgramResumeWithdrawal {
+  readonly token: string
+  readonly ownerPid: number
+}
+
 /** The fixed protocol command prefix; `/usr/bin/env` is a real executable. */
 const ENV = '/usr/bin/env'
 const FORBIDDEN_PATH_TEXT = /[\u0000-\u001F\u007F-\u009F]/u
@@ -147,6 +153,12 @@ function topologyAdmitted(env: NodeJS.ProcessEnv, launch: ProgramResumeLaunchEnv
   return true
 }
 
+/** The frozen resume argv cannot carry either official preset input form. */
+function presetAdmitted(presetId: string | undefined, env: NodeJS.ProcessEnv): boolean {
+  return (presetId === undefined || presetId === '')
+    && (env.DSH_PI_TUI_PRESET?.trim() ?? '') === ''
+}
+
 /** The one official-profile admission shared by Direct and the daemon supervisor. */
 function profileAdmitted(input: {
   readonly profileContext: ProgramResumeProfileContext
@@ -160,7 +172,7 @@ function profileAdmitted(input: {
 }): boolean {
   if (input.platform !== 'linux' && input.platform !== 'darwin') return false
   if (!input.stdinIsTTY || !input.stdoutIsTTY) return false
-  if (input.presetId !== undefined && input.presetId !== '') return false
+  if (!presetAdmitted(input.presetId, input.env)) return false
   if (input.profileContext.overlays.length !== 0) return false
   if ((input.profileContext.telemetryDisabledEnv ?? '') !== '') return false
   if (input.execArgv.length !== 0) return false
@@ -281,8 +293,7 @@ export function daemonProgramResumeCapability(input: {
  * supervisor owner, an unsupported topology or a path that is no longer the
  * same kind of file disables the sender without affecting business startup.
  */
-export function clientProgramResumeCapability(input: {
-  readonly token: string | undefined
+interface ClientProgramResumeHandoffInput {
   readonly handoff: string | undefined
   readonly expectedHome: string
   readonly expectedProfile: string
@@ -293,8 +304,15 @@ export function clientProgramResumeCapability(input: {
   readonly stdinIsTTY: boolean
   readonly stdoutIsTTY: boolean
   readonly platform: NodeJS.Platform
-}): ProgramResumeCapability | undefined {
-  if (!isProgramResumeToken(input.token) || input.handoff === undefined) return undefined
+}
+
+interface ClientProgramResumeInput extends ClientProgramResumeHandoffInput {
+  readonly token: string | undefined
+}
+
+/** Validate the inherited daemon facts without deciding whether they may report. */
+function clientProgramResumeFacts(input: ClientProgramResumeHandoffInput): ProgramResumeLaunchFacts | undefined {
+  if (input.handoff === undefined) return undefined
   if (input.platform !== 'linux' && input.platform !== 'darwin') return undefined
   if (!input.stdinIsTTY || !input.stdoutIsTTY) return undefined
   if (input.execArgv.length !== 0) return undefined
@@ -324,7 +342,24 @@ export function clientProgramResumeCapability(input: {
   const profileDir = join(home, 'profiles', input.expectedProfile)
   if (!directory(profileDir)) return undefined
   if (!directory(facts.cwd) || !executableFile(ENV) || !executableFile(facts.nodePath) || !regularFile(facts.cliPath)) return undefined
-  return { token: input.token, facts: { ...facts, home } }
+  return { ...facts, home }
+}
+
+export function clientProgramResumeCapability(input: ClientProgramResumeInput): ProgramResumeCapability | undefined {
+  if (!isProgramResumeToken(input.token) || !presetAdmitted(undefined, input.env)) return undefined
+  const facts = clientProgramResumeFacts(input)
+  return facts === undefined ? undefined : { token: input.token, facts }
+}
+
+/**
+ * Authorize one clear for a record inherited by an accepted daemon reexec whose
+ * current launch preset cannot be represented. This never creates a target.
+ */
+export function clientProgramResumeWithdrawal(input: ClientProgramResumeInput): ProgramResumeWithdrawal | undefined {
+  if (!input.isReexec || !isProgramResumeToken(input.token)) return undefined
+  if ((input.env.DSH_PI_TUI_PRESET?.trim() ?? '') === '') return undefined
+  const facts = clientProgramResumeFacts(input)
+  return facts === undefined ? undefined : { token: input.token, ownerPid: facts.ownerPid }
 }
 
 /**
