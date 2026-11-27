@@ -616,6 +616,10 @@ export function createWin32StopWaiter(scopeId: string, instanceId: string): Win3
     bridge.closeHandle(cancelHandle)
     throw new Error('native win32: the per-instance stop event has a foreign descriptor')
   }
+  // Qualification-only failure injection: exercises the production Host's
+  // publication guard without inventing a second native waiter. Production
+  // never sets this variable.
+  const forcedFailure = process.env.SPLIT_PROCESS_HOST_FORCE_NATIVE_WAITER_FAILURE === '1'
   let stopResolve: (() => void) | undefined
   let stopReject: ((error: Error) => void) | undefined
   const stopped = new Promise<void>((resolve, reject) => {
@@ -632,6 +636,7 @@ export function createWin32StopWaiter(scopeId: string, instanceId: string): Win3
   }
   const loop = (async () => {
     try {
+      if (forcedFailure) throw new Error('native win32: qualification forced stop-waiter failure')
       for (;;) {
         const code = await new Promise<number>((resolve, reject) => {
           bridge.waitForMultipleObjects.async(2, [stopHandle, cancelHandle], 0, 0xffffffff, (error: Error | null, value: number) => {

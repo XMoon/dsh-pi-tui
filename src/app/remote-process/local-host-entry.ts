@@ -1999,6 +1999,7 @@ async function publishLocalHost(
   seat: ProcessSeat,
   instanceId: string,
   acpController: AcpControlController,
+  publicationGuard?: () => void,
 ): Promise<PublishedLocalHost> {
   const connection = context.get('connection') as unknown as HostConnectionService | undefined
   if (connection === undefined || typeof connection.authenticatedUrl !== 'function' || typeof connection.fetch?.register !== 'function') {
@@ -2135,6 +2136,11 @@ async function publishLocalHost(
     // seat/inode or a changed kernel identity must stop instead of publishing.
     seat.assertCurrent()
     assertRecordedHostKernelIdentityCurrent(identity)
+    // This is the last synchronous boundary before the registry becomes
+    // discoverable. A waiter failure observed during publication must abort
+    // here, inside the existing route/launch cleanup, rather than committing a
+    // Host that can no longer receive its native stop.
+    publicationGuard?.()
     writeLocalRecord(scope, identity)
     // Qualification barrier: hold the process after the registry commit and
     // before the caller can report Ready, so a launcher can deliver a signal in
@@ -2600,12 +2606,9 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
           },
         ), { diag: createEntryDiag('host') })
       }
-      if (nativeStopWaitFailure !== undefined) {
-        await stop(0, undefined)
-        releaseSignalAdmission()
-        return
-      }
-      const publishedHost = await publishLocalHost(handle.ctx, scope, hostProcessIdentity, seat, instanceId, acpController)
+      const publishedHost = await publishLocalHost(handle.ctx, scope, hostProcessIdentity, seat, instanceId, acpController, () => {
+        if (nativeStopWaitFailure !== undefined) throw nativeStopWaitFailure
+      })
       published = publishedHost
       registration = publishedHost
       // The exit backstop removes only this instance's files; SIGKILL leaves
