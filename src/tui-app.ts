@@ -8977,9 +8977,9 @@ export class TuiApp {
    *  memory). `addToHistory` unshifts, so the snapshot is fed oldest→newest;
    *  the authority already collapsed consecutive duplicates and applied the
    *  cap, so the editor ends up holding exactly the projection it owns. Called
-   *  only where the whole recall context was replaced (a scope publish or a
-   *  hydration reseed) — never on a settlement, which must not touch the
-   *  draft. */
+   *  for a whole-context replacement (scope publish/hydration/reset) and for a
+   *  live accepted rpcId merge that can remove a previously projected Host row;
+   *  a non-browse settlement keeps the visible draft untouched. */
   private restoreEditorRecall(restoreBrowseDraft: boolean): void {
     // A cold hydration reseed may land while the user is browsing the
     // provisional recall with their own non-empty draft. The base editor owns
