@@ -504,34 +504,44 @@ test('an unconfirmed outcome requires a fresh observation before the next write'
   await page.dispose()
 })
 
-test('an explicit unsupported Host denies every CUA write, while a failed system read stays usable', async () => {
-  const win = manualController({
-    port: {
-      ...cuaPort().port,
-      readSystemStatus: async () => ({
-        platform: 'win32',
-        sessionLocked: false,
-        captureAvailable: false,
-        elevated: false,
-        helper: { pid: 7, name: 'DSH Computer Use' },
-      }),
-    },
-  })
+test('an explicit unsupported Host denies every CUA write kind, while a failed system read stays usable', async () => {
+  const actions: string[] = []
+  const winPort: CuaAccessPort = {
+    ...cuaPort().port,
+    readSystemStatus: async () => ({
+      platform: 'win32',
+      sessionLocked: false,
+      captureAvailable: false,
+      elevated: false,
+      helper: { pid: 7, name: 'DSH Computer Use' },
+    }),
+    requestPermission: async () => { actions.push('request'); return STATUS },
+    openSettings: async () => { actions.push('open') },
+    enablePersistentPtc: async () => { actions.push('persist') },
+    revoke: async (id) => { actions.push(`revoke:${id}`) },
+    retryApproval: async (id) => { actions.push(`retry:${id}`) },
+  }
+  const preset = presetDefault()
+  const win = manualController({ port: winPort, preset: preset.config })
   await win.refresh()
-  const before = win.getSnapshot()
-  const attempts: Array<(page: CuaAccessSettingsController, capture: CuaActionCapture) => Promise<void>> = [
-    (page, action) => page.requestPermission(action),
-    (page, action) => page.openSettings(action),
-    (page, action) => page.setPtcDefault(action),
-    (page, action) => page.enablePersistentPtc(action),
-    (page, action) => page.revoke(action),
-    (page, action) => page.retryApproval(action),
+  const base = win.getSnapshot()
+  assert.equal(base.system.phase, 'ready')
+  assert.equal((base.system.value as { platform: string }).platform, 'win32')
+  const attempts: Array<{ kind: string; run: () => Promise<void> }> = [
+    { kind: 'request', run: async () => { await win.requestPermission(capture(base, 'request', { permission: 'accessibility' })) } },
+    { kind: 'open', run: async () => { await win.openSettings(capture(base, 'open', { permission: 'accessibility' })) } },
+    { kind: 'preset', run: async () => { await win.setPtcDefault(capture(base, 'preset')) } },
+    { kind: 'persistent-ptc', run: async () => { await win.enablePersistentPtc(capture(base, 'persistent-ptc')) } },
+    { kind: 'revoke', run: async () => { await win.revoke(capture(base, 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' })) } },
+    { kind: 'retry', run: async () => { await win.retryApproval(capture(base, 'retry', { applicationId: 'app-2', applicationGroup: 'refused' })) } },
   ]
   for (const attempt of attempts) {
-    await attempt(win, capture(before, 'request', { permission: 'accessibility' }))
+    await attempt.run()
+    assert.equal(win.getSnapshot().action?.state, 'failed', `${attempt.kind} must be denied`)
+    assert.match(win.getSnapshot().action?.text ?? '', /supports macOS only/u, `${attempt.kind} carries the unsupported reason`)
   }
-  assert.deepEqual(win.getSnapshot().action?.state, 'failed')
-  assert.match(win.getSnapshot().action?.text ?? '', /supports macOS only/u)
+  assert.deepEqual(actions, [], 'no CUA write reaches any kind-specific port method on win32')
+  assert.deepEqual(preset.calls, [], 'no guarded preset write runs on win32')
   // The independent application policy stays usable when only the system read fails.
   const failedSystem = manualController({
     port: {
@@ -545,6 +555,32 @@ test('an explicit unsupported Host denies every CUA write, while a failed system
   assert.equal(failedSystem.getSnapshot().action?.state, 'ok')
   await win.dispose()
   await failedSystem.dispose()
+})
+
+test('a basis change during the synchronous queue-head notification dispatches nothing', async () => {
+  let basis = 1
+  const calls: string[] = []
+  const page = manualController({
+    port: {
+      ...cuaPort().port,
+      observation: { readSnapshot: () => basis, subscribe: () => () => {} },
+      revoke: async (id) => { calls.push(`revoke:${id}`) },
+    },
+  })
+  await page.refresh()
+  let busyNotifications = 0
+  page.subscribe(() => {
+    if (!page.getSnapshot().busy) return
+    busyNotifications += 1
+    // The FIRST busy publication is acceptance; the queue head re-publishes it
+    // right before dispatch. Flip the provider basis on that second one.
+    if (busyNotifications === 2) basis = 2
+  })
+  await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
+  assert.deepEqual(calls, [], 'the queued dispatch re-proves the basis after the synchronous notification')
+  assert.equal(page.getSnapshot().action?.state, 'unknown')
+  assert.match(page.getSnapshot().action?.text ?? '', /nothing was sent/u)
+  await page.dispose()
 })
 
 test('a roster read that crosses a silent replacement starts no downstream old-generation IO', async () => {
