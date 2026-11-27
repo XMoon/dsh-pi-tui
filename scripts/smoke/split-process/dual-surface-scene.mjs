@@ -118,6 +118,12 @@ export function createDualSurfaceSceneTools(context) {
       `${label} Client A opened Session Y`,
       120_000)
     const sessionY = aOpen.openSessionId
+    // Remote explicit New reuses the first eligible blank in a Workspace. Seed
+    // A's Session with one plain accepted Turn so a later explicit New (B's or
+    // A's own second create) cannot collapse both sides onto the same blank;
+    // the fixture marker bypasses scenario modals.
+    await submitPrompt(clientA, 'c1-scene-seed', `${label} A nonblank seed`)
+    await clientA.waitForScreen('c1-scene-seed answer', `${label} A seed settled`, 120_000)
     const { client: clientB, ready: bReady } = await startC1Client(
       `${label} B`,
       { ...clientEnv, ...bEnv },
