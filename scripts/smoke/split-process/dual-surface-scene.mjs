@@ -107,8 +107,11 @@ export function createDualSurfaceSceneTools(context) {
     } = options
     const { host, ready: hostReady, workRoot } = await startC1Host(scenario, label, extraHostEnv)
     const hostBefore = await hostIdentityFacts(host)
+    // Both Clients launch from this scene's own work root, so their explicit
+    // New gestures share one fresh Host Workspace instead of inheriting blanks
+    // and roster growth from earlier cases in the packed Profile.
     assert(hostBefore.hostPid === hostReady.pid, `${label} the Host ready record does not own the Host identity`)
-    const { client: clientA, ready: aReady } = await startC1Client(`${label} A`, { ...clientEnv, ...aEnv })
+    const { client: clientA, ready: aReady } = await startC1Client(`${label} A`, { ...clientEnv, ...aEnv }, { cwd: workRoot })
     await submitPrompt(clientA, '/new', `${label} A /new`)
     const aOpen = await waitForSurfaceStatus(clientA,
       record => record.sessionOpen === true
@@ -127,7 +130,7 @@ export function createDualSurfaceSceneTools(context) {
     const { client: clientB, ready: bReady } = await startC1Client(
       `${label} B`,
       { ...clientEnv, ...bEnv },
-      bCwd === undefined ? {} : { cwd: bCwd },
+      { cwd: bCwd ?? workRoot },
     )
     let sessionX
     if (openB) {
@@ -143,6 +146,8 @@ export function createDualSurfaceSceneTools(context) {
       assert(typeof sessionX === 'string' && sessionX !== '',
         `${label} Client B published no Session identity`)
       assert(sessionX !== sessionY, `${label} A and B opened the SAME Session; the scene needs two`)
+      await submitPrompt(clientB, 'c1-scene-seed', `${label} B nonblank seed`)
+      await clientB.waitForScreen('c1-scene-seed answer', `${label} B seed settled`, 120_000)
     }
     assert(typeof sessionY === 'string' && sessionY !== '', `${label} Client A published no Session identity`)
     for (const [side, ready] of [['A', aReady], ['B', bReady]]) {
@@ -164,16 +169,18 @@ export function createDualSurfaceSceneTools(context) {
   const selectPaintedSessionRow = async (client, sessionId, label, timeoutMs = 60_000) => {
     const short = String(sessionId).replace(/^session[-_]/i, '').slice(0, 8)
     const deadline = Date.now() + timeoutMs
+    let lastFrame = []
     while (Date.now() < deadline) {
       const frame = await client.viewport()
+      lastFrame = frame
       const cursorIndex = frame.findIndex(line => line.startsWith('> '))
-      const targetIndex = frame.findIndex(line => line.includes(short))
+      const targetIndex = frame.findIndex(line => line.includes(short) && !/[▸▾]/u.test(line))
       if (cursorIndex >= 0 && targetIndex >= 0 && cursorIndex === targetIndex) return
       if (targetIndex >= 0) client.send(targetIndex < cursorIndex ? '\x1b[A' : '\x1b[B')
       else client.send('\x1b[B')
       await sleep(120)
     }
-    throw new SplitSmokeAssertionError(`${label}: the painted cursor never reached the ${short} row`)
+    throw new SplitSmokeAssertionError(`${label}: the painted cursor never reached the ${short} row; frame=${JSON.stringify(lastFrame)}`)
   }
 
   return {
