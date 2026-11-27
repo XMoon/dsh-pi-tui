@@ -724,12 +724,13 @@ async function startSurfaceLocalClient(
   const domains = composition.domains
   const delivery = composition.interactionDelivery
   /**
-   * Feature History PR2-A: the ONE process-lifetime input-recall memory of this
-   * Client root. It lives OUTSIDE the per-revision loop: a same-PID HMR
+   * Feature History PR2-A/PR2-C: the ONE process-lifetime input-recall memory
+   * of this Client root. It lives OUTSIDE the per-revision loop: a same-PID HMR
    * replacement re-borrows this SAME object (never a fresh mount-local one, and
    * never disposed by the revision cleanup), while a new OS process naturally
-   * starts empty. It holds plain strings only — no Session, cwd, file or Host
-   * identity.
+   * starts empty. It holds plain display strings plus the minimal local/Host
+   * provenance of the current carrier+Session scope; no Client file, cwd,
+   * durable cache or mirrored Host index.
    */
   const inputRecall = createInputMemoryRecall()
 

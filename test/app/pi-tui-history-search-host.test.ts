@@ -813,6 +813,16 @@ test('a REAL child Session created with origin=subagent contributes zero rows th
     assert.deepEqual(childSearch.items, [], 'no child row is searchable even with its user-source task')
     const childRecall = await wire.readSessionRecall({ sessionId: childId })
     assert.deepEqual(childRecall, { kind: 'ready', sessionId: childId, items: [] })
+    // The child contributes ZERO rows to the broader scopes too: its accepted
+    // user-source task must never leak into All or its event-time Directory.
+    for (const scope of ['all', 'directory'] as const) {
+      const broad = await wire.search(scope === 'all'
+        ? { scope, query: 'hsp-real-child', limit: 25 }
+        : { scope, cwd: wire.host.anchorDir, query: 'hsp-real-child', limit: 25 })
+      assert.equal(broad.kind, 'ready', JSON.stringify(broad))
+      if (broad.kind !== 'ready') throw new Error('expected ready')
+      assert.deepEqual(broad.items, [], `${scope}: a child occurrence must never enter the root corpus`)
+    }
     const childText = await wire.readText({
       sessionId: childId,
       messageId: delegated.id,
@@ -836,6 +846,37 @@ test('a REAL child Session created with origin=subagent contributes zero rows th
     assert.equal(parentRecall.kind, 'ready', JSON.stringify(parentRecall))
     if (parentRecall.kind !== 'ready') throw new Error('expected ready recall')
     assert.deepEqual(parentRecall.items.map(item => item.text), ['hsp-real-parent-input'])
+  } finally {
+    await wire.dispose()
+  }
+})
+
+test('a Host recall answer stays within the actual 64 KiB envelope, dropping a whole unfit row', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-recall-budget')
+  try {
+    const sessionId = 'history-recall-budget'
+    await wire.host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    const texts = [0, 1, 2].map(index => `${String(index)}${'中'.repeat(8191)}`)
+    for (const [index, text] of texts.entries()) {
+      await prompt(wire, sessionId, `req-recall-budget-${String(index)}`, text)
+    }
+    await waitForReady(wire, 'recall budget corpus')
+    let answer = await wire.readSessionRecall({ sessionId })
+    const deadline = Date.now() + 20_000
+    while (answer.kind === 'loading' && Date.now() < deadline) {
+      // Bounded observation window: the same Host may still be settling the
+      // just-accepted rows into its projection.
+      await new Promise(resolve => setTimeout(resolve, 25))
+      answer = await wire.readSessionRecall({ sessionId })
+    }
+    assert.equal(answer.kind, 'ready', JSON.stringify(answer))
+    if (answer.kind !== 'ready') throw new Error('expected ready recall')
+    // Three 8192-UTF-16-unit CJK rows cannot fit one 64 KiB answer: the newest
+    // two whole rows are kept in order, and the third is skipped, never sliced.
+    assert.deepEqual(answer.items.map(item => item.text), [texts[2], texts[1]])
+    assert.ok(answer.items.every(item => item.text.length === 8192))
+    assert.ok(Buffer.byteLength(JSON.stringify(answer), 'utf8') <= 64 * 1024,
+      'the recalled answer must stay within the fixed serialized byte budget')
   } finally {
     await wire.dispose()
   }
@@ -6791,7 +6832,13 @@ test('an early hit cannot publish ready while a later Session official read is s
     indexOfService(service).markSession({ sessionId: 'proof-session', dirty: true })
     const dirty = await service.search({ scope: 'all', query: 'mutable', limit: 25 }, new AbortController().signal)
     assert.equal(dirty.kind, 'loading')
+    const dirtyRecall = await service.readSessionRecall({ sessionId: 'proof-session' }, new AbortController().signal)
+    assert.deepEqual(dirtyRecall, { kind: 'loading' }, 'a dirty target never answers the old checkpoint recall')
     indexOfService(service).markSession({ sessionId: 'proof-session', dirty: false })
+    indexOfService(service).markSession({ sessionId: 'proof-session', uncertainSources: 2 })
+    const uncertainRecall = await service.readSessionRecall({ sessionId: 'proof-session' }, new AbortController().signal)
+    assert.deepEqual(uncertainRecall, { kind: 'loading' }, 'an uncertain target never answers the old checkpoint recall')
+    indexOfService(service).markSession({ sessionId: 'proof-session', uncertainSources: 0 })
     assert.equal(calls.openCalls(), 0, 'the latched read must be the only open and it has not started')
     release()
     await waitDirectReady(service)

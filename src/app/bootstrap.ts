@@ -2376,11 +2376,12 @@ export function applyRunnerWithRuntime(
       if (remoteSources === undefined || recallSeedGenerationUnsubscribe !== undefined) return
       recallSeedGenerationUnsubscribe = remoteSources.commandSource.subscribeConnectionGeneration(() => {
         const sessionId = ownership.currentSessionId()
-        if (cleanedUp || lifecycleController.signal.aborted || sessionId === undefined) return
-        // A carrier rollover is a DIFFERENT scope: the old carrier's rows are
-        // discarded before the new generation is read (never inferred same Host).
+        if (cleanedUp || lifecycleController.signal.aborted) return
+        // A carrier rollover is a DIFFERENT scope even while sessionless: the
+        // old carrier's local rows are discarded before the new generation is
+        // read (never inferred same Host).
         bindRecallScope(sessionId)
-        if (remoteIngressHandle !== undefined) scheduleRemoteRecallSeed(sessionId)
+        if (sessionId !== undefined && remoteIngressHandle !== undefined) scheduleRemoteRecallSeed(sessionId)
       })
     }
     ensureRemoteRecallGenerationWatch()

@@ -171,6 +171,33 @@ function composerDraftOf(lines) {
   return row.slice(at + '❯'.length).trim()
 }
 
+/** Press the REAL ↑ sink until the async Host seed has committed one of the
+ *  expected original texts into the composer. A committed seed is the only
+ *  success signal; the loop is bounded by the caller deadline. */
+async function waitForSeededComposerDraft(client, allowed, label, timeoutMs = 120_000) {
+  const started = Date.now()
+  for (;;) {
+    const draft = composerDraftOf(await client.viewport())
+    if (draft !== undefined && allowed.includes(draft)) return draft
+    assert(Date.now() - started < timeoutMs,
+      `${label}: the ↑ sink never recalled a Host-seeded row; draft=${JSON.stringify(draft)}`)
+    client.send('\x1b[A')
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+}
+
+/** Walk the real ↓ sink back to the saved empty draft after a recall seed.
+ *  The newest row may have been skipped by the allowed-text wait, so one ↓ is
+ *  not enough in general. */
+async function clearSeededComposerDraft(client, label) {
+  for (let step = 0; step < 20; step += 1) {
+    if ((composerDraftOf(await client.viewport()) ?? '') === '') return
+    client.send('\x1b[B')
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  await waitForComposerDraft(client, '', label, 5_000)
+}
+
 async function waitForComposerDraft(client, target, label, timeoutMs = 30_000) {
   const started = Date.now()
   for (;;) {
@@ -1302,6 +1329,86 @@ export async function runHostHistorySearch(context) {
     `W02f: the fork proof changed across the restart: ${JSON.stringify({ forkProofBefore, forkProofAfter })}`)
     await scene.exitC1Client(forkRestartClient, 'history fork restart client exit')
     await scene.stopC1Host(forkRestart.host)
+    await scene.awaitSceneSeatFree()
+    host = undefined
+
+    // ── W04b: after the Host process restarts, FRESH Clients' real editor ↑/↓
+    // restore the Host-seeded Session once; their submit creates exactly ONE new
+    // official occurrence. A separate Client per Session proves no old row
+    // leaks into the new scope. This runs after the cold-proof assertions so the
+    // accepted submit cannot invalidate their unchanged-source evidence.
+    const logE = join(workDir, 'host-history-search-recall-editor.log')
+    const recallHost = await scene.startC1Host('history-search', 'history recall host', {
+      DSH_PI_TUI_LOG: logE,
+      DSH_PI_TUI_LOG_LEVEL: 'debug',
+    })
+    host = recallHost.host
+    const targetRecallTexts = (hostSessionEvents(dshHome, sessionId) ?? []).flatMap((event) => {
+      if (event.type === 'agent/inbox/spliced') {
+        return (event.data.inserted ?? []).filter(isAcceptedUserMessage).map(textOfMessage)
+      }
+      if (event.type === 'user/message' && isAcceptedUserMessage(event.data)) return [textOfMessage(event.data)]
+      return []
+    })
+    const recallAStart = await scene.startC1Client('history recall client A', {
+      SPLIT_PROCESS_CLIENT_SESSION: sessionId,
+      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
+    })
+    const recallA = recallAStart.client
+    await recallA.waitForScreen('❯', 'W04b fresh A Client mounted', 120_000)
+    await waitForComposerDraft(recallA, '', 'W04b fresh A editor starts empty', 120_000)
+    const recalledText = await waitForSeededComposerDraft(recallA, targetRecallTexts, 'W04b A seed')
+    // ↑ is the ONLY input; ↓ restores the exact pre-browse empty draft.
+    await clearSeededComposerDraft(recallA, 'W04b ↓ returns to the empty draft')
+    const countAcceptedText = (text) => {
+      const ids = new Set()
+      for (const event of hostSessionEvents(dshHome, sessionId) ?? []) {
+        if (event.type === 'agent/inbox/spliced') {
+          for (const message of event.data.inserted ?? []) {
+            if (isAcceptedUserMessage(message) && textOfMessage(message) === text) ids.add(message.id)
+          }
+        } else if (event.type === 'user/message' && isAcceptedUserMessage(event.data) && textOfMessage(event.data) === text) {
+          ids.add(event.data.id)
+        }
+      }
+      return ids.size
+    }
+    const beforeSubmit = countAcceptedText(recalledText)
+    recallA.send('\x1b[A')
+    await waitForComposerDraft(recallA, recalledText, 'W04b ↑ recalls the same seed again', 120_000)
+    recallA.send('\r')
+    const submitDeadline = Date.now() + 120_000
+    while (countAcceptedText(recalledText) < beforeSubmit + 1 && Date.now() < submitDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    assert(countAcceptedText(recalledText) === beforeSubmit + 1,
+      `W04b: the recalled submit did not create exactly one official occurrence (before=${String(beforeSubmit)}): ${JSON.stringify(await recallA.viewport())}`)
+    await scene.exitC1Client(recallA, 'history recall client A exit')
+    // B's own seed is the only recalled row in a fresh B Client.
+    const recallBStart = await scene.startC1Client('history recall client B', {
+      SPLIT_PROCESS_CLIENT_SESSION: sentinelId,
+      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
+    })
+    const recallB = recallBStart.client
+    await recallB.waitForScreen('❯', 'W04b fresh B Client mounted', 120_000)
+    await waitForComposerDraft(recallB, '', 'W04b fresh B editor starts empty', 120_000)
+    const sentinelRecallText = await waitForSeededComposerDraft(recallB, sentinelTexts, 'W04b B seed')
+    assert(targetRecallTexts.includes(sentinelRecallText) === false, 'W04b: A history leaked into B')
+    await clearSeededComposerDraft(recallB, 'W04b B ↓ empty')
+    await scene.exitC1Client(recallB, 'history recall client B exit')
+    // Back to A in a NEW Client: B's history never leaks into the restored A.
+    const recallA2Start = await scene.startC1Client('history recall client A again', {
+      SPLIT_PROCESS_CLIENT_SESSION: sessionId,
+      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
+    })
+    const recallA2 = recallA2Start.client
+    await recallA2.waitForScreen('❯', 'W04b fresh A Client returns', 120_000)
+    await waitForComposerDraft(recallA2, '', 'W04b fresh A editor starts empty again', 120_000)
+    const backToA = await waitForSeededComposerDraft(recallA2, targetRecallTexts, 'W04b A reseed')
+    assert(sentinelTexts.includes(backToA) === false, 'W04b: B history leaked into the restored A')
+    await clearSeededComposerDraft(recallA2, 'W04b A ↓ empty')
+    await scene.exitC1Client(recallA2, 'history recall client A again exit')
+    await scene.stopC1Host(recallHost.host)
     await scene.awaitSceneSeatFree()
     host = undefined
 
