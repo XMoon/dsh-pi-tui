@@ -228,6 +228,11 @@ function isChildAAnswerEvent(event: unknown, turn: number): boolean {
   return data?.id === `a-childa-${turn}` || data?.message?.id === `a-childa-${turn}`
 }
 
+/** Exact painted-turn witness: answer 1 must not match answers 10–19. */
+function hasPaintedChildAAnswer1(view: string): boolean {
+  return /\bchilda answer 1\b/u.test(view)
+}
+
 /** The structural faces this suite drives on the mounted TuiApp / Client. */
 interface MountedApp {
   setDraft(text: string): void
@@ -574,7 +579,7 @@ test('`/tasks` renders the REAL Remote descendant tree and the child row opens t
 
   app.scrollToTop({ disableFollow: true })
   await waitFor('the newly loaded oldest child answer is actually painted', () =>
-    viewport().includes('childa answer 1'), 10_000)
+    hasPaintedChildAAnswer1(viewport()), 10_000)
   await fixture.vt.waitForRender()
   const publishedFoldCount = childFoldOwners.length
   const publishedFoldOwner = childFoldOwners.at(-1)
@@ -592,7 +597,7 @@ test('`/tasks` renders the REAL Remote descendant tree and the child row opens t
     'page settlement must not hydrate a second child-A fold for the committed cut')
   assert.equal(childFoldOwners.at(-1), publishedFoldOwner,
     'page settlement must preserve the canonical child-A fold owner')
-  assert.ok(viewport().includes('childa answer 1'),
+  assert.ok(hasPaintedChildAAnswer1(viewport()),
     `the newly loaded old row must remain painted after settlement:\n${viewport()}`)
   assert.deepEqual(app.fullscreenScrollForTest(), publishedScroll,
     'page settlement must not move the committed history anchor')
