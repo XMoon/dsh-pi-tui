@@ -31,7 +31,7 @@ import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
 const CASE_ID = 'acp.system-prompt-append'
-const MARKER_IDS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+const MARKER_IDS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
 
 function markerOf(id) {
   return `ACP_SYSTEM_PROMPT_APPEND_${id}_MARKER`
@@ -233,12 +233,13 @@ export async function runAcpSystemPromptAppend(context) {
    * The same Session legitimately produces several records with identical
    * system text, so a plain "first match" wait could return an earlier turn.
    */
-  const sessionMarker = async (sessionId, label, predicate, fromCount) => {
+  const sessionMarker = async (sessionId, label, predicate, fromCount, promptTag, root = workRoot) => {
     const started = Date.now()
     while (Date.now() - started < 180_000) {
-      const match = readC1WorkEvents(workRoot).slice(fromCount)
+      const match = readC1WorkEvents(root).slice(fromCount)
         .find(event => event.kind === 'acp-system-prompt-request'
-          && event.sessionId === sessionId && predicate(event))
+          && event.sessionId === sessionId && predicate(event)
+          && (promptTag === undefined || event.promptTag === promptTag))
       if (match !== undefined) return match
       await sleep(25)
     }
@@ -318,7 +319,7 @@ export async function runAcpSystemPromptAppend(context) {
     await sendTuiPrompt(tui, 'asp-tui-a', 'ASP-05 TUI shared A')
     let sharedA
     try {
-      sharedA = await sessionMarker(sessionA, 'TUI shared A', request => request.markers?.A === 1, sharedFrom)
+      sharedA = await sessionMarker(sessionA, 'TUI shared A', request => request.markers?.A === 1, sharedFrom, 'asp-tui-a')
     } catch (error) {
       const frame = await tui.viewport().catch(() => [])
       throw new SplitSmokeAssertionError(`${CASE_ID}: TUI shared A timed out; screen=${JSON.stringify(frame.slice(-24))}`)
@@ -335,7 +336,7 @@ export async function runAcpSystemPromptAppend(context) {
       sessionId: sessionA, prompt: [{ type: 'text', text: 'asp-acp-a' }],
     })
     requireFact(promptA?.stopReason === 'end_turn', `ASP-06: ACP prompt stop reason: ${JSON.stringify(promptA)}`)
-    const acpA = await sessionMarker(sessionA, 'ACP prompt A', request => request.markers?.A === 1, acpFrom)
+    const acpA = await sessionMarker(sessionA, 'ACP prompt A', request => request.markers?.A === 1, acpFrom, 'asp-acp-a')
     requireFact(acpA.markers?.B === 0, 'ASP-06: Session A must never see the other View marker')
 
     // ASP-07: a second Session/connection is isolated in both directions.
@@ -351,14 +352,14 @@ export async function runAcpSystemPromptAppend(context) {
       sessionId: sessionB, prompt: [{ type: 'text', text: 'asp-acp-b' }],
     })
     requireFact(promptB?.stopReason === 'end_turn', `ASP-07: B prompt: ${JSON.stringify(promptB)}`)
-    const requestB = await sessionMarker(sessionB, 'ACP prompt B', request => request.markers?.B === 1, bFrom)
+    const requestB = await sessionMarker(sessionB, 'ACP prompt B', request => request.markers?.B === 1, bFrom, 'asp-acp-b')
     assertOnly(requestB, 'ASP-07 B request', 'B')
     const a2From = readC1WorkEvents(workRoot).length
     const promptA2 = await conn1.request(acp.methods.agent.session.prompt, {
       sessionId: sessionA, prompt: [{ type: 'text', text: 'asp-acp-a2' }],
     })
     requireFact(promptA2?.stopReason === 'end_turn', 'ASP-07: A remains usable')
-    const requestA2 = await sessionMarker(sessionA, 'ACP prompt A2', request => request.markers?.A === 1, a2From)
+    const requestA2 = await sessionMarker(sessionA, 'ACP prompt A2', request => request.markers?.A === 1, a2From, 'asp-acp-a2')
     assertOnly(requestA2, 'ASP-07 A request', 'A')
 
     // ASP-07b: a real formal child owns its OWN Agent scope; the parent append
@@ -366,7 +367,7 @@ export async function runAcpSystemPromptAppend(context) {
     const childTurnBefore = (hostSessionEvents(dshHome, sessionA) ?? []).length
     const childFrom = readC1WorkEvents(workRoot).length
     await sendTuiPrompt(tui, 'asp-child-parent', 'ASP-07b TUI child parent')
-    const delegation = await sessionMarker(sessionA, 'ASP-07b parent request', request => request.markers?.A === 1, childFrom)
+    const delegation = await sessionMarker(sessionA, 'ASP-07b parent request', request => request.markers?.A === 1, childFrom, 'asp-child-parent')
     requireFact(delegation.markers?.A === 1, 'ASP-07b: the parent request keeps its append')
     const childStart = await waitForC1WorkEvent(workRoot,
       event => event.kind === 'subagent-start', 'ASP-07b formal child start', 120_000)
@@ -374,7 +375,8 @@ export async function runAcpSystemPromptAppend(context) {
     requireFact(typeof childId === 'string' && childId !== sessionA,
       `ASP-07b: a real formal child Session must exist: ${JSON.stringify(childStart)}`)
     const childRequest = await waitForC1WorkEvent(workRoot,
-      event => event.kind === 'acp-system-prompt-request' && event.sessionId === childId,
+      event => event.kind === 'acp-system-prompt-request' && event.sessionId === childId
+        && event.promptTag === 'asp-child-task',
       'ASP-07b formal child request', 120_000)
     requireFact(allMarkerCounts(childRequest).every(count => count === 0),
       `ASP-07b: the formal child must never inherit the parent append: ${JSON.stringify(childRequest.markers)}`)
@@ -387,14 +389,15 @@ export async function runAcpSystemPromptAppend(context) {
     const heldFrom = readC1WorkEvents(workRoot).length
     await sendTuiPrompt(tui, 'asp-hold-a', 'ASP-08 TUI held A')
     const heldRequest = await waitForC1WorkEvent(workRoot,
-      event => event.kind === 'acp-system-prompt-held' && event.sessionId === sessionA,
+      event => event.kind === 'acp-system-prompt-held' && event.sessionId === sessionA
+        && event.promptTag === 'asp-hold-a',
       'ASP-08 held foreign request', 120_000)
     requireFact(heldRequest.markers?.A === 1, 'ASP-08: the already-sampled foreign request keeps the append')
     const closedA = await conn1.request(acp.methods.agent.session.close, { sessionId: sessionA })
     requireFact(closedA !== null && typeof closedA === 'object', 'ASP-08: close during the foreign turn must settle')
     writeFileSync(holdBarrier, 'release\n', { mode: 0o600 })
     const postHold = await sessionMarker(sessionA, 'ASP-08 post-detach step',
-      request => request.afterTool === true && request.markers?.A === 0, heldFrom)
+      request => request.afterTool === true && request.markers?.A === 0, heldFrom, 'asp-hold-a')
     requireFact(allMarkerCounts(postHold).every(count => count === 0),
       'ASP-08: the next step of the held foreign turn must not consume the retired append')
     await turnEndAfter(sessionA, heldTurnBefore, 'ASP-08 held foreign turn end')
@@ -405,7 +408,7 @@ export async function runAcpSystemPromptAppend(context) {
     const afterCloseFrom = readC1WorkEvents(workRoot).length
     await sendTuiPrompt(tui, 'asp-tui-after-close', 'ASP-08 TUI after close')
     const afterClose = await sessionMarker(sessionA, 'TUI after close', request => allMarkerCounts(request).every(count => count === 0)
-      && request.harnessIdentity === true, afterCloseFrom)
+      && request.harnessIdentity === true, afterCloseFrom, 'asp-tui-after-close')
     requireFact(afterClose.markers?.A === 0, 'ASP-08: the retired append must not reach the next real turn')
     await turnEndAfter(sessionA, aAfterClose, 'ASP-08 TUI turn end')
     const repeatedClose = await conn1.request(acp.methods.agent.session.close, { sessionId: sessionA })
@@ -419,7 +422,7 @@ export async function runAcpSystemPromptAppend(context) {
     })
     const cFrom = readC1WorkEvents(workRoot).length
     await sendTuiPrompt(tui, 'asp-tui-c', 'ASP-09 TUI C')
-    const requestC = await sessionMarker(sessionA, 'TUI C', request => request.markers?.C === 1, cFrom)
+    const requestC = await sessionMarker(sessionA, 'TUI C', request => request.markers?.C === 1, cFrom, 'asp-tui-c')
     assertOnly(requestC, 'ASP-09 C request', 'C')
     // The REAL live reattach replaces the value on the SAME connection.
     await conn1.request(acp.methods.agent.session.resume, {
@@ -427,14 +430,14 @@ export async function runAcpSystemPromptAppend(context) {
     })
     const hFrom = readC1WorkEvents(workRoot).length
     await sendTuiPrompt(tui, 'asp-tui-h', 'ASP-09 TUI H')
-    const requestH = await sessionMarker(sessionA, 'TUI H', request => request.markers?.H === 1, hFrom)
+    const requestH = await sessionMarker(sessionA, 'TUI H', request => request.markers?.H === 1, hFrom, 'asp-tui-h')
     assertOnly(requestH, 'ASP-09 H request', 'H')
     await conn1.request(acp.methods.agent.session.resume, {
       sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt: null,
     })
     const clearedFrom = readC1WorkEvents(workRoot).length
     await sendTuiPrompt(tui, 'asp-tui-cleared', 'ASP-09 TUI cleared')
-    const cleared = await sessionMarker(sessionA, 'TUI cleared', request => allMarkerCounts(request).every(count => count === 0), clearedFrom)
+    const cleared = await sessionMarker(sessionA, 'TUI cleared', request => allMarkerCounts(request).every(count => count === 0), clearedFrom, 'asp-tui-cleared')
     requireFact(cleared.literalPreserved === false, 'ASP-09: null must clear the literal append too')
 
     // ASP-10: cold load carries no opaque value; an explicit resend applies.
@@ -451,7 +454,7 @@ export async function runAcpSystemPromptAppend(context) {
       sessionId: sessionA, prompt: [{ type: 'text', text: 'asp-load-no-append' }],
     })
     requireFact(loadPrompt?.stopReason === 'end_turn', 'ASP-10: loaded prompt must answer end_turn')
-    const coldRequest = await sessionMarker(sessionA, 'cold load request', request => allMarkerCounts(request).every(count => count === 0), coldFrom)
+    const coldRequest = await sessionMarker(sessionA, 'cold load request', request => allMarkerCounts(request).every(count => count === 0), coldFrom, 'asp-load-no-append')
     requireFact(systemNodes(sessionA).some(node => JSON.stringify(node).includes(markerOf('A'))),
       'ASP-10: the original durable system record is retained (never rewritten)')
     await loader.client.request(acp.methods.agent.session.close, { sessionId: sessionA })
@@ -465,7 +468,7 @@ export async function runAcpSystemPromptAppend(context) {
       sessionId: sessionA, prompt: [{ type: 'text', text: 'asp-load-resend' }],
     })
     requireFact(resendPrompt?.stopReason === 'end_turn', 'ASP-10: explicit append resend must answer end_turn')
-    const resendRequest = await sessionMarker(sessionA, 'cold load resend', request => request.markers?.D === 1, resendFrom)
+    const resendRequest = await sessionMarker(sessionA, 'cold load resend', request => request.markers?.D === 1, resendFrom, 'asp-load-resend')
     assertOnly(resendRequest, 'ASP-10 resend request', 'D')
     await resender.client.request(acp.methods.agent.session.close, { sessionId: sessionA })
     await closeClient(resender.client)
@@ -506,7 +509,7 @@ export async function runAcpSystemPromptAppend(context) {
       sessionId: sessionC, prompt: [{ type: 'text', text: 'asp-complete' }],
     })
     requireFact(completePrompt?.stopReason === 'end_turn', 'ASP-11: the complete preset prompt must answer end_turn')
-    const completeRequest = await sessionMarker(sessionC, 'complete request', request => request.markers?.E === 0, completeFrom)
+    const completeRequest = await sessionMarker(sessionC, 'complete request', request => request.markers?.E === 0, completeFrom, 'asp-complete')
     requireFact(completeRequest.harnessIdentity === false && completeRequest.systemLength < 1024,
       `ASP-11: the complete minimal prompt must be the sole authority: ${JSON.stringify(completeRequest)}`)
     await completer.client.request(acp.methods.agent.session.close, { sessionId: sessionC })
@@ -535,7 +538,7 @@ export async function runAcpSystemPromptAppend(context) {
       sessionId: sessionA, prompt: [{ type: 'text', text: 'asp-after-off' }],
     })
     requireFact(offPrompt?.stopReason === 'end_turn', 'ASP-12: the post-Off View must serve a real turn')
-    const offRequest = await sessionMarker(sessionA, 'post-Off request', request => request.markers?.G === 1, offFrom)
+    const offRequest = await sessionMarker(sessionA, 'post-Off request', request => request.markers?.G === 1, offFrom, 'asp-after-off')
     assertOnly(offRequest, 'ASP-12 post-Off request', 'G')
     await afterOff.client.request(acp.methods.agent.session.close, { sessionId: sessionA })
     await closeClient(afterOff.client)
@@ -545,6 +548,75 @@ export async function runAcpSystemPromptAppend(context) {
     requireFact(conn2 !== undefined, 'ASP-13: the second connection was established')
     await closeClient(conn2)
     conn2 = undefined
+
+    // ASP-14: REAL cold recovery. Stop the TUI/peer/Host, boot a new Host on the
+    // same profile and Session store, and prove the SAME Session resumes with
+    // its effective default; the old append is never resurrected from history,
+    // and an explicit resend applies exactly once on the cold View.
+    const beforeCold = hostIdentity
+    await scene.exitC1Client(tui, 'ASP-14 TUI')
+    tui = undefined
+    await peer.shutdown()
+    await host.shutdown()
+    requireFact(host.exited, 'ASP-14: the old Host must really stop before the cold resume')
+    const coldWorkRoot = scene.c1WorkRoot('asp cold host')
+    const coldStarted = await scene.startC1Host('acp-system-prompt', 'asp cold host', {
+      DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
+      C1_SYSTEM_PROMPT_CONTROL: join(coldWorkRoot, 'acp-system-prompt-control.json'),
+      C1_SYSTEM_PROMPT_HOLD: join(coldWorkRoot, 'acp-system-prompt-hold.release'),
+    }, coldWorkRoot)
+    host = coldStarted.host
+    const coldIdentity = await hostIdentityFacts()
+    requireFact(coldIdentity.hostPid !== beforeCold.hostPid
+      && coldIdentity.instanceId !== beforeCold.instanceId
+      && coldIdentity.scopeId === beforeCold.scopeId,
+    'ASP-14: the cold Host must be a NEW process on the SAME profile scope')
+    const coldPeer = await startPeer('asp cold peer')
+    const coldAccess = await acpAccess(coldPeer, 'ASP-14 cold enable ACP', true)
+    requireFact(coldAccess.ok === true && coldAccess.status?.state === 'enabled', 'ASP-14: the cold Host ACP must enable')
+    const coldStatus = daemonStatus('ASP-14 cold daemon status')
+    const coldScopeId = coldStarted.ready.localHost?.scopeId
+    requireFact(typeof coldScopeId === 'string' && coldScopeId.length === 64, 'ASP-14: the cold Host must publish its scope id')
+    const coldSocket = process.platform === 'darwin'
+      ? `/private/tmp/dpt-${String(process.getuid())}-${coldScopeId.slice(0, 40)}/acp.sock`
+      : join(dshHome, 'run', 'dsh-pi-tui', coldScopeId, 'acp.sock')
+    requireFact(coldStatus['acp-socket'] === coldSocket, `ASP-14: the cold ACP endpoint: ${JSON.stringify(coldStatus)}`)
+    endpoint = process.platform === 'darwin'
+      ? { path: coldStatus['acp-socket'] }
+      : { path: coldSocket, dir: join(dshHome, 'run', 'dsh-pi-tui', coldScopeId) }
+    const cold = await openClient('ASP-14', () => {})
+    await cold.client.request(acp.methods.agent.session.load, {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt: null,
+    })
+    const coldBootFrom = readC1WorkEvents(coldWorkRoot).length
+    const coldPrompt = await cold.client.request(acp.methods.agent.session.prompt, {
+      sessionId: sessionA, prompt: [{ type: 'text', text: 'asp-cold-resume' }],
+    })
+    requireFact(coldPrompt?.stopReason === 'end_turn', 'ASP-14: the cold null resume must serve a real turn')
+    const coldBootRequest = await sessionMarker(sessionA, 'ASP-14 cold resume request',
+      request => allMarkerCounts(request).every(count => count === 0), coldBootFrom, 'asp-cold-resume', coldWorkRoot)
+    requireFact(coldBootRequest.sessionId === sessionA, 'ASP-14: the cold resume must keep the exact Session id')
+    requireFact(coldBootRequest.harnessIdentity === true && coldBootRequest.systemLength > 0,
+      'ASP-14: an omitted/null cold resume uses the Host effective default instructions')
+    requireFact(systemNodes(sessionA).some(node => JSON.stringify(node).includes(markerOf('A'))),
+      'ASP-14: the original canonical system record is retained (never rewritten)')
+    await cold.client.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    await cold.client.request(acp.methods.agent.session.load, {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt: appendRequest('I'),
+    })
+    const coldResendFrom = readC1WorkEvents(coldWorkRoot).length
+    const coldResendPrompt = await cold.client.request(acp.methods.agent.session.prompt, {
+      sessionId: sessionA, prompt: [{ type: 'text', text: 'asp-cold-resend' }],
+    })
+    requireFact(coldResendPrompt?.stopReason === 'end_turn', 'ASP-14: the explicit cold resend must serve a real turn')
+    const coldResendRequest = await sessionMarker(sessionA, 'ASP-14 cold resend request',
+      request => request.markers?.I === 1, coldResendFrom, 'asp-cold-resend', coldWorkRoot)
+    assertOnly(coldResendRequest, 'ASP-14 cold resend request', 'I')
+    requireFact(coldResendRequest.markers?.A === 0, 'ASP-14: the pre-restart append is never resurrected')
+    await cold.client.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    await closeClient(cold.client)
+    requireFact(!host.exited, 'ASP-14: the cold Host must survive the cold resume')
+    await coldPeer.shutdown()
 
     const result = {
       status: 'PASS',
@@ -563,6 +635,9 @@ export async function runAcpSystemPromptAppend(context) {
       nullCleared: true,
       coldLoadNoCarrier: true,
       explicitResendApplied: true,
+      coldHostRestart: true,
+      coldResumeNoCarrier: true,
+      coldResendOnce: true,
       completePresetSuppressed: true,
       offRetired: true,
       onFreshView: true,
@@ -587,6 +662,8 @@ export async function runAcpSystemPromptAppend(context) {
         resendRequest,
         completeRequest,
         offRequest,
+        coldBootRequest,
+        coldResendRequest,
       },
     }
     context.trace(`${CASE_ID}/evidence`, result)

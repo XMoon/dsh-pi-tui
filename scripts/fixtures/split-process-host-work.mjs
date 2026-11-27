@@ -461,7 +461,7 @@ function recordPromptFacts(options) {
  * request is the real sink; a count is kept per marker so a sibling/child or a
  * retired generation can never pass by sharing one aggregate value.
  */
-const ACP_SYSTEM_PROMPT_MARKER_IDS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+const ACP_SYSTEM_PROMPT_MARKER_IDS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
 
 /** The exact marker text one ACP append case sends for a suffix. */
 function acpSystemPromptMarker(id) {
@@ -470,6 +470,18 @@ function acpSystemPromptMarker(id) {
 
 /** Sanitized model-facing facts of ONE real request in this scenario. */
 function acpSystemPromptRequestFacts(options, sessionId) {
+  // The exact current authored user prompt correlates this sample with the
+  // case-owned turn/step that triggered it; the digest is not user data.
+  const reversed = [...(options.messages ?? [])].reverse()
+  // Runtime-context injections are also user-role messages; prefer the
+  // user-authored source exactly like the durable prompt facts do.
+  const authored = reversed.find(message => message?.role === 'user' && message?.source?.kind === 'user')
+    ?? reversed.find(message => message?.role === 'user')
+  const userPrompt = authored === undefined ? '' : allUserText([authored])
+  // The case owns its prompt tags; the official TUI may append runtime-context
+  // injections to the same user message, so the tag (not the whole digest) is
+  // the stable correlation fact.
+  const promptTag = /(asp-[a-z0-9-]+)/u.exec(userPrompt)?.[1]
   const systemChannel = textOf(options.system)
   const historyChannel = (options.messages ?? [])
     .filter(message => message?.role === 'system')
@@ -488,6 +500,7 @@ function acpSystemPromptRequestFacts(options, sessionId) {
     systemSha256: createHash('sha256').update(systemText).digest('hex'),
     harnessIdentity: systemText.includes('You are an AI agent powered by DeepSeek Harness.'),
     literalPreserved: systemText.includes('{{literal}}'),
+    promptTag,
     afterTool: Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool',
   }
 }

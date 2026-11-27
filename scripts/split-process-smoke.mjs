@@ -882,7 +882,7 @@ export function assertSelectedVerdict(caseId, result) {
   }
   if (caseId === 'acp.system-prompt-append') {
     const evidence = result?.evidence
-    const zero = request => ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+    const zero = request => ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
       .every(id => (request?.markers?.[id] ?? 0) === 0)
     assert(result?.status === 'PASS'
       && result?.scope === 'REAL_SPLIT_PROCESS_L6'
@@ -900,6 +900,9 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.nullCleared === true
       && result?.coldLoadNoCarrier === true
       && result?.explicitResendApplied === true
+      && result?.coldHostRestart === true
+      && result?.coldResumeNoCarrier === true
+      && result?.coldResendOnce === true
       && result?.completePresetSuppressed === true
       && result?.offRetired === true
       && result?.onFreshView === true
@@ -921,6 +924,11 @@ export function assertSelectedVerdict(caseId, result) {
       && zero(evidence?.cleared)
       && zero(evidence?.coldRequest)
       && evidence?.resendRequest?.markers?.D === 1
+      && evidence?.coldBootRequest?.sessionId === result?.sessionA
+      && zero(evidence?.coldBootRequest)
+      && evidence.coldBootRequest.harnessIdentity === true
+      && evidence?.coldResendRequest?.markers?.I === 1
+      && evidence.coldResendRequest.markers.A === 0
       && evidence?.completeRequest?.markers?.E === 0
       && evidence.completeRequest.harnessIdentity === false
       && evidence?.offRequest?.markers?.G === 1,

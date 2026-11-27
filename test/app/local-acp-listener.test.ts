@@ -545,6 +545,61 @@ test('initialize advertises the client system prompt append only for the real sc
   }
 })
 
+test('a cancelled fresh attach during its initial config read retires the append and releases the reservation', async t => {
+  const { scope } = newScope(t)
+  let releaseConfig: (() => void) | undefined
+  let configReads = 0
+  const fake = makeFakeAccess({
+    systemPromptAppend: true,
+    modelOptions: async () => {
+      configReads += 1
+      if (configReads === 1) {
+        return await new Promise<never[]>(resolve => {
+          releaseConfig = () => resolve([])
+        })
+      }
+      return []
+    },
+  })
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access, views: registry })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/new',
+      params: {
+        cwd: '/host/proj',
+        mcpServers: [],
+        systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'CANCELLED_APPEND' }] },
+      },
+    })
+    await waitForFact(() => fake.systemPromptAppendRegistrations.length === 1 ? true : undefined, 'the committed append registration')
+    await waitForFact(() => configReads === 1 ? true : undefined, 'the held initial config read')
+    assert.equal(registry.hasClaim('session-1'), true, 'the fresh claim is attached while the config read is held')
+    // A real SDK request cancellation during the held post-commit config read.
+    client.send({ jsonrpc: '2.0', method: '$/cancel_request', params: { requestId: 2 } })
+    await waitForFact(() => fake.systemPromptAppendRegistrations[0]?.disposeCalls === 1 ? true : undefined, 'the cancelled append retirement')
+    assert.equal(registry.hasClaim('session-1'), false, 'the cancelled attach leaves no live claim')
+    releaseConfig?.()
+    // The SAME Session is immediately attachable: no phantom claim, no stale BUSY slot.
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/resume', params: { sessionId: 'session-1', cwd: '/host/proj' } })
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; result?: unknown; error?: { code?: number; data?: { code?: string } } }
+      if (frame.id !== 3) continue
+      assert.equal(frame.error, undefined, `the cancelled Session must be attachable again: ${JSON.stringify(frame.error)}`)
+      assert.equal(typeof frame.result, 'object', 'the recovery attach settles with a real result')
+      break
+    }
+  } finally {
+    client.close()
+  }
+})
+
 test('two connections reuse JSON-RPC id 1 independently and one closing does not affect the other', async t => {
   const { scope } = newScope(t)
   const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })

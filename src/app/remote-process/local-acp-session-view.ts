@@ -1125,8 +1125,20 @@ interface AcpSystemPromptAppendRegistration {
   active: boolean
   /** True only after this exact View generation committed. */
   committed: boolean
-  /** The exact official disposer; replaced after `section()` returns. */
-  dispose: () => void
+  /**
+   * The exact official disposer. It is ABSENT while the synchronous `section()`
+   * call has not returned; that pending window is a real retirement responsibility
+   * and never a fictitious empty terminal.
+   */
+  dispose?: () => void
+  /** A detach/replacement requested retirement while `section()` was returning. */
+  retireRequested: boolean
+  /**
+   * The exact owning Cordis scope was destroyed (`onAgentDisposed`): that
+   * destruction is the terminal, so the late returned disposer must not be
+   * fabricated as a second retirement.
+   */
+  scopeTerminal: boolean
 }
 
 /** One reservation held by exactly one connection. Its object identity IS the reservation identity. */
@@ -1719,6 +1731,8 @@ function turnEndUserAborted(data: unknown): boolean {
  */
 export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private readonly claims = new Map<string, ViewClaim>()
+  /** Request-abort watchers that must be removed at the wire terminal. */
+  private readonly attachAbortWatchers = new WeakMap<AbortSignal, () => void>()
   /** Waiters for "every claim's Host work settled" (listener retirement). */
   private readonly workWaiters = new Set<PromiseWithResolvers<void>>()
   /** The ONE Host fact/approval subscription of this registry (R701-03). */
@@ -2322,6 +2336,14 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       this.resetIdleIfCurrent(state, op)
       throw error instanceof AcpScopedMcpError ? mapScopedMcpError(error) : error
     }
+    // A request the client already cancelled owns no Host effect; the attach
+    // generation still returns to idle before the cancellation propagates.
+    try {
+      requestSignal?.throwIfAborted()
+    } catch (error) {
+      this.resetIdleIfCurrent(state, op)
+      throw error
+    }
 
     const workspace = await access.createWorkspace(request.cwd)
     if (workspace.kind === 'indeterminate') {
@@ -2368,6 +2390,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // newer operation owns it); do not hold a claim for a dead/superseded op.
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP connection closed before the session view attached', JSONRPC_INVALID_PARAMS, { sessionId })
     }
+    // The Session EXISTS with this exact id; a cancellation from here on
+    // preserves it in the error instead of pretending nothing was created.
+    if (this.attachAborted(requestSignal)) {
+      this.resetIdleIfCurrent(state, op)
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP attach request was cancelled after the Host created the session', JSONRPC_INVALID_PARAMS, { sessionId })
+    }
     if (this.claims.has(sessionId)) {
       this.resetIdleIfCurrent(state, op)
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_ALREADY_ATTACHED', 'the new session is already attached to an ACP view', JSONRPC_INVALID_PARAMS)
@@ -2381,6 +2409,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const agent = await this.resolveForView(access, state, op, claim)
     claim.exactAgent = agent
     claim.exactSession = agent.session
+    if (this.attachAborted(requestSignal)) this.abortAttach(state, op, claim, access)
     if (request.mcpServers.length > 0) {
       try {
         await this.installScopedMcp(state, op, claim, access, agent, request.mcpServers, requestSignal)
@@ -2389,6 +2418,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         this.resetIdleIfCurrent(state, op)
         throw error
       }
+      if (this.attachAborted(requestSignal)) this.abortAttach(state, op, claim, access)
     }
     try {
       this.installSystemPromptAppend(state, op, claim, access, agent, systemPromptAppend)
@@ -2400,6 +2430,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       this.resetIdleIfCurrent(state, op)
       throw error
     }
+    if (this.attachAborted(requestSignal)) this.abortAttach(state, op, claim, access)
     this.commitAttached(state, op, claim, access, agent, channels)
     this.scheduleCatalogRefresh(claim, access)
     return { sessionId }
@@ -2456,6 +2487,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
       claim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
       this.claims.set(sessionId, claim)
+      if (this.attachAborted(requestSignal)) {
+        this.releaseReservation(state, claim)
+        this.resetIdleIfCurrent(state, op)
+        throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP attach request was cancelled', JSONRPC_INVALID_PARAMS, { sessionId })
+      }
     }
     if (previous !== undefined) this.admitRefreshDispatch(state, op, claim, previous, access, requestSignal)
     const agent = await this.resolveForView(access, state, op, claim)
@@ -2467,6 +2503,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     claim.exactAgent = agent
     claim.exactSession = agent.session
+    if (this.attachAborted(requestSignal)) this.abortAttach(state, op, claim, access)
     if (request.mcpServers !== undefined && request.mcpServers.length > 0) {
       try {
         await this.installScopedMcp(state, op, claim, access, agent, request.mcpServers, requestSignal)
@@ -2475,6 +2512,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         this.resetIdleIfCurrent(state, op)
         throw error
       }
+      if (this.attachAborted(requestSignal)) this.abortAttach(state, op, claim, access)
     }
     try {
       this.installSystemPromptAppend(state, op, claim, access, agent, systemPromptAppend)
@@ -2485,6 +2523,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       this.resetIdleIfCurrent(state, op)
       throw error
     }
+    if (this.attachAborted(requestSignal)) this.abortAttach(state, op, claim, access)
     this.commitAttached(state, op, claim, access, agent, channels)
     // A resumed View re-reads the OFFICIAL continued projection: every call
     // that is still answerable is offered once on THIS connection, in official
@@ -2569,6 +2608,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
       claim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
       this.claims.set(sessionId, claim)
+      if (this.attachAborted(requestSignal)) {
+        this.releaseReservation(state, claim)
+        this.resetIdleIfCurrent(state, op)
+        throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP attach request was cancelled', JSONRPC_INVALID_PARAMS, { sessionId })
+      }
     }
     if (previous !== undefined) this.admitRefreshDispatch(state, op, claim, previous, access, requestSignal)
     const agent = await this.resolveForView(access, state, op, claim)
@@ -2578,6 +2622,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     claim.exactAgent = agent
     claim.exactSession = agent.session
+    if (this.attachAborted(requestSignal)) this.abortAttach(state, op, claim, access)
     if (request.mcpServers.length > 0) {
       try {
         await this.installScopedMcp(state, op, claim, access, agent, request.mcpServers, requestSignal)
@@ -2586,6 +2631,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         this.resetIdleIfCurrent(state, op)
         throw error
       }
+      if (this.attachAborted(requestSignal)) this.abortAttach(state, op, claim, access)
     }
     try {
       this.installSystemPromptAppend(state, op, claim, access, agent, systemPromptAppend)
@@ -2596,6 +2642,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       this.resetIdleIfCurrent(state, op)
       throw error
     }
+    if (this.attachAborted(requestSignal)) this.abortAttach(state, op, claim, access)
     // REPLAY_BARRIER_OPEN: committed BEFORE the View becomes attached, so no
     // live update of this Session can ever precede the canonical snapshot.
     const replay: ViewReplay = { buffered: [], subagents: [], abort: new AbortController(), overflowed: false, stopped: false }
@@ -3642,13 +3689,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     text: string | undefined,
   ): void {
     if (text === undefined) return
-    const registration: AcpSystemPromptAppendRegistration = { active: true, committed: false, dispose: () => {} }
+    const registration: AcpSystemPromptAppendRegistration = {
+      active: true,
+      committed: false,
+      retireRequested: false,
+      scopeTerminal: false,
+    }
     claim.systemPromptAppend = registration
     let handle: { readonly dispose: () => void }
     try {
       handle = access.registerSystemPromptAppend(agent, agent.session, text,
         () => this.systemPromptAppendLive(state, claim, registration))
     } catch (error) {
+      // The official effect rolled back inside `section()` (G0-c), so there is
+      // no live contribution and no pending terminal to wait for.
       if (claim.systemPromptAppend === registration) claim.systemPromptAppend = undefined
       registration.active = false
       if (error instanceof AcpSystemPromptAppendError && error.kind === 'stale') {
@@ -3671,21 +3725,30 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     registration.dispose = handle.dispose
     const current = claim.systemPromptAppend === registration
+      && registration.retireRequested !== true
       && this.isCurrentOp(state, op)
       && this.claims.get(claim.sessionId) === claim
       && claim.connectionIdentity === state
       && claim.detachedWithFence !== true
     if (current) return
-    // A reentrant close/EOF/replacement retired the responsibility while the
-    // exact disposer was still being returned: the late disposer settles it and
-    // the stale claim never commits.
+    // A reentrant close/EOF/replacement committed its logical fence while the
+    // official call was still returning. The REAL handle is settled exactly
+    // once here (never the fictitious placeholder), and only then is this exact
+    // claim generation released. A reentrantly created successor is never
+    // touched: the release paths re-check the claim object identity.
     if (claim.systemPromptAppend === registration) claim.systemPromptAppend = undefined
     registration.active = false
-    try {
-      handle.dispose()
-    } catch {
-      this.diag.warn('local-acp.system-prompt-retire-notification-failed', { reason: 'change-notification' })
+    registration.committed = false
+    const dispose = registration.dispose
+    registration.dispose = undefined
+    if (registration.scopeTerminal !== true) {
+      try {
+        dispose?.()
+      } catch {
+        this.diag.warn('local-acp.system-prompt-retire-notification-failed', { reason: 'change-notification' })
+      }
     }
+    this.releaseClaimWithMcp(state, claim, access)
     throw new LocalAcpViewError(
       'LOCAL_ACP_VIEW_CLOSED',
       'the ACP view was released before it attached',
@@ -3702,17 +3765,29 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * exact removal; it is observed with a stable content-free reason and never
    * reported as a clean call. The responsibility is cleared only afterwards.
    */
-  private retireSystemPromptAppend(claim: ViewClaim): void {
+  private retireSystemPromptAppend(claim: ViewClaim): 'none' | 'pending' | 'settled' {
     const append = claim.systemPromptAppend
-    if (append === undefined) return
-    claim.systemPromptAppend = undefined
+    if (append === undefined) return 'none'
     append.active = false
     append.committed = false
+    if (append.dispose === undefined) {
+      // The synchronous `section()` call has not returned its exact disposer
+      // yet. Keep the retirement responsibility on the claim: a release path
+      // that deleted it now would let the real contribution outlive the View.
+      append.retireRequested = true
+      return 'pending'
+    }
+    claim.systemPromptAppend = undefined
+    const dispose = append.dispose
+    append.dispose = undefined
     try {
-      append.dispose()
+      dispose()
     } catch {
+      // G0-c proved the installed official scoped layer runs its undo BEFORE the
+      // change notification; this observed throw follows the exact removal.
       this.diag.warn('local-acp.system-prompt-retire-notification-failed', { reason: 'change-notification' })
     }
+    return 'settled'
   }
 
   /**
@@ -3981,15 +4056,28 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   /** Release one settled claim and record the idempotent close fact. */
   private finishClose(state: ConnectionViewState, sessionId: string, claim: ViewClaim): Record<string, never> {
     if (this.claims.get(sessionId) !== claim || claim.detachedWithFence || state.phase === 'closed') return {}
+    const op = state.op
     // The real detach boundary retires the official scoped contribution before
     // the View is gone; an assembled system request already sampled stays as it was.
-    this.retireSystemPromptAppend(claim)
+    const append = this.retireSystemPromptAppend(claim)
+    // A reentrant close/replacement from the official change notification owns
+    // the newer state; this close must never overwrite it.
+    if (this.claims.get(sessionId) !== claim || state.op !== op) return {}
     // A closed View owns no connection output or reverse Form any more.
     claim.notifyConfigUpdate = undefined
     // The read-only projection sink dies with the detach: a queued projection
     // is dropped and a still-open load replay is invalidated here.
     this.stopProjectionOutput(claim)
     this.releaseQuestionForms(claim)
+    if (append === 'pending') {
+      // The synchronous section call has not returned its exact disposer yet.
+      // Keep this exact claim as the retirement fence; the install settles the
+      // real handle and releases only this object, never a successor.
+      claim.detachedWithFence = true
+      this.notifyWorkSettled()
+      state.phase = 'idle'
+      return {}
+    }
     // A transient terminal fact may still outlive the View: a retired-turn
     // approval fence (F2) or an unclaimed Host obligation (v1.1). The View
     // detaches, but the claim survives so a LATE approval of that exact
@@ -6239,6 +6327,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (append !== undefined) {
         append.active = false
         append.committed = false
+        // The exact owning Cordis scope is being destroyed: that destruction is
+        // the retirement terminal, so no late official disposer is fabricated.
+        append.scopeTerminal = true
+        append.dispose = undefined
         claim.systemPromptAppend = undefined
       }
       // The disposed Agent can neither ask nor accept an answer any more: every
@@ -6521,7 +6613,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (claim.connectionIdentity !== state) continue
       // EOF/Off/replacement loses the ACP contribution immediately; its exact
       // retirement settles independently of the Host obligation fences below.
-      this.retireSystemPromptAppend(claim)
+      const append = this.retireSystemPromptAppend(claim)
       // A physical teardown/Off/replacement ends this connection's notification
       // capability, every reverse Form/continued obligation and every queued
       // read-only projection immediately, even when the claim survives for a
@@ -6530,6 +6622,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       claim.notifyConfigUpdate = undefined
       this.stopProjectionOutput(claim)
       this.releaseQuestionForms(claim)
+      if (append === 'pending') {
+        // The exact official disposer is still returning: the claim stays as
+        // the retirement fence and the install settles it.
+        claim.detachedWithFence = true
+        this.notifyWorkSettled()
+        continue
+      }
       const bound = access ?? this.access
       // An in-flight MCP admission is not cancellable synchronously; commit the
       // retirement intent and keep the reservation until its late result owns
@@ -6796,6 +6895,22 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
+   * Retire ONE fresh ordinary attach generation whose initial config read was
+   * cancelled after the View committed. Only the exact claim object is touched:
+   * its append is retired through the real official disposer and a real MCP
+   * lease keeps its own fence; a reentrant successor or another connection's
+   * View is never released by `sessionId`.
+   */
+  retireFailedAttach(state: ConnectionViewState, sessionId: string, access: HostAcpSessionAccess): void {
+    const claim = this.claims.get(sessionId)
+    if (claim === undefined || claim.connectionIdentity !== state) return
+    const op = state.op
+    this.releaseClaimWithMcp(state, claim, access)
+    if (state.op === op && (state.phase === 'attaching' || state.phase === 'attached')) state.phase = 'idle'
+    this.notifyWorkSettled()
+  }
+
+  /**
    * Retire ONE exact fresh claim generation (a reattach's post-attach failure or
    * its request cancellation). The claim identity is re-checked, so a claim
    * this request did not create — a concurrent close's fence, another
@@ -6804,17 +6919,24 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    */
   private retireClaimGeneration(state: ConnectionViewState, claim: ViewClaim): void {
     if (this.claims.get(claim.sessionId) !== claim || claim.detachedWithFence === true) return
-    this.retireSystemPromptAppend(claim)
+    const op = state.op
+    const append = this.retireSystemPromptAppend(claim)
+    if (this.claims.get(claim.sessionId) !== claim) return
     claim.notifyConfigUpdate = undefined
     this.stopProjectionOutput(claim)
     this.releaseQuestionForms(claim)
+    if (append === 'pending') {
+      claim.detachedWithFence = true
+      this.notifyWorkSettled()
+      return
+    }
     this.claims.delete(claim.sessionId)
     // A cancellation can land while the fresh claim is still ATTACHING (the
     // official resolve is a real Host await): the connection must return to
     // idle in that phase too, otherwise the listener's slot release and the
     // eight-slot budget would leak an orphaned View. `closed` keeps its own
     // teardown owner.
-    if (state.phase === 'attaching' || state.phase === 'attached') state.phase = 'idle'
+    if (state.op === op && (state.phase === 'attaching' || state.phase === 'attached')) state.phase = 'idle'
     this.notifyWorkSettled()
   }
 
@@ -6829,7 +6951,21 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    */
   private watchRefreshAbort(state: ConnectionViewState, claim: ViewClaim, signal?: AbortSignal): void {
     if (signal === undefined) return
-    signal.addEventListener('abort', () => { this.retireClaimGeneration(state, claim) }, { once: true })
+    const listener = (): void => { this.retireClaimGeneration(state, claim) }
+    signal.addEventListener('abort', listener, { once: true })
+    this.attachAbortWatchers.set(signal, () => { signal.removeEventListener('abort', listener) })
+  }
+
+  /**
+   * Remove the request-abort watcher at the wire request's terminal. A signal
+   * that aborts AFTER the response must never retire a committed View.
+   */
+  clearAttachAbort(signal?: AbortSignal): void {
+    if (signal === undefined) return
+    const remove = this.attachAbortWatchers.get(signal)
+    if (remove === undefined) return
+    this.attachAbortWatchers.delete(signal)
+    remove()
   }
 
   /**
@@ -6972,6 +7108,32 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
+   * The exact attach request was cancelled: release ONLY its own fresh claim
+   * generation (never a successor, never a Host Session/Agent) and return the
+   * connection to idle before the cancellation propagates. A claim with a real
+   * MCP lease keeps its exact retirement fence.
+   */
+  private attachAborted(signal: AbortSignal | undefined): boolean {
+    return signal?.aborted === true
+  }
+
+  private abortAttach(
+    state: ConnectionViewState,
+    op: number,
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+  ): never {
+    this.releaseClaimWithMcp(state, claim, access)
+    this.resetIdleIfCurrent(state, op)
+    throw new LocalAcpViewError(
+      'LOCAL_ACP_VIEW_CLOSED',
+      'the ACP attach request was cancelled',
+      JSONRPC_INVALID_PARAMS,
+      { sessionId: claim.sessionId },
+    )
+  }
+
+  /**
    * Resolve one Session to its live Agent through the sole official owner,
    * releasing the reservation and classifying every failure. A closed,
    * superseded or already-released operation owns no claim even if its await
@@ -7095,7 +7257,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * a stale operation's late release must not delete the newer claim.
    */
   private releaseReservation(state: ConnectionViewState, claim: ViewClaim): void {
-    this.retireSystemPromptAppend(claim)
+    const append = this.retireSystemPromptAppend(claim)
+    if (this.claims.get(claim.sessionId) !== claim) return
+    if (append === 'pending') {
+      claim.detachedWithFence = true
+      this.notifyWorkSettled()
+      return
+    }
     if (claim.commandOperation !== undefined || claim.policyWrite !== undefined
       || claim.mcpMountPending === true || claim.mcpLease !== undefined) {
       claim.detachedWithFence = true
@@ -7110,7 +7278,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   /** Release a failed commit while preserving any exact MCP lease it owns. */
   private releaseClaimWithMcp(state: ConnectionViewState, claim: ViewClaim, access: HostAcpSessionAccess): void {
-    this.retireSystemPromptAppend(claim)
+    const append = this.retireSystemPromptAppend(claim)
+    if (append === 'pending') {
+      claim.detachedWithFence = true
+      this.notifyWorkSettled()
+      return
+    }
     if (claim.mcpLease !== undefined) {
       claim.detachedWithFence = true
       this.requestMcpRetire(claim, access)

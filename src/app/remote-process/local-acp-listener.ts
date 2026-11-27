@@ -1237,17 +1237,43 @@ function buildAgentApp(
       try {
         requireInitialized()
         view = createSessionViewSlot(slots, views)
-        beginSlotRequest(view)
+        // The fresh attach owns the slot exclusively through its initial config
+        // read: no same-slot prompt/config can start on a generation whose
+        // attach response the client has not received yet.
+        beginSlotRefresh(view)
         const result = await views.newSession(view, access, params, viewChannelsFor(client), signal)
-        const config = await readConfigStateOrLog(result.sessionId, view)
-        return { ...result, ...config }
+        const sessionId = result.sessionId
+        const attachedView = view
+        const onAbort = (): void => { views.retireFailedAttach(attachedView, sessionId, access) }
+        signal.addEventListener('abort', onAbort, { once: true })
+        try {
+          if (signal.aborted) {
+            views.retireFailedAttach(attachedView, sessionId, access)
+            signal.throwIfAborted()
+          }
+          const config = await readConfigStateOrLog(sessionId, attachedView)
+          if (signal.aborted) {
+            views.retireFailedAttach(attachedView, sessionId, access)
+            signal.throwIfAborted()
+          }
+          return { ...result, ...config }
+        } catch (error) {
+          // A committed fresh attach whose initial config terminal failed also
+          // retires exactly this generation; the client never saw a success.
+          views.retireFailedAttach(attachedView, sessionId, access)
+          throw error
+        } finally {
+          signal.removeEventListener('abort', onAbort)
+        }
       } catch (error) {
         throw asRequestError(error)
       } finally {
         if (view !== undefined) {
-          endSlotRequest(view)
+          if (activityOf(view).refreshing) endSlotRefresh(view)
+          else endSlotRequest(view)
           releaseIdleViewSlot(slots, views, view)
         }
+        views.clearAttachAbort(signal)
         endRequest('control')
       }
     })
@@ -1280,10 +1306,31 @@ function buildAgentApp(
           }
         }
         view = createSessionViewSlot(slots, views)
-        beginSlotRequest(view)
+        beginSlotRefresh(view)
         const result = await views.resumeSession(view, access, params, viewChannelsFor(client), signal)
-        const config = await readConfigStateOrLog(params.sessionId, view)
-        return { ...result, ...config }
+        const attachedView = view
+        const sessionId = params.sessionId
+        const onAbort = (): void => { views.retireFailedAttach(attachedView, sessionId, access) }
+        signal.addEventListener('abort', onAbort, { once: true })
+        try {
+          if (signal.aborted) {
+            views.retireFailedAttach(attachedView, sessionId, access)
+            signal.throwIfAborted()
+          }
+          const config = await readConfigStateOrLog(sessionId, attachedView)
+          if (signal.aborted) {
+            views.retireFailedAttach(attachedView, sessionId, access)
+            signal.throwIfAborted()
+          }
+          return { ...result, ...config }
+        } catch (error) {
+          // A committed fresh attach whose initial config terminal failed also
+          // retires exactly this generation; the client never saw a success.
+          views.retireFailedAttach(attachedView, sessionId, access)
+          throw error
+        } finally {
+          signal.removeEventListener('abort', onAbort)
+        }
       } catch (error) {
         throw asRequestError(error)
       } finally {
@@ -1292,6 +1339,7 @@ function buildAgentApp(
           else endSlotRequest(view)
           releaseIdleViewSlot(slots, views, view)
         }
+        views.clearAttachAbort(signal)
         endRequest('control')
       }
     })
@@ -1332,10 +1380,31 @@ function buildAgentApp(
           }
         }
         view = createSessionViewSlot(slots, views)
-        beginSlotRequest(view)
+        beginSlotRefresh(view)
         const result = await views.loadSession(view, access, params, viewChannelsFor(client), signal)
-        const config = await readConfigStateOrLog(params.sessionId, view)
-        return { ...result, ...config }
+        const attachedView = view
+        const sessionId = params.sessionId
+        const onAbort = (): void => { views.retireFailedAttach(attachedView, sessionId, access) }
+        signal.addEventListener('abort', onAbort, { once: true })
+        try {
+          if (signal.aborted) {
+            views.retireFailedAttach(attachedView, sessionId, access)
+            signal.throwIfAborted()
+          }
+          const config = await readConfigStateOrLog(sessionId, attachedView)
+          if (signal.aborted) {
+            views.retireFailedAttach(attachedView, sessionId, access)
+            signal.throwIfAborted()
+          }
+          return { ...result, ...config }
+        } catch (error) {
+          // A committed fresh attach whose initial config terminal failed also
+          // retires exactly this generation; the client never saw a success.
+          views.retireFailedAttach(attachedView, sessionId, access)
+          throw error
+        } finally {
+          signal.removeEventListener('abort', onAbort)
+        }
       } catch (error) {
         throw asRequestError(error)
       } finally {
@@ -1344,6 +1413,7 @@ function buildAgentApp(
           else endSlotRequest(view)
           releaseIdleViewSlot(slots, views, view)
         }
+        views.clearAttachAbort(signal)
         endRequest('control')
       }
     })

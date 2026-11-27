@@ -253,8 +253,14 @@ class FakeAccess implements HostAcpSessionAccess {
     text: string,
     stillCurrent: () => boolean,
   ) => void = () => {}
-  /** Inject the official change-notification throw after the effect undo. */
+  /**
+   * Reproduce a change-notification-style throw from the disposer. The REAL
+   * undo-before-notification order belongs to the installed official effect and
+   * is proven by the G0-c probe, not by this fake.
+   */
   systemPromptDisposeThrows = false
+  /** Observe/re-enter from inside the exact disposer's official notification. */
+  systemPromptDisposeImpl: (() => void) | undefined
 
   supportsSystemPromptAppend(): boolean { return this.systemPromptAppendEnabled }
 
@@ -270,6 +276,7 @@ class FakeAccess implements HostAcpSessionAccess {
     return {
       dispose: () => {
         registration.disposeCalls += 1
+        this.systemPromptDisposeImpl?.()
         if (this.systemPromptDisposeThrows) throw new Error('injected change notification throw')
       },
     }
@@ -838,7 +845,7 @@ test('a failed append registration fails the attach with the real session identi
   assert.equal(registry.hasClaim('S46'), false)
 })
 
-test('a change-notification throw at disposer time still follows the exact retirement and never blocks a successor', async () => {
+test('a disposer-time notification throw is observed and never blocks a successor (official undo order: G0-c)', async () => {
   const access = new FakeAccess()
   access.createSessionImpl = async () => {
     access.seed(makeAgent('S47', '/work/a'))
@@ -900,6 +907,58 @@ test('same-connection reattach retires the outgoing append before the replacemen
   assert.equal(registry.hasClaim('S50'), false)
 })
 
+test('an already-cancelled ordinary attach performs no Host effect and returns the connection to idle', async () => {
+  const access = new FakeAccess()
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(
+    registry.newSession(conn, access, {
+      ...NEW,
+      systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'PRE_ABORT' }] },
+    }, { systemPromptAppend: true }, controller.signal),
+  )
+  assert.deepEqual(access.createWorkspaceCalls, [], 'a pre-cancelled attach never creates a Workspace')
+  assert.deepEqual(access.createSessionCalls, [], 'a pre-cancelled attach never creates a Session')
+  assert.equal(registry.claimCount(), 0)
+  assert.equal(registry.phaseOf(conn), 'idle')
+})
+
+test('a cancelled ordinary attach releases its reservation and never registers the append', async () => {
+  const access = new FakeAccess()
+  access.createSessionImpl = async () => {
+    access.seed(makeAgent('S51', '/work/a'))
+    return { kind: 'created', sessionId: 'S51' }
+  }
+  const entered = deferred<void>()
+  const held = deferred<{ agent: LiveAgentViewIdentity }>()
+  access.resolveAgentImpl = async () => {
+    entered.resolve()
+    return await held.promise
+  }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  const controller = new AbortController()
+  const attempt = registry.newSession(conn, access, {
+    ...NEW,
+    systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'CANCELLED' }] },
+  }, { systemPromptAppend: true }, controller.signal)
+  await entered.promise
+  assert.equal(registry.claimCount(), 1, 'the fresh reservation exists while the official resolve is pending')
+  controller.abort()
+  held.resolve({ agent: access.currentAgent('S51') as LiveAgentViewIdentity })
+  await assert.rejects(
+    attempt,
+    (error: unknown) => error instanceof LocalAcpViewError
+      && error.code === 'LOCAL_ACP_VIEW_CLOSED'
+      && error.data.sessionId === 'S51',
+  )
+  assert.equal(registry.claimCount(), 0, 'the cancelled reservation never commits')
+  assert.equal(registry.phaseOf(conn), 'idle')
+  assert.equal(access.systemPromptAppendRegistrations.length, 0, 'a cancelled attach never registers the append')
+})
+
 test('a reentrant close during append registration settles the late exact handle and refuses the stale commit', async () => {
   const access = new FakeAccess()
   access.createSessionImpl = async () => {
@@ -909,11 +968,15 @@ test('a reentrant close during append registration settles the late exact handle
   const registry = new AcpSessionViewRegistry(QUIET_DIAG)
   const conn = registry.createConnection()
   const stillCurrentSamples: boolean[] = []
+  let claimsDuringRegistration = -1
   access.registerSystemPromptAppendImpl = (_agent, _session, _text, stillCurrent) => {
     stillCurrentSamples.push(stillCurrent())
     // A synchronous `system-prompt/change` listener re-enters close while the
     // official section call is still returning its exact disposer.
     void registry.closeSession(conn, access, 'S46')
+    // The close committed its logical fence but MUST keep this exact claim as
+    // the retirement responsibility until the real handle settles.
+    claimsDuringRegistration = registry.claimCount()
     stillCurrentSamples.push(stillCurrent())
   }
   await assert.rejects(
@@ -927,6 +990,8 @@ test('a reentrant close during append registration settles the late exact handle
   )
   assert.deepEqual(stillCurrentSamples, [false, false],
     'the provider is invisible before the commit and after the reentrant close')
+  assert.equal(claimsDuringRegistration, 1,
+    'the reentrant close keeps the exact claim fenced until the real disposer returns')
   assert.equal(access.systemPromptAppendRegistrations.length, 1)
   assert.equal(access.systemPromptAppendRegistrations[0]?.disposeCalls, 1,
     'the late returned exact disposer settles the abandoned registration exactly once')
@@ -940,6 +1005,49 @@ test('a reentrant close during append registration settles the late exact handle
   }, { systemPromptAppend: true })
   assert.equal(access.systemPromptAppendRegistrations.length, 2)
   assert.equal(access.systemPromptAppendRegistrations[1]?.disposeCalls, 0)
+})
+
+test('a reentrant close inside the exact disposer notification never clobbers the closed View', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S48', '/work/a')
+  access.seed(agent)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  await registry.resumeSession(conn, access, {
+    sessionId: 'S48', cwd: '/work/a',
+    systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'DISPOSE' }] },
+  }, { systemPromptAppend: true })
+  const registration = access.systemPromptAppendRegistrations[0]
+  let nestedCloses = 0
+  access.systemPromptDisposeImpl = () => {
+    nestedCloses += 1
+    // The official change notification runs AFTER the scoped undo (G0-c); a
+    // synchronous listener re-enters close while the disposer is returning.
+    void registry.closeSession(conn, access, 'S48')
+  }
+  await registry.closeSession(conn, access, 'S48')
+  assert.equal(nestedCloses, 1)
+  assert.equal(registration?.disposeCalls, 1, 'the exact disposer runs exactly once')
+  assert.equal(registry.claimCount(), 0, 'the inner close owns the terminal; the outer never resurrects the claim')
+  assert.equal(registry.phaseOf(conn), 'idle')
+})
+
+test('Agent disposal while an append is live is the terminal and does not fabricate a disposer call', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S49', '/work/a')
+  access.seed(agent)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const conn = registry.createConnection()
+  await registry.resumeSession(conn, access, {
+    sessionId: 'S49', cwd: '/work/a',
+    systemPrompt: { mode: 'append', content: [{ type: 'text', text: 'LIVE' }] },
+  }, { systemPromptAppend: true })
+  const registration = access.systemPromptAppendRegistrations[0]
+  registry.onAgentDisposed(agent)
+  assert.equal(registry.hasClaim('S49'), false)
+  assert.equal(registration?.disposeCalls, 0,
+    'the exact owning scope destruction is the terminal; no second disposer is fabricated')
+  assert.equal(registration?.stillCurrent(), false, 'the provider is closed before the claim disappears')
 })
 
 test('a failed append after a real MCP mount keeps the exact lease fence until its terminal', async () => {
