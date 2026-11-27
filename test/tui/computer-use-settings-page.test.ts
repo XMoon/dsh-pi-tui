@@ -731,20 +731,31 @@ test('a single-region Applications list publishes no hidden Detail verb or row t
   mounted.page.dispose()
 })
 
-test('the dual Applications wheel scrolls the painted region under x and ignores the gutter', async () => {
+test('the dual Applications wheel consumes the actual signed line delta per painted region', async () => {
   const mounted = mount({ cua: { readApplications: async () => MANY_LONG } })
-  await enterApplications(mounted, { width: 120, rows: 8, allowDual: true })
-  const before = mounted.render(120)
+  await enterApplications(mounted, { width: 120, rows: 6, allowDual: true })
+  const columns = (frame: string[]): { list: string[], detail: string[] } => ({
+    list: frame.slice(0, -1).map(line => line.slice(0, 34)),
+    detail: frame.slice(0, -1).map(line => line.slice(36)),
+  })
+  const before = columns(mounted.render(120))
   // The two-cell gutter between the painted panes owns no scroll.
-  wheelCell(mounted, 120, 8, 34, 1, 1)
-  assert.deepEqual(mounted.render(120), before, 'the gutter wheel is inert')
-  // Over the list the LIST scrolls; over the Detail the DETAIL scrolls.
-  wheelCell(mounted, 120, 8, 5, 1, 1)
-  const listScrolled = mounted.render(120)
-  assert.notDeepEqual(listScrolled, before, 'the wheel over the List scrolls the List')
-  wheelCell(mounted, 120, 8, 60, 1, 1)
-  const detailScrolled = mounted.render(120)
-  assert.notDeepEqual(detailScrolled, listScrolled, 'the wheel over the Detail scrolls the Detail')
+  wheelCell(mounted, 120, 6, 34, 1, 2)
+  assert.deepEqual(mounted.render(120), mounted.render(120), 'the gutter frame is stable')
+  const gutter = columns(mounted.render(120))
+  assert.deepEqual(gutter, before, 'the gutter wheel changes nothing')
+  // Over the List, the ACTUAL delta 2 advances the viewport by exactly 2 lines
+  // (never a hidden ±3 multiplier).
+  wheelCell(mounted, 120, 6, 5, 1, 2)
+  const listMoved = columns(mounted.render(120))
+  assert.deepEqual(listMoved.list.slice(0, listMoved.list.length - 2), before.list.slice(2))
+  assert.deepEqual(listMoved.detail, before.detail, 'the wheel over the List leaves the Detail alone')
+  // Over the Detail, the same actual delta scrolls only the Detail.
+  const detailBefore = columns(mounted.render(120))
+  wheelCell(mounted, 120, 6, 60, 1, 2)
+  const detailMoved = columns(mounted.render(120))
+  assert.deepEqual(detailMoved.detail.slice(0, detailMoved.detail.length - 2), detailBefore.detail.slice(2))
+  assert.deepEqual(detailMoved.list, detailBefore.list, 'the wheel over the Detail leaves the List alone')
   mounted.page.dispose()
 })
 
@@ -807,6 +818,74 @@ test('the Applications Detail states unreadable storage and keeps the receipt vi
   const settled = mounted.render(96).join('\n')
   assert.match(settled, /Action: .*revoked/u, 'the settled outcome is painted in the active projection')
   assert.deepEqual(mounted.calls.filter(call => call.startsWith('revoke:')), ['revoke:app-1'])
+  mounted.page.dispose()
+})
+
+test('a removed target keeps its own attribution visible at a short grant', async () => {
+  let applications: CuaApplicationState = {
+    allowedApps: [{ id: 'app-1', name: 'TextEdit', executablePath: '/Applications/TextEdit.app' }],
+    blockedApps: [{ id: 'app-2', name: 'Example' }],
+    persistentAvailable: true,
+  }
+  const mounted = mount({
+    cua: {
+      readApplications: async () => applications,
+      revoke: async (id) => {
+        applications = { ...applications, allowedApps: applications.allowedApps.filter(application => application.id !== id) }
+      },
+    },
+  })
+  await settle(mounted, 'Bundle: Enabled')
+  selectOverviewAction(mounted, 'Manage applications')
+  mounted.page.handleInput('\r')
+  grantWorkbench(mounted, { width: 96, rows: 20, barWidth: 120, allowDual: false })
+  mounted.render(96)
+  mounted.page.handleInput('\r') // open the selected TextEdit Detail
+  mounted.render(96)
+  mounted.page.handleInput('\r') // the visible Revoke verb
+  assert.match(mounted.render(96).join('\n'), /Revoke this application decision\?/u)
+  mounted.page.handleInput('y')
+  await settle(mounted, 'Application access revoked for TextEdit')
+  // A short grant still reveals the abnormal result at the TOP of the active
+  // projection, and the deterministic fallback is not labelled as the target.
+  grantWorkbench(mounted, { width: 96, rows: 4, barWidth: 120, allowDual: false })
+  const short = mounted.render(96).join('\n')
+  assert.match(short, /Action: Application access revoked for TextEdit/u)
+  assert.match(short, /\/Applications\/TextEdit\.app/u)
+  assert.doesNotMatch(short, /revoked for Example/u)
+  mounted.page.dispose()
+})
+
+test('an unconfirmed revoke keeps its receipt visible at a short grant and only Refresh rearms', async () => {
+  const basis = 1
+  const mounted = mount({
+    cua: {
+      observation: { readSnapshot: () => basis, subscribe: () => () => {} },
+      revoke: async () => { throw new Error('lost receipt after dispatch') },
+    },
+  })
+  await settle(mounted, 'Bundle: Enabled')
+  selectOverviewAction(mounted, 'Manage applications')
+  mounted.page.handleInput('\r')
+  grantWorkbench(mounted, { width: 96, rows: 20, barWidth: 120, allowDual: false })
+  mounted.render(96)
+  mounted.page.handleInput('\r')
+  mounted.render(96)
+  mounted.page.handleInput('\r')
+  assert.match(mounted.render(96).join('\n'), /Revoke this application decision\?/u)
+  mounted.page.handleInput('y')
+  await settle(mounted, 'outcome could not be confirmed')
+  assert.equal(mounted.controller.getSnapshot().action?.requiresRecovery, true)
+  assert.equal(cuaActionAdmitted(
+    mounted.controller.getSnapshot(),
+    { epoch: mounted.controller.getSnapshot().epoch, kind: 'revoke', applicationId: 'app-2', applicationGroup: 'refused' },
+  ).ok, false, 'an unconfirmed effect retires the write actions')
+  grantWorkbench(mounted, { width: 96, rows: 4, barWidth: 120, allowDual: false })
+  assert.match(mounted.render(96).join('\n'), /Action outcome unconfirmed/u)
+  // An explicit Refresh settles the application authority and rearms the action.
+  mounted.page.handleInput('r')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(mounted.controller.getSnapshot().action?.requiresRecovery, false)
   mounted.page.dispose()
 })
 

@@ -373,7 +373,14 @@ test('a pre-dispatch refusal is Could not save with zero mutation; an unconfirme
   await second.refresh()
   await second.setPtcDefault(capture(second.getSnapshot(), 'preset'))
   assert.equal(second.getSnapshot().action?.state, 'unknown')
+  assert.equal(second.getSnapshot().action?.requiresRecovery, true)
   assert.match(second.getSnapshot().action?.text ?? '', /Could not confirm save/u)
+  // An automatic refresh can never silently clear a typed unconfirmed outcome;
+  // an adequate explicit Refresh can.
+  await second.refresh()
+  assert.equal(second.getSnapshot().action?.requiresRecovery, true)
+  await second.refresh(true)
+  assert.equal(second.getSnapshot().action?.requiresRecovery, false)
   assert.match(second.getSnapshot().action?.text ?? '', /Refresh and check/u)
   await second.dispose()
 })
@@ -484,7 +491,7 @@ test('an unconfirmed outcome requires a fresh observation before the next write'
   await page.refresh()
   await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
   assert.equal(page.getSnapshot().action?.state, 'unknown')
-  assert.equal(page.getSnapshot().recoveryRequired, true)
+  assert.equal(page.getSnapshot().action?.requiresRecovery, true)
   // The write actionability itself is retired until a fresh observation.
   const blocked = cuaActionAdmitted(
     page.getSnapshot(),
@@ -497,10 +504,56 @@ test('an unconfirmed outcome requires a fresh observation before the next write'
   await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
   assert.equal(calls.length, before, 'unknown never retries without a fresh authoritative observation')
   assert.match(page.getSnapshot().action?.text ?? '', /Refresh/u)
-  await page.refresh()
-  assert.equal(page.getSnapshot().recoveryRequired, false)
+  await page.refresh(true)
+  assert.equal(page.getSnapshot().action?.requiresRecovery, false)
   await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
   assert.equal(calls.length, before + 1, 'one explicit Refresh re-authorizes exactly one write')
+  await page.dispose()
+})
+
+test('a same-basis unobservable failure keeps its receipt and only an adequate explicit Refresh rearms', async () => {
+  let fail = true
+  let applicationsFail = false
+  const calls: string[] = []
+  const page = manualController({
+    port: {
+      ...cuaPort().port,
+      readApplications: async () => {
+        if (applicationsFail) throw new Error('application list failed')
+        return APPLICATIONS
+      },
+      revoke: async (id) => {
+        calls.push(`revoke:${id}`)
+        if (fail) throw new Error('lost receipt after dispatch')
+      },
+    },
+  })
+  await page.refresh()
+  await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
+  const terminal = page.getSnapshot().action
+  assert.equal(terminal?.state, 'unknown')
+  assert.equal(terminal?.requiresRecovery, true)
+  assert.match(terminal?.text ?? '', /lost receipt after dispatch/u, 'the actual unobservable reason is preserved')
+  // A gesture is not a retry and never overwrites the terminal explanation.
+  await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
+  assert.equal(page.getSnapshot().action?.text, terminal?.text)
+  assert.equal(page.getSnapshot().action?.at, terminal?.at)
+  assert.deepEqual(calls, ['revoke:app-1'])
+  // A background/mandatory refresh cannot silently clear the admission.
+  await page.refresh()
+  assert.equal(page.getSnapshot().action?.requiresRecovery, true)
+  // A FAILED relevant read cannot authorize the next decision either.
+  applicationsFail = true
+  await page.refresh(true)
+  assert.equal(page.getSnapshot().action?.requiresRecovery, true)
+  // A successful explicit Refresh settles the same authority and rearms.
+  applicationsFail = false
+  await page.refresh(true)
+  assert.equal(page.getSnapshot().action?.requiresRecovery, false)
+  fail = false
+  await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
+  assert.equal(page.getSnapshot().action?.state, 'ok')
+  assert.deepEqual(calls, ['revoke:app-1', 'revoke:app-1'])
   await page.dispose()
 })
 
@@ -557,7 +610,7 @@ test('an explicit unsupported Host denies every CUA write kind, while a failed s
   await failedSystem.dispose()
 })
 
-test('a basis change during the synchronous queue-head notification dispatches nothing', async () => {
+test('a basis change during the synchronous acceptance notification sends nothing', async () => {
   let basis = 1
   const calls: string[] = []
   const page = manualController({
@@ -568,18 +621,18 @@ test('a basis change during the synchronous queue-head notification dispatches n
     },
   })
   await page.refresh()
-  let busyNotifications = 0
+  let flipped = false
   page.subscribe(() => {
-    if (!page.getSnapshot().busy) return
-    busyNotifications += 1
-    // The FIRST busy publication is acceptance; the queue head re-publishes it
-    // right before dispatch. Flip the provider basis on that second one.
-    if (busyNotifications === 2) basis = 2
+    if (!flipped && page.getSnapshot().busy) {
+      flipped = true
+      basis = 2
+    }
   })
   await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
-  assert.deepEqual(calls, [], 'the queued dispatch re-proves the basis after the synchronous notification')
+  assert.deepEqual(calls, [], 'the acceptance notification invalidation stops the dispatch')
   assert.equal(page.getSnapshot().action?.state, 'unknown')
   assert.match(page.getSnapshot().action?.text ?? '', /nothing was sent/u)
+  assert.notEqual(page.getSnapshot().action?.requiresRecovery, true, 'a zero-write refusal needs no recovery')
   await page.dispose()
 })
 
@@ -691,7 +744,7 @@ test('a silent Direct replacement before an action dispatches nothing and states
   assert.deepEqual(calls.filter(call => call.startsWith('request:')), [],
     'the old-provider capture dispatches zero writes on the replaced provider')
   assert.equal(page.getSnapshot().action?.state, 'unknown')
-  assert.match(page.getSnapshot().action?.text ?? '', /NOT dispatched/u)
+  assert.match(page.getSnapshot().action?.text ?? '', /nothing was sent/u)
   await page.dispose()
 })
 

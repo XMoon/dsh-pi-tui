@@ -1185,10 +1185,14 @@ checks the live settings service, and Remote re-checks inside the ONE serialized
 settings-mirror queue with the same before-dispatch fence every typed section
 uses, so a decision queued behind another write is never rebased onto the new
 Host. The caller's own Computer Use observation is an independent authority at
-that boundary: `setGuarded` carries the caller predicate and both adapters
-re-prove it at the actual dispatch (Direct immediately before the official
-mutation, Remote inside the queue head), so a superseded page observation
-dispatches nothing even at an unchanged settings pair. `accepted` means the official mutation settled; only a later same-authority
+that boundary: `setGuarded` carries the caller's FULL captured-eligibility
+predicate (observation identity, provider/platform and the exact painted preset
+decision) and both adapters re-prove it at the actual dispatch (Direct
+immediately before the official mutation, Remote inside the queue head), so a
+superseded observation or an independently settling read that makes the captured
+action ineligible dispatches nothing even at an unchanged settings pair. A
+proven same-authority readback still attributes the accepted preset write even
+when unrelated Computer Use UI changes afterwards. `accepted` means the official mutation settled; only a later same-authority
 observation that serves the target value confirms the change, and an
 unobservable settlement is `outcome-unconfirmed`, never retried or painted as
 saved. There is no second preset store, optimistic Client value or Session

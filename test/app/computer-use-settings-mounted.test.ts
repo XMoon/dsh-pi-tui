@@ -70,6 +70,7 @@ interface Harness {
   readonly presetWrites: string[]
   readonly applications: () => CuaApplicationState
   readonly page: () => EmbeddedSpecialistPage | undefined
+  readonly invalidateObservation: () => void
   readonly settingsPanel: () => { onCellPress(x: number, y: number): void; onCellClick(x: number, y: number): void } | undefined
   readonly invoke: (name: string, rawInput?: string) => Promise<unknown>
   readonly view: () => string
@@ -90,11 +91,18 @@ function setup(options: {
   const calls: string[] = []
   const presetGeneration: object = {}
   const requests: string[] = []
+  const observationListeners = new Set<() => void>()
   const revokes: string[] = []
   const retries: string[] = []
   const presetWrites: string[] = []
   const port: CuaAccessPort = {
-    observation: { readSnapshot: () => 1, subscribe: () => () => {} },
+    observation: {
+      readSnapshot: () => 1,
+      subscribe: (listener) => {
+        observationListeners.add(listener)
+        return () => { observationListeners.delete(listener) }
+      },
+    },
     readSystemStatus: async () => { calls.push('read:system'); return SYSTEM },
     readApplications: async () => { calls.push('read:applications'); return applications },
     readApplicationIcons: async () => { calls.push('read:icons'); return {} },
@@ -284,6 +292,9 @@ function setup(options: {
     retries,
     presetWrites,
     applications: () => applications,
+    invalidateObservation: () => {
+      for (const listener of [...observationListeners]) listener()
+    },
     page: () => {
       const lease = (app as unknown as { workspaceLease?: { kind?: string; panel?: unknown } }).workspaceLease
       if (lease === undefined || lease.kind !== 'settings') return undefined
@@ -333,6 +344,19 @@ async function sgrWheel(h: Harness, direction: 'up' | 'down', col: number, row: 
   await frames(h.vt)
 }
 
+/** One complete pointer gesture: press+release in the SAME input write, as a
+ *  real terminal delivers a click. */
+async function sgrClickOnce(h: Harness, label: string): Promise<void> {
+  const lines = h.vt.getViewport().map(stripTerminalSequences)
+  const row = lines.findIndex(line => line.includes(label))
+  assert.ok(row >= 0, `missing ${label} in the painted frame:\n${lines.join('\n')}`)
+  const col = lines[row]!.indexOf(label)
+  h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M\x1b[<0;${col + 1};${row + 1}m`)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+}
+
 async function sgrClick(h: Harness, label: string, wordOffset = 0): Promise<void> {
   const lines = h.vt.getViewport().map(stripTerminalSequences)
   const row = lines.findIndex(line => line.includes(label))
@@ -363,6 +387,21 @@ async function openComputerUse(h: Harness): Promise<void> {
   await frames(h.vt, 2)
   await flushOwnedTurns()
   await frames(h.vt, 2)
+}
+
+/** Wait until the REAL frame stops changing across two paint rounds, so the
+ *  next SGR gesture is admitted against the settled frame (a click crossing a
+ *  repaint is refused by the shared currentness rule). */
+async function waitForStableView(h: Harness, rounds = 20): Promise<string> {
+  let last = h.view()
+  for (let attempt = 0; attempt < rounds; attempt += 1) {
+    await frames(h.vt, 2)
+    await flushOwnedTurns()
+    const next = h.view()
+    if (next === last) return next
+    last = next
+  }
+  return last
 }
 
 async function waitForText(h: Harness, needle: string, attempts = 40): Promise<void> {
@@ -531,6 +570,12 @@ test('the Applications workbench completes a real pointer select → open → co
   await sgrClick(h, 'Enter open')
   await waitForText(h, 'Revoke access…')
   assert.match(h.view(), /Decision: Always allowed/u)
+  // The dual projection's VISIBLE Detail verb must also be keyboard-admissible.
+  await press(h.vt, '\r')
+  await waitForText(h, 'Revoke this application decision?')
+  await press(h.vt, '\x1b')
+  await frames(h.vt, 2)
+  await waitForText(h, 'Revoke access…')
   await sgrClick(h, 'Revoke access…')
   await waitForText(h, 'Revoke this application decision?')
   assert.match(h.view(), /Application: TextEdit · \/Applications\/TextEdit\.app/u)
@@ -546,7 +591,7 @@ test('the Applications workbench completes a real pointer select → open → co
   // the receipt stays visible in the ACTIVE workbench projection.
   await waitForText(h, 'Refused')
   assert.doesNotMatch(h.view(), /Decision: Always allowed/u)
-  await waitForText(h, 'Action: Application access revoked')
+  await waitForText(h, 'Action: Application access revoked for TextEdit')
   // Applications Help is REAL content in the same projection (Esc closes it
   // first, then the normal local Back ladder still runs).
   await press(h.vt, '?')
@@ -555,6 +600,17 @@ test('the Applications workbench completes a real pointer select → open → co
   await frames(h.vt, 2)
   assert.doesNotMatch(h.view(), /Help and recovery/u)
   assert.match(h.view(), /Enter open|Enter activate|Back \[Esc\]/u)
+  // Finish the ladder: Detail -> List -> the SAME Overview instance.
+  await press(h.vt, '\x1b')
+  await frames(h.vt, 2)
+  assert.match(h.view(), /Always allowed/u, 'the receipt page returns to the List')
+  await press(h.vt, '\x1b')
+  await frames(h.vt, 3)
+  assert.match(h.view(), /Bundle: Enabled/u, 'the local rail Back returns to the Overview')
+  // The real page Back then retires THIS instance and returns to the Rows.
+  await press(h.vt, '\x1b')
+  await frames(h.vt, 3)
+  assert.equal(h.page(), undefined, 'the real page Back exits the mounted instance')
 })
 
 test('a narrow Applications list never activates the hidden Detail verb (real SGR)', async () => {
@@ -643,8 +699,18 @@ test('the dual Applications wheel follows the painted region and the gutter stay
   await sgrWheel(h, 'down', 30, 5)
   await frames(h.vt, 2)
   assert.notEqual(h.view(), before, 'the wheel over the List scrolls the List')
+  // Keep scrolling the SAME region until the selected first row leaves the
+  // painted viewport; the Open hint must disappear with it.
+  for (let step = 0; step < 6 && /Enter open/u.test(h.view()); step += 1) {
+    await sgrWheel(h, 'down', 30, 5)
+    await frames(h.vt, 2)
+  }
   assert.doesNotMatch(h.view(), /Enter open/u, 'an offscreen selection advertises no Open')
-  await sgrWheel(h, 'up', 30, 5)
+  for (let step = 0; step < 6 && !/> A\b/u.test(h.view()); step += 1) {
+    await sgrWheel(h, 'up', 30, 5)
+    await frames(h.vt, 2)
+  }
+  assert.match(h.view(), /Enter open/u, 'the restored visible selection advertises Open again')
   await frames(h.vt, 2)
   // Over the Detail the Detail scrolls (its long path exceeds the grant).
   const listFrame = h.view()
@@ -676,6 +742,73 @@ test('a pending accepted action paints Waiting with no cancel, then shows its re
   await sgrClick(h, 'Back [Esc]')
   await frames(h.vt, 2)
   assert.equal(h.page(), undefined, 'the real painted Back retires the page after settlement')
+})
+
+test('an invalidated Overview risk retires before the next paint and the stale decision writes nothing', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  await openComputerUse(h)
+  await waitForText(h, 'Persistent PTC mode…')
+  for (let step = 0; step < 40; step += 1) {
+    if (/> Persistent PTC mode…/u.test(h.view())) break
+    await press(h.vt, '\x1b[B')
+  }
+  await press(h.vt, '\r')
+  await waitForText(h, 'Enable persistent PTC mode?')
+  assert.match(h.view(), /Confirm \[Enter\]/u)
+  h.invalidateObservation()
+  // The page retires the invalidated confirmation in its observation
+  // subscription; the next NATURALLY scheduled frame is a coherent Overview.
+  await frames(h.vt, 3)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.match(h.view(), /Bundle: Enabled/u, 'the next frame is the Overview tenant')
+  assert.doesNotMatch(h.view(), /Confirm \[Enter\]/u)
+  await waitForStableView(h)
+  await press(h.vt, 'y')
+  await frames(h.vt, 2)
+  assert.ok(!h.calls.includes('persist'), 'the stale risk performed no write')
+  // A fresh control remains usable on the same page. The cursor still sits on
+  // the invalidated PTC action, so return to the first action before moving.
+  await waitForText(h, 'Request permission')
+  for (let step = 0; step < 40; step += 1) await press(h.vt, '\x1b[A')
+  for (let step = 0; step < 40; step += 1) {
+    if (/> .*Request permission/u.test(h.view())) break
+    await press(h.vt, '\x1b[B')
+  }
+  await press(h.vt, '\r')
+  await waitForText(h, 'Action: Request sent')
+})
+
+test('an invalidated Applications risk retires before the next paint and a fresh verb writes once', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  await openComputerUse(h)
+  await waitForText(h, 'Manage applications')
+  await sgrClick(h, 'Manage applications')
+  await frames(h.vt, 3)
+  await sgrClick(h, 'TextEdit')
+  await sgrClick(h, 'Enter open')
+  await waitForText(h, 'Revoke access…')
+  await sgrClick(h, 'Revoke access…')
+  await waitForText(h, 'Revoke this application decision?')
+  h.invalidateObservation()
+  await frames(h.vt, 3)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.match(h.view(), /Always allowed/u, 'the next frame is the normal Applications projection')
+  assert.doesNotMatch(h.view(), /Confirm \[Enter\]/u)
+  await waitForStableView(h)
+  await press(h.vt, 'y')
+  await frames(h.vt, 2)
+  assert.deepEqual(h.revokes, [], 'the stale Applications risk performed no write')
+  // The SAME Detail page remains usable with the fresh observation.
+  await waitForText(h, 'Revoke access…')
+  await waitForStableView(h)
+  await press(h.vt, '\r')
+  await waitForText(h, 'Revoke this application decision?')
+  await press(h.vt, 'y')
+  await frames(h.vt, 3)
+  await flushOwnedTurns()
+  assert.deepEqual(h.revokes, ['app-1'], 'the fresh risk dispatches exactly once')
 })
 
 test('the Applications rail Back returns to the SAME mounted Overview without a re-read', async () => {

@@ -302,8 +302,11 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   private visibleActionIds = new Set<string>()
   /** Applications help is REAL content (never an invisible Esc step). */
   private helpOffset = 0
-  /** Whether the LAST list render really painted the selected row. */
-  private listSelectionPainted = false
+  /** Whether the LAST published list targets really contain the selected row
+   *  (computed from the final painted result, never re-derived at admission). */
+  private paintedListSelection = false
+  /** The last settled action revealed in the workbench (one reveal per result). */
+  private revealedWorkbenchActionAt: number | undefined
   private pressed: { readonly identity: string; readonly target: PaintedTarget } | undefined
   private paintedBarSpansValue: readonly BarSpan[] = []
   private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
@@ -321,10 +324,23 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     this.openPlugins = intents.openPlugins
     this.diag = intents.diag
     this.unsubscribe = this.controller.subscribe(() => {
+      // Retire an invalidated full-width risk BEFORE the next Root compose, so
+      // the Root never chooses the stale grant for a page that already returned
+      // to its normal projection. The subscription is the ONE owner of this
+      // transition; render itself never changes the projection.
+      const snapshot = this.controller.getSnapshot()
+      if (this.confirmation !== undefined && this.confirmation.epoch !== snapshot.epoch) {
+        this.mode = this.confirmation.returnMode
+        this.listRegion = this.confirmation.returnRegion
+        this.confirmation = undefined
+        this.confirmationVisible = false
+        this.pressed = undefined
+        this.notice = { kind: 'info', text: 'The Host observation changed; the confirmation was discarded. Review the current state and act again.' }
+      }
       this.revision += 1
       this.requestRender()
     })
-    this.start('computer use settings refresh', () => this.controller.refresh())
+    this.start('computer use settings refresh', () => this.controller.refresh(true))
   }
 
   /**
@@ -505,14 +521,6 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   render(width: number): string[] {
     const snapshot = this.controller.getSnapshot()
     this.grantAwaitingPaintValue = false
-    // A newer observation retires the painted confirmation BEFORE any key can
-    // reuse it: the same application id on a newer observation is a new
-    // decision, never the old confirmation.
-    if (this.confirmation !== undefined && this.confirmation.epoch !== snapshot.epoch) {
-      this.confirmation = undefined
-      this.confirmationVisible = false
-      this.notice = { kind: 'info', text: 'The Host observation changed; the confirmation was discarded. Review the current state and act again.' }
-    }
     const frame = this.mode === 'overview' && this.confirmation === undefined
       ? this.renderOverview(snapshot, width)
       : this.renderWorkbench(snapshot, width)
@@ -887,6 +895,13 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     const grant = this.liveWorkbenchGrant(width)
     const bodyRows = Math.max(0, grant.rows)
     this.lastBodyRows = bodyRows
+    if (snapshot.action !== undefined && snapshot.action.at !== this.revealedWorkbenchActionAt) {
+      this.revealedWorkbenchActionAt = snapshot.action.at
+      // Reuse the ONE scrollport: a new abnormal result is revealed at its
+      // first line once, instead of remaining below a long path/decision.
+      this.listOffset = 0
+      this.detailOffset = 0
+    }
     const bodyWidth = grant.width
     const targets: PaintedTarget[] = []
     this.visibleActionIds.clear()
@@ -946,15 +961,18 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       const text = `${this.notice!.kind === 'error' ? 'Error' : 'Notice'}: ${this.notice!.text}`
       out[noticeRow] = fit(this.toneText(this.notice!.kind === 'error' ? 'error' : 'dim', text), bodyWidth)
     }
-    // Only the region THIS frame really painted publishes targets. A hidden
-    // region's rows/verbs are not a pointer route in a single-region grant, and
-    // its unshifted cells would otherwise coincide with visible blank cells.
+    // ONE final admission derived from what THIS frame really painted (after
+    // clipping and the notice replacement). A hidden region's rows/verbs are
+    // not a pointer/keyboard route; in the dual projection BOTH regions are
+    // visible and both stay admissible.
+    const listPainted = both || this.listRegion === 'list'
+    const detailPainted = both || this.listRegion === 'detail'
     for (const target of list.targets) {
-      if (visibleRegions !== undefined && visibleRegions !== 'list') continue
+      if (!listPainted) continue
       if (target.row !== noticeRow) targets.push(target)
     }
     for (const target of detail.targets) {
-      if (visibleRegions !== undefined && visibleRegions !== 'detail') continue
+      if (!detailPainted) continue
       if (target.row === noticeRow) {
         if (target.kind === 'action') {
           this.detailActions = this.detailActions.filter(action => action.id !== target.action.id)
@@ -964,10 +982,13 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       }
       targets.push(both ? { ...target, startCol: target.startCol + listWidth + 2, endCol: target.endCol + listWidth + 2 } : target)
     }
-    if (visibleRegions !== 'detail') {
+    if (!detailPainted) {
       for (const action of this.detailActions) this.visibleActionIds.delete(action.id)
       this.detailActions = []
     }
+    this.paintedListSelection = listPainted && this.selection !== undefined
+      && targets.some(target => target.kind === 'select'
+        && target.group === this.selection!.group && target.id === this.selection!.id)
     // A passive region cell click only moves the local focus (never a write).
     // Registered LAST so every painted row/verb keeps its own target.
     if (both && bodyRows > 0) {
@@ -1047,6 +1068,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   } {
     this.repairSelection(snapshot)
     const lines: PageLine[] = []
+    const receiptPush = (text: string, options: Omit<PageLine, 'text'> = {}): void => { lines.push({ text, ...options }) }
+    this.pushReceiptLines(snapshot, width, receiptPush)
     const entries = this.applicationGroups(snapshot)
     if (snapshot.applications.phase !== 'ready' || snapshot.applications.value === undefined) {
       lines.push({
@@ -1079,8 +1102,6 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     this.listOffset = Math.max(0, Math.min(this.listOffset, maxOffset))
     const visible = lines.slice(this.listOffset, this.listOffset + bodyRows)
     const targets: PaintedTarget[] = []
-    this.listSelectionPainted = this.selection !== undefined && visible.some(line =>
-      line.select !== undefined && line.select.group === this.selection!.group && line.select.id === this.selection!.id)
     for (let index = 0; index < visible.length; index += 1) {
       const line = visible[index]
       if (line?.select === undefined) continue
@@ -1101,6 +1122,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     const selected = this.selectedApplication(snapshot)
     const storageUnavailable = snapshot.applications.phase === 'ready'
       && snapshot.applications.value?.persistentAvailable === false
+    this.pushReceiptLines(snapshot, width, push)
     if (selected === undefined) {
       lines.push({ text: 'Select an application to review its persisted decision.', tone: 'dim' })
       if (storageUnavailable) {
@@ -1108,7 +1130,6 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
           push(part, { tone: 'warning' })
         }
       }
-      this.pushReceiptLines(snapshot, width, push)
       const maxOffset = Math.max(0, lines.length - Math.max(1, bodyRows))
       this.detailOffset = Math.max(0, Math.min(this.detailOffset, maxOffset))
       return { lines: lines.slice(this.detailOffset, this.detailOffset + bodyRows), targets }
@@ -1132,7 +1153,6 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         push(part, { tone: 'warning' })
       }
     }
-    this.pushReceiptLines(snapshot, width, push)
     const busy = snapshot.busy
     if (busy) {
       const visible = lines.slice(this.detailOffset, this.detailOffset + bodyRows)
@@ -1229,14 +1249,9 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
 
   private openSelectedApplication(): void {
     if (this.mode !== 'applications' || this.confirmation !== undefined) return
-    const snapshot = this.controller.getSnapshot()
-    this.repairSelection(snapshot)
-    if (this.selection === undefined) return
-    // Enter/Right opens only a row the LAST frame really painted inside the
-    // list viewport; a scrolled-out selection publishes no activation.
-    const lineIndex = this.applicationRowLineIndex(snapshot)
-    const bodyRows = Math.max(1, this.liveWorkbenchGrant(this.paint?.bodyWidth ?? 80).rows)
-    if (lineIndex === undefined || lineIndex < this.listOffset || lineIndex >= this.listOffset + bodyRows) return
+    // The final painted target result is the ONE admission: a scrolled-out,
+    // notice-overwritten or otherwise unpainted selection cannot open.
+    if (this.selection === undefined || !this.paintedListSelection) return
     this.listRegion = 'detail'
     this.detailOffset = 0
     this.bump()
@@ -1246,7 +1261,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     if (this.controller.getSnapshot().busy) {
       return this.layoutBar(width, [{ id: 'bar:wait', text: 'Waiting for the action to settle…', priority: 1000 }])
     }
-    const hasSelection = this.selection !== undefined && this.listSelectionPainted
+    const hasSelection = this.selection !== undefined && this.paintedListSelection
     return this.layoutBar(width, [
       ...(hasSelection ? [{ id: 'bar:open', text: 'Enter open', priority: 700 }] : []),
       ...(this.paintsBothRegions() ? [{ id: 'bar:tab', text: 'Tab detail', priority: 40 }] : []),
@@ -1725,6 +1740,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     this.bump()
   }
 
+  /** A selection reveal HINT for the next paint only: admission is the final
+   *  published target set, never this independently derived row index. */
   private applicationRowLineIndex(snapshot: CuaAccessSettingsSnapshot): number | undefined {
     if (this.selection === undefined) return undefined
     let row = 0
@@ -1781,11 +1798,11 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       if (!this.frameCurrent()) return undefined
       if (this.controller.getSnapshot().busy) return { handled: true }
       if (this.confirmation !== undefined) {
-        this.scrollConfirmation(event.wheelDelta < 0 ? -3 : 3)
+        this.scrollConfirmation(event.wheelDelta)
         return { handled: true }
       }
       if (this.mode === 'applications') {
-        const delta = event.wheelDelta < 0 ? -3 : 3
+        const delta = event.wheelDelta
         if (this.help) {
           this.scrollWorkbenchHelp(delta)
           return { handled: true }
@@ -1801,7 +1818,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         this.scrollWorkbenchRegion(delta, event.x < listWidth ? 'list' : 'detail')
         return { handled: true }
       }
-      this.scrollOverview(event.wheelDelta < 0 ? -3 : 3)
+      this.scrollOverview(event.wheelDelta)
       return { handled: true }
     }
     if (event.y < 0 || event.y >= bodyRows) return undefined
@@ -1867,7 +1884,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   }
 
   private refresh(): void {
-    this.start('computer use settings refresh', () => this.controller.refresh())
+    this.start('computer use settings refresh', () => this.controller.refresh(true))
   }
 
   private bump(): void {

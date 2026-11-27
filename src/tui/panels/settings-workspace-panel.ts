@@ -1998,6 +1998,10 @@ export class SettingsWorkspacePanel implements Component {
    *  transition or an MCP full-width form changes the painted surface even when
    *  the focus/width/row allocation stay identical. */
   private paintedEmbeddedProjection: 'tenant' | 'workbench' | 'workbench-fullwidth' | 'body' | undefined
+  /** The projection the current paintFrameCore actually CHOSE, recorded at the
+   *  post-mount/pre-compose seam (not before deferred consumes, not after the
+   *  child render). */
+  private composedEmbeddedProjection: 'tenant' | 'workbench' | 'workbench-fullwidth' | 'body' | undefined
 
   /** SUX-08: the live projection discriminator of the mounted page. The page
    *  owns the sub-mode; the Root derives only the projection. */
@@ -2009,13 +2013,17 @@ export class SettingsWorkspacePanel implements Component {
 
   /** Compose ONE complete frame (the caller owns the directory sync/fence). */
   private paintFrame(width: number): string[] {
-    // The stamp describes the projection the ROOT composed the frame under. A
-    // child may clear an invalidated confirmation (or enter another sub-mode)
-    // DURING its render; stamping the live mode afterwards would certify a
-    // mixed frame whose grant was chosen for the previous projection.
-    const composed = this.liveEmbeddedProjection()
+    // The stamp is the projection paintFrameCore really chose at its post-mount/
+    // pre-compose seam. A mismatch with the live projection after the child
+    // render means this frame was composed for the previous projection; it is
+    // fenced for input and ONE coherent repaint is requested.
+    this.composedEmbeddedProjection = undefined
     const lines = this.paintFrameCore(width)
-    this.paintedEmbeddedProjection = composed
+    this.paintedEmbeddedProjection = this.composedEmbeddedProjection
+    if (this.specialistPage !== undefined && this.paintedEmbeddedProjection !== undefined
+      && this.paintedEmbeddedProjection !== this.liveEmbeddedProjection()) {
+      this.intents.requestRender()
+    }
     return lines
   }
 
@@ -2064,6 +2072,10 @@ export class SettingsWorkspacePanel implements Component {
     // longer carries the row (or selects a direct category) therefore fails and
     // settles the command's promise instead of waiting forever.
     this.consumeInitialSpecialist()
+    // The projection THIS frame composes is fixed AFTER every deferred mount
+    // consume and BEFORE the projection branch: the child render must not change
+    // it again.
+    this.composedEmbeddedProjection = this.liveEmbeddedProjection()
     // A child's painted body box/bar belongs to ONE frame: a frame that does not
     // really host a page body must not keep the previous frame's grant.
     this.paintedSpecialistBox = undefined

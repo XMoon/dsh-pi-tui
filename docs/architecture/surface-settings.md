@@ -1928,15 +1928,20 @@ The mounted instance has exactly TWO projections:
   to the rail, and the rail Back is a LOCAL return to the SAME mounted Overview
   instance (no dispose, remount or extra read). Every projection change
   (Overview↔Applications, the full-width confirmation) must repaint before a
-  new key or pointer may act on it. A single-region grant publishes only the
-  region it really painted (a hidden List row or Detail verb is never a pointer
-  route), the wheel scrolls the painted region under the pointer and the
-  two-cell gutter owns no scroll, and the Detail is a full keyboard/wheel
-  scrollport. The settled action receipt and the official readback stay visible
-  in the active Applications projection (also when the removed decision makes
-  another row current), `Enter open` is advertised only while the selected row
-  is really painted, and Applications paints the SAME Help content instead of an
-  invisible Esc step.
+  new key or pointer may act on it. The ONE final painted projection is the
+  admission: a single-region grant publishes only the region it really painted
+  (hidden rows/verbs are never a route, and a notice-overwritten row loses its
+  business target), the dual projection publishes both visible regions, and a
+  scrolled-out or overwritten selection advertises no Open. The wheel consumes
+  the actual signed line delta of the event for the painted region under the
+  pointer; the two-cell gutter owns no scroll. The Detail is a full
+  keyboard/wheel scrollport. The settled receipt and official readback stay in
+  the ACTIVE Applications projection (List and Detail), are revealed once at
+  their first line, retain the original target's safe public identity (never the
+  opaque id, never a fallback row), and the same Help content is real there
+  instead of an invisible Esc step. A newer observation retires an armed risk in
+  the page's observation subscription BEFORE the Root composes the next frame;
+  render never changes the projection.
 
 Authority is never the page: the bundle selection/availability comes from the
 existing Plugin Manager roster, the saved default preset from the existing
@@ -1993,17 +1998,25 @@ The published observation identity moves on every superseding read, refresh and
 invalidation; each action carries the exact painted capture (observation
 identity plus target fact) and is re-proved at admission and again at the
 dispatch boundary. A read-only `reading` state never blocks Back. An accepted
-action owns the page until its own settlement: Waiting is published
-synchronously at acceptance, the bar is a truthful `Waiting…` with no cancel,
-and a second action, parent leave or local mode switch is refused. An
-unconfirmed outcome is never retried blind: only a fresh authoritative
-observation (Refresh) re-authorizes the next write, while an official definite
-refusal keeps its exact reason. An explicit unsupported Host (for example
-Windows) denies every CUA write; a failed system observation leaves the
-independently current application decisions usable. Closing the page never
-claims a Host rollback. A grant with no body row paints only its truthful safe
-bar (`Back`, or `Waiting…`/`Cancel` when an action/risk owns the page) and runs
-no read or hidden action.
+action owns the page until its own settlement: Waiting is published ONCE
+synchronously at acceptance (after the exact decision, epoch and provider basis
+were captured), the bar is a truthful `Waiting…` with no cancel, and a second
+action, parent leave, the page's own Back or a local mode switch is refused.
+The captured full eligibility (provider, platform, target and preset facts) is
+re-proven after that synchronous publication and again at the actual sink. An
+unconfirmed DISPATCHED effect is a terminal `unknown` receipt that owns the
+recovery admission: every write stays retired (a gesture is not a retry and
+never overwrites the receipt) until ONE explicit user Refresh settles an
+authority adequate for the same next decision; background/post-effect readbacks
+update facts but never clear it, and a failed relevant read cannot authorize it.
+A dispatched error with no proof of no-effect is `unknown` with the actual
+current-provider reason; only a proven pre-dispatch refusal is `not sent`/failed
+with its exact reason. An explicit unsupported Host (for example Windows) denies
+EVERY CUA write; a failed system observation leaves the independently current
+application decisions usable. Closing the page never claims a Host rollback. A
+grant with no body row paints only its truthful safe bar (`Back`, or
+`Waiting…`/`Cancel` when an action/risk owns the page) and runs no read or
+hidden action.
 
 The page's `Open Settings → Plugins` action retires the specialist and switches
 the SAME lease to the Plugin Manager. After the first explicit bundle enable the
