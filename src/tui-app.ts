@@ -8263,9 +8263,12 @@ export class TuiApp {
    * takes precedence over cancel/exit. Idle retains clear-then-confirm;
    * working/unknown draft clears never arm an exit. */
   private handleExitRequest(trigger: ExitConfirmationTrigger, activity?: ExitSessionActivity): void {
-    // A held submission belongs to the acceptance transaction, not to the
-    // editable draft. A shell-mode prefix counts even with an empty body.
+    // Only the current keyboard-owning editor can clear its draft. A leased
+    // Job workspace can route Host exit actions while the return editor is
+    // paused; a held submission also cannot be edited. A shell-mode prefix
+    // counts even with an empty body.
     if (trigger.clearsDraft && !this.composerHeld()
+      && this.ownsPhysicalKeyboard(this.seatEditor().component)
       && (this.seatEditor().getText() !== '' || this.seatInputMode() !== 'prompt')) {
       this.seatEditor().setText('')
       this.resetEditorMode()
