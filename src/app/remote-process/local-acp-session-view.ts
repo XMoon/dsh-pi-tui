@@ -4661,15 +4661,18 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (decodedContent.some(part => part.type === 'blob')) {
       const prepared = await this.prepareFileContent(claim, flight, access, decodedContent, requestSignal)
       if (prepared.kind === 'cancelled') {
+        const cleanup = this.cleanupNoDispatch(claim, flight)
         flight.fileAdmissionPending = false
         flight.settleAdmission()
-        this.completeFileAdmission(claim, flight, { stopReason: 'cancelled' })
+        if (cleanup === undefined) this.completeFileAdmission(claim, flight, { stopReason: 'cancelled' })
+        else this.failFileAdmission(claim, flight, cleanup)
         return await flight.settled.promise
       }
       if (prepared.kind === 'failure') {
+        const cleanup = this.cleanupNoDispatch(claim, flight)
         flight.fileAdmissionPending = false
         flight.settleAdmission()
-        this.failFileAdmission(claim, flight, prepared.error)
+        this.failFileAdmission(claim, flight, cleanup ?? prepared.error)
         return await flight.settled.promise
       }
       content = prepared.content
@@ -4856,6 +4859,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         // its normal consumption/queue-removal terminal now owns retirement.
         flight.stagedReceipts = undefined
       }
+      const savedBusiness = flight.pendingBusinessOutcome
+      if (savedBusiness !== undefined) {
+        flight.pendingBusinessOutcome = undefined
+        if (savedBusiness.kind === 'failure') this.failPrompt(claim, flight, savedBusiness.error)
+        else this.completePrompt(claim, flight, savedBusiness.result)
+        return await flight.settled.promise
+      }
       if (flight.pendingDisposalFailure !== undefined) {
         // The actual admission Promise settled, but the Agent was disposed
         // while it was pending. Its real terminal wins over a clean result.
@@ -4893,7 +4903,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
       }
     } catch (error) {
-      flight.settleAdmission()
       const finalCheckRefusal = error instanceof LocalAcpViewError
       if (finalCheckRefusal) flight.definiteNoDispatch = true
       // The ORIGINAL Controller Promise has actually rejected. Only now is
@@ -4902,6 +4911,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       const cleanupFailed = flight.stagedReceipts !== undefined
         && flight.stagedReceipts.length > 0 && !this.cleanupPreparedFiles(claim, flight)
       flight.fileAdmissionPending = false
+      flight.settleAdmission()
       if (!flight.settledDone) {
         if (flight.pendingDisposalFailure !== undefined) {
           this.failFileAdmission(claim, flight, flight.pendingDisposalFailure)

@@ -2082,6 +2082,25 @@ test('disposal during a pending Controller admission waits for the original call
   assert.equal(view.access.cleanupCalls.at(-1)?.receiptIds[0], 'receipt-1')
 })
 
+test('an accepted admission drains a business terminal observed while its original call was pending', async () => {
+  const view = promptView()
+  await view.attach()
+  const admission = deferred<{ readonly accepted: true }>()
+  view.access.promptImpl = () => admission.promise
+  const attempt = view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///early.bin', blob: 'AQID' } }], false, true)
+  await new Promise(resolve => setImmediate(resolve))
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-early-terminal')
+  view.claim('m-early-terminal', 1, request.requestId)
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(view.registry.hasClaim('P1'), true, 'the observed terminal must not release the file flight early')
+  admission.resolve({ accepted: true })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(view.registry.hasUnsettledHostWork(), false, 'the accepted join releases after the original call settles')
+})
+
 test('a Controller rejection after an observed insertion keeps the indeterminate fence and cleans after settlement', async () => {
   const view = promptView()
   await view.attach()
