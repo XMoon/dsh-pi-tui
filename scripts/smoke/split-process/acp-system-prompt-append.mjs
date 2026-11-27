@@ -22,7 +22,7 @@ import { spawnSync } from 'node:child_process'
 import * as acp from '@agentclientprotocol/sdk'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
-import { readC1WorkEvents } from '../../lib/split-smoke-fixtures.mjs'
+import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents, waitForHostSessionEventAfter } from '../../lib/split-smoke-sessions.mjs'
 import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import { createC1Scene } from './c1-scene.mjs'
@@ -254,6 +254,7 @@ export async function runAcpSystemPromptAppend(context) {
   try {
     const started = await scene.startC1Host('acp-system-prompt', 'asp host', {
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
+      C1_SYSTEM_PROMPT_CONTROL: controlPath,
     }, workRoot)
     host = started.host
     const ready = started.ready
@@ -418,20 +419,28 @@ export async function runAcpSystemPromptAppend(context) {
 
     // ASP-11: the official complete minimal preset keeps its authority.
     sessionC = await openNewTui(tui, 'ASP-11 TUI C')
-    tui.send('/preset minimal')
-    await tui.waitForScreen('/preset minimal', 'ASP-11 preset command painted', 120_000)
-    await sleep(100)
-    tui.send('\r')
-    // The official durable `agent-preset/selected` append is the authority for
-    // the switch; a painted notice can scroll out of the captured viewport.
-    const presetDeadline = Date.now() + 120_000
+    // The complete-preset owner is the SAME official `agentPresets.select` the
+    // TUI `/preset` command dispatches; the fixture invokes it through a narrow
+    // run-owned control action, so this case never re-implements or races the
+    // TUI command surface.
+    const presetActionId = `asp-preset-${String(++actionSequence)}`
+    const presetTemporary = `${controlPath}.tmp-${presetActionId}`
+    writeFileSync(presetTemporary, JSON.stringify({
+      actionId: presetActionId, action: 'select-preset', sessionId: sessionC, preset: 'minimal',
+    }), { mode: 0o600 })
+    renameSync(presetTemporary, controlPath)
+    const presetControl = await waitForC1WorkEvent(workRoot,
+      event => event.kind === 'acp-system-prompt-control' && event.actionId === presetActionId,
+      'ASP-11 official preset select', 120_000)
+    requireFact(presetControl.ok === true && presetControl.preset === 'minimal',
+      `ASP-11: the official blank-session preset select must commit minimal: ${JSON.stringify(presetControl)}`)
+    const presetRecordDeadline = Date.now() + 15_000
     for (;;) {
-      const selected = (hostSessionEvents(dshHome, sessionC) ?? [])
+      const recorded = (hostSessionEvents(dshHome, sessionC) ?? [])
         .some(event => event.type === 'agent-preset/selected' && event.data?.agentPreset === 'minimal')
-      if (selected) break
-      if (Date.now() > presetDeadline) {
-        const frame = await tui.viewport().catch(() => [])
-        throw new SplitSmokeAssertionError(`${CASE_ID}: minimal preset switch did not commit; screen=${JSON.stringify(frame.slice(-24))}`)
+      if (recorded) break
+      if (Date.now() > presetRecordDeadline) {
+        throw new SplitSmokeAssertionError(`${CASE_ID}: ASP-11: the durable agent-preset/selected record did not appear`)
       }
       await sleep(50)
     }

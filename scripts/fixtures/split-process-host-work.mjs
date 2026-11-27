@@ -3202,6 +3202,44 @@ export async function apply(ctx) {
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
 
+  // The ACP system-prompt scenario needs ONE real blank-session preset switch
+  // (complete minimal preset) through the SAME official `agentPresets.select`
+  // the TUI command uses. The case writes a narrow control action; the fixture
+  // invokes only that official service and records its real result.
+  const systemPromptControl = process.env.C1_SYSTEM_PROMPT_CONTROL
+  if (scenario === 'acp-system-prompt' && typeof systemPromptControl === 'string' && systemPromptControl !== '') {
+    let handled
+    const timer = setInterval(() => {
+      if (!existsSync(systemPromptControl)) return
+      let request
+      try {
+        request = JSON.parse(readFileSync(systemPromptControl, 'utf8'))
+      } catch {
+        return
+      }
+      if (request?.actionId === handled) return
+      handled = request?.actionId
+      const agentPresets = ctx.reflect.get('agentPresets')
+      const agent = request?.sessionId === undefined ? undefined : ctx.agents.get(String(request.sessionId))
+      if (request?.action !== 'select-preset' || agentPresets === undefined || agent === undefined) {
+        record('acp-system-prompt-control', {
+          actionId: request?.actionId, action: request?.action, ok: false, reason: 'unavailable',
+        })
+        return
+      }
+      agentPresets.select(agent, String(request.preset)).then(selected => {
+        record('acp-system-prompt-control', {
+          actionId: request.actionId, action: request.action, ok: true, sessionId: agent.id, preset: selected,
+        })
+      }, error => {
+        record('acp-system-prompt-control', {
+          actionId: request.actionId, action: request.action, ok: false, reason: String(error?.code ?? error?.message ?? error).slice(0, 200),
+        })
+      })
+    }, 25)
+    ctx.effect(() => () => clearInterval(timer), 'acp-system-prompt-control')
+  }
+
   if (scenario === 'acp-scoped-mcp-b0') {
     createScopedMcpB0Workload(ctx, { root, record })
   }
