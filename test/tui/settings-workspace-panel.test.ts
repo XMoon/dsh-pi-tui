@@ -503,11 +503,15 @@ class FakeSpecialistPage implements EmbeddedSpecialistPage {
   /** SUX-08: exercise the page-owned Overview↔Applications projection. */
   workbench = false
   workbenchFullWidth = false
+  /** A real child can invalidate its confirmation DURING render (the frame the
+   *  Root composed for full-width then becomes a tenant). */
+  beforeRender?: () => void
   localRailBack = true
   private rowGrant = 4
   /** Lines this page paints (the root budgets them). */
   lines: string[] = ['SPECIALIST HEADER', '> alpha', '  beta', 'specialist hint']
   render(width: number): string[] {
+    this.beforeRender?.()
     // The root grants body rows PLUS the one physical bar; a real page's last
     // line is its semantic hint. The fake follows that contract so the SAME
     // class serves the full-width pages and the hosted Detail tenants.
@@ -4353,6 +4357,48 @@ test('the Computer Use page projection change is fenced until the Root repaints 
   plain(h, 120)
   ;(page as unknown as { done?: () => void }).done?.() // the page own Back retires THIS instance
   assert.equal(page.disposed, true)
+})
+
+test('the Root stamps the projection it composed, not the child mode after render', () => {
+  const withComputerUse = (): SettingsWorkspaceSnapshot => ({
+    ...SNAPSHOT,
+    rows: [...SNAPSHOT.rows, {
+      id: 'computer-use',
+      category: 'tools' as const,
+      label: 'Computer Use',
+      summary: 'Permissions · applications · PTC',
+      scope: 'DSH Host · official Computer Use provider',
+      freshness: 'runtime' as const,
+      description: 'the official Computer Use provider page',
+      specialist: 'computer-use' as const,
+    }],
+  })
+  const h = setup({ columns: 120, rows: 40, specialistPage: true, snapshot: withComputerUse })
+  walkTo(h, 'tools')
+  h.panel.handleInput('\r')
+  for (let step = 0; step < 12; step += 1) {
+    if (/\S\s+> Computer Use\b/u.test(plain(h, 120))) break
+    h.panel.handleInput('\x1b[B')
+  }
+  h.panel.handleInput('\r')
+  plain(h, 120)
+  const page = h.computerUsePages[0]!
+  // Compose a full-width workbench frame, then let the child invalidate its
+  // confirmation during render: the painted frame is a tenant built with the
+  // old grant, so it must be treated as awaiting a real paint.
+  page.workbench = true
+  page.workbenchFullWidth = true
+  plain(h, 120)
+  page.beforeRender = () => { page.workbench = false; page.workbenchFullWidth = false }
+  plain(h, 120)
+  const inputsBefore = page.inputs.length
+  h.panel.handleInput('\r')
+  assert.equal(page.inputs.length, inputsBefore,
+    'a mixed full-width→tenant frame admits no key until it repaints')
+  plain(h, 120)
+  h.panel.handleInput('\r')
+  assert.equal(page.inputs.length, inputsBefore + 1, 'the repainted tenant admits the key again')
+  h.panel.dispose()
 })
 
 test('the Plugin card Manage Computer Use intent switches the SAME lease and refuses stale/pending/too-small requests', () => {

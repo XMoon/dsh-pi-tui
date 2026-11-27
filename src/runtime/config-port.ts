@@ -785,7 +785,7 @@ export interface PresetDefaultConfig {
    * dispatch (zero mutation, no CAS rebase). The one-argument `set(id)`
    * contract and its callers are unchanged.
    */
-  setGuarded?(id: string, decision: PresetDefaultDecision): Promise<SectionMutationOutcome>
+  setGuarded?(id: string, decision: PresetDefaultDecision, stillCurrent?: () => boolean): Promise<SectionMutationOutcome>
 }
 
 /**

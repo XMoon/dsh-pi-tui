@@ -1860,7 +1860,9 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
     if (settings === undefined) return undefined
     const descriptor = readSettingsDescriptor(settings, PRESET_REGISTRY_NS)
     if (descriptor === undefined || !validSettingsRevision(descriptor.revision)) return undefined
-    return { generation: settingsAuthorityOf(settings), revision: descriptor.revision, value: this.get() }
+    const value = this.get()
+    if (value === undefined) return undefined
+    return { generation: settingsAuthorityOf(settings), revision: descriptor.revision, value }
   }
 
   /**
@@ -1868,7 +1870,7 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
    * captured authority. A replaced settings service or a moved revision refuses
    * synchronously BEFORE the official mutation (zero writes, no rebase).
    */
-  async setGuarded(id: string, decision: PresetDefaultDecision): Promise<SectionMutationOutcome> {
+  async setGuarded(id: string, decision: PresetDefaultDecision, stillCurrent?: () => boolean): Promise<SectionMutationOutcome> {
     const settings = this.settings()
     if (settings === undefined) return { kind: 'rejected', reason: 'the Host settings service is unavailable' }
     if (!Object.is(settingsAuthorityOf(settings), decision.generation)) {
@@ -1880,6 +1882,12 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
     }
     if (descriptor.revision !== decision.revision) {
       return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+    }
+    // The caller's CUA observation is an INDEPENDENT authority: it must still be
+    // current at the actual dispatch boundary, even when the settings pair has
+    // not moved.
+    if (stillCurrent !== undefined && !stillCurrent()) {
+      return { kind: 'rejected', reason: 'the Computer Use observation changed; refresh before saving' }
     }
     try {
       await mutateSettings(settings, PRESET_REGISTRY_NS, [

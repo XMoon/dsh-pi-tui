@@ -1026,6 +1026,43 @@ test('a guarded preset decision queued behind a predecessor is a conflict, not a
   )
 })
 
+test('a guarded preset decision queued behind an unrelated write re-proves the caller observation at the queue head', async () => {
+  const { port, state } = createBackend(current => {
+    current.presetRoster.push({ id: 'alpha', isDefault: true })
+    current.namespaces.set('agent-preset-registry', {
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'beta' },
+      revision: 1,
+    })
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS, theme: 'dark' }, revision: 1 })
+  })
+  await port.describe()
+  const decision = port.presetDefault.readDecision!()!
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  state.mutateGate = async () => { await held }
+  // An UNRELATED settings write holds the shared queue; the preset namespace
+  // revision and the connection generation both stay unchanged.
+  const settings = port.tuiSettings!
+  const predecessor = settings.replace({ ...settings.get(), theme: 'light' })
+  await tick()
+  let current = true
+  const guarded = port.presetDefault.setGuarded!('ptc', decision, () => current)
+  await tick()
+  // The Computer Use observation is superseded while the decision is queued.
+  current = false
+  release()
+  await predecessor
+  const outcome = await guarded
+  assert.equal(outcome.kind, 'rejected')
+  assert.deepEqual(
+    state.mutateCalls.filter(call => call.ns === 'agent-preset-registry'
+      && call.ops.some(op => op.path[0] === 'selectedDefault' && op.value === 'ptc')),
+    [],
+    'no stale CUA decision may dispatch even at an unchanged settings pair',
+  )
+})
+
 test('a dispatched guarded preset write it cannot confirm is outcome-unconfirmed, never success', async () => {
   const { port, state } = createBackend(current => {
     current.presetRoster.push({ id: 'alpha', isDefault: true })

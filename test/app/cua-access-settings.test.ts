@@ -318,6 +318,28 @@ test('a generation rollover during an in-flight write keeps admission and publis
   await page.dispose()
 })
 
+test('an unproven effective default paints unknown and refuses the guarded write', async () => {
+  const calls: string[] = []
+  const page = manualController({
+    port: cuaPort().port,
+    preset: {
+      available: () => true,
+      get: () => 'ptc',
+      set: async () => {},
+      readDecision: () => ({ generation: {}, revision: 2, value: undefined }),
+      setGuarded: async () => { calls.push('guarded'); return { kind: 'accepted' } },
+    },
+  })
+  await page.refresh()
+  assert.equal(page.getSnapshot().preset.value, undefined, 'a capture without a proven effective id is not current')
+  assert.equal(page.getSnapshot().preset.decision, undefined)
+  await page.setPtcDefault(capture(page.getSnapshot(), 'preset'))
+  assert.equal(page.getSnapshot().action?.state, 'failed')
+  assert.match(page.getSnapshot().action?.text ?? '', /cannot be proven/u)
+  assert.deepEqual(calls, [], 'no guarded write is attempted from an unproven default')
+  await page.dispose()
+})
+
 test('the guarded preset action writes ONCE with the painted decision and confirms from a same-authority readback', async () => {
   const preset = presetDefault('default')
   const { controller: page } = controller({ bundle: { enabled: true }, preset: preset.config })
@@ -384,6 +406,183 @@ test('a preset authority without the guarded seam refuses instead of falling bac
   assert.deepEqual(calls, [], 'the one-argument unguarded write may never stand in for the guarded decision')
   assert.equal(page.getSnapshot().action?.state, 'failed')
   assert.match(page.getSnapshot().action?.text ?? '', /cannot be proven/u)
+  await page.dispose()
+})
+
+function manualController(options: {
+  port: CuaAccessPort
+  preset?: PresetDefaultConfig
+}): CuaAccessSettingsController {
+  return new CuaAccessSettingsController({
+    cuaAccess: options.port,
+    pluginManager: pluginManager({ enabled: true }),
+    presetDefault: options.preset ?? presetDefault().config,
+    locale: () => 'zh',
+    diag: quietDiag,
+  })
+}
+
+test('acceptance publishes Waiting synchronously; a buffered second action is refused', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const calls: string[] = []
+  const page = manualController({
+    port: {
+      ...cuaPort().port,
+      revoke: async (id) => { calls.push(`revoke:${id}`); await held },
+    },
+  })
+  await page.refresh()
+  const first = page.getSnapshot()
+  const write = page.revoke(capture(first, 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
+  // No await: the same input turn already sees the accepted ownership.
+  assert.equal(page.getSnapshot().busy, true)
+  assert.equal(cuaActionAdmitted(page.getSnapshot(), capture(first, 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' })).ok, true)
+  await page.revoke(capture(first, 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
+  assert.deepEqual(calls, ['revoke:app-1'], 'a second action in the same turn never dispatches')
+  release()
+  await write
+  assert.equal(page.getSnapshot().busy, false)
+  await page.dispose()
+})
+
+test('a synchronous subscriber that closes on Waiting prevents the dispatch', async () => {
+  const calls: string[] = []
+  const page = manualController({
+    port: {
+      ...cuaPort().port,
+      revoke: async (id) => { calls.push(`revoke:${id}`) },
+    },
+  })
+  await page.refresh()
+  let closed = false
+  page.subscribe(() => {
+    if (!closed && page.getSnapshot().busy) {
+      closed = true
+      page.close()
+    }
+  })
+  await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
+  assert.deepEqual(calls, [], 'a subscriber close during the synchronous acceptance notification dispatches nothing')
+  await page.dispose()
+})
+
+test('an unconfirmed outcome requires a fresh observation before the next write', async () => {
+  let basis = 1
+  const calls: string[] = []
+  const page = manualController({
+    port: {
+      ...cuaPort().port,
+      observation: { readSnapshot: () => basis, subscribe: () => () => {} },
+      revoke: async (id) => {
+        calls.push(`revoke:${id}`)
+        basis = 2 // the provider is silently replaced during the write
+        throw new Error('old provider unavailable')
+      },
+    },
+  })
+  await page.refresh()
+  await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
+  assert.equal(page.getSnapshot().action?.state, 'unknown')
+  assert.equal(page.getSnapshot().recoveryRequired, true)
+  // The write actionability itself is retired until a fresh observation.
+  const blocked = cuaActionAdmitted(
+    page.getSnapshot(),
+    capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }),
+  )
+  assert.equal(blocked.ok, false)
+  assert.match(blocked.ok ? '' : blocked.reason, /Refresh/u)
+  // A fresh capture on the SAME published snapshot still cannot write blind.
+  const before = calls.length
+  await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
+  assert.equal(calls.length, before, 'unknown never retries without a fresh authoritative observation')
+  assert.match(page.getSnapshot().action?.text ?? '', /Refresh/u)
+  await page.refresh()
+  assert.equal(page.getSnapshot().recoveryRequired, false)
+  await page.revoke(capture(page.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
+  assert.equal(calls.length, before + 1, 'one explicit Refresh re-authorizes exactly one write')
+  await page.dispose()
+})
+
+test('an explicit unsupported Host denies every CUA write, while a failed system read stays usable', async () => {
+  const win = manualController({
+    port: {
+      ...cuaPort().port,
+      readSystemStatus: async () => ({
+        platform: 'win32',
+        sessionLocked: false,
+        captureAvailable: false,
+        elevated: false,
+        helper: { pid: 7, name: 'DSH Computer Use' },
+      }),
+    },
+  })
+  await win.refresh()
+  const before = win.getSnapshot()
+  const attempts: Array<(page: CuaAccessSettingsController, capture: CuaActionCapture) => Promise<void>> = [
+    (page, action) => page.requestPermission(action),
+    (page, action) => page.openSettings(action),
+    (page, action) => page.setPtcDefault(action),
+    (page, action) => page.enablePersistentPtc(action),
+    (page, action) => page.revoke(action),
+    (page, action) => page.retryApproval(action),
+  ]
+  for (const attempt of attempts) {
+    await attempt(win, capture(before, 'request', { permission: 'accessibility' }))
+  }
+  assert.deepEqual(win.getSnapshot().action?.state, 'failed')
+  assert.match(win.getSnapshot().action?.text ?? '', /supports macOS only/u)
+  // The independent application policy stays usable when only the system read fails.
+  const failedSystem = manualController({
+    port: {
+      ...cuaPort().port,
+      readSystemStatus: async () => { throw new Error('native status failed') },
+    },
+  })
+  await failedSystem.refresh()
+  assert.equal(failedSystem.getSnapshot().system.phase, 'failed')
+  await failedSystem.revoke(capture(failedSystem.getSnapshot(), 'revoke', { applicationId: 'app-1', applicationGroup: 'allowed' }))
+  assert.equal(failedSystem.getSnapshot().action?.state, 'ok')
+  await win.dispose()
+  await failedSystem.dispose()
+})
+
+test('a roster read that crosses a silent replacement starts no downstream old-generation IO', async () => {
+  let basis = 1
+  let releaseRoster!: () => void
+  const heldRoster = new Promise<void>((resolve) => { releaseRoster = resolve })
+  let rosterCalls = 0
+  const reads: string[] = []
+  const port = cuaPort({
+    observation: { readSnapshot: () => basis, subscribe: () => () => {} },
+    readSystemStatus: async () => { reads.push('system'); return STATUS },
+    readApplications: async () => { reads.push('applications'); return APPLICATIONS },
+    readPtcConfiguration: async () => { reads.push('ptc'); return PTC },
+  })
+  const page = new CuaAccessSettingsController({
+    cuaAccess: port.port,
+    pluginManager: {
+      snapshot: async () => {
+        rosterCalls += 1
+        if (rosterCalls === 1) await heldRoster
+        return (pluginManager({ enabled: true }).snapshot as () => Promise<unknown>)()
+      },
+    } as unknown as PluginManagerPort,
+    presetDefault: presetDefault().config,
+    locale: () => 'zh',
+    diag: quietDiag,
+  })
+  const refresh = page.refresh()
+  await new Promise(resolve => setTimeout(resolve, 5))
+  basis = 2
+  releaseRoster()
+  await refresh
+  for (let attempt = 0; attempt < 100 && page.getSnapshot().reading; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 2))
+  }
+  assert.deepEqual(reads, ['system', 'applications', 'ptc'],
+    'the old-generation roster authorizes no downstream read; only the settled re-read runs once')
+  assert.equal(page.getSnapshot().system.phase, 'ready')
   await page.dispose()
 })
 

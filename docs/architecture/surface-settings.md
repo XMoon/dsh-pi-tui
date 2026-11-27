@@ -1928,7 +1928,15 @@ The mounted instance has exactly TWO projections:
   to the rail, and the rail Back is a LOCAL return to the SAME mounted Overview
   instance (no dispose, remount or extra read). Every projection change
   (Overview↔Applications, the full-width confirmation) must repaint before a
-  new key or pointer may act on it.
+  new key or pointer may act on it. A single-region grant publishes only the
+  region it really painted (a hidden List row or Detail verb is never a pointer
+  route), the wheel scrolls the painted region under the pointer and the
+  two-cell gutter owns no scroll, and the Detail is a full keyboard/wheel
+  scrollport. The settled action receipt and the official readback stay visible
+  in the active Applications projection (also when the removed decision makes
+  another row current), `Enter open` is advertised only while the selected row
+  is really painted, and Applications paints the SAME Help content instead of an
+  invisible Esc step.
 
 Authority is never the page: the bundle selection/availability comes from the
 existing Plugin Manager roster, the saved default preset from the existing
@@ -1945,6 +1953,11 @@ settings-authority generation and the exact `agent-preset-registry` revision the
 painted frame read, refuses BEFORE dispatch when either moved (the old decision
 is never rebased onto a replacement Host), and paints a confirmed result only
 from a fresh same-authority observation whose effective default is `ptc`. The
+caller's Computer Use observation is an independent authority at that boundary:
+Direct re-proves it immediately before the official mutation and the Remote
+mirror re-proves it inside the serialized queue head, so a write queued behind
+an unrelated settings mutation dispatches nothing once the page observation was
+superseded. An unproven effective default paints Unknown and offers no write. The
 ordinary one-argument preset write and its `/preset default` caller are
 unchanged, and this page never starts or switches a Session. Persistent PTC is
 a separate explicit confirmed write with a possible runtime reload.
@@ -1980,9 +1993,17 @@ The published observation identity moves on every superseding read, refresh and
 invalidation; each action carries the exact painted capture (observation
 identity plus target fact) and is re-proved at admission and again at the
 dispatch boundary. A read-only `reading` state never blocks Back. An accepted
-action owns the page until its own settlement: the bar is a truthful `Waiting…`
-with no cancel, and a second action, parent leave or local mode switch is
-refused. Closing the page never claims a Host rollback.
+action owns the page until its own settlement: Waiting is published
+synchronously at acceptance, the bar is a truthful `Waiting…` with no cancel,
+and a second action, parent leave or local mode switch is refused. An
+unconfirmed outcome is never retried blind: only a fresh authoritative
+observation (Refresh) re-authorizes the next write, while an official definite
+refusal keeps its exact reason. An explicit unsupported Host (for example
+Windows) denies every CUA write; a failed system observation leaves the
+independently current application decisions usable. Closing the page never
+claims a Host rollback. A grant with no body row paints only its truthful safe
+bar (`Back`, or `Waiting…`/`Cancel` when an action/risk owns the page) and runs
+no read or hidden action.
 
 The page's `Open Settings → Plugins` action retires the specialist and switches
 the SAME lease to the Plugin Manager. After the first explicit bundle enable the

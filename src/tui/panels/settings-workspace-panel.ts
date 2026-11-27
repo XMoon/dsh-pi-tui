@@ -2009,8 +2009,13 @@ export class SettingsWorkspacePanel implements Component {
 
   /** Compose ONE complete frame (the caller owns the directory sync/fence). */
   private paintFrame(width: number): string[] {
+    // The stamp describes the projection the ROOT composed the frame under. A
+    // child may clear an invalidated confirmation (or enter another sub-mode)
+    // DURING its render; stamping the live mode afterwards would certify a
+    // mixed frame whose grant was chosen for the previous projection.
+    const composed = this.liveEmbeddedProjection()
     const lines = this.paintFrameCore(width)
-    this.paintedEmbeddedProjection = this.liveEmbeddedProjection()
+    this.paintedEmbeddedProjection = composed
     return lines
   }
 
@@ -5714,7 +5719,10 @@ export class SettingsWorkspacePanel implements Component {
       // frame is not. Until that frame paints, ONLY the real Esc may run — and
       // it runs against the CURRENT logical seat, never a stale passive paint
       // flag. This gate precedes the rail Tab fast path and the child forward.
-      if (this.webWorkbenchActive() && this.rootProjectionAwaitingPaint()) {
+      // BOTH directions of a hosted-page projection change are fenced: the
+      // workbench transition AND the reverse back to a tenant (a confirmation
+      // invalidated during render). A live-mode test would skip the reverse case.
+      if ((this.webWorkbenchActive() || this.specialistRow === 'computer-use') && this.rootProjectionAwaitingPaint()) {
         if (!matchesKey(data, 'escape')) return
         if (this.focus === 'categories') {
           // SUX-08: while a hosted page's projection change is still awaiting

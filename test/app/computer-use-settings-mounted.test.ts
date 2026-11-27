@@ -79,6 +79,8 @@ function setup(options: {
   readonly columns?: number
   readonly rows?: number
   readonly applications?: CuaApplicationState
+  /** F02: hold the accepted request so Waiting/Back refusal are observable. */
+  readonly requestGate?: Promise<unknown>
 } = {}): Harness {
   let applications: CuaApplicationState = options.applications ?? {
     allowedApps: [{ id: 'app-1', name: 'TextEdit', executablePath: '/Applications/TextEdit.app' }],
@@ -86,6 +88,7 @@ function setup(options: {
     persistentAvailable: true,
   }
   const calls: string[] = []
+  const presetGeneration: object = {}
   const requests: string[] = []
   const revokes: string[] = []
   const retries: string[] = []
@@ -96,7 +99,11 @@ function setup(options: {
     readApplications: async () => { calls.push('read:applications'); return applications },
     readApplicationIcons: async () => { calls.push('read:icons'); return {} },
     readPtcConfiguration: async () => { calls.push('read:ptc'); return PTC },
-    requestPermission: async (permission, locale) => { requests.push(`${permission}:${locale}`); return SYSTEM },
+    requestPermission: async (permission, locale) => {
+      requests.push(`${permission}:${locale}`)
+      if (options.requestGate !== undefined) await options.requestGate
+      return SYSTEM
+    },
     openSettings: async (permission, locale) => { calls.push(`open:${permission}:${locale}`) },
     enablePersistentPtc: async () => { calls.push('persist') },
     revoke: async (id) => {
@@ -134,7 +141,7 @@ function setup(options: {
     available: () => true,
     get: () => presetValue,
     set: async () => {},
-    readDecision: () => ({ generation: {}, revision: 1, value: presetValue }),
+    readDecision: () => ({ generation: presetGeneration, revision: 1, value: presetValue }),
     setGuarded: async (id) => { presetWrites.push(id); presetValue = id; return { kind: 'accepted' } },
   }
 
@@ -535,9 +542,140 @@ test('the Applications workbench completes a real pointer select → open → co
   await frames(h.vt, 3)
   assert.deepEqual(h.revokes, ['app-1'], 'ONE exact application decision is revoked')
   assert.equal(h.applications().allowedApps.length, 0)
-  // The authoritative post-write read removes the decision from the page.
+  // The authoritative post-write read removes the decision from the page, and
+  // the receipt stays visible in the ACTIVE workbench projection.
   await waitForText(h, 'Refused')
   assert.doesNotMatch(h.view(), /Decision: Always allowed/u)
+  await waitForText(h, 'Action: Application access revoked')
+  // Applications Help is REAL content in the same projection (Esc closes it
+  // first, then the normal local Back ladder still runs).
+  await press(h.vt, '?')
+  await waitForText(h, 'Help and recovery')
+  await press(h.vt, '\x1b')
+  await frames(h.vt, 2)
+  assert.doesNotMatch(h.view(), /Help and recovery/u)
+  assert.match(h.view(), /Enter open|Enter activate|Back \[Esc\]/u)
+})
+
+test('a narrow Applications list never activates the hidden Detail verb (real SGR)', async () => {
+  const h = setup({
+    columns: 44,
+    rows: 20,
+    applications: {
+      allowedApps: [{ id: 'app-a', name: 'A', executablePath: '/A.app' }],
+      blockedApps: [{ id: 'app-b', name: 'B' }],
+      persistentAvailable: true,
+    },
+  })
+  await openComputerUse(h)
+  // The Manage verb sits below the first 44x20 screen: scroll the SAME model.
+  for (let step = 0; step < 40 && !/Manage applications/u.test(h.view()); step += 1) {
+    await press(h.vt, '\x1b[6~')
+  }
+  await waitForText(h, 'Manage applications')
+  // Select Manage in the real Overview, then Enter into the single-region list.
+  for (let step = 0; step < 40; step += 1) {
+    if (/> Manage applications/u.test(h.view())) break
+    await press(h.vt, '\x1b[B')
+  }
+  await press(h.vt, '\r')
+  await frames(h.vt, 3)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  const list = h.view()
+  assert.match(list, /Always allowed/u)
+  assert.doesNotMatch(list, /Revoke access…/u, 'the hidden Detail verb is not painted')
+  // The hidden Detail build puts `Revoke access…` on page-local row 7; the page
+  // body starts at terminal row 3, so this blank list cell is the old hidden
+  // verb coordinate and must never write.
+  sgrMouse(h, 'press', 3, 10)
+  sgrMouse(h, 'release', 3, 10)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  assert.doesNotMatch(h.view(), /Revoke this application decision\?/u)
+  assert.deepEqual(h.revokes, [])
+  // The painted bar Open is the explicit route; the visible verb is then real.
+  await sgrClick(h, 'Enter open')
+  await waitForText(h, 'Revoke access…')
+  assert.match(h.view(), /Decision: Always allowed/u)
+  // Symmetric: a hidden List row cell (page-local row 1) never acts from the Detail.
+  sgrMouse(h, 'press', 3, 4)
+  sgrMouse(h, 'release', 3, 4)
+  await frames(h.vt, 2)
+  assert.match(h.view(), /Decision: Always allowed/u, 'the Detail keeps the seat')
+  assert.doesNotMatch(h.view(), /Enter open/u)
+  await sgrClick(h, 'Revoke access…')
+  await waitForText(h, 'Revoke this application decision?')
+  await sgrClick(h, 'Confirm [Enter]')
+  await frames(h.vt, 3)
+  await flushOwnedTurns()
+  assert.deepEqual(h.revokes, ['app-a'], 'the visible verb is the ONE write')
+})
+
+test('the dual Applications wheel follows the painted region and the gutter stays inert (real SGR)', async () => {
+  const apps = Array.from({ length: 10 }, (_, index) => ({
+    id: `app-${String(index + 1)}`,
+    name: index === 0 ? 'A' : `App ${String(index + 1)}`,
+    executablePath: index === 0
+      ? `/Applications/${'Very Long Application Name/'.repeat(12)}A.app`
+      : `/Applications/App ${String(index + 1)}.app`,
+  }))
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    applications: { allowedApps: apps, blockedApps: [], persistentAvailable: true },
+  })
+  await openComputerUse(h)
+  await waitForText(h, 'Manage applications')
+  await sgrClick(h, 'Manage applications')
+  await frames(h.vt, 3)
+  h.vt.resize(120, 12)
+  await frames(h.vt)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  const before = h.view()
+  // The two-cell gutter between the painted panes owns no scroll.
+  // Categories rail + 34-cell List => the page-local 2-cell gutter is at x=58..59.
+  await sgrWheel(h, 'down', 58, 5)
+  assert.equal(h.view(), before, 'the gutter wheel changes nothing')
+  // Over the List the List scrolls; the selected row may leave the viewport and
+  // the Open hint must disappear with it.
+  await sgrWheel(h, 'down', 30, 5)
+  await frames(h.vt, 2)
+  assert.notEqual(h.view(), before, 'the wheel over the List scrolls the List')
+  assert.doesNotMatch(h.view(), /Enter open/u, 'an offscreen selection advertises no Open')
+  await sgrWheel(h, 'up', 30, 5)
+  await frames(h.vt, 2)
+  // Over the Detail the Detail scrolls (its long path exceeds the grant).
+  const listFrame = h.view()
+  await sgrWheel(h, 'down', 70, 5)
+  await frames(h.vt, 2)
+  assert.notEqual(h.view(), listFrame, 'the wheel over the Detail scrolls the Detail')
+  assert.match(h.view(), /Categories \(/u, 'the workbench chrome stays painted')
+})
+
+test('a pending accepted action paints Waiting with no cancel, then shows its receipt and returns', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const h = setup({ columns: 44, rows: 20, requestGate: gate })
+  await openComputerUse(h)
+  await waitForText(h, 'Request permission')
+  await sgrClick(h, 'Request permission')
+  await waitForText(h, 'Waiting for the action to settle')
+  assert.doesNotMatch(h.view(), /Back \[Esc\]/u, 'the accepted action paints no cancel')
+  const page = h.page()
+  // The Waiting frame advertises no cancel at all.
+  assert.doesNotMatch(h.view(), /Back \[Esc\]/u)
+  release()
+  await waitForText(h, 'Action: Request sent')
+  assert.deepEqual(h.requests, ['screenRecording:en-US'], 'the first missing permission is the exact sink')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.equal(h.page(), page, 'the settled page is still the SAME instance')
+  await sgrClick(h, 'Back [Esc]')
+  await frames(h.vt, 2)
+  assert.equal(h.page(), undefined, 'the real painted Back retires the page after settlement')
 })
 
 test('the Applications rail Back returns to the SAME mounted Overview without a re-read', async () => {

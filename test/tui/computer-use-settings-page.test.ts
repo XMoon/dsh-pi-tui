@@ -651,6 +651,236 @@ test('a zero-body grant keeps only the page real safe bar in both projections', 
   mounted.page.dispose()
 })
 
+const MANY: CuaApplicationState = {
+  allowedApps: Array.from({ length: 10 }, (_, index) => ({
+    id: `app-${String(index + 1)}`,
+    name: `App ${String(index + 1)}`,
+    executablePath: `/Applications/App ${String(index + 1)}.app`,
+  })),
+  blockedApps: [],
+  persistentAvailable: true,
+}
+
+const MANY_LONG: CuaApplicationState = {
+  allowedApps: Array.from({ length: 10 }, (_, index) => ({
+    id: `app-${String(index + 1)}`,
+    name: `App ${String(index + 1)}`,
+    executablePath: index === 0
+      ? `/Applications/${'Very Long Application Name/'.repeat(6)}App 1.app`
+      : `/Applications/App ${String(index + 1)}.app`,
+  })),
+  blockedApps: [],
+  persistentAvailable: true,
+}
+
+const LONG_PATH: CuaApplicationState = {
+  allowedApps: [{
+    id: 'app-long',
+    name: 'A',
+    executablePath: `/Applications/${'Very Long Application Name/'.repeat(6)}A.app`,
+  }],
+  blockedApps: [{ id: 'app-b', name: 'B' }],
+  persistentAvailable: true,
+}
+
+async function enterApplications(
+  mounted: Mounted,
+  options: { width?: number, rows?: number, allowDual?: boolean } = {},
+): Promise<string[]> {
+  await settle(mounted, 'Bundle: Enabled')
+  selectOverviewAction(mounted, 'Manage applications')
+  mounted.page.handleInput('\r')
+  grantWorkbench(mounted, {
+    width: options.width ?? 96,
+    rows: options.rows ?? 20,
+    barWidth: options.width ?? 96,
+    allowDual: options.allowDual ?? false,
+  })
+  return mounted.render(options.width ?? 96)
+}
+
+function clickCell(mounted: Mounted, width: number, height: number, x: number, y: number): void {
+  const event = { type: 'press', x, y, width, height } as TuiMouseEvent
+  mounted.page.handleMouse(event)
+  mounted.page.handleMouse({ ...event, type: 'click' } as TuiMouseEvent)
+}
+
+function wheelCell(mounted: Mounted, width: number, height: number, x: number, y: number, delta: number): void {
+  mounted.page.handleMouse({ type: 'wheel', x, y, width, height, wheelDelta: delta } as TuiMouseEvent)
+}
+
+test('a single-region Applications list publishes no hidden Detail verb or row target', async () => {
+  const mounted = mount({ cua: { readApplications: async () => LONG_PATH } })
+  await enterApplications(mounted, { width: 44, rows: 18 })
+  const list = mounted.render(44).join('\n')
+  assert.match(list, /Always allowed/u)
+  assert.doesNotMatch(list, /Revoke access…/u, 'the hidden Detail verb is not painted in the list')
+  // The hidden Detail build puts `Revoke access…` on row 7; that cell is an
+  // ordinary blank list cell in a single-region grant and must stay inert.
+  clickCell(mounted, 44, 18, 3, 7)
+  assert.doesNotMatch(mounted.render(44).join('\n'), /Revoke this application decision\?/u)
+  assert.deepEqual(mounted.calls.filter(call => call.startsWith('revoke:')), [])
+  // Symmetric: from the Detail, a hidden List row cell must not select or switch.
+  mounted.page.handleInput('\r') // Enter opens the selected row (A is selected at mount)
+  mounted.render(44)
+  assert.match(mounted.render(44).join('\n'), /Decision: Always allowed/u)
+  clickCell(mounted, 44, 18, 3, 1)
+  const detail = mounted.render(44).join('\n')
+  assert.match(detail, /Decision: Always allowed/u, 'a hidden List row cell never leaves the Detail')
+  assert.doesNotMatch(detail, /Enter open/u)
+  mounted.page.dispose()
+})
+
+test('the dual Applications wheel scrolls the painted region under x and ignores the gutter', async () => {
+  const mounted = mount({ cua: { readApplications: async () => MANY_LONG } })
+  await enterApplications(mounted, { width: 120, rows: 8, allowDual: true })
+  const before = mounted.render(120)
+  // The two-cell gutter between the painted panes owns no scroll.
+  wheelCell(mounted, 120, 8, 34, 1, 1)
+  assert.deepEqual(mounted.render(120), before, 'the gutter wheel is inert')
+  // Over the list the LIST scrolls; over the Detail the DETAIL scrolls.
+  wheelCell(mounted, 120, 8, 5, 1, 1)
+  const listScrolled = mounted.render(120)
+  assert.notDeepEqual(listScrolled, before, 'the wheel over the List scrolls the List')
+  wheelCell(mounted, 120, 8, 60, 1, 1)
+  const detailScrolled = mounted.render(120)
+  assert.notDeepEqual(detailScrolled, listScrolled, 'the wheel over the Detail scrolls the Detail')
+  mounted.page.dispose()
+})
+
+test('the first Overview action click after a dual Applications return is active', async () => {
+  const mounted = mount()
+  await enterApplications(mounted, { width: 120, rows: 40, allowDual: true })
+  assert.equal(mounted.page.leaveEmbeddedWorkbench(), true)
+  mounted.render(52)
+  assert.match(mounted.view(52), /Accessibility: Not allowed/u)
+  clickBody(mounted, 'Request permission')
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.deepEqual(mounted.calls.filter(call => call.startsWith('request:')), ['request:accessibility:zh'],
+    'the retained dual grant must not make the Overview verb passive')
+  mounted.page.dispose()
+})
+
+test('Applications Help is real content and Esc closes it before leaving the mode', async () => {
+  const mounted = mount()
+  await enterApplications(mounted, { width: 96, rows: 20 })
+  mounted.page.handleInput('?')
+  const help = mounted.render(96).join('\n')
+  assert.match(help, /Help and recovery/u, 'the workbench paints the real Help')
+  assert.match(help, /Back \[Esc\]/u)
+  mounted.page.handleInput('\x1b')
+  const back = mounted.render(96).join('\n')
+  assert.match(back, /Always allowed/u, 'Esc closes Help and stays in Applications')
+  assert.doesNotMatch(back, /Help and recovery/u)
+  mounted.page.handleInput('\x1b')
+  assert.match(mounted.render(52).join('\n'), /Bundle: Enabled/u, 'the next Esc leaves to the same Overview')
+  mounted.page.dispose()
+})
+
+test('the list bar advertises Open only while the selected row is really painted', async () => {
+  const mounted = mount({ cua: { readApplications: async () => MANY } })
+  await enterApplications(mounted, { width: 96, rows: 6 })
+  assert.match(mounted.render(96).at(-1)!, /Enter open/u)
+  mounted.page.handleInput('\x1b[6~') // PageDown: the list scrolls, the selection stays
+  const paged = mounted.render(96)
+  assert.doesNotMatch(paged.at(-1)!, /Enter open/u, 'an offscreen selection advertises no Open')
+  mounted.page.handleInput('\x1b[B') // moving the selection reveals it again
+  assert.match(mounted.render(96).at(-1)!, /Enter open/u)
+  mounted.page.dispose()
+})
+
+test('the Applications Detail states unreadable storage and keeps the receipt visible', async () => {
+  const mounted = mount({
+    cua: {
+      readApplications: async () => ({ ...APPLICATIONS, persistentAvailable: false }),
+    },
+  })
+  await enterApplications(mounted, { width: 96, rows: 20 })
+  mounted.page.handleInput('\r')
+  mounted.render(96)
+  assert.match(mounted.render(96).join('\n'), /durable application storage is unavailable/u)
+  assert.match(mounted.render(96).join('\n'), /Revoke access…/u)
+  mounted.page.handleInput('\r') // Enter activates the painted verb
+  assert.match(mounted.render(96).join('\n'), /Revoke this application decision\?/u)
+  mounted.page.handleInput('y')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  const settled = mounted.render(96).join('\n')
+  assert.match(settled, /Action: .*revoked/u, 'the settled outcome is painted in the active projection')
+  assert.deepEqual(mounted.calls.filter(call => call.startsWith('revoke:')), ['revoke:app-1'])
+  mounted.page.dispose()
+})
+
+test('the Detail keyboard scroll reaches a verb pushed below a long path grant', async () => {
+  const mounted = mount({ cua: { readApplications: async () => LONG_PATH } })
+  await enterApplications(mounted, { width: 44, rows: 8 })
+  mounted.page.handleInput('\r') // open the selected row
+  const first = mounted.render(44).join('\n')
+  assert.doesNotMatch(first, /Revoke access…/u, 'the long path pushes the verb below the grant')
+  for (let step = 0; step < 20 && !mounted.render(44).join('\n').includes('Revoke access…'); step += 1) {
+    mounted.page.handleInput('\x1b[6~')
+  }
+  assert.match(mounted.render(44).join('\n'), /Revoke access…/u, 'PageDown reaches the complete verb')
+  mounted.page.handleInput('\r')
+  assert.match(mounted.render(44).join('\n'), /Revoke this application decision\?/u)
+  mounted.page.dispose()
+})
+
+test('a Waiting Overview refuses the page own Back until the action settles', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const mounted = mount({ cua: { requestPermission: async () => { await held; return STATUS } } })
+  await settle(mounted, 'Bundle: Enabled')
+  selectOverviewAction(mounted, 'Request permission')
+  mounted.page.handleInput('\r')
+  assert.equal(mounted.controller.getSnapshot().busy, true)
+  mounted.page.render(52)
+  assert.match(mounted.render(52).at(-1)!, /Waiting for the action to settle/u)
+  mounted.page.handleInput('\x1b')
+  assert.notEqual((mounted.page as unknown as { disposed?: boolean }).disposed, true,
+    'the page own Back never retires an accepted action')
+  assert.equal(mounted.controller.getSnapshot().busy, true)
+  release()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  mounted.page.dispose()
+})
+
+test('a clean parent leave is a query: the page never calls the Root continuation itself', () => {
+  const mounted = mount()
+  let leaves = 0
+  assert.equal(mounted.page.requestParentLeave(
+    { categoryId: 'tools', rowId: 'computer-use', focus: 'rows' },
+    () => { leaves += 1 },
+  ), 'allow')
+  assert.equal(leaves, 0, 'the Root owns the ONE leave transaction')
+  mounted.page.dispose()
+})
+
+test('an accepted revoke owns the page synchronously before its first await', async () => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const mounted = mount({ cua: { revoke: async () => { await held } } })
+  await enterApplications(mounted, { width: 96, rows: 20 })
+  mounted.page.handleInput('\r')
+  mounted.render(96)
+  mounted.page.handleInput('\r')
+  assert.match(mounted.render(96).join('\n'), /Revoke this application decision\?/u)
+  mounted.page.handleInput('y')
+  // No await: the same input turn already reads the accepted ownership.
+  assert.equal(mounted.controller.getSnapshot().busy, true, 'Waiting is published synchronously')
+  assert.equal(mounted.page.requestParentLeave(
+    { categoryId: 'tools', rowId: 'computer-use', focus: 'rows' },
+    () => {},
+  ), 'refuse')
+  // The page's own Esc must not retire the page behind the Waiting bar either.
+  mounted.page.handleInput('\x1b')
+  mounted.page.render(96)
+  assert.equal(mounted.page.embeddedWorkbenchActive(), true)
+  assert.equal(mounted.controller.getSnapshot().busy, true)
+  release()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  mounted.page.dispose()
+})
+
 test('a non-Darwin Host paints Unsupported and the Plugins recovery route', async () => {
   const mounted = mount({
     cua: {

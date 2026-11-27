@@ -128,6 +128,9 @@ export interface CuaAccessSettingsSnapshot {
   readonly busy: boolean
   /** A read-only observation is in flight (safe to leave; never Waiting). */
   readonly reading: boolean
+  /** An unconfirmed action outcome retires every write until ONE fresh
+   *  authoritative observation (Refresh) proves the current state again. */
+  readonly recoveryRequired: boolean
   readonly bundle: CuaBundleState
   readonly preset: CuaPresetState
   readonly system: CuaReadState<CuaSystemStatus>
@@ -179,6 +182,18 @@ export function cuaActionAdmitted(
   if (bundle.phase !== 'ready' || !bundle.enabled || !bundle.providerReady) {
     return { ok: false, reason: bundle.error ?? bundle.reason ?? 'The official Computer Use provider is not ready.' }
   }
+  // An EXPLICIT known unsupported Host denies every CUA write (preset, PTC,
+  // revoke/retry included). A system read that merely FAILED is different: the
+  // independently current application decisions stay usable.
+  const knownSystem = snapshot.system.phase === 'ready' ? snapshot.system.value : undefined
+  if (knownSystem !== undefined && knownSystem.platform !== 'darwin') {
+    return { ok: false, reason: 'The official Computer Use provider supports macOS only; no action can run on this Host.' }
+  }
+  // An unconfirmed outcome retires actionability itself: a fresh authoritative
+  // observation (not another gesture on the old facts) must come first.
+  if (snapshot.recoveryRequired) {
+    return { ok: false, reason: 'The previous action outcome is unconfirmed; Refresh before acting again.' }
+  }
   switch (capture.kind) {
     case 'request':
     case 'open': {
@@ -195,6 +210,9 @@ export function cuaActionAdmitted(
       }
       if (snapshot.preset.decision === undefined) {
         return { ok: false, reason: 'The Host preset authority cannot be proven; no change can be saved.' }
+      }
+      if (snapshot.preset.value === undefined) {
+        return { ok: false, reason: 'The effective saved default cannot be proven; no change can be saved.' }
       }
       if (snapshot.preset.value === 'ptc') return { ok: false, reason: 'PTC is already the saved default preset.' }
       return { ok: true }
@@ -238,6 +256,9 @@ export class CuaAccessSettingsController {
   private readonly listeners = new Set<() => void>()
   private state: CuaAccessSettingsSnapshot
   private readonly openingEpoch: number
+  /** An unconfirmed action outcome needs ONE fresh authoritative observation
+   *  before any new write; a gesture alone never retries a lost effect. */
+  private recoveryRequired = false
   private epoch: number
   private readSequence = 0
   private readInFlight: Promise<void> = Promise.resolve()
@@ -257,6 +278,7 @@ export class CuaAccessSettingsController {
       epoch: this.epoch,
       busy: false,
       reading: false,
+      recoveryRequired: false,
       bundle: { phase: 'idle', enabled: false, providerReady: false },
       preset: this.readPreset(),
       system: IDLE(),
@@ -318,6 +340,12 @@ export class CuaAccessSettingsController {
     const run = (async () => {
       const bundle = await this.readBundle(epoch, sequence)
       if (!this.current(epoch, sequence)) return
+      if (!Object.is(this.deps.cuaAccess.observation.readSnapshot(), basisAtStart)) {
+        // The roster itself was awaited across a provider replacement: it must
+        // not authorize the three downstream reads of the old generation.
+        this.publishCrossedRead()
+        return
+      }
       this.patch({ bundle })
       if (bundle.phase !== 'ready' || !bundle.enabled || !bundle.providerReady) {
         const disabledPhase = bundle.phase === 'disabled'
@@ -333,6 +361,8 @@ export class CuaAccessSettingsController {
           busy: this.actionInFlight,
           reading: false,
         })
+        this.recoveryRequired = false
+        this.patch({ recoveryRequired: false })
         return
       }
       this.patch({
@@ -348,26 +378,13 @@ export class CuaAccessSettingsController {
       if (!this.current(epoch, sequence)) return
       const basisAtEnd = this.deps.cuaAccess.observation.readSnapshot()
       if (!Object.is(basisAtStart, basisAtEnd)) {
-        // The read CROSSED a provider replacement: these values describe the old
-        // service and must not be painted or adopted as the current generation.
-        // Publish the unknown state and read once more at the settled basis.
-        this.observedBasis = basisAtEnd
-        this.epoch += 1
-        this.readSequence += 1
-        this.patch({
-          epoch: this.epoch,
-          system: { phase: 'unknown', reason: 'The Host CUA provider changed during the read; refresh again to read the new generation.' },
-          applications: { phase: 'unknown', reason: 'The Host CUA provider changed during the read; refresh again to read the new generation.' },
-          ptc: { phase: 'unknown', reason: 'The Host CUA provider changed during the read; refresh again to read the new generation.' },
-          busy: this.actionInFlight,
-          reading: false,
-        })
-        this.readInFlight = this.refresh().catch(() => {})
+        this.publishCrossedRead()
         return
       }
       // The settled read is the page's NEW basis.
       this.observedBasis = basisAtEnd
-      this.patch({ busy: this.actionInFlight, reading: false })
+      this.recoveryRequired = false
+      this.patch({ busy: this.actionInFlight, reading: false, recoveryRequired: false })
     })()
     this.readInFlight = run.catch(() => {})
     await this.readInFlight
@@ -403,13 +420,13 @@ export class CuaAccessSettingsController {
   async setPtcDefault(capture: CuaActionCapture): Promise<void> {
     await this.runAction(capture,
       { kind: 'preset', text: 'Default preset set to PTC for new Sessions. An existing Session keeps its own preset.' },
-      async () => {
+      async (stillCurrent) => {
         const decision = this.state.preset.decision
         const guarded = this.deps.presetDefault.setGuarded
         if (decision === undefined || guarded === undefined) {
           return { state: 'failed' as const, text: 'The Host preset authority cannot be proven; nothing was saved. Refresh and act again.' }
         }
-        const outcome = await guarded.call(this.deps.presetDefault, 'ptc', decision)
+        const outcome = await guarded.call(this.deps.presetDefault, 'ptc', decision, stillCurrent)
         if (outcome.kind === 'rejected' || outcome.kind === 'conflict') {
           return { state: 'failed' as const, text: `Could not save: ${outcome.reason}` }
         }
@@ -563,12 +580,36 @@ export class CuaAccessSettingsController {
   private readPreset(): CuaPresetState {
     try {
       const available = this.deps.presetDefault.available()
-      const value = this.deps.presetDefault.get()
-      const decision = this.deps.presetDefault.readDecision?.()
-      return { phase: 'ready', available, value, ...(decision === undefined ? {} : { decision }) }
+      const readDecision = this.deps.presetDefault.readDecision
+      const raw = this.deps.presetDefault.get()
+      // A guarded read that cannot prove the effective value is NOT a last-known
+      // default: the page must never paint an unproven id as current nor offer a
+      // write from it. A backend without the seam keeps its own live read.
+      const decision = readDecision === undefined ? undefined : readDecision.call(this.deps.presetDefault)
+      const proven = decision !== undefined && decision.value !== undefined ? decision : undefined
+      const value = readDecision === undefined ? raw : proven?.value
+      return { phase: 'ready', available, value, ...(proven === undefined ? {} : { decision: proven }) }
     } catch (error) {
       return { phase: 'failed', available: false, reason: reasonOf(error) }
     }
+  }
+
+  /** The read CROSSED a provider replacement: these values describe the old
+   *  service and must not be painted or adopted as the current generation.
+   *  Publish the unknown state and read once more at the settled basis. */
+  private publishCrossedRead(): void {
+    this.observedBasis = this.deps.cuaAccess.observation.readSnapshot()
+    this.epoch += 1
+    this.readSequence += 1
+    this.patch({
+      epoch: this.epoch,
+      system: { phase: 'unknown', reason: 'The Host CUA provider changed during the read; refresh again to read the new generation.' },
+      applications: { phase: 'unknown', reason: 'The Host CUA provider changed during the read; refresh again to read the new generation.' },
+      ptc: { phase: 'unknown', reason: 'The Host CUA provider changed during the read; refresh again to read the new generation.' },
+      busy: this.actionInFlight,
+      reading: false,
+    })
+    this.readInFlight = this.refresh().catch(() => {})
   }
 
   private current(epoch: number, sequence: number): boolean {
@@ -578,7 +619,7 @@ export class CuaAccessSettingsController {
   private async runAction(
     capture: CuaActionCapture,
     receipt: Omit<CuaActionReceipt, 'state' | 'at'>,
-    run: () => Promise<void | { readonly state: 'ok' | 'failed' | 'unknown'; readonly text?: string }>,
+    run: (stillCurrent: () => boolean) => Promise<void | { readonly state: 'ok' | 'failed' | 'unknown'; readonly text?: string }>,
   ): Promise<void> {
     return await this.admitAction(capture, receipt, run)
   }
@@ -597,41 +638,28 @@ export class CuaAccessSettingsController {
   private async admitAction(
     capture: CuaActionCapture,
     receipt: Omit<CuaActionReceipt, 'state' | 'at'>,
-    run: () => Promise<void | { readonly state: 'ok' | 'failed' | 'unknown'; readonly text?: string }>,
+    run: (stillCurrent: () => boolean) => Promise<void | { readonly state: 'ok' | 'failed' | 'unknown'; readonly text?: string }>,
   ): Promise<void> {
     // ONE accepted action at a time: a second buffered Enter/click is refused
     // before it can enter the serial tail. The page also disables its actions
     // while busy, but this admission is the authority.
     if (this.closed || this.actionInFlight) return
+    if (this.recoveryRequired) {
+      this.publishRefusal(receipt, 'The previous action outcome is unconfirmed; Refresh and review the current state before acting again.')
+      return
+    }
     const refused = cuaActionAdmitted(this.state, capture)
     if (!refused.ok) {
       this.publishRefusal(receipt, refused.reason)
       return
     }
-    // Consume the observation basis before any dispatch: a page action painted
-    // against an older generation is refused and the new generation is read.
-    const basis = this.deps.cuaAccess.observation.readSnapshot()
-    if (!Object.is(basis, this.observedBasis)) {
-      await this.invalidateObservation()
-      this.patch({
-        action: {
-          ...receipt,
-          kind: capture.kind,
-          state: 'unknown',
-          text: 'The Host CUA provider changed; the page was refreshed and the action was NOT dispatched. Review the new state and act again.',
-          at: Date.now(),
-        },
-        busy: false,
-      })
-      return
-    }
+    // Accept ownership SYNCHRONOUSLY: every UI gate (Back/parent/Tab/second
+    // action) reads snapshot.busy, so a buffered gesture in the same input turn
+    // must already see the page owned by this accepted action.
     this.actionInFlight = true
+    this.patch({ busy: true })
     const epoch = this.epoch
-    // The provider this action was ADMITTED against. Direct's observation
-    // subscription is a no-op, so a replacement between admission and the
-    // queued dispatch is invisible to `epoch`: the identity must be re-read at
-    // the dispatch boundary and again at settlement.
-    const admittedBasis = basis
+    const admittedBasis = this.deps.cuaAccess.observation.readSnapshot()
     // The ONE currentness judgment for a dispatched CUA write. A provider
     // replacement during the write is invisible to `epoch` on Direct; both the
     // success and the error settlement use this same judgment — an error raised
@@ -639,90 +667,117 @@ export class CuaAccessSettingsController {
     const stillCurrent = (): boolean => !this.closed
       && epoch === this.epoch
       && Object.is(this.deps.cuaAccess.observation.readSnapshot(), admittedBasis)
-    const task = this.tail.then(async () => {
-      if (this.closed) return
-      // The queue head re-proves the EXACT painted capture (observation
-      // identity and target facts) and the provider identity before dispatch.
-      const live = cuaActionAdmitted(this.state, capture)
-      if (!live.ok) {
-        this.publishRefusal(receipt, live.reason)
-        return
-      }
-      this.patch({ busy: true })
-      if (!Object.is(this.deps.cuaAccess.observation.readSnapshot(), admittedBasis)) {
-        // Replaced before dispatch: the target the user acted on belongs to the
-        // old provider, so nothing is dispatched.
+    try {
+      if (!Object.is(admittedBasis, this.observedBasis)) {
+        // The capture was painted against an older observation basis: read the
+        // new generation and dispatch nothing. Ownership stays published while
+        // the fresh read settles, so this boundary cannot be crossed by a
+        // gesture that arrived in the same input turn.
+        await this.invalidateObservation()
         this.patch({
           action: {
             ...receipt,
             kind: capture.kind,
             state: 'unknown',
-            text: 'The Host CUA provider changed before the action was dispatched; nothing was sent. Refresh and act again.',
+            text: 'The Host CUA provider changed; the page was refreshed and the action was NOT dispatched. Review the new state and act again.',
             at: Date.now(),
           },
           busy: false,
         })
         return
       }
-      try {
-        const result = await run()
-        // The guarded preset write proves its OWN config authority through its
-        // same-generation readback; the CUA provider basis is not that
-        // authority and must not turn a proven preset write into an unknown.
-        const attributable = capture.kind === 'preset' || stillCurrent()
-        if (!attributable) {
-          this.publishUnknown(receipt, capture.kind)
+      const task = this.tail.then(async () => {
+        if (this.closed) return
+        // The queue head re-proves the EXACT painted capture (observation
+        // identity and target facts) and the provider identity before dispatch.
+        const live = cuaActionAdmitted(this.state, capture)
+        if (!live.ok) {
+          this.publishRefusal(receipt, live.reason)
           return
         }
-        if (result !== undefined && result.state !== 'ok') {
+        // Re-publish the accepted ownership at the queue head. `patch` invokes
+        // subscribers SYNCHRONOUSLY, so a listener may close the workspace or
+        // invalidate the observation before the official write starts: prove
+        // the same basis and generation again AFTER this notification.
+        this.patch({ busy: true })
+        if (this.closed) return
+        if (!stillCurrent()) {
           this.patch({
             action: {
               ...receipt,
               kind: capture.kind,
-              state: result.state,
-              text: result.text ?? receipt.text,
+              state: 'unknown',
+              text: 'The Host CUA provider changed before the action was dispatched; nothing was sent. Refresh and act again.',
+              at: Date.now(),
+            },
+            busy: false,
+          })
+          return
+        }
+        try {
+          const result = await run(stillCurrent)
+          // The guarded preset write proves its OWN config authority through its
+          // same-generation readback; the CUA provider basis is not that
+          // authority and must not turn a proven preset write into an unknown.
+          const attributable = capture.kind === 'preset' || stillCurrent()
+          if (!attributable) {
+            this.publishUnknown(receipt, capture.kind)
+            return
+          }
+          if (result !== undefined && result.state !== 'ok') {
+            this.patch({
+              action: {
+                ...receipt,
+                kind: capture.kind,
+                state: result.state,
+                text: result.text ?? receipt.text,
+                at: Date.now(),
+              },
+              busy: this.actionInFlight,
+            })
+            await this.refresh()
+            return
+          }
+          this.patch({
+            action: {
+              ...receipt,
+              kind: capture.kind,
+              state: 'ok',
+              text: result?.text ?? receipt.text,
+              at: Date.now(),
+            },
+          })
+          await this.refresh()
+        } catch (error) {
+          if (!stillCurrent() && capture.kind !== 'preset') {
+            // The rejection belongs to the replaced provider: the CURRENT one
+            // has no attributable outcome, so the truthful state is unknown, not
+            // the old provider's failure.
+            this.publishUnknown(receipt, capture.kind)
+            return
+          }
+          const unknown = error instanceof SupersededReadError
+          if (unknown) {
+            this.publishUnknown(receipt, capture.kind)
+            return
+          }
+          // An official definite refusal keeps its exact reason. Refresh still
+          // re-reads the authoritative facts so the page never keeps a stale
+          // pre-action projection beside the failure.
+          this.patch({
+            action: {
+              ...receipt,
+              kind: capture.kind,
+              state: 'failed',
+              text: reasonOf(error),
               at: Date.now(),
             },
             busy: this.actionInFlight,
           })
           await this.refresh()
-          return
         }
-        this.patch({
-          action: {
-            ...receipt,
-            kind: capture.kind,
-            state: 'ok',
-            text: result?.text ?? receipt.text,
-            at: Date.now(),
-          },
-        })
-        await this.refresh()
-      } catch (error) {
-        if (!stillCurrent() && capture.kind !== 'preset') {
-          // The rejection belongs to the replaced provider: the CURRENT one has
-          // no attributable outcome, so the truthful state is unknown, not the
-          // old provider's failure.
-          this.publishUnknown(receipt, capture.kind)
-          return
-        }
-        const unknown = error instanceof SupersededReadError
-        this.patch({
-          action: {
-            ...receipt,
-            kind: capture.kind,
-            state: unknown ? 'unknown' : 'failed',
-            text: unknown
-              ? 'The Host connection changed; the action outcome is unconfirmed. Refresh before retrying.'
-              : reasonOf(error),
-            at: Date.now(),
-          },
-          busy: false,
-        })
-      }
-    })
-    this.tail = task.catch(() => {})
-    try {
+      })
+      this.tail = task.catch(() => {})
       await task
     } finally {
       this.actionInFlight = false
@@ -744,6 +799,9 @@ export class CuaAccessSettingsController {
     receipt: Omit<CuaActionReceipt, 'state' | 'at'>,
     kind: CuaActionKind,
   ): void {
+    // A lost/unconfirmed effect is never retried blind: only a fresh
+    // authoritative observation re-authorizes the next write.
+    this.recoveryRequired = true
     this.patch({
       action: {
         ...receipt,
@@ -753,6 +811,7 @@ export class CuaAccessSettingsController {
         at: Date.now(),
       },
       busy: this.actionInFlight,
+      recoveryRequired: true,
     })
   }
 

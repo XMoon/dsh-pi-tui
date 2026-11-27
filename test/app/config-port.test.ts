@@ -1044,6 +1044,34 @@ test('presetDefault setGuarded dispatches ONE exact revision and refuses a moved
   assert.equal(writes.length, 0, 'a replaced authority dispatches nothing')
 })
 
+test('presetDefault setGuarded re-proves the caller observation immediately before the official write', async () => {
+  const writes: unknown[] = []
+  const settingsObject = {
+    describe: () => [{
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'code' },
+      user: { selectedDefault: 'code' },
+      revision: 3,
+    }],
+    mutate: async (ns: string, ops: unknown, expected: number | undefined) => { writes.push({ ns, ops, expected }) },
+  }
+  const host = {
+    get: (name: string): unknown => name === 'settings'
+      ? settingsObject
+      : name === 'agentPresets' ? { get defaultId() { return 'code' } } : undefined,
+    on: (() => false) as unknown as HostContextLike['on'],
+  }
+  const preset = new DirectConfigPort(host, undefined, () => undefined).presetDefault
+  const decision = preset.readDecision!()!
+  let current = false
+  const refused = await preset.setGuarded!('ptc', decision, () => current)
+  assert.deepEqual(refused, { kind: 'rejected', reason: 'the Computer Use observation changed; refresh before saving' })
+  assert.equal(writes.length, 0, 'the caller observation is an independent authority with zero write on refusal')
+  current = true
+  assert.deepEqual(await preset.setGuarded!('ptc', decision, () => current), { kind: 'accepted' })
+  assert.equal(writes.length, 1)
+})
+
 test('presetDefault setGuarded reports an unconfirmed outcome when the official mutation throws after dispatch', async () => {
   const settingsObject = {
     describe: () => [{ ns: 'agent-preset-registry', value: { selectedDefault: 'code' }, user: { selectedDefault: 'code' }, revision: 3 }],

@@ -1742,7 +1742,9 @@ class RemotePresetDefaultConfig implements PresetDefaultConfig {
     if (generation === undefined) return undefined
     const view = this.mirror.namespace(PRESET_REGISTRY_NS)
     if (view === undefined || !validRemoteSettingsRevision(view.revision)) return undefined
-    return { generation, revision: view.revision, value: this.get() }
+    const value = this.get()
+    if (value === undefined) return undefined
+    return { generation, revision: view.revision, value }
   }
 
   /**
@@ -1752,7 +1754,7 @@ class RemotePresetDefaultConfig implements PresetDefaultConfig {
    * the official mutation, so a queued decision whose Host/revision changed
    * behind a predecessor dispatches nothing and is never rebased.
    */
-  async setGuarded(id: string, decision: PresetDefaultDecision): Promise<SectionMutationOutcome> {
+  async setGuarded(id: string, decision: PresetDefaultDecision, stillCurrent?: () => boolean): Promise<SectionMutationOutcome> {
     if (this.mirror.namespace(PRESET_REGISTRY_NS) === undefined) {
       return { kind: 'rejected', reason: `settings namespace "${PRESET_REGISTRY_NS}" is not available in this deployment` }
     }
@@ -1762,6 +1764,16 @@ class RemotePresetDefaultConfig implements PresetDefaultConfig {
       [{ op: 'set', path: ['selectedDefault'], value: id }],
       decision.revision,
       decision.generation,
+      // The shared mirror queue may hold this write behind an unrelated
+      // settings mutation; the caller's CUA observation must still be current
+      // at the ACTUAL queue head, not merely when the decision was painted.
+      stillCurrent === undefined ? undefined : {
+        beforeDispatch: () => {
+          if (!stillCurrent()) {
+            throw Object.assign(new Error('the Computer Use observation changed before dispatch'), { code: 'settings/writer-superseded' })
+          }
+        },
+      },
     )
   }
 }

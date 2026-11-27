@@ -300,6 +300,10 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   private overviewActionRows: number[] = []
   private detailActions: PageAction[] = []
   private visibleActionIds = new Set<string>()
+  /** Applications help is REAL content (never an invisible Esc step). */
+  private helpOffset = 0
+  /** Whether the LAST list render really painted the selected row. */
+  private listSelectionPainted = false
   private pressed: { readonly identity: string; readonly target: PaintedTarget } | undefined
   private paintedBarSpansValue: readonly BarSpan[] = []
   private paintedEscapeSpanValue: { readonly startCol: number; readonly endCol: number } | undefined
@@ -380,6 +384,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         return
       case 'bar:help':
         this.help = !this.help
+        if (this.help) this.helpOffset = 0
         this.bump()
         return
       case 'bar:open':
@@ -443,10 +448,13 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
    * or an accepted action owns the page; an ordinary browse (including an
    * unknown receipt that is already painted) leaves without a write.
    */
-  requestParentLeave(_target: SpecialistParentLeaveTarget, leave: () => void): 'allow' | 'refuse' {
+  requestParentLeave(_target: SpecialistParentLeaveTarget, _leave: () => void): 'allow' | 'refuse' {
+    // `allow` is a QUERY: the Root's ONE leave transaction owns the continuation.
+    // A page that opens its own question returns `refuse` and calls the captured
+    // continuation only after the user really confirms; a clean page never calls
+    // it itself (which would close/apply the same leave twice).
     if (this.webWorkbenchBlocksParentNavigation()) return 'refuse'
     this.pressed = undefined
-    leave()
     return 'allow'
   }
 
@@ -743,8 +751,9 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
 
     // 3. Authorization. Every project-wide preset/PTC fact and its explicit
     // action belongs to the same model on every grant; the short grant reaches
-    // them through the same scrollport (never a second short variant).
-    if (providerReady) {
+    // them through the same scrollport (never a second short variant). An
+    // explicit unsupported Host offers no CUA write at all.
+    if (providerReady && system?.platform !== 'win32') {
       if (snapshot.preset.phase === 'ready') {
         const value = snapshot.preset.value ?? 'unknown'
         pushFact('New Sessions', value === 'ptc' ? 'ptc (PTC is the saved default)' : value)
@@ -791,7 +800,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       if (value?.persistentAvailable === false) {
         pushWrapped('The Host reports durable application storage is unavailable; persisted decisions may not survive.', { detail: true })
       }
-      if (!busy && value !== undefined) {
+      if (!busy && value !== undefined && system?.platform !== 'win32') {
         pushAction('Manage applications', { id: 'manage', kind: 'manage' })
       }
     } else {
@@ -857,8 +866,11 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   }
 
   private paintsBothRegions(): boolean {
+    // The projection is the MODE's, not a retained grant's: after returning to
+    // the Overview the old dual grant must never make an Overview verb passive.
+    if (this.mode !== 'applications' || this.confirmation !== undefined) return false
     const grant = this.workbenchGrant
-    return grant !== undefined && grant.allowDual && this.confirmation === undefined
+    return grant !== undefined && grant.allowDual
   }
 
   private listColumnWidth(width: number): number {
@@ -893,7 +905,17 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       ])
       return { lines: [...out, fit(bar.text, grant.barWidth)], bodyRows, bodyWidth, bar, targets }
     }
+    if (this.help) {
+      const built = this.buildWorkbenchHelp(bodyWidth, bodyRows)
+      for (let index = 0; index < bodyRows; index += 1) {
+        const line = built.lines[index]
+        out.push(fit(line === undefined ? '' : this.paintLine(line), bodyWidth))
+      }
+      const bar = this.renderWorkbenchSafeBar(grant.barWidth, snapshot)
+      return { lines: [...out, fit(bar.text, grant.barWidth)], bodyRows, bodyWidth, bar, targets }
+    }
     const both = this.paintsBothRegions()
+    const visibleRegions = both ? undefined : this.listRegion
     const listWidth = both ? this.listColumnWidth(bodyWidth) : bodyWidth
     const detailWidth = both ? Math.max(1, bodyWidth - listWidth - 2) : bodyWidth
     const list = this.buildApplicationList(snapshot, listWidth, bodyRows)
@@ -924,10 +946,15 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       const text = `${this.notice!.kind === 'error' ? 'Error' : 'Notice'}: ${this.notice!.text}`
       out[noticeRow] = fit(this.toneText(this.notice!.kind === 'error' ? 'error' : 'dim', text), bodyWidth)
     }
+    // Only the region THIS frame really painted publishes targets. A hidden
+    // region's rows/verbs are not a pointer route in a single-region grant, and
+    // its unshifted cells would otherwise coincide with visible blank cells.
     for (const target of list.targets) {
+      if (visibleRegions !== undefined && visibleRegions !== 'list') continue
       if (target.row !== noticeRow) targets.push(target)
     }
     for (const target of detail.targets) {
+      if (visibleRegions !== undefined && visibleRegions !== 'detail') continue
       if (target.row === noticeRow) {
         if (target.kind === 'action') {
           this.detailActions = this.detailActions.filter(action => action.id !== target.action.id)
@@ -936,6 +963,10 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         continue
       }
       targets.push(both ? { ...target, startCol: target.startCol + listWidth + 2, endCol: target.endCol + listWidth + 2 } : target)
+    }
+    if (visibleRegions !== 'detail') {
+      for (const action of this.detailActions) this.visibleActionIds.delete(action.id)
+      this.detailActions = []
     }
     // A passive region cell click only moves the local focus (never a write).
     // Registered LAST so every painted row/verb keeps its own target.
@@ -1048,6 +1079,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     this.listOffset = Math.max(0, Math.min(this.listOffset, maxOffset))
     const visible = lines.slice(this.listOffset, this.listOffset + bodyRows)
     const targets: PaintedTarget[] = []
+    this.listSelectionPainted = this.selection !== undefined && visible.some(line =>
+      line.select !== undefined && line.select.group === this.selection!.group && line.select.id === this.selection!.id)
     for (let index = 0; index < visible.length; index += 1) {
       const line = visible[index]
       if (line?.select === undefined) continue
@@ -1062,15 +1095,25 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   } {
     const lines: PageLine[] = []
     const targets: PaintedTarget[] = []
-    const selected = this.selectedApplication(snapshot)
-    if (selected === undefined) {
-      lines.push({ text: 'Select an application to review its persisted decision.', tone: 'dim' })
-      return { lines: lines.slice(0, bodyRows), targets }
-    }
-    const { group, application } = selected
     const push = (text: string, options: Omit<PageLine, 'text'> = {}): void => {
       lines.push({ text, ...options })
     }
+    const selected = this.selectedApplication(snapshot)
+    const storageUnavailable = snapshot.applications.phase === 'ready'
+      && snapshot.applications.value?.persistentAvailable === false
+    if (selected === undefined) {
+      lines.push({ text: 'Select an application to review its persisted decision.', tone: 'dim' })
+      if (storageUnavailable) {
+        for (const part of wrapText('The Host reports durable application storage is unavailable; persisted decisions may not survive.', width)) {
+          push(part, { tone: 'warning' })
+        }
+      }
+      this.pushReceiptLines(snapshot, width, push)
+      const maxOffset = Math.max(0, lines.length - Math.max(1, bodyRows))
+      this.detailOffset = Math.max(0, Math.min(this.detailOffset, maxOffset))
+      return { lines: lines.slice(this.detailOffset, this.detailOffset + bodyRows), targets }
+    }
+    const { group, application } = selected
     push('Application', { tone: 'strong' })
     for (const part of wrapText(`  ${applicationName(application)}`, width)) push(part)
     if (application.executablePath !== undefined) {
@@ -1084,6 +1127,12 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     for (const part of wrapText('Persisted decisions only; this Session\'s temporary grants are not listed here.', width)) {
       push(part, { detail: true })
     }
+    if (storageUnavailable) {
+      for (const part of wrapText('The Host reports durable application storage is unavailable; persisted decisions may not survive.', width)) {
+        push(part, { tone: 'warning' })
+      }
+    }
+    this.pushReceiptLines(snapshot, width, push)
     const busy = snapshot.busy
     if (busy) {
       const visible = lines.slice(this.detailOffset, this.detailOffset + bodyRows)
@@ -1130,6 +1179,42 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     return { lines: visible, targets }
   }
 
+  /** The ONE settled-action receipt, visible in the ACTIVE projection too: after
+   *  a revoke/retry the readback may remove the row, yet the user must still see
+   *  what happened and how to recover from an unconfirmed outcome. */
+  private pushReceiptLines(
+    snapshot: CuaAccessSettingsSnapshot,
+    width: number,
+    push: (text: string, options?: Omit<PageLine, 'text'>) => void,
+  ): void {
+    const action = snapshot.action
+    if (action === undefined) return
+    const prefix = action.state === 'ok' ? 'Action' : action.state === 'unknown' ? 'Action outcome unconfirmed' : 'Action failed'
+    for (const part of wrapText(`${prefix}: ${action.text}`, width)) {
+      push(part, { tone: action.state === 'ok' ? 'fact' : 'warning' })
+    }
+    if (action.state === 'unknown') {
+      for (const part of wrapText('Refresh to read the authoritative state before deciding again.', width)) {
+        push(part, { tone: 'warning', detail: true })
+      }
+    }
+  }
+
+  /** The REAL Applications help: the same durable recovery text as the Overview,
+   *  rendered inside the current workbench projection (its own scroll). */
+  private buildWorkbenchHelp(width: number, bodyRows: number): { readonly lines: PageLine[] } {
+    const lines: PageLine[] = []
+    const push = (text: string, options: Omit<PageLine, 'text'> = {}): void => { lines.push({ text, ...options }) }
+    push('Help and recovery', { tone: 'strong' })
+    for (const item of HELP_LINES) {
+      const parts = wrapText(`  ${item}`, width)
+      for (const part of parts) push(part, { detail: true })
+    }
+    const maxOffset = Math.max(0, lines.length - bodyRows)
+    this.helpOffset = Math.max(0, Math.min(this.helpOffset, maxOffset))
+    return { lines: lines.slice(this.helpOffset, this.helpOffset + bodyRows) }
+  }
+
   /** Two decisions in the SAME group that cannot be told apart by their public
    *  identity must never be confirmed: the exact target would be a guess. */
   private applicationIdentityUnique(
@@ -1161,7 +1246,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     if (this.controller.getSnapshot().busy) {
       return this.layoutBar(width, [{ id: 'bar:wait', text: 'Waiting for the action to settle…', priority: 1000 }])
     }
-    const hasSelection = this.selection !== undefined
+    const hasSelection = this.selection !== undefined && this.listSelectionPainted
     return this.layoutBar(width, [
       ...(hasSelection ? [{ id: 'bar:open', text: 'Enter open', priority: 700 }] : []),
       ...(this.paintsBothRegions() ? [{ id: 'bar:tab', text: 'Tab detail', priority: 40 }] : []),
@@ -1241,6 +1326,9 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       return
     }
     if (matchesKey(data, 'escape') || matchesKey(data, 'left')) {
+      // An accepted action owns the page: the physical bar paints Waiting with
+      // no escape, and the keyboard must not retire the page behind that bar.
+      if (this.controller.getSnapshot().busy) return
       if (this.help) {
         this.help = false
         this.bump()
@@ -1300,6 +1388,22 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
   }
 
   private handleApplicationsInput(data: string, snapshot: CuaAccessSettingsSnapshot): void {
+    if (this.help) {
+      const step = this.workbenchBodyRows()
+      if (matchesKey(data, 'up')) return this.scrollWorkbenchHelp(-1)
+      if (matchesKey(data, 'down')) return this.scrollWorkbenchHelp(1)
+      if (matchesKey(data, 'pageDown')) return this.scrollWorkbenchHelp(step)
+      if (matchesKey(data, 'pageUp')) return this.scrollWorkbenchHelp(-step)
+      if (data === 'r' || data === 'R') {
+        this.refresh()
+        return
+      }
+      if (data === '?' || data === 'h' || data === 'H') {
+        this.help = false
+        this.bump()
+      }
+      return
+    }
     if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
       if (!this.paintsBothRegions()) return
       this.listRegion = this.listRegion === 'list' ? 'detail' : 'list'
@@ -1311,7 +1415,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       return
     }
     if (data === '?' || data === 'h' || data === 'H') {
-      this.help = !this.help
+      this.help = true
+      this.helpOffset = 0
       this.bump()
       return
     }
@@ -1324,6 +1429,23 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         this.openSelectedApplication()
         return
       }
+      return
+    }
+    // The Detail is a full scrollport: a long path/receipt may push the ONE
+    // verb below the grant, and it must stay reachable by the keyboard.
+    const step = this.workbenchBodyRows()
+    if (matchesKey(data, 'up')) return this.scrollApplicationDetail(-1)
+    if (matchesKey(data, 'down')) return this.scrollApplicationDetail(1)
+    if (matchesKey(data, 'pageDown')) return this.scrollApplicationDetail(step)
+    if (matchesKey(data, 'pageUp')) return this.scrollApplicationDetail(-step)
+    if (matchesKey(data, 'home')) {
+      this.detailOffset = 0
+      this.bump()
+      return
+    }
+    if (matchesKey(data, 'end')) {
+      this.detailOffset = Number.MAX_SAFE_INTEGER
+      this.bump()
       return
     }
     if (matchesKey(data, 'enter') || matchesKey(data, 'right')) {
@@ -1623,8 +1745,22 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     this.bump()
   }
 
-  private scrollWorkbenchRegion(delta: number): void {
-    if (this.listRegion === 'detail') {
+  private workbenchBodyRows(): number {
+    return Math.max(1, this.liveWorkbenchGrant(this.paint?.bodyWidth ?? 80).rows)
+  }
+
+  private scrollApplicationDetail(delta: number): void {
+    this.detailOffset = Math.max(0, this.detailOffset + delta)
+    this.bump()
+  }
+
+  private scrollWorkbenchHelp(delta: number): void {
+    this.helpOffset = Math.max(0, this.helpOffset + delta)
+    this.bump()
+  }
+
+  private scrollWorkbenchRegion(delta: number, region: 'list' | 'detail'): void {
+    if (region === 'detail') {
       this.detailOffset = Math.max(0, this.detailOffset + delta)
     } else {
       this.listOffset = Math.max(0, this.listOffset + delta)
@@ -1648,8 +1784,24 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         this.scrollConfirmation(event.wheelDelta < 0 ? -3 : 3)
         return { handled: true }
       }
-      if (this.mode === 'applications') this.scrollWorkbenchRegion(event.wheelDelta < 0 ? -3 : 3)
-      else this.scrollOverview(event.wheelDelta < 0 ? -3 : 3)
+      if (this.mode === 'applications') {
+        const delta = event.wheelDelta < 0 ? -3 : 3
+        if (this.help) {
+          this.scrollWorkbenchHelp(delta)
+          return { handled: true }
+        }
+        const both = this.paintsBothRegions()
+        if (!both) {
+          this.scrollWorkbenchRegion(delta, this.listRegion)
+          return { handled: true }
+        }
+        const listWidth = this.listColumnWidth(paint.bodyWidth)
+        // The two-cell gutter between painted regions owns no scroll.
+        if (event.x >= listWidth && event.x < listWidth + 2) return { handled: true }
+        this.scrollWorkbenchRegion(delta, event.x < listWidth ? 'list' : 'detail')
+        return { handled: true }
+      }
+      this.scrollOverview(event.wheelDelta < 0 ? -3 : 3)
       return { handled: true }
     }
     if (event.y < 0 || event.y >= bodyRows) return undefined
