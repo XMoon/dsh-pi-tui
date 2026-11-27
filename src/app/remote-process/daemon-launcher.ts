@@ -220,6 +220,29 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/gu, `'\\''`)}'`
 }
 
+/**
+ * The one copy-pasteable re-run command for a Client spawn failure. POSIX keeps
+ * its environment-assignment form; Windows gets the PowerShell-equivalent form
+ * because `VAR=value cmd` is not a Windows command. The profile is quoted for
+ * the target shell: POSIX close-reopen quoting versus PowerShell doubled quotes.
+ */
+function daemonClientRerunCommand(
+  profile: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const profileArg = platform === 'win32' ? powershellQuote(profile) : shellQuote(profile)
+  return platform === 'win32'
+    ? `$env:DSH_PI_TUI_BACKEND='daemon'; dsh --profile ${profileArg}`
+    : `DSH_PI_TUI_BACKEND=daemon dsh --profile ${profileArg}`
+}
+
+/** PowerShell single-quoted literal: an embedded quote is doubled (`''`), not
+ *  the POSIX close-reopen sequence. */
+function powershellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
+  return `'${value.replace(/'/gu, "''")}'`
+}
+
 /** The child-exit mapping: a real code, or 128+signal when the child was signalled. */
 function exitCodeFor(code: number | null, signal: NodeJS.Signals | null): number {
   if (code !== null) return code
@@ -254,7 +277,7 @@ export class DaemonCoordinator {
   private readonly spawnFailureExitCode: number
   private readonly shutdownBudgetMs: number
   private child: ChildProcess | undefined
-  private childExit: Promise<void> | undefined
+  private childExited: Promise<void> | undefined
   private started = false
   private disposed = false
   private settled = false
@@ -305,11 +328,21 @@ export class DaemonCoordinator {
     }
     this.child = child
     this.spawnCount += 1
-    this.childExit = new Promise<void>(resolve => {
+    // Exit-only truth: an 'error' (for example a refused kill/TerminateProcess)
+    // is NOT an actual exit and must never satisfy the dispose cleanup budget.
+    this.childExited = new Promise<void>(resolve => {
       child.once('exit', () => resolve())
-      child.once('error', () => resolve())
     })
-    child.once('error', (error: Error) => { this.settle(this.spawnFailureExitCode, error) })
+    // A post-spawn 'error' is a cleanup fact, not a spawn failure. Only a
+    // never-spawned child may claim "could not start ... Host was not started".
+    const spawned = child.pid !== undefined
+    child.once('error', (error: Error) => {
+      if (spawned) {
+        this.diag.warn('pi-tui daemon: child process error after spawn', { error: error.message })
+        return
+      }
+      this.settle(this.spawnFailureExitCode, error)
+    })
     child.once('exit', (code, signal) => { this.settle(exitCodeFor(code, signal), undefined) })
   }
 
@@ -325,32 +358,30 @@ export class DaemonCoordinator {
       const safeErrno = typeof errno === 'string' && /^[A-Z][A-Z0-9_]{1,31}$/u.test(errno) ? ` (${errno})` : ''
       this.reportFatal(this.failureLine !== undefined
         ? this.failureLine(safeErrno)
-        : `dsh-pi-tui: could not start the daemon Client process${safeErrno}; the Host was not started. Reinstall the profile and re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile ${shellQuote(this.env.SPLIT_PROCESS_PROFILE!)}`)
+        : `dsh-pi-tui: could not start the daemon Client process${safeErrno}; the Host was not started. Reinstall the profile and re-run: ${daemonClientRerunCommand(this.env.SPLIT_PROCESS_PROFILE!)}`)
     }
     this.appExit(code)
   }
 
   /**
    * The SINGLE stop owner, AWAITABLE. A spawn not yet started is cancelled; a
-   * live child is asked to stop once (SIGTERM) and dispose() resolves only after
-   * the child actually exited, so the parent Fiber disposer holds the child's
-   * cleanup rather than the parent process exiting underneath it. The wait is
-   * bounded to fit the official ~5s shutdown deadline; a child that does not exit
-   * within it is escalated to SIGKILL and awaited briefly. Idempotent.
+   * live child is asked to stop once and dispose() resolves only after the child
+   * actually exited, so the parent Fiber disposer holds the child's cleanup
+   * rather than the parent process exiting underneath it. On POSIX the bounded
+   * SIGTERM→SIGKILL sequence fits the official ~5s shutdown deadline. Windows
+   * has no catchable POSIX SIGTERM: the direct child is forcibly terminated once
+   * and only its ACTUAL exit inside the same budget is success; no graceful claim
+   * is made. Idempotent.
    */
   dispose(): Promise<boolean> {
     if (this.disposePromise !== undefined) return this.disposePromise
     this.disposed = true
     this.disposePromise = (async (): Promise<boolean> => {
       const child = this.child
-      const exited = this.childExit
+      const exited = this.childExited
       if (child === undefined || child.exitCode !== null || child.signalCode !== null || exited === undefined) return true
       const start = Date.now()
       const budgetEnd = start + this.shutdownBudgetMs
-      // Reserve part of the ONE budget for the SIGKILL phase so a SIGTERM phase
-      // that never stops the child cannot consume the whole budget.
-      const killReserve = Math.min(1000, Math.max(50, Math.floor(this.shutdownBudgetMs * 0.25)))
-      const killAt = budgetEnd - killReserve
       const disposeStartedAt = performance.now()
       // The budget deadline is a LOSSING fallback, never a second completion
       // path: cancel its timer whenever the child's real exit wins, otherwise
@@ -366,6 +397,23 @@ export class DaemonCoordinator {
           if (timer !== undefined) clearTimeout(timer)
         }
       }
+      if (process.platform === 'win32') {
+        // Windows has no catchable POSIX SIGTERM: the direct child is forcibly
+        // terminated by the OS (TerminateProcess), and the ONLY truthful result
+        // is whether the exact ChildProcess actually exited inside the budget.
+        // No SIGTERM→SIGKILL double act and no graceful claim.
+        try { child.kill() } catch { /* already gone */ }
+        if (await waitExitUntil(budgetEnd)) {
+          this.diag.debug('pi-tui daemon: client exited after forced process termination', { durationMs: Math.round((performance.now() - disposeStartedAt) * 10) / 10 })
+          return true
+        }
+        this.reportFatal('dsh-pi-tui: the daemon Client did not exit after forced process termination within the shutdown budget; it may be left running')
+        return false
+      }
+      // Reserve part of the ONE budget for the SIGKILL phase so a SIGTERM phase
+      // that never stops the child cannot consume the whole budget.
+      const killReserve = Math.min(1000, Math.max(50, Math.floor(this.shutdownBudgetMs * 0.25)))
+      const killAt = budgetEnd - killReserve
       try { child.kill('SIGTERM') } catch { /* already gone */ }
       const sigtermWaitAt = performance.now()
       if (await waitExitUntil(killAt)) {

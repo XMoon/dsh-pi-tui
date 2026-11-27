@@ -19,6 +19,7 @@ export interface ExitCommandDeps {
 
 /** The ONE fixed user notice of every Client reload decision (English). */
 export const CLIENT_RELOAD_REFUSAL_NOTICES: Readonly<Record<ClientReloadRefusalReason, string>> = {
+  'unsupported-platform': 'Client reload is not available on Windows. The current Client is kept. Exit with /exit and relaunch to use an updated build.',
   unavailable: 'Client reload is available only in the split Client.',
   'not-ready': 'Client reload is unavailable until the current Client is connected and ready.',
   'draft-text': 'Client reload blocked: finish or clear the editor draft first.',

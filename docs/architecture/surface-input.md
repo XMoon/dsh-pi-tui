@@ -487,7 +487,9 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   live Session named by the request, and an unknown or mismatched Session fails
   closed before execution. Direct remains the production default and serves this
   contract in-process; Remote is the split-process transport of the same
-  contract (Windows Remote user-shell execution is not open in this version).
+  contract, including the Windows Split Host on the supported native-x64 daemon
+  domain. The Windows Remote layer executes the command in the Host environment
+  with the Host's official PowerShell capability; the Client never spawns it.
 - Output is collected through the subprocess provider's per-stream collect/spill
   dispositions: each stream keeps a bounded in-memory tail and reports its own
   truncation instead of claiming lossless bytes, and the Host-local spill file —
@@ -543,8 +545,14 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   a sessionless surface with no selected Workspace answers `unavailable` with no
   Host read and no Client fallback. A Host refusal never falls back to Client
   PATH or filesystem, and a Workspace that is unregistered, revoked or unreadable
-  during the completion is `unavailable` rather than a stale or empty success. A
-  completion RESULT may not cross a Connection generation: a candidate reply that
+  during the completion is `unavailable` rather than a stale or empty success.
+  On Windows the Remote Host exposes ONLY literal-path completion: command,
+  variable and git-subcommand candidates are explicitly unavailable, and the
+  accepted path becomes ONE single-quoted PowerShell literal. The Remote
+  completion adapter's `pathLiteralDialect` is projected from the AUTHENTICATED
+  Host publication schema (schema 3 = PowerShell, schema 1/2 = Bash), never from
+  the Client OS or a Client-local setting. A completion RESULT may not cross a
+  Connection generation: a candidate reply that
   arrives (or is applied as an asynchronous result) after the Connection
   generation changed is refused, matching the official Client lifecycle (request
   abort, menu generation, editor document currentness, plus Host re-validation at

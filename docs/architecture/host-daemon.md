@@ -18,8 +18,12 @@ service definition a cold start keeps the basic detached Host. Windows supports
 only the independent process: `status`, `start`, `stop`, `restart` and `logs`
 are available, there is no Windows service manager, and `install`/`uninstall`
 are explicitly `UNSUPPORTED_PLATFORM` before any scope or manager work. The
-Windows Host is headless; the interactive Client remains unsupported, and ACP
-remains truthfully unavailable on Windows.
+Windows Host is a normal independent Host: a supported interactive daemon
+Client attaches to it exactly like on Linux/macOS, client exit never stops it,
+and only an explicit authenticated stop or real process failure ends it. ACP
+remains truthfully unavailable on Windows. The supported domain is native
+Windows 11 x64, an ordinary (non-elevated) user and an ordinary local fixed-NTFS
+profile path.
 
 - **Manager vs. authentication authority.** The manager answers "how is the Host
   OS process supervised", never "is a Host ready". When a live Host is already

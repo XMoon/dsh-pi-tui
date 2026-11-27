@@ -31,11 +31,13 @@ import {
   readKernelProcess,
   type DarwinKernelProcessIdentity,
   type KernelObservation,
+  type Win32KernelProcessIdentity,
 } from '../../src/runtime/native-process/identity.ts'
 import {
   type DarwinLocalInstanceRecord,
   type LinuxLocalInstanceRecord,
   type LocalInstanceRecord,
+  type Win32LocalInstanceRecord,
 } from '../../src/app/remote-process/local-discovery.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { installDarwinKoffiFixture } from '../support/darwin-koffi-fixture.ts'
@@ -308,6 +310,31 @@ test('revalidate also refuses a launch path replaced after the first classificat
 
 const scopeForDarwin = (record: DarwinLocalInstanceRecord): LocalScope => scopeOf(record)
 
+/** A structural Windows schema-3 publication for the portable contract tests;
+ *  the real Win32 SID/FILETIME observation is the native G3 probe/final P2. */
+function win32Identity(overrides: Partial<Win32LocalInstanceRecord> = {}): Win32LocalInstanceRecord {
+  const identity: Win32KernelProcessIdentity = {
+    platform: 'win32',
+    pid: process.pid,
+    ownerSid: 'S-1-5-21-1111111111-2222222222-3333333333-1009',
+    creationFiletime: '134402314444783126',
+  }
+  return {
+    schema: 3,
+    scopeId: 'a'.repeat(64),
+    profileRealpath: 'C:\\fixture\\profile',
+    instanceId: '11111111-1111-4111-8111-111111111111',
+    hostPid: process.pid,
+    hostKernelIdentity: identity,
+    origin: 'http://127.0.0.1:41001',
+    protocol: LOCAL_PROTOCOL,
+    bundleVersion: '0.5.7',
+    dshVersion: '0.2.2-rc.3',
+    buildId: 'b'.repeat(64),
+    ...overrides,
+  }
+}
+
 test('macOS verifies the launch directory through the authenticated Host object route', DARWIN_ONLY, async t => {
   const root = testLifecycle(t).tempDir('dsh-f5b-equivalence-')
   const record = darwinIdentity()
@@ -488,4 +515,134 @@ test('macOS revalidate rejects a late Host observation after the launch path was
   release()
   assert.equal(await pending, false,
     'a Host observation that names the pre-rename object is stale once the launch path was recreated')
+})
+
+test('Windows verifies the launch directory through the authenticated Host object route', async t => {
+  const root = testLifecycle(t).tempDir('dsh-win-f5b-equivalence-')
+  const record = win32Identity()
+  const launchObject = launchObjectOf(root)
+  const transport = transportOf(() => launchObject)
+  const readKernel = (): KernelObservation => ({ kind: 'alive', identity: record.hostKernelIdentity })
+  const verdict = await classifyLaunchWorkspace(record, root, {
+    platform: 'win32',
+    launchObject,
+    transport,
+    scope: scopeOf(record),
+    readRecord: () => record,
+    readKernel,
+    supportedWorkspacePath: () => true,
+  })
+  assert.equal(verdict.kind, 'verified', JSON.stringify(verdict))
+  if (verdict.kind !== 'verified') return
+  assert.equal(verdict.device, launchObject.device)
+  assert.equal(verdict.inode, launchObject.inode)
+  assert.equal(await verdict.revalidate(), true)
+  assert.equal(transport.calls.length, 2)
+  assert.match(transport.calls[0].url, /\/api\/pi-tui\.workspace-object$/u)
+  assert.equal((transport.calls[0].body as { readonly instanceId?: string }).instanceId, record.instanceId)
+  assert.equal((transport.calls[0].body as { readonly path?: string }).path, root)
+})
+
+test('Windows without the launch capture stays unverified and dispatches nothing', async t => {
+  const root = testLifecycle(t).tempDir('dsh-win-f5b-equivalence-')
+  const record = win32Identity()
+  const transport = transportOf(() => ({ device: '1', inode: '2' }))
+  const verdict = await classifyLaunchWorkspace(record, root, {
+    platform: 'win32',
+    transport,
+    scope: scopeOf(record),
+    readRecord: () => record,
+    readKernel: () => ({ kind: 'alive', identity: record.hostKernelIdentity }),
+    supportedWorkspacePath: () => true,
+  })
+  assert.equal(verdict.kind, 'unverified')
+  assert.match(verdict.kind === 'unverified' ? verdict.reason : '', /not captured at launch/u)
+  assert.equal(transport.calls.length, 0, 'a missing launch object never reaches the Host route')
+})
+
+test('Windows refuses an unsupported path before any Host observation', async t => {
+  const root = testLifecycle(t).tempDir('dsh-win-f5b-equivalence-')
+  const record = win32Identity()
+  const launchObject = launchObjectOf(root)
+  const transport = transportOf(() => launchObject)
+  const verdict = await classifyLaunchWorkspace(record, root, {
+    platform: 'win32',
+    launchObject,
+    transport,
+    scope: scopeOf(record),
+    readRecord: () => record,
+    readKernel: () => ({ kind: 'alive', identity: record.hostKernelIdentity }),
+    supportedWorkspacePath: () => false,
+  })
+  assert.equal(verdict.kind, 'unverified')
+  assert.match(verdict.kind === 'unverified' ? verdict.reason : '', /supported local fixed NTFS/u)
+  assert.equal(transport.calls.length, 0)
+})
+
+test('Windows refuses a non-schema-3 Host publication and a renamed launch path', async t => {
+  const root = testLifecycle(t).tempDir('dsh-win-f5b-equivalence-')
+  const work = join(root, 'project')
+  mkdirSync(work)
+  const record = win32Identity()
+  const launchObject = launchObjectOf(work)
+  const transport = transportOf(() => launchObject)
+  const wrongSchema = await classifyLaunchWorkspace(linuxIdentity(), work, {
+    platform: 'win32',
+    launchObject,
+    transport,
+    scope: scopeOf(record),
+    readRecord: () => record,
+    readKernel: () => ({ kind: 'alive', identity: record.hostKernelIdentity }),
+    supportedWorkspacePath: () => true,
+  })
+  assert.equal(wrongSchema.kind, 'unverified')
+  assert.match(wrongSchema.kind === 'unverified' ? wrongSchema.reason : '', /Windows schema 3/u)
+
+  const verdict = await classifyLaunchWorkspace(record, work, {
+    platform: 'win32',
+    launchObject,
+    transport,
+    scope: scopeOf(record),
+    readRecord: () => record,
+    readKernel: () => ({ kind: 'alive', identity: record.hostKernelIdentity }),
+    supportedWorkspacePath: () => true,
+  })
+  assert.equal(verdict.kind, 'verified')
+  if (verdict.kind !== 'verified') return
+  renameSync(work, join(root, 'project.old'))
+  mkdirSync(work)
+  assert.equal(await verdict.revalidate(), false, 'a recreated launch path revokes the Windows proof')
+})
+
+test('Windows revalidate revokes on a generation rollover, Host identity change or unsupported path', async t => {
+  const root = testLifecycle(t).tempDir('dsh-win-f5b-equivalence-')
+  const work = join(root, 'project')
+  mkdirSync(work)
+  const record = win32Identity()
+  const launchObject = launchObjectOf(work)
+  const transport = transportOf(() => launchObject)
+  let kernel: KernelObservation = { kind: 'alive', identity: record.hostKernelIdentity }
+  let supported = true
+  const verdict = await classifyLaunchWorkspace(record, work, {
+    platform: 'win32',
+    launchObject,
+    transport,
+    scope: scopeOf(record),
+    readRecord: () => record,
+    readKernel: () => kernel,
+    supportedWorkspacePath: () => supported,
+  })
+  assert.equal(verdict.kind, 'verified')
+  if (verdict.kind !== 'verified') return
+
+  transport.generationId = 8
+  assert.equal(await verdict.revalidate(), false, 'a new Connection generation revokes the proof')
+  transport.generationId = 7
+
+  kernel = { kind: 'alive', identity: { ...record.hostKernelIdentity, creationFiletime: '134402314444783127' } }
+  assert.equal(await verdict.revalidate(), false, 'a changed Host kernel identity revokes the proof')
+  kernel = { kind: 'alive', identity: record.hostKernelIdentity }
+
+  supported = false
+  assert.equal(await verdict.revalidate(), false, 'a path no longer proven local fixed NTFS revokes the proof')
 })

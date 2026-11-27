@@ -13,12 +13,14 @@
  *
  * Linux uses its long-lived kernel view: the authenticated Host
  * `/proc/<pid>/stat` starttime and `/proc/<pid>/root` directory object. macOS
- * cannot read another process's `/proc` view, so the Host process itself
- * answers through the Owner-only read-only workspace-object route. Both
- * platforms require the SAME directory object the Client started in — a path
- * spelling alone is never evidence — and a failed/unverifiable observation
- * only means the user must choose a Host Workspace through the existing
- * Browser.
+ * and Windows cannot read another process's `/proc` view, so the Host process
+ * itself answers through the Owner-only read-only workspace-object route
+ * (schema 2 for macOS, schema 3 for Windows). All platforms require the SAME
+ * directory object the Client started in — a path spelling alone is never
+ * evidence — and a failed/unverifiable observation only means the user must
+ * choose a Host Workspace through the existing Browser. Windows additionally
+ * requires the launch object captured at launch and an ordinary local
+ * fixed-NTFS path; a missing capture is never filled by a later cwd stat.
  *
  * @module @xmoon76/dsh-pi-tui/app/remote-process/local-workspace-equivalence
  */
@@ -32,7 +34,7 @@ import {
   sameLocalInstanceRecord,
   type LocalInstanceRecord,
 } from './local-discovery.ts'
-import { observeHostWorkspaceObject } from './local-workspace-object.ts'
+import { observeHostWorkspaceObject, isBoundedWorkspaceObjectPath, isSupportedWin32WorkspacePath } from './local-workspace-object.ts'
 import {
   readKernelProcess,
   type KernelObservation,
@@ -81,15 +83,20 @@ export interface LaunchWorkspaceOptions {
   readonly platform?: NodeJS.Platform
   readonly readStarttime?: (pid: number, procRoot: string) => string | undefined
   /** The `(dev, ino)` captured at CLIENT LAUNCH (before any later rename or
-   *  recreation of the path). When absent the CURRENT process cwd object is
-   *  used — still a real object, never a guess. */
+   *  recreation of the path). On Windows this capture is REQUIRED: a missing
+   *  launch object is `unverified`, never replaced by a later `stat('.')`. */
   readonly launchObject?: DirectoryObject
-  /** The live authenticated Client transport (required by the Darwin proof). */
+  /** The live authenticated Client transport (required by the Host-observed
+   *  route proof on macOS and Windows). */
   readonly transport?: LaunchWorkspaceTransport
   /** The official local scope whose current registry record is re-read. */
   readonly scope?: LocalScope
   readonly readRecord?: (scope: LocalScope) => LocalInstanceRecord | undefined
   readonly readKernel?: (pid: number) => KernelObservation
+  /** The Windows supported-path proof (grammar + real local fixed NTFS). A
+   *  deterministic seam for the fail-closed contract tests; production uses the
+   *  shared {@link isSupportedWin32WorkspacePath}. */
+  readonly supportedWorkspacePath?: (path: string) => boolean
   /** The caller's cancellation lifetime. The classifier never blocks past this
    *  signal or the route's own bounded response window. */
   readonly signal?: AbortSignal
@@ -130,9 +137,11 @@ export async function classifyLaunchWorkspace(
   if (identity === undefined) {
     return { kind: 'unverified', reason: 'the local Host identity is unavailable' }
   }
-  if (platform === 'darwin') return await classifyDarwinLaunchWorkspace(identity, launchCwd, options)
+  if (platform === 'darwin' || platform === 'win32') {
+    return await classifyHostObservedLaunchWorkspace(identity, launchCwd, options, platform)
+  }
   if (platform !== 'linux') {
-    return { kind: 'unverified', reason: 'the Host/Client directory equivalence check is only available on Linux and macOS' }
+    return { kind: 'unverified', reason: 'the Host/Client directory equivalence check is only available on Linux, macOS and Windows' }
   }
   if (identity.schema !== 1) {
     return { kind: 'unverified', reason: 'the Host publication is not a Linux schema 1 record' }
@@ -222,17 +231,23 @@ function classifyLinuxLaunchWorkspace(
 }
 
 /**
- * The macOS proof: the Host itself stats the same absolute path through the
- * Owner-only route, and BOTH the kernel identity and the official Connection
- * generation must be unchanged before and after the observation.
+ * The Host-observed proof (macOS and Windows): the Host itself stats the same
+ * absolute path through the Owner-only route, and BOTH the kernel identity and
+ * the official Connection generation must be unchanged before and after the
+ * observation. Windows additionally requires the launch object captured at
+ * launch and an ordinary local fixed-NTFS path on both sides.
  */
-async function classifyDarwinLaunchWorkspace(
+async function classifyHostObservedLaunchWorkspace(
   identity: LocalInstanceRecord,
   launchCwd: string,
   options: LaunchWorkspaceOptions,
+  platform: 'darwin' | 'win32',
 ): Promise<LaunchWorkspaceVerdict> {
-  if (identity.schema !== 2) {
+  if (platform === 'darwin' && identity.schema !== 2) {
     return { kind: 'unverified', reason: 'the Host publication is not a macOS schema 2 record' }
+  }
+  if (platform === 'win32' && identity.schema !== 3) {
+    return { kind: 'unverified', reason: 'the Host publication is not a Windows schema 3 record' }
   }
   if (identity.hostPid < 1) {
     return { kind: 'unverified', reason: 'the authenticated Host identity is incomplete' }
@@ -252,12 +267,28 @@ async function classifyDarwinLaunchWorkspace(
     return { kind: 'unverified', reason: 'the official Host Connection generation is not ready' }
   }
   const capturedGeneration = generation.generationId
-  if (!recordIsCurrent(identity, readKernel, readRecord, scope)) {
+  if (!recordIsCurrent(identity, readKernel, readRecord, scope, platform)) {
     return { kind: 'unverified', reason: 'the current Host publication does not match the authenticated identity' }
   }
-  const launchObject = options.launchObject ?? statDirectoryObject('.')
+  const launchObject = platform === 'win32'
+    ? options.launchObject
+    : options.launchObject ?? statDirectoryObject('.')
   if (launchObject === undefined) {
-    return { kind: 'unverified', reason: 'the Client launch object cannot be inspected' }
+    return {
+      kind: 'unverified',
+      reason: platform === 'win32'
+        ? 'the Windows Client launch directory object was not captured at launch'
+        : 'the Client launch object cannot be inspected',
+    }
+  }
+  let win32Supported: (() => boolean) | undefined
+  if (platform === 'win32') {
+    const supported = options.supportedWorkspacePath
+      ?? ((path: string) => isBoundedWorkspaceObjectPath(path, 'win32') && isSupportedWin32WorkspacePath(path))
+    if (!supported(launchCwd)) {
+      return { kind: 'unverified', reason: 'the launch directory is not an ordinary path on a supported local fixed NTFS volume' }
+    }
+    win32Supported = () => supported(launchCwd)
   }
   const client = statDirectoryObject(launchCwd)
   if (client === undefined) {
@@ -298,7 +329,7 @@ async function classifyDarwinLaunchWorkspace(
     || clientAfter.inode !== launchObject.inode) {
     return { kind: 'unverified', reason: 'the launch path changed while the Host object was observed' }
   }
-  if (!recordIsCurrent(identity, readKernel, readRecord, scope)
+  if (!recordIsCurrent(identity, readKernel, readRecord, scope, platform)
     || transport.status().generationId !== capturedGeneration) {
     return { kind: 'unverified', reason: 'the Host identity or Connection generation changed during the observation' }
   }
@@ -308,7 +339,8 @@ async function classifyDarwinLaunchWorkspace(
       if (Boolean(signal?.aborted)) return false
       const now = transport.status()
       if (now.transport !== 'connected' || now.generationId !== capturedGeneration) return false
-      if (!recordIsCurrent(identity, readKernel, readRecord, scope)) return false
+      if (!recordIsCurrent(identity, readKernel, readRecord, scope, platform)) return false
+      if (win32Supported !== undefined && !win32Supported()) return false
       // The SAME launch object is re-observed; a rename+recreate revokes the
       // proof even when the new path is also a directory.
       const clientNow = statDirectoryObject(launchCwd)
@@ -334,7 +366,7 @@ async function classifyDarwinLaunchWorkspace(
         || clientAfter.device !== launchObject.device
         || clientAfter.inode !== launchObject.inode) return false
       if (transport.status().generationId !== capturedGeneration) return false
-      return recordIsCurrent(identity, readKernel, readRecord, scope)
+      return recordIsCurrent(identity, readKernel, readRecord, scope, platform)
     } catch {
       return false
     }
@@ -359,9 +391,10 @@ function recordIsCurrent(
   readKernel: (pid: number) => KernelObservation,
   readRecord: (scope: LocalScope) => LocalInstanceRecord | undefined,
   scope: LocalScope,
+  platform: NodeJS.Platform,
 ): boolean {
   try {
-    assertRecordedHostKernelIdentityCurrent(identity, readKernel)
+    assertRecordedHostKernelIdentityCurrent(identity, readKernel, platform)
     const recorded = readRecord(scope)
     return recorded !== undefined && sameLocalInstanceRecord(recorded, identity)
   } catch {

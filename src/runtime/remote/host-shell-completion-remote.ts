@@ -1,21 +1,33 @@
 import { SupersededReadError } from '../read-error.ts'
-import type { HostShellCompletionOutcome, HostShellCompletionPort, HostShellCompletionRequest, HostShellCompletionTarget } from '../host-shell-completion-port.ts'
+import type {
+  HostShellCompletionOutcome,
+  HostShellCompletionPort,
+  HostShellCompletionRequest,
+  HostShellCompletionTarget,
+  HostShellPathLiteralDialect,
+} from '../host-shell-completion-port.ts'
 import { parseHostShellCompletionOutcome, type PiTuiHostUserShellNamespace } from './pi-tui-host-user-shell-contract.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 
 /** One read-only completion call through the same authenticated Host namespace as Shell execution. */
 export class RemoteHostShellCompletionPort implements HostShellCompletionPort {
   readonly pathAuthority = 'host' as const
-  /** The currently opened Split Host is the POSIX (Bash) deployment; the
-   * Windows daemon tier is not open in this version. PR3 binds real Host
-   * provenance, never the Client OS. */
-  readonly pathLiteralDialect = 'bash' as const
+  /** The literal-path grammar of the AUTHENTICATED Host shell, projected from
+   *  the Host identity by the split-Client composition. No default is derived
+   *  from the Client OS; an in-process POSIX qualification caller that omits
+   *  it keeps the historical Bash behavior. */
+  readonly pathLiteralDialect: HostShellPathLiteralDialect
   private readonly namespace: PiTuiHostUserShellNamespace
   private readonly generation: RemoteConnectionGenerationSource
 
-  constructor(namespace: PiTuiHostUserShellNamespace, generation: RemoteConnectionGenerationSource) {
+  constructor(
+    namespace: PiTuiHostUserShellNamespace,
+    generation: RemoteConnectionGenerationSource,
+    pathLiteralDialect: HostShellPathLiteralDialect = 'bash',
+  ) {
     this.namespace = namespace
     this.generation = generation
+    this.pathLiteralDialect = pathLiteralDialect
   }
 
   async complete(input: {

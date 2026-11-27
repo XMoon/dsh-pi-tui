@@ -3220,6 +3220,9 @@ export function applyRunnerWithRuntime(
       // and the sink, so no new local input can slip in).
       requestClientReload: createClientReloadCommandRequest({
         facts: {
+          // Windows reload is DEFERRED_BY_OWNER (2026-11-27): the reexec spawn
+          // context cannot start a replacement; refuse before any intent/teardown.
+          supported: () => process.platform !== 'win32',
           capable: () => startupSettlement?.requestClientReload !== undefined && remoteSources !== undefined,
           ready: () => !cleanedUp && !lifecycleController.signal.aborted,
           draftText: () => surface.composer.getDraft(),

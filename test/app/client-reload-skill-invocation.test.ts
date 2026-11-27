@@ -217,6 +217,7 @@ function setup(mode: Mode): Harness {
     beginClientWrite: () => owner.controller.beginClientWrite(),
     requestClientReload: createClientReloadCommandRequest({
       facts: {
+        supported: () => true,
         capable: () => true,
         ready: () => true,
         draftText: () => app.getDraft(),

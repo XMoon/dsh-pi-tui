@@ -4,7 +4,8 @@ This document owns the long-lived Host/Client boundary: locality, the semantic
 port contract, Direct/Remote equivalence, currentness/identity rules and the
 qualification tiers. Direct is the default public backend; `daemon` is the
 opt-in local split-process backend: the Host/Client link is supported on
-Linux and macOS, and one Host process plus zero or more Client processes
+Linux, macOS and Windows (native x64, ordinary local fixed-NTFS paths), and one
+Host process plus zero or more Client processes
 (`dist/local-host.mjs` / `dist/local-client.mjs`; the Host lifetime is
 independent of Client attachment) over an authenticated loopback HTTP/WebSocket
 carrier, entered through ONE lazy Client edge
@@ -67,16 +68,18 @@ Consequences that are part of the contract:
   draft external editor stays Client-local; a future Host-filesystem
   editor/open is a separate capability.
 - `!`/`!!` execution is ONE Host-owned one-shot authority on both backends. A
-  POSIX Host keeps the raw Bash argv; a Windows Direct Host uses the live
-  official `ctx.shell.pwshPath` with the official composed PowerShell argv
+  POSIX Host keeps the raw Bash argv; a Windows Direct or Split Host uses the
+  live official `ctx.shell.pwshPath` with the official composed PowerShell argv
   (`-NoLogo -NoProfile -NonInteractive -Command` with the public
   `ENCODING_PREAMBLE` and `ENV_OVERRIDES`) and accepts the official ACL
   backend's real `partial` or `full` enforcement. A missing official shell
   capability refuses before any spawn — never a bare `pwsh`, `cmd`, Git Bash,
-  WSL or sandbox downgrade, and `partial` is never advertised as full. Windows
-  Remote user-shell execution is not available in this release: the Windows
-  daemon tier remains guarded, and a real Host dialect/wire is future work,
-  never a Client-OS guess.
+  WSL or sandbox downgrade, and `partial` is never advertised as full. A
+  Remote Client executes the command on the Host, never on the Client OS; the
+  Host shell's literal-path dialect is projected from the AUTHENTICATED Host
+  publication schema (schema 3 = PowerShell, schema 1/2 = Bash), never guessed
+  from the Client platform. Windows Remote completion exposes only literal-path
+  candidates — no command, variable or git-subcommand source.
 
 ## Semantic ports and composition
 
@@ -136,7 +139,7 @@ runner and does not compose through that facade:
 - **Direct (production default).** `src/index.ts -> app/bootstrap.ts` boots one
   Direct runtime over the caller's Host Context. No Remote module participates.
   This is one of the two `app/bootstrap.ts` roots.
-- **Split Client (internal, local Linux/macOS split).** `local-client-entry.ts ->
+- **Split Client (internal, local split).** `local-client-entry.ts ->
   app/bootstrap.ts` owns its OWN Client Context, the official B1 transport and
   the one official Client Domain mount (`app/remote/client-runtime.ts`, mounted
   in two stages so the interaction owner exists before the Gateway's first
@@ -146,7 +149,7 @@ runner and does not compose through that facade:
   `app/remote/application-stage.ts`, and adopts that pre-built core through the
   selection seam instead of constructing a second graph. This is the second
   `app/bootstrap.ts` root.
-- **Split Host (internal, local Linux/macOS split).** `local-host-entry.ts` boots the official
+- **Split Host (internal, local split).** `local-host-entry.ts` boots the official
   profile through `runProfile()` with the Host-only overlay; it does NOT enter
   `app/bootstrap.ts`. The overlay's single built-in
   `@xmoon76/dsh-pi-tui/host-runtime` row owns the package's ONE private Typert
@@ -215,12 +218,15 @@ public `sessionLaunch` value resolved Client-locally by the existing
 resume) — never an exact-id bypass. It is dropped on Client reexec so the
 confirmed exact Session is restored instead of re-running the public intent.
 
-The daemon backend is the LOCAL split process on Linux and macOS: it requires a
-real interactive TTY, and any other OS or a non-interactive launch fails closed.
-A real public-managed start uses the platform's supervision path when one
-exists: Linux delegates to the verified systemd user unit, and macOS to the
-verified user-level LaunchAgent; in BOTH cases the strict-absence detached Host
-process remains the fallback only when no service definition is installed. The
+The daemon backend is the LOCAL split process on Linux, macOS and native
+Windows (the supported Windows domain is the ordinary local user with a local
+fixed-NTFS Profile): it requires a real interactive TTY, and any unsupported OS
+or a non-interactive launch fails closed. A real public-managed start uses the
+platform's supervision path when one exists: Linux delegates to the verified
+systemd user unit, and macOS to the verified user-level LaunchAgent; on Windows
+no service unit is used and the detached Host starts directly. In both
+supervised cases the strict-absence detached Host process remains the fallback
+only when no service definition is installed. The
 public `dsh daemon status/start/stop/restart/logs/install/uninstall`
 management verbs cover both the launchd job and the independent macOS Host
 process (see the management section below). Selection is cold-launch only: writing the Profile value shows "applies on next
@@ -234,9 +240,12 @@ node through the official revision-checked Settings mutation.
 The internal split-process entry is one Host process plus zero or more Client
 processes from ONE installed npm package. The Host lifetime is independent of
 Client attachment and may continue with zero active Clients. The local Host
-transport is supported on Linux and macOS for interactive Clients; Windows
-supports the same independent headless Host and management plane today, while
-the interactive Client remains unavailable. The kernel admission
+transport is supported on Linux, macOS and Windows for interactive Clients.
+On Windows the supported domain is native Windows 11 x64, an ordinary user and
+an ordinary local fixed-NTFS profile path; the same independent Host,
+management plane and official Web frontend are available, `daemon
+install`/`uninstall` remain unsupported because no Windows service manager owns
+the Host, and ACP ingress is truthfully unavailable. The kernel admission
 authority is platform-owned: Linux uses abstract AF_UNIX sockets for the Host
 Singleton and the qualification-only Client seat; macOS uses `O_EXLOCK`-held
 seat files, re-proved by inode and directory identity before Ready; Windows uses
@@ -294,13 +303,13 @@ truthfully unavailable on Windows.
   Context, webserver, Agent or Session. Only the frozen `qualification` Client
   binds the second, qualification-only claim for its lifetime; a second
   qualification Client fails `CLIENT_ALREADY_ACTIVE` before spawning or touching
-  a Host. On Windows no qualification/Client seat is created because no Windows
-  Client entry is admitted yet; the Host and the short-lived admin seat are the
-  only mutex users. A real `surface` Client — and the non-TUI `peer` — binds no
-  profile-global seat; it is admitted automatically by the authenticated
-  `/connect` + identity chain described below. Zero or more independent Surface
-  Clients, each with its own PTY, Cordis Client Context, official transport,
-  Session reference and physical surface, may attach to the SAME Host
+  a Host. On Windows no qualification/Client seat is created; the Host and the
+  short-lived admin seat are the only mutex users. A real `surface` Client — and
+  the non-TUI `peer` — binds no profile-global seat; it is admitted automatically
+  by the authenticated `/connect` + identity chain described below. Zero or more
+  independent Surface Clients, each with its own PTY, Cordis Client Context,
+  official transport, Session reference and physical surface, may attach to the
+  SAME Host
   concurrently and share its exact PID/starttime/`instanceId`. Kernel release on
   process death is the only stale-seat recovery.
 - **Identity is authenticated, never registry-only.** The registry
@@ -434,9 +443,20 @@ truthfully unavailable on Windows.
   seat or business
   object; a termination signal addressed to that PID is forwarded to the
   replacement child, and a signal arriving after the handoff was accepted but
-  before the child spawned cancels the handoff without spawning. The
-  replacement re-authenticates the expected Host, which is discovered with a
-  no-spawn expectation (`HOST_HANDOFF_UNAVAILABLE` when the expected instance
+  before the child spawned cancels the handoff without spawning. On Windows a
+  normal Client exit follows the same natural stop path as `/exit`. An explicit
+  supervisor disposal may request termination of its direct child (the Win32
+  TerminateProcess path) and waits for that child's ACTUAL exit inside the
+  bounded shutdown budget; the Host is never addressed, signalled or stopped by
+  that path. An abnormal console/terminal loss is not a graceful stop and the
+  implementation does not assert a specific process exit order for that case.
+  Windows `/reload-client` is not available: the refusal is decided before any
+  reexec intent, surface release or stop, the current Client/Host/Session/draft
+  are kept, and the fixed notice tells the user to exit and relaunch. The
+  Windows normal exit plus relaunch path is the supported way to adopt an
+  updated build. On Linux/macOS the replacement re-authenticates the expected
+  Host, which is
+  discovered with a no-spawn expectation (`HOST_HANDOFF_UNAVAILABLE` when the expected instance
   is absent/dead, `HOST_IDENTITY_MISMATCH` when another live instance owns the
   scope) and must reopen the same Session against the current generation;
   success requires the official Session history `openState` to be `'open'`, and
@@ -624,9 +644,13 @@ Client filesystem read:
   the existing Browser. The Client launch directory is only a candidate, and
   only after a `(dev, ino)` object equivalence proof against the authenticated
   Host identity: on Linux through `/proc/<hostPid>/root` and the Host
-  starttime, on macOS through the Host's own Owner-only workspace-object
-  observation plus the schema 2 kernel identity and the current official
-  Connection generation. The proof is asynchronous and is re-run before every
+  starttime; on macOS and Windows through the Host's own Owner-only
+  workspace-object observation plus the schema 2 / schema 3 kernel identity and
+  the current official Connection generation. Windows additionally requires
+  the directory object captured at Client launch (a missing capture is never
+  replaced by a later `stat('.')`) and an ordinary local fixed-NTFS path on
+  both sides; drive-relative, root-relative, UNC/network and device spellings
+  are refused. The proof is asynchronous and is re-run before every
   Workspace resolution/create/adoption and before `-c` resumes; a rename,
   recreation, Host restart, Cookie/generation replacement or unreadable fact
   revokes it back to the unselected Browser path. An explicit choice survives
