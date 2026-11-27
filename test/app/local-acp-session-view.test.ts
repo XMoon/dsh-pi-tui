@@ -2053,7 +2053,10 @@ test('disposal during a pending Controller admission waits for the original call
   const view = promptView()
   await view.attach()
   const admission = deferred<{ readonly accepted: true }>()
-  view.access.promptImpl = () => admission.promise
+  view.access.promptImpl = async (_request, _signal, finalCheck) => {
+    finalCheck?.()
+    return await admission.promise
+  }
   let settled = false
   const attempt = view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///controller.bin', blob: 'AQID' } }], false, true)
   attempt.then(() => { settled = true }, () => { settled = true })
@@ -2086,7 +2089,10 @@ test('an accepted admission drains a business terminal observed while its origin
   const view = promptView()
   await view.attach()
   const admission = deferred<{ readonly accepted: true }>()
-  view.access.promptImpl = () => admission.promise
+  view.access.promptImpl = async (_request, _signal, finalCheck) => {
+    finalCheck?.()
+    return await admission.promise
+  }
   const attempt = view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///early.bin', blob: 'AQID' } }], false, true)
   await new Promise(resolve => setImmediate(resolve))
   const request = view.access.promptCalls[0]!
@@ -2101,22 +2107,6 @@ test('an accepted admission drains a business terminal observed while its origin
   assert.equal(view.registry.hasUnsettledHostWork(), false, 'the accepted join releases after the original call settles')
 })
 
-test('a cancel observed after the last upload but before the outer continuation retires the receipt before admission', async () => {
-  const view = promptView()
-  await view.attach()
-  view.access.stageFileImpl = async () => {
-    view.registry.cancelSession(view.conn, view.access, 'P1')
-    view.access.stagedReceipts.add('receipt-cancel')
-    return { receiptId: 'receipt-cancel' }
-  }
-  assert.deepEqual(
-    await view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///cancel.bin', blob: 'AQID' } }], false, true),
-    { stopReason: 'cancelled' },
-  )
-  assert.equal(view.access.promptCalls.length, 0, 'the outer cancellation must not reach the Controller')
-  assert.deepEqual(view.access.cleanupCalls.at(-1)?.receiptIds, ['receipt-cancel'])
-})
-
 test('a Controller rejection after an observed insertion keeps the indeterminate fence and cleans after settlement', async () => {
   const view = promptView()
   await view.attach()
@@ -2129,8 +2119,8 @@ test('a Controller rejection after an observed insertion keeps the indeterminate
   const attempt = view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///observed.bin', blob: 'AQID' } }], false, true)
   await new Promise(resolve => setImmediate(resolve))
   const request = view.access.promptCalls[0]!
-  view.insert(request.requestId, 'm-observed')
   finalCheck?.()
+  view.insert(request.requestId, 'm-observed')
   admission.reject(new Error('controller rejected after insertion'))
   await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_DISPATCH_INDETERMINATE'))
   assert.equal(view.access.cleanupCalls.at(-1)?.receiptIds[0], 'receipt-1')
