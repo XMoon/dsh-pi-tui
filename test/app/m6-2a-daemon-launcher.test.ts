@@ -199,7 +199,7 @@ test('a real child process locates the package root from a symlinked dist invoke
 
 class FakeChild extends EventEmitter {
   /** A successful spawn has a pid; an asynchronous spawn failure has none. */
-  pid = 1234
+  pid: number | undefined = 1234
   exitCode: number | null = null
   signalCode: NodeJS.Signals | null = null
   readonly kills: (NodeJS.Signals | undefined)[] = []
@@ -227,10 +227,11 @@ class FakeChild extends EventEmitter {
   finishSignal(signal: NodeJS.Signals): void { this.signalCode = signal; this.emit('exit', null, signal) }
 }
 
-function fakeSpawn(): { spawnImpl: typeof import('node:child_process').spawn; children: FakeChild[] } {
+function fakeSpawn(withPid = true): { spawnImpl: typeof import('node:child_process').spawn; children: FakeChild[] } {
   const children: FakeChild[] = []
   const spawnImpl = (() => {
     const child = new FakeChild()
+    if (!withPid) child.pid = undefined
     children.push(child)
     return child
   }) as unknown as typeof import('node:child_process').spawn
@@ -406,6 +407,19 @@ test('an unresponsive Windows child is an abnormal result, never a graceful clai
   assert.equal(fatalLines.length, 1)
   assert.match(fatalLines[0], /forced process termination/u)
   assert.doesNotMatch(fatalLines[0], /SIGKILL|SIGTERM/u)
+})
+
+test('an asynchronous spawn error still takes the spawn-failure path', () => {
+  const { spawnImpl, children } = fakeSpawn(false)
+  const fatalLines: string[] = []
+  const exitCodes: number[] = []
+  const c = coordinator(children, exitCodes, spawnImpl, { reportFatal: (line: string) => { fatalLines.push(line) } })
+  c.start()
+  children[0].emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }))
+  assert.deepEqual(exitCodes, [1], 'a never-spawned child still requests the spawn-failure exit')
+  assert.equal(fatalLines.length, 1)
+  assert.match(fatalLines[0], /could not start the daemon Client process \(ENOENT\)/u)
+  assert.match(fatalLines[0], /Host was not started/u)
 })
 
 test('a refused Windows kill is not mistaken for an actual exit', async () => {
