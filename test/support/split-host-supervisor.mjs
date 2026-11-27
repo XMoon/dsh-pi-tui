@@ -11237,6 +11237,9 @@ async function handleStartQualificationClients(message) {
     }
     fixedPrimary = requireReadyHost(`START_QUALIFICATION_CLIENTS ${CROSS_HOME_MODE}`)
     await assertCrossHomePrimaryBusy(fixedPrimary, `START_QUALIFICATION_CLIENTS ${CROSS_HOME_MODE} primary`)
+    // The awaited primary proof can cross a disconnect. Do not create a
+    // client directory, pending reservation, or alias effect after closure.
+    assertLifecycleOpen(`START_QUALIFICATION_CLIENTS ${CROSS_HOME_MODE} after primary admission`)
   }
   const clients = []
   for (let index = 0; index < count; index += 1) {
@@ -11514,8 +11517,17 @@ async function handleSignalEntry(message) {
       throw new Error('SIGNAL_ENTRY: the Host already exited')
     }
     if (handle.signalIntent !== undefined) throw new Error('SIGNAL_ENTRY: the Host already received its declared crash signal')
-    assertProcessHostSignalOwnership(handle, `SIGNAL_ENTRY ${signal}`)
     await assertCrossHomePreRelease(handle, `SIGNAL_ENTRY ${signal}`)
+    // The awaited admission introduced its own boundary. Re-check the same
+    // lifecycle and live ownership facts, then run the existing exact signal
+    // proof synchronously immediately before the numeric-PID kill.
+    assertLifecycleOpen(`SIGNAL_ENTRY ${signal} after pre-release admission`)
+    if (handle.ready === undefined) throw new Error('SIGNAL_ENTRY: the Host is no longer ready')
+    if (handle.exited || handle.child.exitCode !== null || handle.child.signalCode !== null) {
+      throw new Error('SIGNAL_ENTRY: the Host exited while pre-release admission was pending')
+    }
+    if (handle.signalIntent !== undefined) throw new Error('SIGNAL_ENTRY: the Host already received its declared crash signal')
+    assertProcessHostSignalOwnership(handle, `SIGNAL_ENTRY ${signal}`)
     processFallbackScratchBaseline = readdirSync(processScope.dir).filter(name => name.startsWith('host-scratch-'))
     try {
       process.kill(handle.child.pid, signal)

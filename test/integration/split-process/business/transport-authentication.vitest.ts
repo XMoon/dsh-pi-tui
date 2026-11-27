@@ -1095,25 +1095,18 @@ test('cancels an installed Client during an in-flight authentication without dis
     expect(heldSocket.destroyed).toBe(false)
 
     // The decisive boundary is the real request already in flight, not a sleep
-    // or a spawn timestamp: the Client has not authenticated, created a
-    // Context or reached Ready, and no failure has been reported yet.
-    const recordsBefore = await scene.entryRecords(cancelled)
-    for (const recordName of ['host-authenticated', 'context-ready', 'ready', 'failure']) {
-      expect(recordsBefore.some(record => record.m4a0 === recordName),
-        `the cancelled Client reported ${recordName} before the request was held`).toBe(false)
-    }
-
-    // Re-verify the SAME sole request is still pending immediately before the
-    // signal; no sleep or spawn timestamp is the decisive boundary.
-    expect(unexpected).toBeUndefined()
-    expect(requests).toHaveLength(1)
-    expect(requestSocket).toBe(heldSocket)
-    expect(heldSocket.destroyed).toBe(false)
+    // or a spawn timestamp. Read the final record snapshot first, then verify
+    // the SAME sole pending socket and absence of premature records immediately
+    // before the signal.
     const recordsAtSignal = await scene.entryRecords(cancelled)
     for (const recordName of ['host-authenticated', 'context-ready', 'ready', 'failure']) {
       expect(recordsAtSignal.some(record => record.m4a0 === recordName),
         `the cancelled Client reported ${recordName} while the request was still held`).toBe(false)
     }
+    expect(unexpected).toBeUndefined()
+    expect(requests).toHaveLength(1)
+    expect(requestSocket).toBe(heldSocket)
+    expect(heldSocket.destroyed).toBe(false)
     const signalAt = performance.now()
     signalAttempted = true
     await scene.signalEntry(cancelled, 'SIGTERM')

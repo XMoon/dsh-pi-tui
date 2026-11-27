@@ -1098,6 +1098,7 @@ async function assertCrossHomeProbeTerminal(receipt, kernel, observation) {
       groupLeader: true,
     })
     if (captured.kind === 'captured') fail(`cross-home probe: a live alias Host candidate remains: ${String(pid)}`)
+    if (captured.kind === 'gone') continue
     if (captured.kind === 'unknown') {
       failUnknown(pid, captured.code ?? 'CAPTURE_UNKNOWN')
       continue

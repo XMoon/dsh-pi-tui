@@ -668,8 +668,11 @@ Two further non-PTY contracts are fixed (Linux and macOS):
   free, exact primary seat still held) before it releases the primary Host seat
   or calls the Scene clean. An unproven alias terminal is `NOT_QUIESCED`, never
   a pass. An abnormal abort may use the no-spawn branch only when the producer
-  is joined or positively never dispatched, the `ENOENT` Host log is strict, no
-  candidate was ever observed and an independent all-PID scan finds none.
+  is joined or positively never dispatched, the `ENOENT` Host log is strict and
+  no candidate was ever observed. For a joined producer the independent all-PID
+  scan must find no candidate; for a positively never-dispatched reservation it
+  must find no captured alias entry, because an unreadable unrelated PID cannot
+  be a candidate when no producer ever existed.
 
 It requires two private inputs:
 
