@@ -739,6 +739,24 @@ async function inputScene(context) {
     requireFact(holdAuthored.length === 0, 'PO-4E closed held file prompt inserted no user/message')
     requireFact(holdRetire.receiptIds.includes(held.receiptId), 'PO-4E late receipt retired by exact id')
 
+    // Reopen the SAME Session after the close and load the exact ACP-authored
+    // user file from canonical history. This is the same source-to-sink input,
+    // not the separate output-scene file replay.
+    await sdk.request(acp.methods.agent.session.close, { sessionId })
+    const inputLoadFrom = sdk.updates.length
+    await sdk.request(acp.methods.agent.session.load, { sessionId, cwd: workspace, mcpServers: [] })
+    const inputLoadWindow = sdk.finishWindow(inputLoadFrom, sdk.updates.length, sessionId)
+    const inputResourceUpdate = inputLoadWindow.find(params => params.update.sessionUpdate === 'user_message_chunk'
+      && params.update.messageId === po4eUser.id && params.update.content?.type === 'resource')
+    requireFact(inputResourceUpdate !== undefined,
+      'PO-4E session/load replays the ACP-authored user file under its durable message id')
+    const expectedInputUri = `dsh-attachment://sha256/${hash(po4eBytes)}/${encodeURIComponent(po4eFile.attachment.name)}`
+    const loadedBytes = assertFileResource(inputResourceUpdate.update.content, {
+      uri: expectedInputUri, bytes: po4eBytes.length, sha256: hash(po4eBytes),
+    }, 'PO-4E loaded ACP-authored input')
+    requireFact(loadedBytes.length === po4eBytes.length && hash(loadedBytes) === hash(po4eBytes),
+      'PO-4E loaded input bytes are the exact staged file')
+
     return {
       imageAttachmentId: images[0].ref.attachmentId, imageSha256: images[0].digest, largeImageBytes: large.length,
       resourceLinkTurn: link.turn, imageTurn: images[0].turn, largeImageTurn: images[1].turn,
