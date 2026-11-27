@@ -1085,12 +1085,15 @@ function wideCategoryWidth(width: number): number {
  * not an extra grant: `paneHeaderRows` is reserved INSIDE `bodyRows`, so a
  * multi-column frame spends its first body row on the header and leaves
  * `bodyRows - paneHeaderRows` real content rows.
+ *
+ * The inline-choice phase is NOT an input: the same width/height/notice grant
+ * applies while browsing and while choosing, so entering or leaving a choice
+ * never moves the root chrome. The choice body consumes the SAME real grant.
  */
 function planSettingsChrome(
   width: number,
   rows: number,
   noticeLive: boolean,
-  choosing = false,
 ): SettingsChromePlan {
   const safeRows = Math.max(1, Math.floor(rows))
   const layout = layoutForWidth(width)
@@ -1100,9 +1103,9 @@ function planSettingsChrome(
   const base = Math.max(0, safeRows - headerRows - actionRows)
   // §4.4: the notice keeps the body at two rows; the metadata keeps it at three.
   const noticeRows = safeRows >= 6 && noticeLive && base - 1 >= 2 ? 1 : 0
-  const metaRows = !choosing && safeRows >= 8 && base - noticeRows - 1 >= 3 ? 1 : 0
+  const metaRows = safeRows >= 8 && base - noticeRows - 1 >= 3 ? 1 : 0
   const bodyWithoutRules = base - noticeRows - metaRows
-  const ruleRows = !choosing && bodyWithoutRules >= 5 ? 1 : 0
+  const ruleRows = bodyWithoutRules >= 5 ? 1 : 0
   const bodyRows = Math.max(0, bodyWithoutRules - ruleRows)
   const paneHeaderRows: 0 | 1 = layout !== 'narrow' && bodyRows >= 2 ? 1 : 0
   return {
@@ -1890,7 +1893,6 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.columns(),
       this.intents.rows(),
       this.intents.notice() !== undefined,
-      this.choiceField() !== undefined,
     )
     // The child is rendered into the body grant + the ONE physical action row:
     // its own pinned bar is the semantic source of the root bar, and its body
@@ -1988,13 +1990,11 @@ export class SettingsWorkspacePanel implements Component {
     // It must be committed BEFORE `direct` is chosen: `direct` would otherwise
     // still describe the retired Plugins category and paint the closed page.
     this.consumeComputerUseNavigation()
-    const choosing = this.choiceField() !== undefined
     const direct = this.paintsDirectPage(width)
     const plan = planSettingsChrome(
       width,
       liveRows,
       this.intents.notice() !== undefined,
-      choosing,
     )
     // A paint whose ROW ALLOCATION really changed is the same gesture boundary
     // as an unrepainted chrome change: the previous frame's press identity no
@@ -4308,7 +4308,6 @@ export class SettingsWorkspacePanel implements Component {
       width,
       this.intents.rows(),
       this.intents.notice() !== undefined,
-      this.choiceField() !== undefined,
     ).bodyRows
   }
 
@@ -4381,9 +4380,37 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.columns(),
       this.intents.rows(),
       this.intents.notice() !== undefined,
-      this.choiceField() !== undefined,
     )
     return !sameChromeRows(painted, live)
+  }
+
+  /** Whether the ROOT-owned legacy hit map/panes belong to a state version that
+   *  has already moved. The inline-choice phase no longer participates in the
+   *  row allocation, so `chromeGeometryStale` cannot catch a phase transition by
+   *  itself any more; the existing `paintedRevision` is the map identity a fresh
+   *  press/release must still match. Auth/Plugin/tenant/Workbench pages keep
+   *  their own grant/currentness owners, and DIRECT pages (About/Models/Account/
+   *  Plugins) are excluded: they have no inline choice and their async fact
+   *  publication may bump the revision between a valid paint and the user's
+   *  click, which is not a stale hit map. */
+  private rootMapAwaitingPaint(): boolean {
+    return this.specialistPage === undefined
+      && this.authPage === undefined
+      && !isDirectCategory(this.categoryId)
+      && this.paintedRevision !== this.revision
+  }
+
+  /** Whether a wheel over the LEGACY projection would be interpreted against a
+   *  different phase or visible-pane set than the one the frame painted. A
+   *  candidate scroll bumps `revision` on every step, so `paintedRevision`
+   *  cannot gate a wheel burst; the painted option region (present exactly for a
+   *  content-row choice) and the narrow/medium focus projection are the
+   *  observable proofs instead. */
+  private legacyWheelProjectionStale(): boolean {
+    if (this.specialistPage !== undefined || this.authPage !== undefined || this.categoryId === 'plugins') return false
+    if (layoutForWidth(this.intents.columns()) !== 'wide'
+      && this.paintedFocus !== undefined && this.paintedFocus !== this.focus) return true
+    return (this.choiceField() !== undefined) !== (this.paintedPanes.detail?.optionRegion !== undefined)
   }
 
   /** The current projection (see {@link projectionWidth}). */
@@ -4427,7 +4454,6 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.columns(),
       this.intents.rows(),
       this.intents.notice() !== undefined,
-      this.choiceField() !== undefined,
     )
     return chromeGeometry(plan).contentRows
   }
@@ -4510,7 +4536,6 @@ export class SettingsWorkspacePanel implements Component {
         this.projectionWidth(),
         this.intents.rows(),
         this.intents.notice() !== undefined,
-        this.choiceField() !== undefined,
       )
       if (chromeGeometry(plan).contentRows < 1) return
     }
@@ -5605,10 +5630,10 @@ export class SettingsWorkspacePanel implements Component {
     // transition) only the real Esc is admitted — a key must never act on a
     // body the user cannot see.
     if (this.specialistPage !== undefined) {
-      // RFL-016: the root chrome (an App notice/choice) can shrink the hosted
-      // grant without changing the terminal size. The pointer path already
-      // refuses a stale hit map; the keyboard path must revoke the specialist's
-      // old action grant too. Only the real Esc passes.
+      // RFL-016: the root chrome (an App notice / live chrome change) can
+      // shrink the hosted grant without changing the terminal size. The pointer
+      // path already refuses a stale hit map; the keyboard path must revoke the
+      // specialist's old action grant too. Only the real Esc passes.
       if (this.chromeGeometryStale() && !matchesKey(data, 'escape')) {
         this.cancelPointerOwners()
         this.intents.requestRender()
@@ -5814,8 +5839,14 @@ export class SettingsWorkspacePanel implements Component {
     // its complete Action Bar hint. Fact paging follows the painted fact region's
     // scroll extent, even when its optional hint is dropped for width.
     if (this.choiceField() !== undefined) {
+      // The candidate/fact/confirm grants all describe the LAST painted choice
+      // frame. The App notice can change the real row allocation without a
+      // terminal resize (chromeGeometryStale), so navigation, paging and Enter
+      // wait for a frame composed against the CURRENT grant. Esc/Left/Backspace
+      // were already handled above and keep their cancel path.
       const paintedGeometryIsCurrent = this.lastRenderWidth === this.intents.columns()
         && this.lastRenderRows === this.intents.rows()
+        && !this.chromeGeometryStale()
       if (matchesKey(data, 'up')) {
         if (paintedGeometryIsCurrent && this.paintedChoiceNavigation) this.moveChoice(-1)
         return
@@ -5840,7 +5871,11 @@ export class SettingsWorkspacePanel implements Component {
         if (paintedGeometryIsCurrent && this.paintedChoiceNavigation) this.setChoice(this.choiceCount() - 1)
         return
       }
-      if (matchesKey(data, 'enter')) return this.confirmChoice('keyboard')
+      if (matchesKey(data, 'enter')) {
+        if (paintedGeometryIsCurrent) this.confirmChoice('keyboard')
+        else this.intents.requestRender()
+        return
+      }
       return
     }
     if (matchesKey(data, 'up')) return this.move(-1)
@@ -6827,6 +6862,17 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.requestRender()
       return undefined
     }
+    // A legacy wheel may only use the facts/option regions and visible panes
+    // the last frame really painted. A phase/focus transition refuses the stale
+    // wheel and asks for the fresh frame instead of scrolling the wrong box.
+    // `paintedRevision` must NOT gate this path: every real scroll bumps the
+    // revision, and a wheel burst is a windowed viewport capability, not a new
+    // press identity.
+    if (this.legacyWheelProjectionStale()) {
+      this.cancelPointerOwners()
+      this.intents.requestRender()
+      return { handled: true }
+    }
     if (this.specialistPage !== undefined) {
       const box = this.paintedSpecialistBox
       const inside = box !== undefined && contentBoxContains(box, event.x, event.y)
@@ -7017,6 +7063,15 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.requestRender()
       return
     }
+    // A ROOT-owned legacy map must belong to the LIVE state version: entering or
+    // leaving a choice (or any other navigation/refresh) no longer changes the
+    // row allocation, so the map identity itself is the proof. Child pages keep
+    // their own grant/currentness owners and never take this gate.
+    if (this.rootMapAwaitingPaint()) {
+      this.cancelPointerOwners()
+      this.intents.requestRender()
+      return
+    }
     // A new press always supersedes the other owner's press state.
     this.pressedGesture = undefined
     this.contentPressed = undefined
@@ -7184,6 +7239,14 @@ export class SettingsWorkspacePanel implements Component {
     // A release in an unrepainted focus-transfer window is the same: the rail
     // cells on screen belong to the previous frame.
     if (this.rootProjectionAwaitingPaint()) {
+      this.cancelPointerOwners()
+      this.intents.requestRender()
+      return
+    }
+    // The release resolves against the ROOT-owned map under the SAME admission
+    // as the new press above; child pages keep their own grant/currentness
+    // owners.
+    if (this.rootMapAwaitingPaint()) {
       this.cancelPointerOwners()
       this.intents.requestRender()
       return

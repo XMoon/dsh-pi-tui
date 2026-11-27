@@ -122,7 +122,10 @@ specialist-page contract below).
 
 - Every category shares ONE root row plan: header, optional metadata, at most
   one top rule, optional app notice, optional pane header, body, and the single
-  physical last-row Action Bar. The app notice is the ONE root-level notice;
+  physical last-row Action Bar. Entering or leaving an inline choice does not
+  change the root chrome allocation. Only the actual viewport and admitted
+  notice/row budget govern its degradation; the choice body consumes the same
+  real grant. The app notice is the ONE root-level notice;
   a page's own business notices stay inside that page's body. At ≥76 columns a
   direct About/Models/Account page keeps the category rail and shares
   ONE display-only pane header whose focused `[Label]` names the live keyboard
