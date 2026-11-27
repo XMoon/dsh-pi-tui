@@ -344,19 +344,6 @@ async function sgrWheel(h: Harness, direction: 'up' | 'down', col: number, row: 
   await frames(h.vt)
 }
 
-/** One complete pointer gesture: press+release in the SAME input write, as a
- *  real terminal delivers a click. */
-async function sgrClickOnce(h: Harness, label: string): Promise<void> {
-  const lines = h.vt.getViewport().map(stripTerminalSequences)
-  const row = lines.findIndex(line => line.includes(label))
-  assert.ok(row >= 0, `missing ${label} in the painted frame:\n${lines.join('\n')}`)
-  const col = lines[row]!.indexOf(label)
-  h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M\x1b[<0;${col + 1};${row + 1}m`)
-  await frames(h.vt, 2)
-  await flushOwnedTurns()
-  await frames(h.vt, 2)
-}
-
 async function sgrClick(h: Harness, label: string, wordOffset = 0): Promise<void> {
   const lines = h.vt.getViewport().map(stripTerminalSequences)
   const row = lines.findIndex(line => line.includes(label))

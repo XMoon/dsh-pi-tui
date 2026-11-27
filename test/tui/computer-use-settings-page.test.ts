@@ -923,6 +923,49 @@ test('a Waiting Overview refuses the page own Back until the action settles', as
   mounted.page.dispose()
 })
 
+test('after a settled receipt, moving the List selection keeps it painted and Open advertised', async () => {
+  let applications: CuaApplicationState = {
+    allowedApps: Array.from({ length: 6 }, (_, index) => ({
+      id: `app-${String(index + 1)}`,
+      name: `App ${String(index + 1)}`,
+      executablePath: `/Applications/App ${String(index + 1)}.app`,
+    })),
+    blockedApps: [],
+    persistentAvailable: true,
+  }
+  const mounted = mount({
+    cua: {
+      readApplications: async () => applications,
+      revoke: async (id) => {
+        applications = { ...applications, allowedApps: applications.allowedApps.filter(application => application.id !== id) }
+      },
+    },
+  })
+  await settle(mounted, 'Bundle: Enabled')
+  selectOverviewAction(mounted, 'Manage applications')
+  mounted.page.handleInput('\r')
+  grantWorkbench(mounted, { width: 96, rows: 20, barWidth: 96, allowDual: false })
+  mounted.render(96)
+  mounted.page.handleInput('\r') // open App 1 Detail
+  mounted.render(96)
+  mounted.page.handleInput('\r') // arm and confirm the visible revoke
+  assert.match(mounted.render(96).join('\n'), /Revoke this application decision\?/u)
+  mounted.page.handleInput('y')
+  await settle(mounted, 'Application access revoked for App 1')
+  // The receipt is first in the short List; the fallback selection and one Down
+  // must both remain really painted (the reveal hint uses the same layout).
+  grantWorkbench(mounted, { width: 96, rows: 5, barWidth: 96, allowDual: false })
+  mounted.render(96)
+  mounted.page.handleInput('\x1b') // Detail -> List
+  mounted.render(96)
+  assert.match(mounted.render(96).join('\n'), /Application access revoked for App 1/u)
+  mounted.page.handleInput('\x1b[B')
+  const frame = mounted.render(96)
+  assert.ok(frame.slice(0, -1).some(line => /^> /u.test(line)), 'the moved selection is painted')
+  assert.match(frame.at(-1)!, /Enter open/u, 'the moved selection is still Open-able')
+  mounted.page.dispose()
+})
+
 test('a clean parent leave is a query: the page never calls the Root continuation itself', () => {
   const mounted = mount()
   let leaves = 0

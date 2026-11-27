@@ -930,7 +930,6 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       return { lines: [...out, fit(bar.text, grant.barWidth)], bodyRows, bodyWidth, bar, targets }
     }
     const both = this.paintsBothRegions()
-    const visibleRegions = both ? undefined : this.listRegion
     const listWidth = both ? this.listColumnWidth(bodyWidth) : bodyWidth
     const detailWidth = both ? Math.max(1, bodyWidth - listWidth - 2) : bodyWidth
     const list = this.buildApplicationList(snapshot, listWidth, bodyRows)
@@ -1744,9 +1743,13 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
    *  published target set, never this independently derived row index. */
   private applicationRowLineIndex(snapshot: CuaAccessSettingsSnapshot): number | undefined {
     if (this.selection === undefined) return undefined
-    let row = 0
+    const bodyWidth = this.paint?.bodyWidth ?? this.liveWorkbenchGrant(80).width
+    const width = this.paintsBothRegions() ? this.listColumnWidth(bodyWidth) : bodyWidth
+    // The List layout puts the settled receipt first; the same receipt count is
+    // the starting offset so the reveal hint stays aligned with the real list.
+    let row = this.receiptLineCount(snapshot, width)
     for (const entry of this.applicationGroups(snapshot)) {
-      if (row > 0) row += 1 // the blank separator between groups
+      if (row > 0) row += 1 // the blank separator (also before the first group after a receipt)
       if (entry.group === this.selection.group) {
         const index = entry.applications.findIndex(application => application.id === this.selection!.id)
         return index < 0 ? undefined : row + 1 + index
@@ -1754,6 +1757,18 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       row += 1 + Math.max(1, entry.applications.length)
     }
     return undefined
+  }
+
+  /** The exact number of body lines `pushReceiptLines` contributes. */
+  private receiptLineCount(snapshot: CuaAccessSettingsSnapshot, width: number): number {
+    const action = snapshot.action
+    if (action === undefined) return 0
+    const prefix = action.state === 'ok' ? 'Action' : action.state === 'unknown' ? 'Action outcome unconfirmed' : 'Action failed'
+    let count = wrapText(`${prefix}: ${action.text}`, width).length
+    if (action.state === 'unknown') {
+      count += wrapText('Refresh to read the authoritative state before deciding again.', width).length
+    }
+    return count
   }
 
   private scrollApplicationList(direction: 1 | -1): void {
