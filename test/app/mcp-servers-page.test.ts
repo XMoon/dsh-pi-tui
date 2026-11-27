@@ -1869,8 +1869,9 @@ test('an unconfirmed outcome is never silently abandoned from the browse frame',
   page.handleInput('\x1b')
   assert.equal(done, 0, 'Esc keeps the warning open, never leaves')
   page.handleInput('\x1b')
+  render(page, 100, 14)
   page.handleInput('d')
-  assert.equal(done, 1, 'only the explicit leave closes the page')
+  assert.equal(done, 1, 'only the explicit leave, after its warning repainted, closes the page')
   assert.equal(controller.calls.includes('refresh'), false, 'leaving does not replay the unknown write')
   assert.equal(controller.calls.some(call => /save|toggle|delete|reset|restart/u.test(call)), false)
 })
@@ -2001,33 +2002,6 @@ test('a long removable field puts its dropped verb on a reachable body line', ()
     'the standalone verb line invokes the same explicit input intent')
 })
 
-test('a proven delete keeps its removal receipt when the controller retires the status', () => {
-  const { page, controller } = makePage(snapshot({
-    selectedConfig: CONFIG_FACET,
-    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 3 },
-  }))
-  render(page, 100, 16)
-  page.handleInput('y')
-  const before = controller.snapshotValue
-  const removedRows = before.rows.filter(row => row.name !== 'alpha')
-  controller.snapshotValue = {
-    ...before,
-    configConfirm: undefined,
-    configStatus: { kind: 'saved', text: 'Config removed · waiting for Host reconcile' },
-    rows: removedRows,
-    selectedName: 'beta',
-    selectedConfig: undefined,
-  }
-  assert.match(render(page, 100, 16).join('\n'), /Config removed/u)
-  // The controller may now retire its generation-bound status. The page keeps
-  // the truthful fallback only because a SAVED Delete was observed first.
-  controller.snapshotValue = { ...controller.snapshotValue, configStatus: undefined }
-  const frame = render(page, 100, 16).join('\n')
-  assert.match(frame, /Config removed/u)
-  assert.match(frame, /waiting for Host reconcile/u,
-    'the List receipt stays visible after a generation-bound saved status retires')
-})
-
 test('a saved Delete does not leave the Detail before the roster proves removal', () => {
   const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
   render(page, 100, 16)
@@ -2085,7 +2059,7 @@ test('a Delete is bound to the exact entry token, not a same-name replacement', 
     'a same-name new token is NOT the deleted instance; the old Detail must return to the List')
 })
 
-test('a saved Delete seen before the roster change keeps its receipt after the status retires', () => {
+test('a retired saved Delete never resurrects a stale success after roster removal', () => {
   const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
   render(page, 100, 16)
   page.handleInput('\r')
@@ -2104,8 +2078,8 @@ test('a saved Delete seen before the roster change keeps its receipt after the s
   }
   render(page, 100, 16)
   assert.equal(pageRegion(page), 'detail', 'the roster still lists alpha')
-  // The saved status is observed, then retired, and only later does the roster
-  // prove the target gone.
+  // The controller retires its own receipt; the page must not preserve a
+  // synthetic current Saved fact.
   controller.snapshotValue = { ...controller.snapshotValue, configStatus: undefined }
   render(page, 100, 16)
   controller.snapshotValue = {
@@ -2116,7 +2090,7 @@ test('a saved Delete seen before the roster change keeps its receipt after the s
   }
   const frame = render(page, 100, 16).join('\n')
   assert.equal(pageRegion(page), 'list')
-  assert.match(frame, /Config removed/u, 'a previously observed saved Delete is not lost')
+  assert.doesNotMatch(frame, /Config removed/u, 'a retired receipt is not re-created by the page')
 })
 
 test('an unconfirmed Delete with the target gone never paints a success receipt', () => {
@@ -2144,40 +2118,6 @@ test('an unconfirmed Delete with the target gone never paints a success receipt'
   controller.snapshotValue = { ...controller.snapshotValue, configStatus: undefined }
   assert.doesNotMatch(render(page, 100, 16).join('\n'), /Config removed/u,
     'a retired unknown status is not a saved Delete')
-})
-
-test('a new Add/Edit action clears the old Delete receipt fallback', () => {
-  const { page, controller } = makePage(snapshot({
-    selectedConfig: CONFIG_FACET,
-    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 3 },
-  }))
-  render(page, 100, 16)
-  page.handleInput('y')
-  const before = controller.snapshotValue
-  controller.snapshotValue = {
-    ...before,
-    configConfirm: undefined,
-    configStatus: { kind: 'saved', text: 'Config removed · waiting for Host reconcile' },
-    rows: before.rows.filter(row => row.name !== 'alpha'),
-    selectedName: 'beta',
-    selectedConfig: undefined,
-  }
-  render(page, 100, 16)
-  controller.snapshotValue = {
-    ...controller.snapshotValue,
-    editor: editorSnapshot({ mode: 'add', name: '', nameEditable: true, dirty: true }),
-    configStatus: undefined,
-  }
-  render(page, 100, 16)
-  controller.snapshotValue = {
-    ...controller.snapshotValue,
-    editor: undefined,
-    rows: [connected('beta')],
-    selectedName: 'beta',
-    selectedConfig: CONFIG_FACET,
-  }
-  const frame = render(page, 100, 16).join('\n')
-  assert.doesNotMatch(frame, /Config removed/u, 'an unrelated new action must not resurrect an old removal receipt')
 })
 
 test('a same-name removed/re-added Edit target is not the old instance', () => {
@@ -2210,4 +2150,99 @@ test('a same-name removed/re-added Edit target is not the old instance', () => {
   render(page, 100, 16)
   assert.equal(pageRegion(page), 'list',
     'a same-name replacement is a new instance; the old Edit must return to the List')
+})
+
+test('a clipped unknown-leave warning refuses affirmative Leave until its facts repaint', () => {
+  let done = 0
+  const { page } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configOutcomeUnconfirmed: true,
+  }), () => { done += 1 })
+  render(page, 100, 16)
+  page.handleInput('\x1b')
+  // The warning has not painted yet: Leave cannot inherit a previous frame.
+  page.handleInput('d')
+  assert.equal(done, 0, 'an unpainted warning refuses Leave')
+  const clipped = render(page, 44, 4).join('\n')
+  assert.match(clipped, /Keep \[Esc\]/u)
+  assert.doesNotMatch(clipped, /Leave \[D\]/u, 'a clipped warning must not publish the affirmative leave')
+  page.handleInput('d')
+  assert.equal(done, 0, 'the hidden decision is inert')
+  const full = render(page, 100, 16).join('\n')
+  assert.match(full, /Leave \[D\]/u)
+  page.handleInput('d')
+  assert.equal(done, 1, 'the freshly painted warning admits the explicit leave')
+})
+
+test('a form with no painted field publishes no Save or field verb and accepts no hidden edit', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot(),
+  }))
+  const empty = render(page, 100, 3).join('\n')
+  assert.doesNotMatch(empty, /Save \[S\]|Edit \[Enter\]|Activate/u,
+    'no field row is painted, so no field action is advertised')
+  page.handleInput('s')
+  assert.equal(controller.calls.includes('saveEditor'), false,
+    'a hidden Save key must not reach the controller')
+  const full = render(page, 100, 20).join('\n')
+  assert.match(full, /Save \[S\]/u)
+  page.handleInput('s')
+  assert.equal(controller.calls.includes('saveEditor'), true)
+})
+
+test('a no-match filter hides the retained selection from Detail and pointer CRUD', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
+  render(page, 120, 20)
+  page.handleInput('/')
+  for (const char of 'zzz') page.handleInput(char)
+  page.handleInput('\r')
+  const list = render(page, 120, 20).join('\n')
+  assert.match(list, /No managed MCP servers match/u)
+  page.handleInput('\t')
+  const detail = render(page, 120, 20).join('\n')
+  assert.match(detail, /Select a managed server/u)
+  assert.doesNotMatch(detail, /Server: alpha|Delete \[D\]|Edit \[E\]/u,
+    'a filtered-out selection has no facts or actionable verbs')
+  page.handleInput('e')
+  page.handleInput('d')
+  assert.equal(controller.calls.some(call => /beginEdit|beginDelete/u.test(call)), false,
+    'keyboard CRUD cannot target the hidden selection')
+  const base = mouseBase(120, 20)
+  page.handleMouse({ ...base, type: 'press', x: 40, y: 2 })
+  page.handleMouse({ ...base, type: 'click', x: 40, y: 2 })
+  assert.equal(controller.calls.some(call => /beginEdit|beginDelete/u.test(call)), false,
+    'a pointer cannot revive the hidden target')
+})
+
+test('a pointer Refresh in the unknown-leave warning uses the same sink as R', () => {
+  let done = 0
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configOutcomeUnconfirmed: true,
+  }), () => { done += 1 })
+  render(page, 100, 16)
+  page.handleInput('\x1b')
+  render(page, 100, 16)
+  const refresh = page.paintedBarSpans().find(span => span.id.includes('refresh'))
+  assert.ok(refresh !== undefined, 'the warning paints Refresh')
+  page.activateBarSpan(refresh.id)
+  assert.equal(controller.calls.includes('refresh'), true, 'the pointer runs the keyboard recovery intent')
+  assert.equal(done, 0, 'Refresh never leaves the page')
+})
+
+test('List Back during a saving configuration stays mounted and never drops the receipt', () => {
+  let done = 0
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configStatus: { kind: 'saving', text: 'Saving configuration…' },
+  }), () => { done += 1 })
+  render(page, 100, 16)
+  page.handleInput('\x1b')
+  assert.equal(done, 0, 'a dispatched write keeps the page mounted')
+  assert.doesNotMatch(render(page, 100, 16).join('\n'), /Saving configuration…/u)
+  controller.snapshotValue = { ...controller.snapshotValue, configStatus: undefined }
+  render(page, 100, 16)
+  page.handleInput('\x1b')
+  assert.equal(done, 1)
 })

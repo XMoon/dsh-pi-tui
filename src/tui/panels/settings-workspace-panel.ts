@@ -5619,15 +5619,11 @@ export class SettingsWorkspacePanel implements Component {
       // it runs against the CURRENT logical seat, never a stale passive paint
       // flag. This gate precedes the rail Tab fast path and the child forward.
       if (this.webWorkbenchActive() && this.rootProjectionAwaitingPaint()) {
-        // SUX-07 D8b: an explicit `r` is a read-only re-observation and must
-        // stay available even while a full-width transition has not painted;
-        // the previous frame's geometry is never used for a business action.
-        const refresh = data === 'r' || data === 'R'
-        if (!matchesKey(data, 'escape') && !refresh) return
-        if (this.focus === 'categories' && !refresh) {
+        if (!matchesKey(data, 'escape')) return
+        if (this.focus === 'categories') {
           this.closeWebWorkbench()
         } else {
-          this.specialistPage.handleInput(refresh ? data : '\x1b')
+          this.specialistPage.handleInput('\x1b')
           this.intents.requestRender()
         }
         return
@@ -5646,8 +5642,8 @@ export class SettingsWorkspacePanel implements Component {
         // A zero-body workbench frame has no visible action: only the real Esc
         // may run the page's own Back ladder (never a hidden refresh/Tab/Open).
         if (this.webWorkbenchActive() && !matchesKey(data, 'escape')
-          && data !== 'r' && data !== 'R' && this.webWorkbenchLiveContentRows() < 1) return
-        if (!matchesKey(data, 'escape') && data !== 'r' && data !== 'R'
+          && this.webWorkbenchLiveContentRows() < 1) return
+        if (!matchesKey(data, 'escape')
           && this.specialistPage.grantAwaitingPaint?.() === true) return
         // SUX-06B: the untouched Web list yields the keyboard to the visible
         // rail; the Detail keeps Tab as its own local List/Detail toggle, and

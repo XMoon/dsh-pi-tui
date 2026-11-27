@@ -983,9 +983,11 @@ owns only the lease, focus and write-lifecycle mechanics.
   declare its CURRENT sub-view FULL-WIDTH (the MCP configuration form and every
   risk question): the Root then paints no rail/List/Detail background and
   publishes no target outside that child. While such a full-width transition,
-  a focus transfer or a grant change has not painted, only the real Esc and an
-  explicit read-only `R` re-observation are admitted; no business action may
-  run against the previous frame. The exact geometry, active device, explicit
+  a focus transfer or a grant change has not painted, only the real Esc is
+  admitted; no business action may run against the previous frame. A
+  legitimate MCP explicit read-only `R` re-observation is a page action only
+  when its current List/Detail or its current recovery question is actually
+  painted, never during that transition. The exact geometry, active device, explicit
   Open separation, local `Tab`, full-width rule, parent leave/return and ONE
   physical Action Bar grammar are owned by
   [surface-settings.md](./surface-settings.md#settings-workspace); this section

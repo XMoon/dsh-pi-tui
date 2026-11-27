@@ -1744,6 +1744,9 @@ result-row click only selects (the query and search stay open and no Host intent
 runs), a wheel moves that filtered selection only, and the search's
 `Done [Enter]` / the list's `Search [/]` replay the SAME Enter and `/` sinks; the
 single `Cancel [Esc]` is never a second span, it is the Root's physical escape.
+When the filter has no visible result, the controller's retained selection is
+not a Detail subject: it paints no server facts, action targets or CRUD
+dispatch; only Add/Refresh/Back stay legal until a row is visible again.
 An ACTIVE form input is such a modal too: the body cannot be clicked or wheeled
 behind it, while its own `Apply [Enter]` / `Cancel [Esc]` stay reachable. Every
 env/header value carries an EXPLICIT storage form the user chooses —
@@ -1841,7 +1844,13 @@ undo it.` and only an explicit leave drops the local draft. With no form open,
 Detail → List stays legal, but the List's parent leave first states that the
 prior outcome may have been applied and offers the explicit leave or `Refresh`.
 Leaving the page still never retries, cancels or rewrites the dispatched Host
-operation.
+operation. The parent-leave warning is admission-bound like every other question:
+if its complete consequence does not fit the CURRENT grant, only Keep (plus the
+read-only Refresh recovery) is published; Leave is absent and its key/pointer is
+inert until a fresh frame paints the whole warning. The form likewise publishes
+Save, field verbs and Apply only for the field/input rows actually painted in
+the current grant; otherwise it offers resize/Back/Cancel and preserves the draft
+and active input across resize, never staging hidden text.
 
 Pointer ownership is the last painted frame's. A List click, including the
 passive rail preview, only selects and hands the keyboard to the List; a Detail

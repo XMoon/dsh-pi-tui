@@ -128,10 +128,13 @@ class FakeConfiguration implements McpServerConfigurationConfig {
   value: McpServerConfiguration = { kind: 'unavailable', reason: 'not read' }
   readonly mutations: Array<{ ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[]; revision: number; generation: object }> = []
   outcome: (ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[], revision: number, generation: object) => McpConfigWriteOutcome = () => ({ kind: 'saved', revision: 2 })
+  /** Keep one write in flight while the test changes authority. */
+  hold: Promise<void> | undefined
   async refresh(): Promise<void> {}
   read(): McpServerConfiguration { return this.value }
   async mutate(ops: readonly { readonly op: 'set' | 'unset'; readonly path: readonly string[]; readonly value?: unknown }[], revision: number, generation: object): Promise<McpConfigWriteOutcome> {
     this.mutations.push({ ops, revision, generation })
+    if (this.hold !== undefined) await this.hold
     return this.outcome(ops, revision, generation)
   }
 }
@@ -289,6 +292,41 @@ test('a restart invalidated by the observation reports an unconfirmed outcome, n
   await h.flush()
   assert.equal(h.controller.snapshot().operation?.phase, 'failed')
   assert.equal(h.controller.snapshot().notice?.text, RESTART_LOST_NOTE)
+  assert.equal(h.controller.snapshot().restartOutcomeUnconfirmed, true,
+    'retirement records the typed uncertainty before any late settlement')
+  h.controller.beginRestart()
+  assert.equal(h.controller.snapshot().confirmingName, undefined,
+    'a retired restart cannot be blindly re-opened')
+})
+
+test('a saving configuration retired before settlement stays unconfirmed and blocks a blind retry', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  let releaseWrite!: () => void
+  h.configuration.hold = new Promise<void>(resolve => { releaseWrite = resolve })
+  h.controller.beginToggle()
+  h.controller.answerConfigConfirm(true)
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'saving')
+  // The authority is replaced while the write is still in flight.
+  h.port.emit({ kind: 'invalidated', reason: 'connection-changed' })
+  await h.flush()
+  assert.equal(h.controller.snapshot().configOutcomeUnconfirmed, true)
+  assert.equal(h.controller.snapshot().configStatus?.kind, 'unconfirmed')
+  h.controller.beginToggle()
+  h.controller.beginAdd()
+  assert.equal(h.controller.snapshot().configConfirm, undefined,
+    'no second configuration question opens after the loss')
+  assert.equal(h.controller.snapshot().editor, undefined)
+  // Only an explicit R plus a current roster/descriptor can release it.
+  releaseWrite()
+  await h.flush()
+  h.sources.value = { kind: 'ready', configuredNames: ['mine'], generation: GENERATION_2 }
+  h.configuration.value = configOf(GENERATION_2, 4, [{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.port.roster([view('mine')], GENERATION_2)
+  await h.flush()
+  h.controller.refresh()
+  h.port.roster([view('mine')], GENERATION_2)
+  await h.flush()
+  assert.equal(h.controller.snapshot().configOutcomeUnconfirmed, undefined)
 })
 
 test('a settings source read from another generation is Unknown, never Configured/Plugin-owned', async () => {

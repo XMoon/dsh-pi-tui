@@ -1007,6 +1007,11 @@ test('a replacement manager cannot reuse the painted admission of an identical t
   const managerB = h.replaceManager()
   await flushOwnedTurns()
   assert.equal(controller.snapshot().configConfirm, undefined, 'A question retired on the real service event')
+  // R is the explicit re-observation and must act only on a frame that really
+  // paints the current List/Detail, not the held stale question.
+  page.render = render
+  h.app.requestRender()
+  await frames(h.vt, 2)
   h.vt.sendInput('r')
   await flushOwnedTurns()
   const configB = controller.snapshot().config!
@@ -1014,13 +1019,9 @@ test('a replacement manager cannot reuse the painted admission of an identical t
   if (configA.kind !== 'ready' || configB.kind !== 'ready') assert.fail('both descriptors must be ready')
   assert.notEqual(configA.generation, configB.generation)
   assert.equal(configA.revision, configB.revision, 'same revision is deliberate')
-  // Let the replacement browse frame settle its grant before the new question
-  // opens; then paint the OLD admitted question frame again. This is a stale
-  // PAINT, not an unpainted grant transition: B's state exists while A's frame
-  // is on screen, exactly the reuse this case forbids.
-  page.render = render
-  h.app.requestRender()
-  await frames(h.vt, 2)
+  // Paint the OLD admitted question frame again. This is a stale PAINT, not an
+  // unpainted grant transition: B's state exists while A's frame is on screen,
+  // exactly the reuse this case forbids.
   page.render = () => oldFrame
   h.app.requestRender()
   await frames(h.vt, 2)
@@ -1266,6 +1267,50 @@ test('a real SGR pointer journey completes the MCP search with zero Host writes'
   assert.deepEqual(h.settingsMutateCalls, [], 'search never writes the profile')
 })
 
+test('a no-match search cannot revive the hidden selection through Tab or a stale pointer', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  await openMcpPage(h)
+  // Capture a real Detail action target before filtering.
+  await press(h.vt, '\r')
+  const oldDelete = locateCell(h, 'Delete [D]')
+  await press(h.vt, '\x1b')
+  await press(h.vt, '/')
+  for (const char of 'zzz') await press(h.vt, char)
+  await press(h.vt, '\r')
+  assert.match(h.view(), /No managed MCP servers match/u)
+  // Tab is a pure local seat move; the retained controller selection is hidden.
+  await press(h.vt, '\t')
+  assert.match(h.view(), /\[Details\]/u)
+  assert.match(h.view(), /Select a managed server/u)
+  assert.doesNotMatch(h.view(), /Server: alpha|Delete \[D\]|Edit \[E\]/u)
+  const controller = embeddedController(h)
+  const before = controller.snapshot()
+  await press(h.vt, 'e')
+  await press(h.vt, 'd')
+  assert.equal(controller.snapshot().editor, undefined)
+  assert.equal(controller.snapshot().configConfirm, undefined)
+  // The OLD painted Delete cell is now inert.
+  sgrMouse(h, 'press', oldDelete.col, oldDelete.row)
+  sgrMouse(h, 'release', oldDelete.col, oldDelete.row)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  assert.equal(controller.snapshot().editor, undefined)
+  assert.equal(controller.snapshot().configConfirm, undefined)
+  assert.equal(h.settingsMutateCalls.length, 0)
+  assert.deepEqual(h.manager.probes, [])
+  assert.deepEqual(h.manager.restarts, [])
+  // Clearing the query restores the real visible target and its explicit action.
+  await press(h.vt, '/')
+  for (let index = 0; index < 3; index += 1) await press(h.vt, '\x7f')
+  await press(h.vt, '\r')
+  assert.doesNotMatch(h.view(), /No managed MCP servers match/u)
+  await press(h.vt, '\r')
+  await press(h.vt, 'e')
+  assert.ok(controller.snapshot().editor !== undefined, 'the visible target opens its real editor')
+  await press(h.vt, '\x1b')
+  assert.ok(before !== undefined)
+})
+
 test('the Root Cancel [Esc] cancels only the search, and a held Done never survives a query edit', async () => {
   const h = setup()
   await openMcpPage(h)
@@ -1345,6 +1390,13 @@ test('a settled configuration read between press and release refuses the old act
   await frames(h.vt, 3)
   assert.equal(controller.snapshot().configStatus?.kind, 'saving', 'the write is unsettled')
   assert.doesNotMatch(h.view(), /Edit \[E\]/u, 'an unsettled write removes the CRUD affordances')
+  // Detail -> List is local; List Back during the saving write must keep the
+  // page mounted instead of disposing the only owner of the settlement.
+  await press(h.vt, '\x1b')
+  await press(h.vt, '\x1b')
+  assert.ok(h.embeddedMcpPage() !== undefined, 'a saving write is never dropped by List Back')
+  assert.match(h.view(), /Waiting for the Host config write/u)
+  await press(h.vt, '\r')
   const probe = locateCell(h, 'Probe [P]')
   sgrMouse(h, 'press', probe.col, probe.row)
   // The write settles: the saved readback moves the configuration revision and

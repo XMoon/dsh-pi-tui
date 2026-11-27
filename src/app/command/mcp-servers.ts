@@ -1385,6 +1385,13 @@ export class McpServersController {
       const text = this.operation.kind === 'restart'
         ? RESTART_LOST_NOTE
         : 'Observation lost; the result was discarded'
+      if (this.operation.kind === 'restart') {
+        // The dispatched restart lost the authority that could settle it.
+        // Record the typed gate at the actual loss-of-observation boundary;
+        // a later completion cannot repair it.
+        this.restartOutcomeUnconfirmed = true
+        this.restartRecovery = undefined
+      }
       this.operation = { ...this.operation, phase: 'failed', text }
       this.notice = { text, kind: 'error' }
     } else if (this.restartOutcomeUnconfirmed) {
@@ -1409,7 +1416,15 @@ export class McpServersController {
     // painted before it can be answered.
     this.questionSerial += 1
     this.configWriteToken += 1
-    if (!this.configOutcomeUnconfirmed) this.configStatus = undefined
+    if (this.configStatus?.kind === 'saving') {
+      // The write was dispatched but its authority is gone. The in-flight
+      // latch must not disappear as if the write had been cancelled.
+      this.configOutcomeUnconfirmed = true
+      this.configRecovery = undefined
+      this.configStatus = { kind: 'unconfirmed', text: MCP_CONFIG_TEXT.unconfirmed }
+    } else if (!this.configOutcomeUnconfirmed) {
+      this.configStatus = undefined
+    }
   }
 
   private acceptWatchEvent(event: McpServerWatchEvent): void {
