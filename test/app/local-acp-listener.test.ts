@@ -641,6 +641,14 @@ test('a cancelled initial config retires the continued Form of a resumed claim a
     assert.equal(registry.hasClaim('S-resume'), true)
     client.send({ jsonrpc: '2.0', method: '$/cancel_request', params: { requestId: 2 } })
     await waitForFact(() => registry.hasClaim('S-resume') === false ? true : undefined, 'the cancelled resumed claim retirement')
+    // The exact outstanding reverse Form was CANCELLED on the wire, not merely
+    // answered with a currentness rejection later.
+    const cancelled = await nextUntil(client, message => {
+      const params = message['params'] as { requestId?: number } | undefined
+      if (message['method'] === '$/cancel_request' && params?.requestId === formId) return 'form-cancel'
+      return undefined
+    }, ['form-cancel'])
+    assert.equal((cancelled['form-cancel']!.params as { requestId?: number }).requestId, formId)
     // A late answer to the retired Form must not reach the durable question
     // projection: the abort removed the reverse request, not just the UI.
     client.send({ jsonrpc: '2.0', id: formId, result: { action: 'accept', content: { q0: 'yes' } } })
