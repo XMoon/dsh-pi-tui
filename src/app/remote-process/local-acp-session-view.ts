@@ -3654,6 +3654,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (flight !== undefined) {
       const outcome = await this.cancelOwnedFlight(claim, flight, access, 'closing')
         .then(() => 'ok' as const, (error: unknown) => error)
+      if (flight.fileCleanupUnconfirmed === true) {
+        resourceFailure ??= this.fileCleanupUnconfirmedError()
+      }
       if (outcome !== 'ok') {
         // A prompt failure is not a close proof (R701-04): only a real Host
         // terminal (its own turn/end, an Agent disposal, or a definite
@@ -3846,6 +3849,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // settlement is all this side owns.
     if (reason === 'disconnect') return
     if (outcome === 'settled') return
+    // A D4/D5 resource failure is not erased by a business terminal; it must
+    // reach the affected close even when the Agent disposal already proved the
+    // business side.
+    if (outcome instanceof LocalAcpViewError && this.isFileRetirementError(outcome)) throw outcome
     // A PROMPT outcome is not a cancellation-safety proof (R701-04): once the
     // owned turn's durable terminal arrived, the Host work is provably over —
     // a mixed or failed turn keeps ITS OWN prompt error — so the close may
