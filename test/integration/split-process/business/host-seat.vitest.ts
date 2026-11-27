@@ -3,8 +3,10 @@
  * ownership, concurrent contenders, scratch ownership and stale recovery.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
+import { userInfo } from 'node:os'
+import { dirname, join } from 'node:path'
 
 import { expect, test } from 'vitest'
 
@@ -25,6 +27,83 @@ import {
   type SplitProcessHostHandle,
   type SplitProcessScene,
 } from '../../../support/split-process-fixture.ts'
+
+interface PrivateFileSnapshot {
+  bytes: Buffer
+  mode: number
+}
+
+function savePrivateFile(path: string): PrivateFileSnapshot {
+  return { bytes: readFileSync(path), mode: statSync(path).mode & 0o777 }
+}
+
+function expectSamePrivateFile(path: string, snapshot: PrivateFileSnapshot, label: string): void {
+  const current = readFileSync(path)
+  expect(current.equals(snapshot.bytes), `${label}: the bytes changed`).toBe(true)
+  expect(statSync(path).mode & 0o777, `${label}: the mode changed`).toBe(snapshot.mode)
+}
+
+/**
+ * Prove the REAL primary Host kernel seat is currently held. Linux uses a real
+ * abstract-socket bind conflict; Darwin opens the actual account-home lock
+ * file with a non-blocking O_EXLOCK and expects the live claim. The qualification
+ * seat file is NOT a substitute for the Host singleton.
+ */
+async function assertPrimaryHostSeatHeld(scene: SplitProcessScene): Promise<void> {
+  const seat = scene.scope.hostSeat
+  if (process.platform === 'linux') {
+    expect(seat.kind).toBe('linux-abstract')
+    expect(typeof seat.name).toBe('string')
+    const name = String(seat.name)
+    const server = createServer()
+    const outcome = await new Promise<{ code?: string }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        server.close()
+        reject(new Error('the abstract Host seat probe did not settle'))
+      }, 10_000)
+      server.once('error', (error: NodeJS.ErrnoException) => {
+        clearTimeout(timer)
+        resolve({ code: error.code })
+      })
+      server.listen({ path: name }, () => {
+        clearTimeout(timer)
+        server.close(() => resolve({}))
+      })
+    })
+    expect(outcome.code, 'the live Host does not hold its Linux abstract seat').toBe('EADDRINUSE')
+    return
+  }
+  expect(process.platform).toBe('darwin')
+  expect(seat.kind).toBe('darwin-file')
+  const seatPath = String(seat.path)
+  const seatDir = dirname(seatPath)
+  expect(statSync(seatDir).mode & 0o777, 'the Darwin Host seat directory is not private').toBe(0o700)
+  const link = lstatSync(seatPath)
+  expect(link.isSymbolicLink(), 'the Darwin Host seat file is a symlink').toBe(false)
+  expect(link.isFile(), 'the Darwin Host seat is not a regular file').toBe(true)
+  expect(link.mode & 0o777, 'the Darwin Host seat file is not 0600').toBe(0o600)
+  if (typeof process.getuid === 'function') expect(link.uid).toBe(process.getuid())
+  // An existing legal account root is accepted as-is (0755 is legal); it must be
+  // this uid's real directory and not group/other writable.
+  const accountRoot = join(userInfo().homedir, '.dsh-pi-tui')
+  if (existsSync(accountRoot)) {
+    const root = statSync(accountRoot)
+    expect(root.isDirectory(), 'the Darwin account root is not a directory').toBe(true)
+    if (typeof process.getuid === 'function') expect(root.uid).toBe(process.getuid())
+    expect(root.mode & 0o022, 'the Darwin account root is group/other writable').toBe(0)
+  }
+  // O_RDWR|O_EXLOCK|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC; Node omits O_EXLOCK and
+  // its type surface omits O_CLOEXEC, so both use their Darwin values.
+  const flags = constants.O_RDWR | 0x20 | constants.O_NONBLOCK | constants.O_NOFOLLOW | 0x1000000
+  let failure: NodeJS.ErrnoException | undefined
+  try {
+    closeSync(openSync(seatPath, flags, 0o600))
+  } catch (error) {
+    failure = error as NodeJS.ErrnoException
+  }
+  expect(failure?.code === 'EAGAIN' || failure?.code === 'EWOULDBLOCK',
+    `the live Host does not hold its Darwin O_EXLOCK seat (${String(failure?.code ?? 'opened')})`).toBe(true)
+}
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
@@ -392,6 +471,168 @@ test('recovers a stale Host through authenticated discovery and rejects its reti
       }
       throw new AggregateError([asError(cleanupError)],
         'the stale Host recovery test passed but its Scene cleanup failed')
+    }
+  }
+})
+
+test('refuses cross-home discovery for the same canonical profile while the Host seat is owned', async () => {
+  const scene = await createSplitProcessScene()
+  let testError: unknown
+  let client: QualificationClientHandle | undefined
+  let clientFinished = false
+  try {
+    const host = await scene.startHost()
+    const files = readScopeFiles(scene.installation.dshHome, scene.scope.scopeId)
+    const registrySnapshot = savePrivateFile(files.registryPath)
+    const launchSnapshot = savePrivateFile(files.launchPath)
+    const hostPid = host.ready.localHost.hostPid
+    const hostInstanceId = host.ready.localHost.instanceId
+    const hostRootFiberUid = host.ready.rootFiberUid
+    const sessionsBefore = await scene.sessionIds()
+    await assertAuthenticatedHost(scene, host)
+    await assertPrimaryHostSeatHeld(scene)
+
+    // One fixed input-boundary negative: a forbidden combination is refused
+    // before any qualification directory/process exists.
+    const qualificationsDir = join(scene.workDir, 'qualification-clients')
+    const qualificationsBefore = existsSync(qualificationsDir)
+      ? readdirSync(qualificationsDir).sort()
+      : []
+    await expect(scene.request('START_QUALIFICATION_CLIENTS', {
+      mode: 'cross-home-seat-refusal',
+      foundationBarrier: true,
+    })).rejects.toThrow(/does not accept foundationBarrier/u)
+    const qualificationsAfter = existsSync(qualificationsDir)
+      ? readdirSync(qualificationsDir).sort()
+      : []
+    expect(qualificationsAfter).toEqual(qualificationsBefore)
+
+    const [started] = await scene.startQualificationClients({ mode: 'cross-home-seat-refusal' })
+    client = started!
+    const reservation = (await scene.entryRecordFacts(client)).crossHome
+    expect(reservation, 'the cross-home reservation facts are missing').toBeDefined()
+    expect(reservation?.aliasHome).not.toBe(scene.installation.dshHome)
+    expect(reservation?.sameCanonicalProfile).toBe(true)
+    expect(reservation?.sameScope).toBe(true)
+    expect(reservation?.distinctDiscoveryRoots).toBe(true)
+
+    const failure = await scene.waitEntryRecord(client, { m4a0: 'failure' }, 240_000)
+    expect(failure.code).toBe('HOST_START_TIMEOUT')
+    const terminal = await scene.finishEntry(client)
+    clientFinished = true
+    expect(terminal.outcome).toBe('startup-refusal')
+    expect(terminal.exit).toEqual({ code: 1, signal: null })
+    const facts = terminal.crossHome as Record<string, any> | undefined
+    expect(facts, 'the cross-home terminal facts are missing').toBeDefined()
+    expect(facts?.terminal).toBe('seat-conflict')
+    expect(facts?.conflict).toMatchObject({
+      error: 'HOST_ALREADY_OWNED',
+      scopeId: scene.scope.scopeId,
+    })
+    expect(Number.isInteger(facts?.conflict?.pid)).toBe(true)
+    expect(facts?.aliasRegistryAbsent).toBe(true)
+    expect(facts?.aliasLaunchAbsent).toBe(true)
+    expect(facts?.aliasSeatFree).toBe(true)
+    expect(facts?.primarySeatBusy).toBe(true)
+    expect(facts?.primaryPid).toBe(hostPid)
+    expect(facts?.primaryInstanceId).toBe(hostInstanceId)
+    expect(facts?.candidateTerminal).not.toBeUndefined()
+    if (facts?.candidate === null) {
+      // The short-lived natural loser may be gone before the first full
+      // capture; the exact conflict PID/group is still the terminal authority.
+      expect(facts?.candidateTerminal).toBeNull()
+      expect(facts?.scratchProvenance).toBeNull()
+    } else {
+      expect(facts?.candidateTerminal).toBe(true)
+      expect(facts?.scratchProvenance).toBe(true)
+      expect(facts?.candidate?.pid).toBe(facts?.conflict?.pid)
+    }
+
+    const clientRecords = (await scene.entryRecordFacts(client)).records
+    const clientFailures = clientRecords.filter(record => record.m4a0 === 'failure')
+    expect(clientFailures, 'the cross-home Client reported more than one failure').toHaveLength(1)
+    expect(clientFailures[0]?.code).toBe('HOST_START_TIMEOUT')
+    for (const recordName of ['host-authenticated', 'context-ready', 'ready', 'cleanup-failure']) {
+      expect(clientRecords.some(record => record.m4a0 === recordName),
+        `the cross-home Client reported ${recordName}`).toBe(false)
+    }
+    expect(clientRecords.filter(record => record.m4a0 === 'cleanup' && record.status === 'completed'),
+      'the cross-home Client did not report exactly one completed cleanup').toHaveLength(1)
+
+    // The Worker independently reads the REAL new alias Host log: exactly the
+    // one product seat-conflict record, the same canonical scope, and no
+    // profile boot / publication.
+    const aliasScopeDir = facts?.aliasScopeDir
+    expect(typeof aliasScopeDir, 'the alias scope directory is missing').toBe('string')
+    const aliasScopePath = String(aliasScopeDir)
+    const aliasHostLog = readFileSync(join(aliasScopePath, 'host.log'), 'utf8')
+    expect(aliasHostLog.endsWith('\n'), 'the alias Host log has an incomplete trailing record').toBe(true)
+    const aliasRecords = aliasHostLog.slice(0, -1).split('\n').filter(line => line !== '').map(line => JSON.parse(line))
+    const aliasConflicts = aliasRecords.filter(record => record.m4a0 === 'host-seat-conflict')
+    expect(aliasConflicts).toHaveLength(1)
+    expect(aliasConflicts[0]).toMatchObject({
+      m4a0: 'host-seat-conflict',
+      processRole: 'host',
+      error: 'HOST_ALREADY_OWNED',
+      scopeId: scene.scope.scopeId,
+    })
+    expect(Number.isInteger(aliasConflicts[0].pid)).toBe(true)
+    expect(aliasRecords.some(record => record.m4a0 === 'ready' || record.m4a0 === 'failure'
+      || record.m4a0 === 'cleanup-failure' || record.m4a0 === 'profile-booted')).toBe(false)
+    for (const path of [join(aliasScopePath, 'instance.json'), join(aliasScopePath, 'launch.json')]) {
+      expect(existsSync(path), `the alias published ${path}`).toBe(false)
+    }
+    if (process.platform === 'darwin') {
+      // The Darwin Host seat belongs to the account-home scope; the alias
+      // discovery scope directory must never contain a Host seat file.
+      expect(readdirSync(aliasScopePath).some(name => name.startsWith('seat-host-')),
+        'the alias scope created a second Darwin Host seat').toBe(false)
+    }
+
+    // The primary Host material and identity are untouched, and its real seat is
+    // still held after the refusal (not only at reservation time).
+    expectSamePrivateFile(files.registryPath, registrySnapshot, 'the primary registry')
+    expectSamePrivateFile(files.launchPath, launchSnapshot, 'the primary launch')
+    await assertPrimaryHostSeatHeld(scene)
+    await assertAuthenticatedHost(scene, host)
+    const statusAfter = await scene.hostStatus(host)
+    expect(statusAfter.localHost.hostPid).toBe(hostPid)
+    expect(statusAfter.localHost.instanceId).toBe(hostInstanceId)
+    expect(statusAfter.rootFiberUid).toBe(hostRootFiberUid)
+    expect(statusAfter.services.piTuiHostReady).toBe(true)
+    expect(await scene.sessionIds()).toEqual(sessionsBefore)
+
+    // The normal Host release must still consume the fixed alias obligation and
+    // free both the primary and alias seats.
+    await scene.stopHost(host)
+    await scene.assertEntrySeatsFree()
+  } catch (error) {
+    testError = error
+    throw error
+  } finally {
+    const cleanupErrors: Error[] = []
+    if (client !== undefined && !clientFinished) {
+      try {
+        const facts = await scene.entryRecordFacts(client)
+        if (!facts.exited) await scene.waitEntryRecord(client, { m4a0: 'failure' }, 240_000)
+        await scene.finishEntry(client)
+        clientFinished = true
+      } catch (error) {
+        cleanupErrors.push(asError(error))
+      }
+    }
+    try {
+      await scene.dispose()
+    } catch (cleanupError) {
+      cleanupErrors.push(asError(cleanupError))
+    }
+    if (cleanupErrors.length > 0) {
+      if (testError !== undefined) {
+        throw new AggregateError([testError, ...cleanupErrors],
+          'the cross-home seat refusal test failed and its Scene cleanup also failed')
+      }
+      throw new AggregateError(cleanupErrors,
+        'the cross-home seat refusal test passed but its Scene cleanup failed')
     }
   }
 })

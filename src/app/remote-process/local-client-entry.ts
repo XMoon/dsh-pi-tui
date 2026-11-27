@@ -1438,6 +1438,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   const stopped = new Promise<void>(resolve => { resolveStopped = resolve })
   let terminalError: unknown
   let compositionDone = false
+  let dropGenerationObservation: { dispose: () => void } | undefined
 
   const stop = (code: number, failure?: unknown): Promise<void> => {
     if (stopping !== undefined) return stopping
@@ -2566,7 +2567,73 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         return true
       }
       if (request.op === 'qualification-drop-websocket') {
-        transport?.dropWebSocketsForQualification()
+        // Qualification-only. Arm one exact official-generation observation
+        // BEFORE the physical drop; the dispatch ACK remains the separate
+        // dispatch receipt. A source-backed clear record is the intermediate
+        // retirement proof, not a transient status projection.
+        dropGenerationObservation?.dispose()
+        dropGenerationObservation = undefined
+        const connection = transport?.connection
+        const previous = connection?.generation.getSnapshot()
+        let ackEmitted = false
+        let clearObserved = false
+        let published = false
+        let disposed = false
+        let dispatchStarted = false
+        const cleanups: Array<() => void> = []
+        const dispose = (): void => {
+          if (disposed) return
+          disposed = true
+          for (const cleanup of cleanups.splice(0)) cleanup()
+          if (dropGenerationObservation?.dispose === dispose) dropGenerationObservation = undefined
+        }
+        const publish = (): void => {
+          if (disposed || published || !ackEmitted || !clearObserved) return
+          published = true
+          emit({
+            m4a0: 'qualification',
+            op: 'drop-generation-cleared',
+            processRole: 'client',
+            pid: process.pid,
+            ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+            previousGenerationId: previous!.id,
+          })
+          dispose()
+        }
+        if (connection !== undefined && previous !== undefined && Number.isInteger(previous.id)) {
+          const unsubscribe = connection.generation.subscribe(() => {
+            if (!dispatchStarted || disposed) return
+            const current = connection.generation.getSnapshot()
+            if (current === undefined) {
+              clearObserved = true
+              publish()
+            } else if (current.id !== previous.id) {
+              // A replacement before the clear is missing expected evidence;
+              // do not reuse a later unrelated clear for this request.
+              dispose()
+            }
+          })
+          cleanups.push(unsubscribe)
+          const current = connection.generation.getSnapshot()
+          if (current?.id !== previous.id) {
+            dispose()
+          } else {
+            const timer = setTimeout(() => dispose(), 30_000)
+            cleanups.push(() => clearTimeout(timer))
+            const onAbort = (): void => dispose()
+            startupAbort.signal.addEventListener('abort', onAbort, { once: true })
+            cleanups.push(() => startupAbort.signal.removeEventListener('abort', onAbort))
+            if (startupAbort.signal.aborted) dispose()
+            else dropGenerationObservation = { dispose }
+          }
+        }
+        try {
+          dispatchStarted = true
+          transport?.dropWebSocketsForQualification()
+        } catch (error) {
+          dispose()
+          throw error
+        }
         emit({
           m4a0: 'qualification',
           op: 'drop-websocket',
@@ -2574,6 +2641,8 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           pid: process.pid,
           ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
         })
+        ackEmitted = true
+        publish()
         return false
       }
       if (request.op === 'qualification-host-foundation') {

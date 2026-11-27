@@ -6,7 +6,9 @@
 
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createServer as createHttpServer } from 'node:http'
 import { createServer } from 'node:net'
+import type { Socket } from 'node:net'
 import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -31,6 +33,7 @@ import {
   createSplitProcessScene,
   type DiscoveryRefusal,
   type QualificationClientHandle,
+  type SplitProcessClient,
   type SplitProcessHostHandle,
   type SplitProcessScene,
 } from '../../../support/split-process-fixture.ts'
@@ -122,6 +125,40 @@ async function assertAuthenticatedHost(scene: SplitProcessScene, host: SplitProc
   const identity = await readAuthenticatedIdentity(host.ready.localHost.origin, cookie, 'the authenticated identity')
   assertClientHostMatchesPublished(identity.identity as never, files.registry as never, 'the authenticated identity')
   return cookie
+}
+
+async function waitForFrame(
+  client: SplitProcessClient,
+  text: string,
+  label: string,
+  timeoutMs = 120_000,
+): Promise<string> {
+  const started = Date.now()
+  for (;;) {
+    const frame = await client.text()
+    if (frame.includes(text)) return frame
+    if (Date.now() - started >= timeoutMs) {
+      throw new Error(`${label}: the current frame never showed ${JSON.stringify(text)}; frame=${JSON.stringify(frame.slice(-2000))}`)
+    }
+    await sleep(50)
+  }
+}
+
+async function waitForFrameGone(
+  client: SplitProcessClient,
+  text: string,
+  label: string,
+  timeoutMs = 120_000,
+): Promise<void> {
+  const started = Date.now()
+  for (;;) {
+    const frame = await client.text()
+    if (!frame.includes(text)) return
+    if (Date.now() - started >= timeoutMs) {
+      throw new Error(`${label}: ${JSON.stringify(text)} stayed on the current frame for ${String(timeoutMs)}ms`)
+    }
+    await sleep(50)
+  }
 }
 
 test('authenticates the installed Host and rejects unauthenticated HTTP and duplicate mux peers', async () => {
@@ -435,10 +472,9 @@ test('replaces dropped transport generations without retaining wrappers or socke
       const requestId = `drop-generation-${String(cycle)}`
       await scene.qualificationControl(client!, { op: 'qualification-drop-websocket', requestId })
       await scene.waitEntryRecord(client!, { m4a0: 'qualification', op: 'drop-websocket', requestId })
-      await waitFor(async () => {
-        const status = await scene.entryStatus(client!)
-        return status.transport !== 'connected' && status.generationId === undefined
-      }, `the dropped generation ${String(cycle)} to clear its transport and generation identity`, 30_000)
+      const cleared = await scene.waitEntryRecord(client!,
+        { m4a0: 'qualification', op: 'drop-generation-cleared', requestId }, 30_000)
+      expect(cleared.previousGenerationId).toBe(generation)
       const replaced = await waitForValue(async () => {
         const status = await scene.entryStatus(client!)
         return status.transport === 'connected'
@@ -465,11 +501,12 @@ test('replaces dropped transport generations without retaining wrappers or socke
     const retryableBaseline = await scene.entryStatus(retryable!)
     expect(retryableBaseline.activeWrappers).toBe(1)
     expect(retryableBaseline.liveSockets).toBe(1)
+    expect(Number.isInteger(retryableBaseline.generationId)).toBe(true)
     await scene.qualificationControl(retryable!, { op: 'qualification-drop-websocket', requestId: 'retryable-drop' })
-    await waitFor(async () => {
-      const status = await scene.entryStatus(retryable!)
-      return status.transport !== 'connected' && status.generationId === undefined
-    }, 'the retryable refresh actual interruption and cleared generation', 30_000)
+    await scene.waitEntryRecord(retryable!, { m4a0: 'qualification', op: 'drop-websocket', requestId: 'retryable-drop' })
+    const retryableCleared = await scene.waitEntryRecord(retryable!,
+      { m4a0: 'qualification', op: 'drop-generation-cleared', requestId: 'retryable-drop' }, 30_000)
+    expect(retryableCleared.previousGenerationId).toBe(retryableBaseline.generationId)
     const recovered = await waitForValue(async () => {
       const status = await scene.entryStatus(retryable!)
       return status.transport === 'connected'
@@ -871,6 +908,329 @@ test('refuses unsafe or forged Host discovery facts without killing or replacing
       }
       throw new AggregateError([asError(cleanupError)],
         'the discovery-refusal test passed but its Scene cleanup failed')
+    }
+  }
+})
+
+test('cancels an installed Client during an in-flight authentication without disturbing the Host or peer', async () => {
+  const scene = await createSplitProcessScene()
+  let testError: unknown
+  let peer: SplitProcessClient | undefined
+  let cancelled: QualificationClientHandle | undefined
+  let startAttempted = false
+  let signalAttempted = false
+  let cancelledFinished = false
+  let targetTerminalProven = false
+  let listener: ReturnType<typeof createHttpServer> | undefined
+  let listenerSockets: Set<Socket> = new Set()
+  let privateSnapshot: { registryPath: string; registry: PrivateFileSnapshot; launchPath: string; launch: PrivateFileSnapshot } | undefined
+  let restored = false
+
+  const restorePrivate = (): void => {
+    if (restored || privateSnapshot === undefined) return
+    restorePrivateFile(privateSnapshot.registryPath, privateSnapshot.registry)
+    restorePrivateFile(privateSnapshot.launchPath, privateSnapshot.launch)
+    restored = true
+  }
+  const closeListener = async (): Promise<void> => {
+    if (listener === undefined) return
+    const current = listener
+    listener = undefined
+    current.closeAllConnections()
+    await new Promise<void>((resolve, reject) => {
+      current.close(error => error === undefined ? resolve() : reject(error))
+    })
+    for (const socket of listenerSockets) socket.destroy()
+    listenerSockets = new Set()
+  }
+  /**
+   * Terminate the target through the EXISTING Supervisor-owned signal/close
+   * path before restoring the private fixture files. A still-live auth wait is
+   * cancelled by the product's own SIGTERM startup-abort chain, never by
+   * closing the test listener first.
+   */
+  const settleCancelledClient = async (): Promise<void> => {
+    if (cancelled === undefined || cancelledFinished) return
+    const facts = await scene.entryRecordFacts(cancelled)
+    if (!facts.exited && !signalAttempted) {
+      // Exactly one owned SIGTERM attempt. If the RPC was already attempted,
+      // join the existing close instead of dispatching a second signal.
+      signalAttempted = true
+      await scene.signalEntry(cancelled, 'SIGTERM')
+    }
+    await scene.finishEntry(cancelled)
+    cancelledFinished = true
+    targetTerminalProven = true
+  }
+
+  try {
+    const host = await scene.startHost()
+    const hostFiles = readScopeFiles(scene.installation.dshHome, scene.scope.scopeId)
+    const hostPid = host.ready.localHost.hostPid
+    const hostInstanceId = host.ready.localHost.instanceId
+    const hostRootFiberUid = host.ready.rootFiberUid
+    const sessionsBefore = await scene.sessionIds()
+    await assertAuthenticatedHost(scene, host)
+
+    // A real, independent surface peer: mounted on the same authenticated Host
+    // and left alive for the whole cancellation. Its draft is the observable
+    // proof the peer's editor still works after the cancelled Client is gone.
+    const peerCwd = join(scene.workDir, 'auth-cancel-peer-workspace')
+    const peerHome = join(scene.workDir, 'auth-cancel-peer-home')
+    mkdirSync(peerCwd, { recursive: true, mode: 0o700 })
+    mkdirSync(peerHome, { recursive: true, mode: 0o700 })
+    peer = await scene.startClient({ label: 'auth-cancel-peer', cwd: peerCwd, home: peerHome })
+    expect(peer.ready.transport).toBe('connected')
+    expect(peer.ready.surfaceMounted).toBe(true)
+    expect(peer.ready.hostPid).toBe(hostPid)
+    expect(peer.ready.instanceId).toBe(hostInstanceId)
+    const draft = `auth-cancel-draft-${randomUUID()}`
+    await peer.type(draft)
+    await waitForFrame(peer, draft, 'the authenticated peer draft')
+    await peer.press('Ctrl+U')
+    await waitForFrameGone(peer, draft, 'the authenticated peer draft clear')
+
+    // The controlled loopback listener is the ONLY origin change: it holds one
+    // real /connect transaction and never returns a Cookie, identity or
+    // redirect. Everything else in the private registry/launch stays the real
+    // Scene Host material.
+    const syntheticToken = `synthetic-${randomUUID()}`
+    const requests: Array<{ method: string; pathname: string; token: string | null; interactions: string | null; keys: string[] }> = []
+    let requestSocket: Socket | undefined
+    let requestArrivedAt: number | undefined
+    let unexpected: Error | undefined
+    let resolveFirstRequest: (() => void) | undefined
+    const firstRequest = new Promise<void>(resolve => { resolveFirstRequest = resolve })
+    listener = createHttpServer((request, response) => {
+      const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+      const keys = [...url.searchParams.keys()]
+      const record = {
+        method: request.method ?? '',
+        pathname: url.pathname,
+        token: url.searchParams.get('token'),
+        interactions: url.searchParams.get('interactions'),
+        keys,
+      }
+      requests.push(record)
+      if (requests.length > 1) {
+        unexpected ??= new Error(`the in-flight authentication sent ${String(requests.length)} requests instead of one`)
+        request.resume()
+        response.writeHead(409)
+        response.end()
+        resolveFirstRequest?.()
+        return
+      }
+      const valid = record.method === 'GET'
+        && record.pathname === '/connect'
+        && record.token === syntheticToken
+        && record.interactions === 'answer'
+        && keys.length === 2
+      if (!valid) {
+        unexpected ??= new Error(`the in-flight authentication request is not the one expected /connect transaction: ${JSON.stringify({
+          method: record.method,
+          pathname: record.pathname,
+          interactions: record.interactions,
+          keys: record.keys,
+          tokenMatches: record.token === syntheticToken,
+        })}`)
+        request.resume()
+        response.writeHead(400)
+        response.end()
+        resolveFirstRequest?.()
+        return
+      }
+      requestSocket = request.socket
+      requestArrivedAt = performance.now()
+      resolveFirstRequest?.()
+      // Deliberately hold the response: no status line, headers or body.
+    })
+    listener.on('connection', socket => {
+      listenerSockets.add(socket)
+      socket.once('close', () => listenerSockets.delete(socket))
+    })
+    await new Promise<void>((resolve, reject) => {
+      const current = listener
+      if (current === undefined) {
+        reject(new Error('the controlled listener disappeared before listen'))
+        return
+      }
+      current.once('error', reject)
+      current.listen(0, '127.0.0.1', () => resolve())
+    })
+    const address = listener.address()
+    if (address === null || typeof address === 'string') throw new Error('the controlled listener has no loopback port')
+    const listenerOrigin = `http://127.0.0.1:${String(address.port)}`
+
+    privateSnapshot = {
+      registryPath: hostFiles.registryPath,
+      registry: savePrivateFile(hostFiles.registryPath),
+      launchPath: hostFiles.launchPath,
+      launch: savePrivateFile(hostFiles.launchPath),
+    }
+    const registry = JSON.parse(privateSnapshot.registry.bytes.toString('utf8')) as Record<string, any>
+    const launch = JSON.parse(privateSnapshot.launch.bytes.toString('utf8')) as Record<string, any>
+    writePrivateJson(hostFiles.registryPath, { ...registry, origin: listenerOrigin })
+    writePrivateJson(hostFiles.launchPath, { ...launch, connectUrl: `${listenerOrigin}/connect?token=${syntheticToken}` })
+
+    startAttempted = true
+    const [target] = await scene.startQualificationClients({ mode: 'attach' })
+    cancelled = target!
+    const targetFacts = await scene.entryRecordFacts(cancelled)
+    expect(targetFacts.exited, 'the registered cancellation target is already terminal').toBe(false)
+    expect(targetFacts.pid, 'the registered cancellation target has no PID').toBeGreaterThan(0)
+    expect(typeof targetFacts.birth, 'the registered cancellation target has no kernel birth').toBe('string')
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('the in-flight authentication never reached the controlled listener')), 30_000)
+      void firstRequest.then(() => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+    if (unexpected !== undefined) throw unexpected
+    const arrivedAt = requestArrivedAt
+    if (arrivedAt === undefined || requestSocket === undefined) {
+      throw new Error('the controlled listener did not record the real request arrival and socket')
+    }
+    const heldSocket = requestSocket
+    expect(heldSocket.destroyed).toBe(false)
+
+    // The decisive boundary is the real request already in flight, not a sleep
+    // or a spawn timestamp. Read the final record snapshot first, then verify
+    // the SAME sole pending socket and absence of premature records immediately
+    // before the signal.
+    const recordsAtSignal = await scene.entryRecords(cancelled)
+    for (const recordName of ['host-authenticated', 'context-ready', 'ready', 'failure']) {
+      expect(recordsAtSignal.some(record => record.m4a0 === recordName),
+        `the cancelled Client reported ${recordName} while the request was still held`).toBe(false)
+    }
+    expect(unexpected).toBeUndefined()
+    expect(requests).toHaveLength(1)
+    expect(requestSocket).toBe(heldSocket)
+    expect(heldSocket.destroyed).toBe(false)
+    const signalAt = performance.now()
+    signalAttempted = true
+    await scene.signalEntry(cancelled, 'SIGTERM')
+    const terminal = await scene.finishEntry(cancelled)
+    const terminalAt = performance.now()
+    cancelledFinished = true
+    targetTerminalProven = true
+    // Conservative same-Worker upper bounds on the real close, not exact OS
+    // exit timestamps.
+    expect(terminalAt - arrivedAt, 'the cancelled Client did not close within 5s of the real request arrival').toBeGreaterThanOrEqual(0)
+    expect(terminalAt - arrivedAt, 'the cancelled Client did not close within 5s of the real request arrival').toBeLessThan(5_000)
+    expect(terminalAt - signalAt, 'the cancelled Client did not close within 5s of the real SIGTERM').toBeGreaterThanOrEqual(0)
+    expect(terminalAt - signalAt, 'the cancelled Client did not close within 5s of the real SIGTERM').toBeLessThan(5_000)
+    expect(terminal.exit).toEqual({ code: 0, signal: null })
+    expect(terminal.outcome).toBe('signal')
+
+    const recordsAfter = await scene.entryRecords(cancelled)
+    for (const recordName of ['host-authenticated', 'context-ready', 'ready', 'failure', 'cleanup-failure']) {
+      expect(recordsAfter.some(record => record.m4a0 === recordName),
+        `the cancelled Client reported ${recordName} after its terminal`).toBe(false)
+    }
+    expect(requests, 'the cancellation listener received more than one request').toHaveLength(1)
+    const signals = recordsAfter.filter(record => record.m4a0 === 'signal' && record.signal === 'SIGTERM')
+    expect(signals, 'exactly one real SIGTERM record').toHaveLength(1)
+    const shutdown = recordsAfter.filter(record => record.m4a0 === 'shutdown-stage' && record.phase === 'cleanup-complete')
+    expect(shutdown, 'exactly one shutdown-stage cleanup-complete record').toHaveLength(1)
+    expect(shutdown[0]?.failure).toBe(false)
+    expect(shutdown[0]?.errors).toBe(0)
+
+    // The Client's abort closes the real in-flight socket; the test must not be
+    // the one that ends it.
+    await waitFor(async () => heldSocket.destroyed, 'the held authentication connection to close after the Client exit', 10_000)
+
+    // Restore the private files only after the Client's real terminal, then
+    // release the listener. The SAME Host must still authenticate with its own
+    // original material.
+    restorePrivate()
+    await closeListener()
+    await assertAuthenticatedHost(scene, host)
+
+    const peerState = await peer.state()
+    expect(peerState.exited).toBe(false)
+    expect(peerState.businessPids).toContain(peer.ready.businessPid)
+    expect(peerState.businessStates.every(state => state.state === 'alive')).toBe(true)
+    const peerFrame = await peer.text()
+    expect(peerFrame.length).toBeGreaterThan(0)
+
+    // A post-cancel Host-backed peer operation, not just a live process or the
+    // last painted frame: the Session Workspace asks the authenticated Host for
+    // its Session roster before the test opens and closes it.
+    await peer.type('/sessions')
+    await peer.press('Enter')
+    await waitForFrame(peer, 'Sessions ·', 'the peer Host Session Workspace', 30_000)
+    await waitForFrameGone(peer, 'Loading sessions…', 'the peer Host Session listing', 30_000)
+    await peer.press('Escape')
+    await waitForFrameGone(peer, 'Sessions ·', 'the peer Host Session Workspace close', 30_000)
+
+    // A fresh qualification Client must authenticate the same Host after the
+    // cancelled entry released its qualification seat.
+    const [fresh] = await scene.startQualificationClients({ mode: 'attach' })
+    const freshReady = await scene.waitEntryRecord(fresh!, { m4a0: 'ready' })
+    expect(freshReady.transport).toBe('connected')
+    expect(freshReady.host.hostPid).toBe(hostPid)
+    expect(freshReady.host.instanceId).toBe(hostInstanceId)
+    const freshExit = await scene.finishEntry(fresh!)
+    expect(freshExit.exit).toEqual({ code: 0, signal: null })
+
+    const statusAfter = await scene.hostStatus(host)
+    expect(statusAfter.localHost.hostPid).toBe(hostPid)
+    expect(statusAfter.localHost.instanceId).toBe(hostInstanceId)
+    expect(statusAfter.rootFiberUid).toBe(hostRootFiberUid)
+    expect(statusAfter.services.piTuiHostReady).toBe(true)
+    expect(await scene.sessionIds()).toEqual(sessionsBefore)
+
+    await peer.exitGracefully()
+    await scene.stopHost(host)
+    await scene.assertEntrySeatsFree()
+  } catch (error) {
+    testError = error
+    throw error
+  } finally {
+    const cleanupErrors: Error[] = []
+    try {
+      await settleCancelledClient()
+    } catch (error) {
+      cleanupErrors.push(asError(error))
+    }
+    if (!startAttempted || targetTerminalProven) {
+      try {
+        restorePrivate()
+      } catch (error) {
+        cleanupErrors.push(asError(error))
+      }
+    } else if (privateSnapshot !== undefined) {
+      cleanupErrors.push(new Error(
+        'the private discovery files were left mutated because the started Client terminal was not proven'))
+    }
+    if (peer !== undefined) {
+      try {
+        await peer.exitGracefully()
+      } catch (error) {
+        cleanupErrors.push(asError(error))
+      }
+    }
+    try {
+      await scene.dispose()
+    } catch (cleanupError) {
+      cleanupErrors.push(asError(cleanupError))
+    }
+    // The listener is closed only after the target Client is terminal or the
+    // existing Scene compensation has ended it; it is never the thing that
+    // fabricates the cancellation.
+    try {
+      await closeListener()
+    } catch (error) {
+      cleanupErrors.push(asError(error))
+    }
+    if (cleanupErrors.length > 0) {
+      if (testError !== undefined) {
+        throw new AggregateError([testError, ...cleanupErrors],
+          'the in-flight authentication cancellation test failed and its Scene cleanup also failed')
+      }
+      throw new AggregateError(cleanupErrors,
+        'the in-flight authentication cancellation test passed but its Scene cleanup failed')
     }
   }
 })
