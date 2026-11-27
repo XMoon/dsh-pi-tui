@@ -1946,6 +1946,19 @@ test('resource shape, aggregate budget and the 16-blob cap are atomic before upl
   await assert.rejects(tooMany.start('', undefined, seventeen, false, true), isPromptError('LOCAL_ACP_PROMPT_INVALID_CONTENT'))
   assert.equal(tooMany.access.stageCalls.length, 0)
   assert.equal(tooMany.access.promptCalls.length, 0)
+  const sixteen = promptView()
+  await sixteen.attach()
+  const sixteenPrompt = sixteen.start('', undefined, seventeen.slice(0, 16), false, true)
+  for (let tick = 0; tick < 100 && sixteen.access.promptCalls.length === 0; tick += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  const sixteenRequest = sixteen.access.promptCalls[0]!
+  assert.equal(sixteen.access.stageCalls.length, 16, 'exactly 16 blob occurrences are admitted')
+  assert.equal(sixteenRequest.content.filter(part => part.type === 'file').length, 16)
+  sixteen.insert(sixteenRequest.requestId, 'm-sixteen')
+  sixteen.claim('m-sixteen', 1, sixteenRequest.requestId)
+  sixteen.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await sixteenPrompt, { stopReason: 'end_turn' })
 })
 
 test('a later blob admission failure retires the earlier real receipt and never calls the Controller', async () => {
@@ -2094,9 +2107,9 @@ test('the final Host admission callback refuses a cancelled file prompt before d
     callback?.()
     return { accepted: true }
   }
-  await assert.rejects(
-    view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///final.bin', blob: 'AQID' } }], false, true),
-    isPromptError('LOCAL_ACP_PROMPT_ABORTED'),
+  assert.deepEqual(
+    await view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///final.bin', blob: 'AQID' } }], false, true),
+    { stopReason: 'cancelled' },
   )
   assert.equal(typeof finalCheck, 'function')
   assert.deepEqual(view.access.cleanupCalls.at(-1)?.receiptIds, ['receipt-1'])
@@ -2151,6 +2164,7 @@ test('a close whose queued receipt retirement fails reports once and then detach
       && error.code === 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'
       && error.data.reason === 'file-receipt-retirement-unconfirmed',
     'the close must report the unconfirmed resource terminal')
+  assert.equal(view.registry.hasClaim('P1'), false, 'the real removal terminal permits normal detach/MCP release')
   await assert.rejects(attempt, (error: unknown) => error instanceof LocalAcpViewError
     && error.code === 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'
     && error.data.reason === 'file-receipt-retirement-unconfirmed')
@@ -3598,7 +3612,7 @@ test('a detached retired claim cannot dispatch a prompt after the same connectio
   view.access.seed(makeAgent('B', '/w'))
   await view.registry.resumeSession(view.conn, view.access, { sessionId: 'B', cwd: '/w' })
   view.access.promptImpl = async () => { throw new Error('unexpected dispatch to retired Session') }
-  await assert.rejects(view.start(), isPromptError('LOCAL_ACP_PROMPT_IN_FLIGHT'))
+  await assert.rejects(view.start(), isViewError('LOCAL_ACP_VIEW_NOT_OWNED'))
   assert.equal(view.access.promptCalls.length, 1, 'the retired reservation is observation-only')
   assert.equal(view.registry.phaseOf(view.conn), 'attached')
   view.registry.onAgentDisposed(view.agent)

@@ -575,6 +575,10 @@ async function inputScene(context) {
     requireFact(po4eProbe.sha256 === hash(po4eBytes) && po4eProbe.bytes === po4eBytes.length
       && po4eProbe.refBytes === po4eBytes.length, 'PO-4E official Store read is byte/hash exact')
     requireFact(po4eProbe.contentTypes.join(',') === 'text,file,text', 'PO-4E durable content order')
+    requireFact(Array.isArray(po4eProbe.resolveAfterConsumption)
+      && po4eProbe.resolveAfterConsumption.length === 1
+      && po4eProbe.resolveAfterConsumption.every(live => live === false),
+    'PO-4E normal consumption retires the exact returned receipt')
     const po4eText = `${po4eMarker}\nbefore${po4eHeader}`
       + `\n[resource uri="urn:po4e:note"]\n${po4eNote}\nafter`
     requireFact(po4eProbe.text === po4eText,
@@ -728,8 +732,8 @@ async function inputScene(context) {
     writeFileSync(po4eHold, '', { mode: 0o600 })
     assert.deepEqual(await closeStarted, {}, 'PO-4E real close settles after the held upload returns')
     const holdOutcome = await holdPrompt
-    requireFact(holdOutcome.ok === false || holdOutcome.value?.stopReason === 'cancelled',
-      'PO-4E closed held prompt reports a terminal, not a dispatch')
+    requireFact(holdOutcome.ok === true && holdOutcome.value?.stopReason === 'cancelled',
+      'PO-4E closed held prompt reports the exact cancelled terminal')
     const holdRetire = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-retire'
       && event.receiptIds.includes(held.receiptId) && event.liveAfter.every(live => live === false),
     'PO-4E late receipt cleanup after close', 120_000)
@@ -764,8 +768,12 @@ async function inputScene(context) {
       missingPathErrno: fileProof.missing, unreadablePathErrno: fileProof.unreadable, negativeRejectedBeforeMessage: true,
       po4eFileAttachmentId: po4eFile.attachment.attachmentId, po4eFileBytes: po4eBytes.length, po4eFileSha256: hash(po4eBytes),
       po4eFileTurn: po4eFlight.turn, po4eFileRpcId: po4eProbe.rpcId, po4eModelHandleCount: po4eModel.handleCount,
+      po4eResolveAfterConsumption: po4eProbe.resolveAfterConsumption,
       po4eToolSha256: po4eTool.toolSha256, po4eNegativeRetiredReceipt: a4Retire.receiptIds[0],
       po4eHeldRetiredReceipt: held.receiptId, po4eHeldCloseStopped: closeWasPending,
+      po4eHeldOutcome: holdOutcome.ok
+        ? { ok: true, stopReason: holdOutcome.value?.stopReason }
+        : { ok: false, code: holdOutcome.error?.data?.code, hostCode: holdOutcome.error?.data?.hostCode },
       po4eQueuedRetiredReceipt: queueRetire.receiptIds[0], po4eQueuedTuiTurnCompleted: true,
       po4eQueuedStopReason: queueOutcome.ok ? queueOutcome.value?.stopReason : undefined,
     }

@@ -1436,10 +1436,9 @@ interface InflightPrompt {
   cancelKind?: 'queued-removed' | 'running-addressed'
   /** The admission call resolved (accepted or classified failure). */
   admissionSettled: boolean
-  /** A resource flight is inside its sequential upload preparation. */
-  filePreparing?: boolean
-  /** The actual Controller admission Promise is still pending. */
-  admissionCallPending?: boolean
+  /** The ONE file-bearing admission responsibility, from first upload until
+   * the original Controller Promise and D4 cleanup have settled. */
+  fileAdmissionPending?: boolean
   /** Receipts returned by THIS flight and not yet handed to the Controller. */
   stagedReceipts?: string[]
   /** A disposal observed while file preparation was still in flight. */
@@ -1760,6 +1759,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       state.phase !== 'attached'
       || claim === undefined
       || claim.connectionIdentity !== state
+      || claim.detachedWithFence
       || claim.exactAgent === undefined
       || claim.exactSession === undefined
     ) {
@@ -3591,6 +3591,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     claim: ViewClaim,
     access: HostAcpSessionAccess,
   ): Promise<Record<string, never>> {
+    let resourceFailure: LocalAcpViewError | undefined
     // A policy write owns the Host maintenance window until its ORIGINAL call
     // settles. Close never cancels it; it waits for the captured terminal and
     // only then evaluates the remaining obligations.
@@ -3625,11 +3626,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           this.dropUnclaimedObligation(claim)
           if (!retired) {
             // The removal is real, but the resource terminal is unconfirmed.
-            // Report this close failure once; the operation itself is settled,
-            // so the claim may detach and a repeated close is idempotent.
-            claim.detachedWithFence = true
-            this.releaseDetachedIfSettled(claim)
-            throw promptError(
+            // Keep the error, finish the normal detach/MCP path, then report it
+            // once on this close.
+            resourceFailure = promptError(
               'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED',
               'the removed queued prompt file receipts could not be confirmed retired',
               JSONRPC_INTERNAL_ERROR,
@@ -3657,12 +3656,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         const terminal = flight.ownTurnEnded
           || flight.failureCode === 'LOCAL_ACP_PROMPT_HOST_REJECTED'
           || flight.definiteNoDispatch === true
-        if (!terminal) {
-          if (outcome instanceof LocalAcpViewError
-            && outcome.code === 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED') {
-            claim.detachedWithFence = true
-            this.releaseDetachedIfSettled(claim)
-          }
+        if (outcome instanceof LocalAcpViewError && this.isFileRetirementError(outcome)) {
+          resourceFailure ??= outcome
+        } else if (!terminal) {
           throw outcome
         }
       }
@@ -3679,7 +3675,15 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // The View is detached now; request the scoped MCP retirement so the
     // claim stays fenced only until the official Fiber closure is confirmed.
     if (claim.mcpLease !== undefined) this.requestMcpRetire(claim, access)
-    return this.finishClose(state, sessionId, claim)
+    const result = this.finishClose(state, sessionId, claim)
+    if (resourceFailure !== undefined) throw resourceFailure
+    return result
+  }
+
+  /** Whether an error is the fixed D4/D5 resource-retirement terminal. */
+  private isFileRetirementError(error: unknown): error is LocalAcpViewError {
+    return error instanceof LocalAcpViewError
+      && error.data.reason === 'file-receipt-retirement-unconfirmed'
   }
 
   /** End one unclaimed obligation on a real terminal fact. A discarded notice
@@ -4381,7 +4385,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const content: AcpPromptPart[] = []
     const receipts: string[] = []
     flight.stagedReceipts = receipts
-    flight.filePreparing = true
+    flight.fileAdmissionPending = true
     const stop = (): 'cancelled' | 'stale' | undefined =>
       this.filePreparationStop(claim, flight, access, signal)
     const disposalFailure = (): { readonly kind: 'failure'; readonly error: LocalAcpViewError } | undefined => {
@@ -4396,7 +4400,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
         const disposed = disposalFailure()
         if (disposed !== undefined) {
-          flight.filePreparing = false
           if (!this.cleanupPreparedFiles(claim, flight)) {
             return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
           }
@@ -4404,7 +4407,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
         const before = stop()
         if (before !== undefined) {
-          flight.filePreparing = false
           if (!this.cleanupPreparedFiles(claim, flight)) {
             return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
           }
@@ -4415,14 +4417,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         const agent = claim.exactAgent
         const session = claim.exactSession
         if (agent === undefined || session === undefined) {
-          flight.filePreparing = false
           return { kind: 'failure', error: this.staleFilePreparationError() }
         }
         let staged: { readonly receiptId: string }
         try {
           staged = await access.stageFile(agent, session, part.data, part.name, signal)
         } catch (error) {
-          flight.filePreparing = false
           if (!this.cleanupPreparedFiles(claim, flight)) {
             return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
           }
@@ -4448,7 +4448,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         receipts.push(staged.receiptId)
         const disposedAfter = disposalFailure()
         if (disposedAfter !== undefined) {
-          flight.filePreparing = false
           if (!this.cleanupPreparedFiles(claim, flight)) {
             return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
           }
@@ -4456,7 +4455,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
         const after = stop()
         if (after !== undefined) {
-          flight.filePreparing = false
           if (!this.cleanupPreparedFiles(claim, flight)) {
             return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
           }
@@ -4466,7 +4464,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
         content.push({ type: 'file', receiptId: staged.receiptId })
       }
-      flight.filePreparing = false
       if (flight.pendingDisposalFailure !== undefined) {
         if (!this.cleanupPreparedFiles(claim, flight)) {
           return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
@@ -4481,7 +4478,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
       return { kind: 'content', content }
     } catch {
-      flight.filePreparing = false
       if (!this.cleanupPreparedFiles(claim, flight)) {
         return { kind: 'failure', error: this.fileCleanupUnconfirmedError() }
       }
@@ -4517,21 +4513,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       state.phase !== 'attached'
       || claim === undefined
       || claim.connectionIdentity !== state
+      || claim.detachedWithFence
       || claim.exactAgent === undefined
       || claim.exactSession === undefined
     ) {
-      throw new LocalAcpViewError(
-        'LOCAL_ACP_VIEW_NOT_OWNED',
-        'this ACP connection holds no view for that session',
-        JSONRPC_RESOURCE_NOT_FOUND,
-        { sessionId: request.sessionId },
-      )
-    }
-    if (claim.detachedWithFence) {
-      if (claim.unclaimedHostObligation !== undefined || claim.retiringTurn !== undefined
-        || claim.inflight !== undefined || claim.closing !== undefined) {
-        throw promptError('LOCAL_ACP_PROMPT_IN_FLIGHT', 'the previous prompt still owes a Host terminal fact', JSONRPC_INVALID_PARAMS)
-      }
       throw new LocalAcpViewError(
         'LOCAL_ACP_VIEW_NOT_OWNED',
         'this ACP connection holds no view for that session',
@@ -4664,11 +4649,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (decodedContent.some(part => part.type === 'blob')) {
       const prepared = await this.prepareFileContent(claim, flight, access, decodedContent, requestSignal)
       if (prepared.kind === 'cancelled') {
+        flight.fileAdmissionPending = false
         flight.settleAdmission()
         this.completePrompt(claim, flight, { stopReason: 'cancelled' })
         return await flight.settled.promise
       }
       if (prepared.kind === 'failure') {
+        flight.fileAdmissionPending = false
         flight.settleAdmission()
         this.failPrompt(claim, flight, prepared.error)
         return await flight.settled.promise
@@ -4768,8 +4755,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         finalCommands = access.readCommandCatalog(claim.exactAgent as LiveAgentViewIdentity, claim.exactSession as object)
       } catch {
         flight.definiteNoDispatch = true
+        const cleanup = this.cleanupNoDispatch(claim, flight)
         flight.settleAdmission()
-        this.failPrompt(claim, flight, new LocalAcpViewError(
+        this.failPrompt(claim, flight, cleanup ?? new LocalAcpViewError(
           'LOCAL_ACP_COMMAND_UNAVAILABLE',
           'the Host command registry could not be re-read at final admission',
           JSONRPC_INVALID_PARAMS,
@@ -4821,16 +4809,36 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           JSONRPC_INTERNAL_ERROR,
         )
       }
+      if (skillPreflight !== undefined) {
+        let commands: AcpCommandCatalogRead
+        try {
+          commands = access.readCommandCatalog(claim.exactAgent!, claim.exactSession!)
+        } catch {
+          throw new LocalAcpViewError(
+            'LOCAL_ACP_COMMAND_UNAVAILABLE',
+            'the Host command registry could not be re-read at the final Host admission boundary',
+            JSONRPC_INVALID_PARAMS,
+          )
+        }
+        if ((claim.catalogEpoch ?? 0) !== skillPreflight.epoch
+          || commands.effectiveNames.includes(skillPreflight.name)) {
+          throw new LocalAcpViewError(
+            'LOCAL_ACP_COMMAND_STALE',
+            'the advertised Skill changed at the final Host admission boundary; it was not dispatched',
+            JSONRPC_INVALID_PARAMS,
+          )
+        }
+      }
     }
     try {
-      flight.admissionCallPending = true
+      flight.fileAdmissionPending = true
       await access.prompt({
         requestId: flight.requestId,
         sessionId: request.sessionId,
         mode: 'queue',
         content,
-      }, requestSignal, finalDispatchCheck)
-      flight.admissionCallPending = false
+      }, requestSignal, flight.fileAdmissionPending === true ? finalDispatchCheck : undefined)
+      flight.fileAdmissionPending = false
       flight.settleAdmission()
       if (flight.messageId !== undefined) {
         // The official Controller bound these receipts to the accepted message;
@@ -4874,7 +4882,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
       }
     } catch (error) {
-      flight.admissionCallPending = false
       flight.settleAdmission()
       const finalCheckRefusal = error instanceof LocalAcpViewError
       if (finalCheckRefusal) flight.definiteNoDispatch = true
@@ -4883,9 +4890,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // official admission/rollback.
       const cleanupFailed = flight.stagedReceipts !== undefined
         && flight.stagedReceipts.length > 0 && !this.cleanupPreparedFiles(claim, flight)
+      flight.fileAdmissionPending = false
       if (!flight.settledDone) {
         if (flight.pendingDisposalFailure !== undefined) {
           this.failPrompt(claim, flight, flight.pendingDisposalFailure)
+        } else if (finalCheckRefusal && (flight.cancelRequested || flight.deliveryClosed)
+          && !cleanupFailed) {
+          this.completePrompt(claim, flight, { stopReason: 'cancelled' })
         } else if (finalCheckRefusal) {
           this.failPrompt(claim, flight, cleanupFailed ? this.fileCleanupUnconfirmedError() : error)
         } else if (flight.messageId !== undefined) {
@@ -4911,7 +4922,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
       }
     } finally {
-      flight.admissionCallPending = false
+      flight.fileAdmissionPending = false
       this.settleUnclaimedAdmission(claim, flight)
     }
     return await flight.settled.promise
@@ -5957,7 +5968,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
       const flight = claim.inflight
       if (flight !== undefined && !flight.settledDone
-        && (flight.filePreparing === true || flight.admissionCallPending === true)) {
+        && flight.fileAdmissionPending === true) {
         // The real upload is already in flight. Do not settle the ACP request
         // before that Promise returns and its receipt is cleaned: record the
         // disposal terminal, stop delivery/currentness, and let the staging
@@ -7271,7 +7282,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   /** Defer a no-dispatch failure until the actual admission Promise settles. */
   private failOrDeferAdmission(claim: ViewClaim, flight: InflightPrompt, error: LocalAcpViewError): void {
-    if (!flight.settledDone && flight.admissionCallPending === true) {
+    if (!flight.settledDone && flight.fileAdmissionPending === true) {
       flight.pendingDisposalFailure ??= error
       flight.cancelRequested = true
       flight.deliveryClosed = true

@@ -2653,6 +2653,9 @@ export async function apply(ctx) {
   if (scenario === undefined || scenario === '') return
   if (!SCENARIOS.has(scenario)) throw new Error(`m4-c1-host-work: unsupported C1_SCENARIO ${JSON.stringify(scenario)}`)
   const { root, proof } = prepareWorkRoot(process.env.C1_WORK_ROOT)
+  const po4eReturnedReceipts = new Map()
+  let po4eFileService
+  let po4eOriginalResolve
   const record = (kind, fields = {}) => {
     appendFileSync(proof, `${JSON.stringify({ kind, scenario, time: Date.now(), pid: process.pid, ...fields })}\n`, { mode: 0o600 })
   }
@@ -3025,6 +3028,8 @@ export async function apply(ctx) {
           text,
           textSha256: createHash('sha256').update(text).digest('hex'),
           attachmentId: file.attachment.attachmentId,
+          resolveAfterConsumption: (po4eReturnedReceipts.get(sessionId) ?? [])
+            .map(receiptId => po4eOriginalResolve?.call(po4eFileService, agent, receiptId) !== undefined),
           name: file.attachment.name,
           refBytes: file.attachment.bytes,
           bytes,
@@ -3043,10 +3048,15 @@ export async function apply(ctx) {
       const originalResolve = fileUploads.resolve
       const originalBind = fileUploads.bindPrompt
       const originalRetire = fileUploads.retirePrompt
+      po4eFileService = fileUploads
+      po4eOriginalResolve = originalResolve
       const bound = new Map()
       fileUploads.upload = async function (agent, request, signal) {
         const result = await originalUpload.call(this, agent, request, signal)
         const bytes = Buffer.from(request.data, 'base64')
+        const returned = po4eReturnedReceipts.get(String(agent.id)) ?? []
+        returned.push(result.receiptId)
+        po4eReturnedReceipts.set(String(agent.id), returned)
         record('po4e-upload-returned', {
           sessionId: String(agent.id),
           receiptId: result.receiptId,
