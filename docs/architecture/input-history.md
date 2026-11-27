@@ -251,6 +251,13 @@ TSP native card.
   exclusion is applied by the same admission fold that projects the occurrence,
   before the message body is parsed, and a verified child target answers the
   truthful ready-empty state (never another Session's rows).
+  - **Cold legacy scope.** A cold persisted-only Session that the official Host
+    roster positively classifies as `migration-required` with a JSONL location is
+    temporarily absent from Host search/readText/recall while it has no live or
+    accepted/repair obligation. This is a product scope omission, not source
+    deletion: Session Browser, Resume/Fork and the durable log are unchanged.
+    After official resume/write migration, or a later roster observation that
+    reports `current`, the existing Host repair/full-pass path indexes it normally.
 - **Statuses.** `loading` is the truthful first-cold-round warmup, `partial` is
   the same healthy round offering only already-verified IDs, and `ready` is
   the original complete result with the normal cursor/More. `incomplete`,

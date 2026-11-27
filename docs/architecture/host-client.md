@@ -1900,6 +1900,7 @@ or the current Ctrl+R/↑↓ contract owned by
 | Event-time directory | Session header `cwd` folded with each `working-directory/change` in seq order at first acceptance; a missing header directory, or a delivered change whose value is not a usable absolute Host path, is the explicit unknown `null` for that interval (never the previous directory, never the Client cwd); a later valid change restores it |
 | Fork inheritance | the official `inheritedEventCount` cut: prefix events fold cwd but never create a child occurrence |
 | Official corpus roster | ONE `sessionPersistence.list` snapshot merged with the Host `sessions` live registry; a same-id live/persisted Header must pass the official `assertSessionHeadersCompatible` check, and the live Header is the visible one |
+| Cold legacy scope | A full pass may terminally omit a persisted-only Session only when the same official list positively reports `formatStatus === 'migration-required'` and materialized `location.kind === 'jsonl'`, the exact live registry has no object, and no accepted/pending/held/dropped/repair/disposal/rebuild/active-candidate/index-fault obligation exists. The pre-list checkpoint cut and exact claim/witness fence the terminal; an existing live/provisional checkpoint is never deleted by this policy. Omission performs no per-ID `stat`/`open`/`read` and deletes only derived occurrence/checkpoint/proof rows; it is not source deletion, accepted coverage or durable proof. A later official `current` classification or real resume re-enters the normal path |
 | Derived index | ONE disposable SQLite projection under the running Profile (`$PROFILE/.dsh-pi-tui/history-search/v3.sqlite`, private directory/file modes; the dormant v2 file is never opened, migrated or deleted); it is rebuilt from official reads whenever the official log and the projection disagree and is never a persistence authority |
 | Durable cold source proof | ONE row per Session in the same `v3.sqlite` records the exact official source path, opaque revision, install/config scope digest and checkpoint digest of one COMPLETE cold replay. Any checkpoint-changing batch, marker rewrite, reset or delete revokes it in the SAME transaction. An aborted transaction may restore the OLD valid proof together with the old checkpoint; a failed or partial NEW replay must never create a new proof |
 | Restart recovery | Only a qualified runtime/backend may compare a committed persisted proof across Host restarts; unqualified sources replay through official handles. The upstream revision API itself remains instance-scoped. A qualified hit performs no official `open`/`read`/`stat`/replay, releases no accepted obligation and settles only the per-ID round evidence; a stale or refused hit keeps the ordinary round barrier and hands the official replay to the existing repair owner |
@@ -1911,6 +1912,15 @@ or the current Ctrl+R/↑↓ contract owned by
 | Verification/read boundary | the single Host maintenance owner runs the 30 s full-corpus roster check and per-Session official repairs OUTSIDE the serial index writer; Owner `search`/`readText`/`readSessionRecall` wait only for accepted short index commits, never for a background `list`/`open`/`stat`/`observeSession` Promise. The writer completeness check uses an index-owned SQL existence probe, never a full checkpoint materialization |
 | Remote surface | the private `piTuiHistorySearch` namespace with exactly three Owner-only unary methods: `search` (three scopes, keyset cursor, bounded preview + immutable content hash), `readText` (exact original text chunks by content hash) and `readSessionRecall` (ONE exact Session, at most 100 newest-first full-text rows under a fixed 64 KiB serialized UTF-8 budget, trim + blank/`!` normalization, `loading`/`incomplete`/`unavailable` otherwise) |
 | Direct | unchanged: the Direct Host never mounts this index and keeps its existing Client-local input history |
+
+`ready` covers the officially visible corpus within the supported search scope,
+including terminal cold-legacy omissions; it does not claim that every historical
+format was read. The fixed partial roster total still includes enumerated omitted
+IDs, but their unreadable terminals never increase the verified-readable numerator.
+An omitted ID has no checkpoint, so exact Session recall remains `loading` rather
+than returning a fabricated ready-empty result. Normal official resume/write
+migration publishes a real seeded live Session and the existing point repair
+re-admits its input without a new prompt or periodic pass.
 
 A HEALTHY first cold round may answer `partial` while official coverage is
 still unproven. `partial` carries up to the requested limit of rows plus
