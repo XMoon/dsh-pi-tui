@@ -811,6 +811,19 @@ export interface EmbeddedSpecialistPage extends Component {
    *  routes Tab and pointer focus between the rail and this region. */
   webWorkbenchRegion?(): 'list' | 'detail'
   /**
+   * SUX-08: whether THIS page's current sub-view is the Adaptive Workbench
+   * projection (the Computer Use Applications view or its ONE dangerous
+   * confirmation). The Root reads it live from the mounted page and keeps no
+   * second local view state; absent = the row-id projection.
+   */
+  embeddedWorkbenchActive?(): boolean
+  /**
+   * SUX-08: a workbench's LOCAL rail Back. `true` means the page returned to
+   * its own parent view inside the SAME instance (no dispose, remount or extra
+   * read); `false`/absent keeps the existing workbench close path.
+   */
+  leaveEmbeddedWorkbench?(): boolean
+  /**
    * SUX-06B/SUX-07: whether a USER parent navigation may retire the workbench
    * right now. The page owns this answer from its local region and phases: a
    * saving write, an active choice/action, or a visible unknown outcome refuses;
@@ -1413,6 +1426,10 @@ export class SettingsWorkspacePanel implements Component {
    *  captured BEFORE `enterDetail` moves the focus to the Detail seat, so the
    *  child's own Esc and the rail Back return to the level the user came from. */
   private webReturnLevel: 'rows' | 'detail' | undefined
+  /** SUX-08: the REAL initiating level of the Computer Use Overview tenant. The
+   *  page's own Back retires the instance and returns HERE (Tools Rows for a
+   *  Plugin-origin entry; the pre-existing Detail preview otherwise). */
+  private cuaReturnLevel: 'rows' | 'detail' | undefined
   /** C2-R5: the typed deeplink page the FIRST real body grant consumes. The
    *  factory is invoked only after the workspace screen lease exists, never in
    *  this constructor. It is cleared before the factory call, so a synchronous
@@ -1975,8 +1992,29 @@ export class SettingsWorkspacePanel implements Component {
     return lines
   }
 
+  /** The hosted page's projection this frame really painted. The Root compares
+   *  it with the page's LIVE projection before admitting any new key/pointer
+   *  gesture: a Computer Use Overview↔Applications switch, a risk full-width
+   *  transition or an MCP full-width form changes the painted surface even when
+   *  the focus/width/row allocation stay identical. */
+  private paintedEmbeddedProjection: 'tenant' | 'workbench' | 'workbench-fullwidth' | 'body' | undefined
+
+  /** SUX-08: the live projection discriminator of the mounted page. The page
+   *  owns the sub-mode; the Root derives only the projection. */
+  private liveEmbeddedProjection(): 'tenant' | 'workbench' | 'workbench-fullwidth' | 'body' | undefined {
+    if (this.specialistPage === undefined) return undefined
+    if (this.webWorkbenchActive()) return this.workbenchLiveFullWidth() ? 'workbench-fullwidth' : 'workbench'
+    return this.detailTenantActive() ? 'tenant' : 'body'
+  }
+
   /** Compose ONE complete frame (the caller owns the directory sync/fence). */
   private paintFrame(width: number): string[] {
+    const lines = this.paintFrameCore(width)
+    this.paintedEmbeddedProjection = this.liveEmbeddedProjection()
+    return lines
+  }
+
+  private paintFrameCore(width: number): string[] {
     const liveRows = this.intents.rows()
     // A terminal resize is a gesture boundary: a press recorded against the old
     // geometry must not resolve against the new one, even when the target's own
@@ -4329,6 +4367,16 @@ export class SettingsWorkspacePanel implements Component {
    *  the case the page-owned query cannot: at narrow widths a yield leaves no
    *  page grant to arm, yet the Categories frame has not been painted either. */
   private rootProjectionAwaitingPaint(): boolean {
+    // SUX-08: a hosted page's projection can change without touching the root
+    // focus/width (the Computer Use Overview↔Applications switch and its ONE
+    // full-width risk view). Until a frame composed against the NEW projection
+    // paints, no new key/pointer may act on the previous frame's surface.
+    if (this.specialistPage !== undefined && this.paintedEmbeddedProjection !== undefined) {
+      if (this.paintedEmbeddedProjection !== this.liveEmbeddedProjection()) return true
+      const live = this.paintedEmbeddedProjection
+      if ((live === 'tenant' || live === 'workbench' || live === 'workbench-fullwidth')
+        && this.paintedFocus !== this.focus) return true
+    }
     // SUX-06B: a workbench rail<->child focus transfer repaints a DIFFERENT
     // active device, bar wording and hit map. Until the destination frame
     // paints, only the real Esc may act (never a key that would navigate or
@@ -4427,8 +4475,14 @@ export class SettingsWorkspacePanel implements Component {
    * Fetch page and the MCP servers page are the TWO real consumers.
    */
   private webWorkbenchActive(): boolean {
-    return this.specialistPage !== undefined
-      && (this.specialistRow === 'web-settings' || this.specialistRow === 'mcp-servers')
+    if (this.specialistPage === undefined) return false
+    // SUX-08: the Computer Use page switches between the Standard Detail tenant
+    // (Overview) and this SAME workbench (Applications / its ONE dangerous
+    // confirmation). The page owns that discriminator; the Root keeps no second
+    // local view state.
+    return this.specialistRow === 'web-settings'
+      || this.specialistRow === 'mcp-servers'
+      || this.specialistPage.embeddedWorkbenchActive?.() === true
   }
 
   /** SUX-07: whether the mounted workbench's CURRENT sub-view needs the whole
@@ -4531,7 +4585,7 @@ export class SettingsWorkspacePanel implements Component {
     // never mount on the old full-width body grant.
     if (row.specialist === 'agent-loop-settings' || row.specialist === 'shell-execution-settings'
       || row.specialist === 'subagent-settings' || row.specialist === 'web-ui'
-      || row.specialist === 'acp-access') {
+      || row.specialist === 'acp-access' || row.specialist === 'computer-use') {
       const plan = planSettingsChrome(
         this.projectionWidth(),
         this.intents.rows(),
@@ -4572,7 +4626,19 @@ export class SettingsWorkspacePanel implements Component {
         this.closeWebWorkbench()
         return
       }
+      // SUX-08: the Overview tenant returns to the level the explicit entry
+      // started from (Tools Rows, or the pre-existing Detail preview). It never
+      // lands on an intermediary level the user never asked for.
+      const cuaReturn = row.specialist === 'computer-use' ? this.cuaReturnLevel : undefined
       this.closeSpecialist()
+      if (cuaReturn === 'detail') {
+        this.intents.requestRender()
+        return
+      }
+      if (cuaReturn === 'rows') {
+        if (this.focus === 'detail') this.leaveDetailTo('rows')
+        return
+      }
       // C2-R5: the two professional editors are opened FROM the row list and
       // closing one returns there — a second back key (Esc or `←`) steps to the
       // category rail like every other Settings level, instead of first landing
@@ -4638,6 +4704,7 @@ export class SettingsWorkspacePanel implements Component {
     this.specialistPage = page
     this.specialistRow = row.id
     this.webReturnLevel = row.specialist === 'web-settings' || row.specialist === 'mcp-servers' ? (webOrigin ?? 'detail') : undefined
+    this.cuaReturnLevel = row.specialist === 'computer-use' ? (webOrigin ?? 'rows') : undefined
     if (row.specialist === 'web-settings' || row.specialist === 'mcp-servers') this.commitWebSeat(this.focus)
     this.pressedGesture = undefined
     this.contentPressed = undefined
@@ -4702,6 +4769,7 @@ export class SettingsWorkspacePanel implements Component {
     this.specialistPage = undefined
     this.specialistRow = undefined
     this.webReturnLevel = undefined
+    this.cuaReturnLevel = undefined
     this.paintedSpecialistBox = undefined
     this.paintedWorkbenchFullWidth = undefined
     this.tenantBarLine = undefined
@@ -4744,10 +4812,11 @@ export class SettingsWorkspacePanel implements Component {
    * category, the terminal width or the mere presence of a factory.
    */
   private detailTenantActive(): boolean {
-    return this.specialistPage !== undefined
-      && (this.specialistRow === 'agent-loop' || this.specialistRow === 'shell-execution'
-        || this.specialistRow === 'subagent-settings' || this.specialistRow === 'web-ui'
-        || this.specialistRow === 'acp-access')
+    if (this.specialistPage === undefined) return false
+    if (this.specialistRow === 'computer-use') return this.specialistPage.embeddedWorkbenchActive?.() !== true
+    return this.specialistRow === 'agent-loop' || this.specialistRow === 'shell-execution'
+      || this.specialistRow === 'subagent-settings' || this.specialistRow === 'web-ui'
+      || this.specialistRow === 'acp-access'
   }
 
   /** Whether this ROW's visible route is a hosted Detail tenant. It is the
@@ -4757,6 +4826,7 @@ export class SettingsWorkspacePanel implements Component {
    *  never depends on the Web Search / Fetch page's factory, and the ACP
    *  tenant never depends on the Web factory. */
   private detailTenantRow(row: SettingsWorkspaceRow | undefined): boolean {
+    if (row?.specialist === 'computer-use') return this.intents.createComputerUsePage !== undefined
     if (row?.specialist === 'subagent-settings') return this.intents.createSubagentSettingsPage !== undefined
     if (row?.specialist === 'web-ui') return this.intents.createWebUiPage !== undefined
     if (row?.specialist === 'acp-access') return this.intents.createAcpAccessPage !== undefined
@@ -5101,7 +5171,8 @@ export class SettingsWorkspacePanel implements Component {
       // SUX-07: the MCP page owns a truthful zero-body bar for its CURRENT
       // sub-view (Back/Cancel/Keep/Waiting). The Web page keeps the original
       // Back-only Root fallback unchanged.
-      if (this.webWorkbenchActive() && this.specialistRow === 'mcp-servers'
+      if (this.webWorkbenchActive()
+        && (this.specialistRow === 'mcp-servers' || this.specialistRow === 'computer-use')
         && this.focus !== 'categories' && page !== undefined) {
         page.focused = true
         page.setWebWorkbenchGrant?.({ width: plan.width, rows: 0, barWidth: plan.width, allowDual: false })
@@ -5646,6 +5717,24 @@ export class SettingsWorkspacePanel implements Component {
       if (this.webWorkbenchActive() && this.rootProjectionAwaitingPaint()) {
         if (!matchesKey(data, 'escape')) return
         if (this.focus === 'categories') {
+          // SUX-08: while a hosted page's projection change is still awaiting
+          // its paint, the rail Esc runs the SAME local return the painted rail
+          // would (never a dispose of the mounted instance).
+          if (this.specialistPage.leaveEmbeddedWorkbench?.() === true) {
+            this.focus = 'detail'
+            this.pressedGesture = undefined
+            this.specialistPressed = undefined
+            this.contentPressed = undefined
+            this.bumpRevision()
+            this.intents.requestRender()
+            return
+          }
+          // A page that keeps the seat (its dangerous confirmation owns the
+          // pending projection) must not be disposed by this window.
+          if (this.specialistRow === 'computer-use') {
+            this.intents.requestRender()
+            return
+          }
           this.closeWebWorkbench()
         } else {
           this.specialistPage.handleInput('\x1b')
@@ -5689,7 +5778,8 @@ export class SettingsWorkspacePanel implements Component {
         // SUX-02: the Shell group's Tab is a LOCAL field move and is never taken
         // by the Root — the child receives it (and refuses it at zero body rows).
         if (this.detailTenantActive()
-          && (this.specialistRow === 'agent-loop' || this.specialistRow === 'web-ui' || this.specialistRow === 'acp-access')
+          && (this.specialistRow === 'agent-loop' || this.specialistRow === 'web-ui'
+            || this.specialistRow === 'acp-access' || this.specialistRow === 'computer-use')
           && (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab'))) {
           const tabForward = matchesKey(data, 'tab')
           // A narrow frame paints ONE region: there is no second region to focus.
@@ -6205,7 +6295,7 @@ export class SettingsWorkspacePanel implements Component {
     // A same-category rail click is a YIELD request only while the mounted
     // workbench really may yield (a clean List); an active Detail/form keeps
     // the child seat, so it must be refused BEFORE the logical focus moves.
-    if (!changed && this.specialistRow === 'mcp-servers' && focus === 'categories'
+    if (!changed && (this.specialistRow === 'mcp-servers' || this.specialistRow === 'computer-use') && focus === 'categories'
       && this.specialistPage?.webWorkbenchCanYieldToRail?.() !== true) return
     this.focus = focus
     // A same-category reselect keeps the mounted workbench: project the logical
@@ -6263,6 +6353,18 @@ export class SettingsWorkspacePanel implements Component {
     // and restores the REAL initiating level — it is never the whole Settings
     // close. The child's own Esc (Detail -> List -> origin) never reaches here.
     if (this.webWorkbenchActive() && this.focus === 'categories') {
+      // SUX-08: the Computer Use Applications rail Back is a LOCAL return to
+      // the SAME mounted Overview instance (one controller/lease, no dispose or
+      // remount); every other workbench keeps its close-to-origin path.
+      if (this.specialistPage?.leaveEmbeddedWorkbench?.() === true) {
+        this.focus = 'detail'
+        this.pressedGesture = undefined
+        this.specialistPressed = undefined
+        this.contentPressed = undefined
+        this.bumpRevision()
+        this.intents.requestRender()
+        return
+      }
       this.closeWebWorkbench()
       return
     }
@@ -7437,22 +7539,11 @@ export class SettingsWorkspacePanel implements Component {
       }
       case 'row': {
         if (!isWorkspaceRowId(target.id)) return
-        // The painted row IS the target: selecting it is the whole gesture
-        // (Enter/Right then decide between the Detail, the choice and the
-        // row's specialist page).
+        // The painted row IS the target: selecting it is the whole gesture.
+        // Enter/Right, the painted Rows forward hint or the Detail's explicit
+        // Manage/Open affordance are the ONLY ways into a row's page — a row
+        // click never mounts one (SUX-08; the Computer Use row click included).
         this.selectRow(target.id, 'rows')
-        // Pages whose row IS the whole gesture open on the click, exactly like
-        // Enter/Right. The Computer Use row belongs here: on the single-pane
-        // (narrow/medium) frame there is no Detail pane, so the Detail's Manage
-        // affordance does not exist and this click is the ONLY pointer route to
-        // the embedded page. SUX-01/02/03: the Agent loop, Shell execution and
-        // Subagent rows are NO LONGER here — their explicit
-        // Change/Details/Open entry stays a separate gesture.
-        if (target.id === 'computer-use') {
-          const row = this.selectedRow()
-          const specialist = row?.specialist
-          if (row !== undefined && specialist === 'computer-use') this.openSpecialist(row)
-        }
         return
       }
       case 'about-action': {

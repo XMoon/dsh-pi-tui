@@ -1,0 +1,475 @@
+/**
+ * The mounted `Settings · Tools · Computer Use` journeys (SUX-08).
+ *
+ * Drives the REAL `/settings` command, the REAL `TuiApp` Settings workspace
+ * lease, the REAL `SettingsWorkspacePanel`, the REAL per-open
+ * `CuaAccessSettingsController` and `ComputerUseSettingsPage`, plus the REAL
+ * Root pointer/SGR route and the ONE physical Action Bar. The Host is a
+ * controlled semantic-port fixture; no real macOS permission or user profile is
+ * touched.
+ *
+ * Proves the two-mode contract end to end: the Overview is a Standard Detail
+ * tenant with no CUA IO before the explicit mount, its first screen keeps the
+ * real missing permission/action, the Applications workbench selects and
+ * confirms through real pointer cells with exact sinks and a same-authority
+ * readback, and the rail Back returns to the SAME mounted instance.
+ *
+ * @module @xmoon76/dsh-pi-tui/computer-use-settings-mounted.test
+ */
+
+import assert from 'node:assert/strict'
+import { afterEach, test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
+import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
+import type { TuiCommandRunner } from '../../src/commands.ts'
+import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+import { TuiApp } from '../../src/tui-app.ts'
+import { createDirectSettingsFixture } from '../support/direct-settings-fixture.ts'
+import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { sessionScopeFacts } from '../support/session-scope-facts.ts'
+import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
+import { selectSettingsCategory } from '../support/settings-rail.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import type { CuaAccessPort, CuaApplicationState, CuaApplicationFact, CuaPtcConfiguration, CuaSystemStatus } from '../../src/runtime/cua-access-port.ts'
+import type { PluginManagerPort } from '../../src/runtime/plugin-manager-port.ts'
+import type { PresetDefaultConfig } from '../../src/runtime/config-port.ts'
+import type { EmbeddedSpecialistPage } from '../../src/tui/panels/settings-workspace-panel.ts'
+
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try {
+      app.dispose()
+    } catch {
+      try { app.stop() } catch {}
+    }
+  }
+})
+
+const SYSTEM: CuaSystemStatus = {
+  platform: 'darwin',
+  accessibility: true,
+  screenRecording: false,
+  helper: { pid: 7, name: 'DSH Computer Use', path: '/helper/dsh-cua-native' },
+  parent: { pid: 1, path: '/sbin/launchd' },
+  launchApplication: { name: 'DSH Computer Use.app', path: '/helper/DSH Computer Use.app' },
+}
+const PTC: CuaPtcConfiguration = { persistent: false, writable: true }
+
+interface Harness {
+  readonly vt: VirtualTerminal
+  readonly app: TuiApp
+  readonly calls: string[]
+  readonly requests: string[]
+  readonly revokes: string[]
+  readonly retries: string[]
+  readonly presetWrites: string[]
+  readonly applications: () => CuaApplicationState
+  readonly page: () => EmbeddedSpecialistPage | undefined
+  readonly settingsPanel: () => { onCellPress(x: number, y: number): void; onCellClick(x: number, y: number): void } | undefined
+  readonly invoke: (name: string, rawInput?: string) => Promise<unknown>
+  readonly view: () => string
+}
+
+function setup(options: {
+  readonly columns?: number
+  readonly rows?: number
+  readonly applications?: CuaApplicationState
+} = {}): Harness {
+  let applications: CuaApplicationState = options.applications ?? {
+    allowedApps: [{ id: 'app-1', name: 'TextEdit', executablePath: '/Applications/TextEdit.app' }],
+    blockedApps: [{ id: 'app-2', name: 'Example' }],
+    persistentAvailable: true,
+  }
+  const calls: string[] = []
+  const requests: string[] = []
+  const revokes: string[] = []
+  const retries: string[] = []
+  const presetWrites: string[] = []
+  const port: CuaAccessPort = {
+    observation: { readSnapshot: () => 1, subscribe: () => () => {} },
+    readSystemStatus: async () => { calls.push('read:system'); return SYSTEM },
+    readApplications: async () => { calls.push('read:applications'); return applications },
+    readApplicationIcons: async () => { calls.push('read:icons'); return {} },
+    readPtcConfiguration: async () => { calls.push('read:ptc'); return PTC },
+    requestPermission: async (permission, locale) => { requests.push(`${permission}:${locale}`); return SYSTEM },
+    openSettings: async (permission, locale) => { calls.push(`open:${permission}:${locale}`) },
+    enablePersistentPtc: async () => { calls.push('persist') },
+    revoke: async (id) => {
+      revokes.push(id)
+      applications = { ...applications, allowedApps: applications.allowedApps.filter(app => app.id !== id) }
+    },
+    retryApproval: async (id) => {
+      retries.push(id)
+      applications = { ...applications, blockedApps: applications.blockedApps.filter(app => app.id !== id) }
+    },
+  }
+  const pluginManager = {
+    snapshot: async () => ({
+      bundles: [{
+        name: '@deepseek-ai/dsh-cua-bundle',
+        official: true,
+        availability: 'installation',
+        enabled: true,
+        installed: false,
+        optional: true,
+        removable: false,
+        rows: [],
+        overrides: [],
+        version: '0.2.2-rc.5',
+      }],
+      plugins: [],
+      registries: {},
+      exemptions: [],
+      exemptionWarnings: [],
+    }),
+    subscribeInvalidation: () => () => {},
+  } as unknown as PluginManagerPort
+  let presetValue = 'default'
+  const presetDefault: PresetDefaultConfig = {
+    available: () => true,
+    get: () => presetValue,
+    set: async () => {},
+    readDecision: () => ({ generation: {}, revision: 1, value: presetValue }),
+    setGuarded: async (id) => { presetWrites.push(id); presetValue = id; return { kind: 'accepted' } },
+  }
+
+  const ctx = new Context()
+  const vt = new VirtualTerminal(options.columns ?? 120, options.rows ?? 40)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: ((_label: string, task: () => unknown, owned: {
+      onResult?: (value: unknown) => void
+      onError?: (error: unknown) => void
+    }) => {
+      Promise.resolve().then(task).then(
+        value => owned.onResult?.(value),
+        error => owned.onError?.(error),
+      )
+    }) as never,
+  })
+  app.start()
+  startedApps.add(app)
+  const defs: Array<{ readonly name: string; readonly handler?: (invocation: { rawInput: string }) => unknown }> = []
+  ctx.provide('commands', {
+    register: (definition: { readonly name: string }) => { defs.push(definition as never); return () => {} },
+    list: () => [],
+    find: () => undefined,
+    execute: async () => undefined,
+  } as never)
+
+  const fixture = createDirectSettingsFixture({ footer: 'default' })
+  const settings = fixture.settings
+  const base: Record<string, unknown> = {
+    ctx,
+    app,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
+    ensureSession: async () => {},
+    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    get defaultIntentOutcome() { return undefined },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
+    tuiSettings: settings,
+    agents: {} as never,
+    sessionReader: {
+      list: async () => [], search: async () => ({ items: [], hasMore: false }),
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined, sessionStatus: () => undefined,
+    },
+    sessionWriter: {
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
+      refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
+    },
+    interaction: {
+      questions: {
+        subscribe: () => undefined, onRequest: () => true, snapshot: () => undefined,
+        claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const,
+      },
+      onApprovalRequest: () => {},
+    },
+    catalog: { models: { available: () => false } } as never,
+    config: settingsDirectPageConfig({
+      configReadiness: () => 'ready' as const,
+      presetDefault,
+      footerCustomItems: { rawForPersistence: () => ({ kind: 'detached' as const, value: [] }) },
+      permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
+      subagentLimits: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      subagentModelSelection: {
+        read: () => ({ kind: 'unavailable' as const, reason: 'not mounted' }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
+      web: { available: () => false },
+      credentials: { available: () => false },
+    }) as never,
+    cuaAccess: port,
+    pluginManager,
+    commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
+    cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
+    copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
+    prepareDraftMessage: async (text: string) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+    signal: new AbortController().signal,
+    switchSession: async () => undefined,
+    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
+    currentPreset: () => undefined,
+    get pendingPreset() { return undefined },
+    set pendingPreset(_id: string | undefined) {},
+    get effectivePresetId() { return undefined },
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
+    refreshStatus: () => {},
+    progressUpdatesState: { mode: 'milestones' },
+    responseStyleState: { style: 'default' },
+    gitAttributionState: { mode: 'off' },
+    focusEnabled: () => false, setFocusMode: () => {},
+    setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused',
+    currentNotificationMethod: () => 'auto', setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, updateWelcomeCard: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
+    enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
+    applyFooterSettings: () => {},
+    backendKind: 'direct' as const,
+    hostShellCompletion: { pathAuthority: 'client', pathLiteralDialect: 'bash', complete: async () => ({ kind: 'ok', candidates: [] }) },
+    forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
+    subscribeSessionScopeInvalidation: () => () => {},
+    listScopedCommands: () => [],
+    recordExtensionError: () => {}, clearExtensionError: () => {},
+  }
+  const runner = new Proxy(base, {
+    get: (target, property) => property in target ? target[property as string] : () => undefined,
+  }) as unknown as TuiCommandRunner
+  registerTuiCommandsWithDirectSeams(runner)
+  return {
+    vt,
+    app,
+    calls,
+    requests,
+    revokes,
+    retries,
+    presetWrites,
+    applications: () => applications,
+    page: () => {
+      const lease = (app as unknown as { workspaceLease?: { kind?: string; panel?: unknown } }).workspaceLease
+      if (lease === undefined || lease.kind !== 'settings') return undefined
+      const panel = lease.panel as { specialistPage?: EmbeddedSpecialistPage } | undefined
+      return panel?.specialistPage
+    },
+    settingsPanel: () => {
+      const lease = (app as unknown as { workspaceLease?: { kind?: string; panel?: unknown } }).workspaceLease
+      if (lease === undefined || lease.kind !== 'settings') return undefined
+      const panel = lease.panel as { onCellPress?: unknown; onCellClick?: unknown } | undefined
+      if (panel?.onCellPress === undefined || panel.onCellClick === undefined) return undefined
+      return panel as { onCellPress(x: number, y: number): void; onCellClick(x: number, y: number): void }
+    },
+    invoke: async (name, rawInput = '') => {
+      const definition = defs.find(candidate => candidate.name === name)
+      assert.ok(definition?.handler !== undefined, `${name} must be registered`)
+      return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput })
+    },
+    view: () => vt.getViewport().map(stripTerminalSequences).join('\n'),
+  }
+}
+
+async function frames(vt: VirtualTerminal, count = 1): Promise<void> {
+  for (let frame = 0; frame < count; frame += 1) await vt.waitForRender()
+}
+
+async function press(vt: VirtualTerminal, data: string): Promise<void> {
+  vt.sendInput(data)
+  await vt.waitForRender()
+}
+
+async function flushOwnedTurns(): Promise<void> {
+  for (let round = 0; round < 4; round += 1) {
+    for (let tick = 0; tick < 10; tick += 1) await Promise.resolve()
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+}
+
+function sgrMouse(h: Harness, kind: 'press' | 'release', col: number, row: number): void {
+  h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}${kind === 'press' ? 'M' : 'm'}`)
+}
+
+async function sgrClick(h: Harness, label: string, wordOffset = 0): Promise<void> {
+  const lines = h.vt.getViewport().map(stripTerminalSequences)
+  const row = lines.findIndex(line => line.includes(label))
+  assert.ok(row >= 0, `missing ${label} in the painted frame:\n${lines.join('\n')}`)
+  const col = lines[row]!.indexOf(label) + wordOffset
+  sgrMouse(h, 'press', col, row)
+  sgrMouse(h, 'release', col, row)
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+}
+
+/** Open the Settings workspace and the Computer Use row through REAL input. */
+async function openComputerUse(h: Harness): Promise<void> {
+  h.invoke('settings')
+  await frames(h.vt)
+  await flushOwnedTurns()
+  await selectSettingsCategory(h.vt, 'Tools')
+  await frames(h.vt)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  for (let step = 0; step < 12; step += 1) {
+    if (/\S\s+> Computer Use\b/u.test(h.view())) break
+    await press(h.vt, '\x1b[B')
+  }
+  assert.match(h.view(), /\S\s+> Computer Use\b/u, `the CUA row must own the Rows selection:\n${h.view()}`)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+}
+
+async function waitForText(h: Harness, needle: string, attempts = 40): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (h.view().includes(needle)) return
+    await frames(h.vt)
+    await flushOwnedTurns()
+  }
+  assert.fail(`the workspace never painted ${needle}:\n${h.view()}`)
+}
+
+test('the Tools row selection performs no CUA IO; the explicit Open mounts ONE Overview read', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  h.invoke('settings')
+  await frames(h.vt)
+  await flushOwnedTurns()
+  await selectSettingsCategory(h.vt, 'Tools')
+  await frames(h.vt)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  for (let step = 0; step < 12; step += 1) {
+    if (/\S\s+> Computer Use\b/u.test(h.view())) break
+    await press(h.vt, '\x1b[B')
+  }
+  assert.match(h.view(), /\S\s+> Computer Use\b/u)
+  assert.equal(h.page(), undefined, 'selecting the row never mounts the page')
+  assert.deepEqual(h.calls, [], 'selecting the row performs ZERO CUA IO')
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.notEqual(h.page(), undefined, 'the explicit Open mounts the real page')
+  await waitForText(h, 'Bundle: Enabled')
+  const text = h.view()
+  assert.match(text, /Accessibility: Allowed/u)
+  assert.match(text, /Screen Recording: Not allowed/u)
+  assert.match(text, /Request permission/u)
+  assert.match(text, /Manage applications/u)
+  assert.deepEqual(h.calls.filter(call => call === 'read:system'), ['read:system'], 'exactly ONE initial system read')
+  assert.deepEqual(h.requests, [])
+  await press(h.vt, '\x1b')
+  await frames(h.vt, 2)
+  assert.equal(h.page(), undefined, 'the page own Back retires the instance')
+})
+
+test('the real 44x8 frame keeps the first missing permission and its exact Request sink', async () => {
+  const h = setup({ columns: 44, rows: 8 })
+  await openComputerUse(h)
+  await waitForText(h, 'Bundle: Enabled')
+  const text = h.view()
+  assert.match(text, /Host: macOS/u)
+  assert.match(text, /Screen Recording: Not allowed/u)
+  assert.match(text, /Request permission/u)
+  assert.doesNotMatch(text, /Accessibility: Allowed/u, 'the short frame spends its rows on the missing permission')
+  await sgrClick(h, 'Request permission')
+  await waitForText(h, 'Action: Request sent')
+  assert.deepEqual(h.requests, ['screenRecording:en-US'], 'the exact painted permission reaches the Host provider once')
+  assert.match(h.view().replace(/\n/gu, ''), /does not grant permission/u, 'the receipt states the real effect')
+  // The fresh observation stays the real denied permission (no optimistic paint).
+  await press(h.vt, '\x1b[H')
+  await frames(h.vt, 2)
+  assert.match(h.view(), /Screen Recording: Not allowed/u)
+})
+
+test('the Applications workbench completes a real pointer select → open → confirm → readback journey', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  await openComputerUse(h)
+  await waitForText(h, 'Manage applications')
+  const readsBefore = h.calls.filter(call => call === 'read:applications').length
+  await sgrClick(h, 'Manage applications')
+  await frames(h.vt, 3)
+  const workbench = h.view()
+  assert.match(workbench, /Categories \(/u, 'the workbench keeps the REAL Categories rail')
+  assert.match(workbench, /Always allowed/u)
+  assert.match(workbench, /TextEdit/u)
+  assert.match(workbench, /Refused/u)
+  assert.equal(h.calls.filter(call => call === 'read:applications').length, readsBefore,
+    'the local workbench switch performs no extra read')
+  // A row click only selects.
+  await sgrClick(h, 'TextEdit')
+  assert.deepEqual(h.revokes, [], 'selecting an application is never a write')
+  // The explicit Open enters the Detail; the explicit verb is the next gate.
+  await sgrClick(h, 'Enter open')
+  await waitForText(h, 'Revoke access…')
+  assert.match(h.view(), /Decision: Always allowed/u)
+  await sgrClick(h, 'Revoke access…')
+  await waitForText(h, 'Revoke this application decision?')
+  assert.match(h.view(), /Application: TextEdit · \/Applications\/TextEdit\.app/u)
+  assert.match(h.view(), /Confirm \[Enter\]/u)
+  assert.deepEqual(h.revokes, [], 'the confirmation is a review, not a write')
+  await sgrClick(h, 'Confirm [Enter]')
+  await frames(h.vt, 3)
+  await flushOwnedTurns()
+  await frames(h.vt, 3)
+  assert.deepEqual(h.revokes, ['app-1'], 'ONE exact application decision is revoked')
+  assert.equal(h.applications().allowedApps.length, 0)
+  // The authoritative post-write read removes the decision from the page.
+  await waitForText(h, 'Refused')
+  assert.doesNotMatch(h.view(), /Decision: Always allowed/u)
+})
+
+test('the Applications rail Back returns to the SAME mounted Overview without a re-read', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  await openComputerUse(h)
+  await waitForText(h, 'Manage applications')
+  const page = h.page()
+  assert.notEqual(page, undefined)
+  await sgrClick(h, 'Manage applications')
+  await frames(h.vt, 3)
+  assert.match(h.view(), /Always allowed/u)
+  const readsAfterOpen = h.calls.filter(call => call === 'read:system').length
+  // The untouched child List yields to the REAL rail; the rail Esc is the
+  // page's LOCAL return to the same Overview instance (no dispose/re-read).
+  await press(h.vt, '\x1b[Z')
+  await frames(h.vt, 2)
+  await press(h.vt, '\x1b')
+  await frames(h.vt, 3)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.equal(h.page(), page, 'the SAME page instance kept the seat')
+  assert.match(h.view(), /Bundle: Enabled/u, 'the Overview is painted again in this lease')
+  assert.equal(h.calls.filter(call => call === 'read:system').length, readsAfterOpen,
+    'the local return performs no extra Host read')
+})

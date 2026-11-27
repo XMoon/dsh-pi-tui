@@ -92,6 +92,7 @@ import type {
   FooterCustomItemsRaw,
   PermissionConfig,
   PresetDefaultConfig,
+  PresetDefaultDecision,
   ProviderConfigGuide,
   ProviderCatalogSnapshot,
   ProviderProfileConfig,
@@ -1807,6 +1808,9 @@ export class DirectPermissionConfig implements PermissionConfig {
   }
 }
 
+/** The namespace that persists the saved preset default for future Sessions. */
+const PRESET_REGISTRY_NS = 'agent-preset-registry'
+
 /** The Direct preset-default config: the 0.1.7 registry's own
  * `defaultId` (deployment `default` merged with the volatile
  * `selectedDefault` user preference and the chooser policy) is the read
@@ -1840,9 +1844,57 @@ export class DirectPresetDefaultConfig implements PresetDefaultConfig {
   async set(id: string): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
-    await mutateSettings(settings, 'agent-preset-registry', [
+    await mutateSettings(settings, PRESET_REGISTRY_NS, [
       { op: 'set', path: ['selectedDefault'], value: id },
     ])
+  }
+
+  /**
+   * SUX-08: the guarded decision read for the Computer Use page. The effective
+   * default, the live settings service identity and the exact
+   * `agent-preset-registry` revision must ALL be provable; otherwise the page
+   * shows Unavailable and offers no write.
+   */
+  readDecision(): PresetDefaultDecision | undefined {
+    const settings = this.settings()
+    if (settings === undefined) return undefined
+    const descriptor = readSettingsDescriptor(settings, PRESET_REGISTRY_NS)
+    if (descriptor === undefined || !validSettingsRevision(descriptor.revision)) return undefined
+    return { generation: settingsAuthorityOf(settings), revision: descriptor.revision, value: this.get() }
+  }
+
+  /**
+   * SUX-08: ONE guarded `selectedDefault` mutation at the caller's exact
+   * captured authority. A replaced settings service or a moved revision refuses
+   * synchronously BEFORE the official mutation (zero writes, no rebase).
+   */
+  async setGuarded(id: string, decision: PresetDefaultDecision): Promise<SectionMutationOutcome> {
+    const settings = this.settings()
+    if (settings === undefined) return { kind: 'rejected', reason: 'the Host settings service is unavailable' }
+    if (!Object.is(settingsAuthorityOf(settings), decision.generation)) {
+      return { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' }
+    }
+    const descriptor = readSettingsDescriptor(settings, PRESET_REGISTRY_NS)
+    if (descriptor === undefined) {
+      return { kind: 'rejected', reason: 'the "agent-preset-registry" Host settings section is not mounted' }
+    }
+    if (descriptor.revision !== decision.revision) {
+      return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+    }
+    try {
+      await mutateSettings(settings, PRESET_REGISTRY_NS, [
+        { op: 'set', path: ['selectedDefault'], value: id },
+      ], decision.revision)
+      return { kind: 'accepted' }
+    } catch (error) {
+      const reason = safeErrorMessage(error)
+      if ((error as { readonly code?: unknown } | null)?.code === 'SETTINGS_CONFLICT') {
+        return { kind: 'conflict', reason }
+      }
+      // ConfigEditor can persist before Loader reconciliation throws: a
+      // dispatched failure cannot prove the profile stayed unchanged.
+      return { kind: 'outcome-unconfirmed', reason }
+    }
   }
 }
 

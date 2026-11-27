@@ -497,8 +497,13 @@ class FakeSpecialistPage implements EmbeddedSpecialistPage {
   inputs: string[] = []
   presses: { readonly type: string; readonly x: number; readonly y: number }[] = []
   grants: number[] = []
+  workbenchGrants: WebWorkbenchGrant[] = []
   focused = false
   disposed = false
+  /** SUX-08: exercise the page-owned Overview↔Applications projection. */
+  workbench = false
+  workbenchFullWidth = false
+  localRailBack = true
   private rowGrant = 4
   /** Lines this page paints (the root budgets them). */
   lines: string[] = ['SPECIALIST HEADER', '> alpha', '  beta', 'specialist hint']
@@ -526,6 +531,20 @@ class FakeSpecialistPage implements EmbeddedSpecialistPage {
   }
   /** The fake keeps no local draft, so a clean user leave is always allowed. */
   requestParentLeave(): 'allow' { return 'allow' }
+  embeddedWorkbenchActive(): boolean { return this.workbench }
+  leaveEmbeddedWorkbench(): boolean {
+    if (!this.localRailBack || !this.workbench) return false
+    this.workbench = false
+    return true
+  }
+  webWorkbenchRegion(): 'list' | 'detail' { return 'list' }
+  webWorkbenchCanYieldToRail(): boolean { return true }
+  webWorkbenchBlocksParentNavigation(): boolean { return false }
+  workbenchRequiresFullWidth(): boolean { return this.workbenchFullWidth }
+  setWebWorkbenchGrant(grant: WebWorkbenchGrant): void {
+    this.workbenchGrants.push(grant)
+    this.rowGrant = Math.max(1, grant.rows + 1)
+  }
   invalidate(): void {}
   dispose(): void {
     this.disposed = true
@@ -4222,12 +4241,10 @@ test('the confirmation warning is scrollable in L2 and must be read before Confi
   assert.equal(short.commits(), 1, 'a scrolled/read warning admits the keyboard Confirm')
 })
 
-test('a pointer click on the Computer Use row opens the page on the single-pane frame', () => {
-  // RFL-009 (v2 scope): on the narrow/medium single-pane frame there is no
-  // Detail pane, so the Detail's Manage affordance does not exist. The row
-  // itself must be a real pointer route to the embedded Computer Use page.
-  // The page's own row is added ONLY here: the shared fixture is the other
-  // tests' navigation baseline.
+test('a Computer Use row click only selects; the painted forward hint mounts ONE Detail tenant', () => {
+  // SUX-08: the row click no longer opens the page. Selection is the whole
+  // click; the explicit Rows forward hint (or Enter/Right) is the ONE mount,
+  // and the page is a REAL Detail tenant inside the existing panes.
   const withComputerUse = (): SettingsWorkspaceSnapshot => ({
     ...SNAPSHOT,
     rows: [...SNAPSHOT.rows, {
@@ -4242,33 +4259,93 @@ test('a pointer click on the Computer Use row opens the page on the single-pane 
     }],
   })
   const h = setup({ columns: 44, rows: 24, specialistPage: true, snapshot: withComputerUse })
-  // The narrow first frame is the About CONTENT: Esc returns to the list, the
-  // rail walk selects Tools, and Enter opens that category's content.
+  // The narrow first frame is the About CONTENT: Esc returns to the rail, the
+  // rail walk selects Tools and the painted `Enter open` hint enters the Rows.
   h.panel.handleInput('\x1b')
   walkTo(h, 'tools')
-  // POINTER-ONLY: the painted `Enter open` hint is a real target that replays
-  // the Enter ladder, so no keyboard step is needed to reach the Tools rows.
   const barRow = plain(h, 44).split('\n').findIndex(line => line.includes('Enter open'))
   assert.ok(barRow >= 0, `the open hint is painted:\n${plain(h, 44)}`)
   const openCol = (plain(h, 44).split('\n')[barRow] ?? '').indexOf('Enter open')
   h.panel.onCellPress(openCol + 1, barRow)
   h.panel.onCellClick(openCol + 1, barRow)
-  const openedRows = plain(h, 44)
-  assert.match(openedRows, /Computer Use/u, `the painted open hint must open the Tools rows:\n${openedRows}`)
   const view = plain(h, 44)
-  const rowIndex = view.split('\n').findIndex(line => line.includes('Computer Use'))
+  const rowIndex = view.split('\n').findIndex(line => !line.includes('Scope:') && /Computer Use/u.test(line))
   assert.ok(rowIndex >= 0, `the Computer Use row is painted:\n${view}`)
-  // The narrow frame is the legacy single-column projection: the rows pane
-  // publishes ITS OWN box, not the wide layout's content box.
-  const rowsPane = (h.panel as unknown as { paintedPanes?: { rows?: { x: number, contentTop: number } } }).paintedPanes?.rows
-  assert.ok(rowsPane !== undefined, 'the narrow rows pane is recorded by the frame')
-  const y = rowIndex
-  const x = Math.max(rowsPane.x, (view.split('\n')[rowIndex] ?? '').indexOf('Computer Use'))
-  h.panel.onCellPress(x, y)
-  h.panel.onCellClick(x, y)
-  assert.equal(h.computerUseBuilds(), 1,
-    'the click on the Computer Use row must open the embedded page, not only select the row')
+  const rowsPane = (h.panel as unknown as { paintedPanes?: { rows?: { x: number } } }).paintedPanes?.rows
+  assert.ok(rowsPane !== undefined)
+  h.panel.onCellPress(rowsPane.x + 1, rowIndex)
+  h.panel.onCellClick(rowsPane.x + 1, rowIndex)
+  assert.equal(h.computerUseBuilds(), 0, 'a row click never mounts the page')
+  // The explicit forward hint on the Rows bar replays Enter/Right exactly once.
+  const rowsBar = plain(h, 44).split('\n')
+  const forwardRow = rowsBar.findIndex(line => line.includes('Right open'))
+  assert.ok(forwardRow >= 0, `the Rows forward hint is painted:\n${plain(h, 44)}`)
+  const forwardCol = rowsBar[forwardRow]!.indexOf('Right open')
+  h.panel.onCellPress(forwardCol + 1, forwardRow)
+  h.panel.onCellClick(forwardCol + 1, forwardRow)
+  assert.equal(h.computerUseBuilds(), 1, 'the explicit forward action mounts the page once')
+  const page = h.computerUsePages[0]!
+  assert.equal(page.disposed, false)
+  const frame = plain(h, 44)
+  assert.ok(page.grants.length >= 1, 'the mounted Overview gets the REAL Detail grant')
+  assert.match(frame, /SPECIALIST HEADER/u, 'the page body owns the Detail pane')
+  assert.equal(frame.split('\n').at(-1)?.trimEnd(), 'specialist hint', 'the page own bar is the physical last row')
+  ;(page as unknown as { done?: () => void }).done?.()
+  assert.equal(page.disposed, true, 'the page own Back retires THIS instance once')
+  assert.match(plain(h, 44), /Tools \u00b7 Rows|Tools · Rows/u, 'Overview Back returns to the real initiating Rows level')
   h.panel.handleInput('\x1b')
+  h.panel.handleInput('\x1b')
+  assert.equal(h.closes(), 1, 'the ordinary rail-to-close ladder is unchanged')
+})
+
+test('the Computer Use page projection change is fenced until the Root repaints it', () => {
+  const withComputerUse = (): SettingsWorkspaceSnapshot => ({
+    ...SNAPSHOT,
+    rows: [...SNAPSHOT.rows, {
+      id: 'computer-use',
+      category: 'tools' as const,
+      label: 'Computer Use',
+      summary: 'Permissions · applications · PTC',
+      scope: 'DSH Host · official Computer Use provider',
+      freshness: 'runtime' as const,
+      description: 'the official Computer Use provider page',
+      specialist: 'computer-use' as const,
+    }],
+  })
+  const h = setup({ columns: 120, rows: 40, specialistPage: true, snapshot: withComputerUse })
+  walkTo(h, 'tools')
+  h.panel.handleInput('\r') // rail -> rows
+  for (let step = 0; step < 12; step += 1) {
+    if (/\S\s+> Computer Use\b/u.test(plain(h, 120))) break
+    h.panel.handleInput('\x1b[B')
+  }
+  assert.match(plain(h, 120), /\S\s+> Computer Use\b/u, 'the CUA row owns the Rows selection')
+  h.panel.handleInput('\r') // rows -> the tenant (Overview)
+  plain(h, 120)
+  const page = h.computerUsePages[0]!
+  assert.equal(page.disposed, false)
+  // The page switches to its OWN workbench projection. Until a frame composed
+  // against that projection paints, no key may act on the previous surface.
+  page.workbench = true
+  const inputsBefore = page.inputs.length
+  h.panel.handleInput('\r')
+  assert.equal(page.inputs.length, inputsBefore, 'an unpainted projection refuses the key')
+  plain(h, 120)
+  const workbenchFrame = plain(h, 120)
+  assert.match(workbenchFrame, /Categories \(/u, 'the workbench keeps the REAL Categories rail')
+  assert.ok(page.workbenchGrants.length >= 1, 'the Root installs the workbench grant')
+  // The Applications rail Back is a LOCAL return to the SAME Overview instance.
+  // The untouched child List yields the keyboard to the REAL rail; the rail
+  // Esc then runs the page's LOCAL return (never closeWebWorkbench/dispose).
+  h.panel.handleInput('\u001b[Z')
+  assert.equal((h.panel as unknown as { focus?: string }).focus, 'categories')
+  h.panel.handleInput('\x1b')
+  assert.equal((h.panel as unknown as { focus?: string }).focus, 'detail', 'the Overview keeps the Detail seat')
+  assert.equal(page.disposed, false, 'the local return never disposes the page')
+  assert.equal(page.workbench, false, 'the page returned to its own Overview projection')
+  plain(h, 120)
+  ;(page as unknown as { done?: () => void }).done?.() // the page own Back retires THIS instance
+  assert.equal(page.disposed, true)
 })
 
 test('any non-zero wheel on the bar revokes a painted open press (positive and cancel contrast)', () => {

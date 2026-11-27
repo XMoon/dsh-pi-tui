@@ -1894,14 +1894,41 @@ from a replaced Host generation reach the page.
 
 ### Computer Use page
 
-`/settings → Tools → Computer Use` is ONE embedded specialist page inside the
+`/settings &#8594; Tools &#8594; Computer Use` is ONE embedded specialist page inside the
 same Settings lease (no second alt-screen, modal or Settings workspace). The
 official Experimental `Computer use` Plugin Manager card's bounded
 `Manage Computer Use…` action switches to the SAME page in the SAME lease: the
 root retires the Plugin child and releases its claim on the next frame before
 mounting the page. The page is omitted when the composition has no official CUA
 access port and no Plugin Manager roster; it must not be painted as an inert
-control.
+control. A row click only selects: Enter/Right, the painted Rows forward hint,
+the Detail's `Manage Computer Use…`, the Plugin card and the `/settings` entry
+are the explicit mount gestures.
+
+The mounted instance has exactly TWO projections:
+
+- `Overview` is a Standard grouped Detail TENANT: ONE continuous semantic line
+  model (Availability &#8594; Permissions &#8594; Authorization &#8594; Application
+  access &#8594; Help/Recovery) paints inside the real Detail pane, the parent
+  Categories/Rows stay live, and the page's own semantic line becomes the ONE
+  physical last-row Action Bar. The normal and the short grant come from that
+  same model; a short grant moves the optional explanatory prose after the
+  facts/actions inside the same scrollport instead of keeping a second copy of
+  any fact or action. At the real `44×8` grant (4 body rows + the bar) the
+  bundle truth, the Host truth, the first missing permission and its request
+  action are all visible. Both permission groups are ordered missing-first
+  (Accessibility before Screen Recording when both are missing); an already
+  allowed group still keeps its explicit request-again/open actions.
+- `Applications` is the existing Adaptive Workbench projection: the SAME
+  Categories rail, the page's local List/Detail grant and ONE physical bar. The
+  persisted decisions are grouped `Always allowed` / `Refused`; a row click or
+  list movement only selects, Enter/Right or the painted `Enter open` enters
+  the exact Detail, and the page's dangerous confirmation is its ONE full-width
+  sub-view. Entering Applications performs no Host read. A clean list may yield
+  to the rail, and the rail Back is a LOCAL return to the SAME mounted Overview
+  instance (no dispose, remount or extra read). Every projection change
+  (Overview&#8596;Applications, the full-width confirmation) must repaint before a
+  new key or pointer may act on it.
 
 Authority is never the page: the bundle selection/availability comes from the
 existing Plugin Manager roster, the saved default preset from the existing
@@ -1910,44 +1937,60 @@ launch-application identity, PTC execution and persisted application decisions
 come from the official provider through the ONE semantic `cuaAccess` port
 (Direct: the live Host service resolved per call; Split: the official generated
 `@deepseek-ai/dsh-cua/remote` namespace with connection-generation fencing).
-The page owns only a per-open observation epoch, one serialized write and its
-cursor/scroll/confirmation/help state.
+The page owns only the per-open observation identity, one serialized action and
+its cursor/scroll/confirmation/help state.
+
+`Set PTC default` is the ONE guarded preset-default write: it captures the live
+settings-authority generation and the exact `agent-preset-registry` revision the
+painted frame read, refuses BEFORE dispatch when either moved (the old decision
+is never rebased onto a replacement Host), and paints a confirmed result only
+from a fresh same-authority observation whose effective default is `ptc`. The
+ordinary one-argument preset write and its `/preset default` caller are
+unchanged, and this page never starts or switches a Session. Persistent PTC is
+a separate explicit confirmed write with a possible runtime reload.
 
 A disabled or missing bundle paints `Disabled`/`Unavailable` and performs no
 CUA query; it is never a fabricated denial or `Ready`. A supported Host paints
 Accessibility and Screen Recording as two independent observations
-(`Allowed`/`Not allowed`/`Unknown`), and the helper/launch-application identity
-and Host platform actually reported by the provider. `Request permission` and
-`Open settings` are action receipts only: a successful call does not paint
-Allowed; a fresh read must observe it. An unknown/unavailable read never keeps
-an older `Allowed` actionable. The PTC facts are separate: the saved default
-preset changes NEW Sessions only, while persistent PTC is an explicit
-confirmed write with a possible runtime reload.
+(`Allowed`/`Not allowed`/`Unknown`), the Host platform and the official
+helper/responsible-application identity actually reported by the provider (the
+responsible application stays reachable in the same scrollport; it is never
+fabricated and never pushes the first missing permission off the short first
+screen). `Request permission`/`Request again` and `Open settings` are action
+receipts only: a successful call does not paint Allowed; a fresh read must
+observe it. An unknown/unavailable read never keeps an older `Allowed`
+actionable. A new action receipt or notice is revealed inside the current grant
+rather than scrolling away.
 
 The persisted application decisions are listed from the official
-`applications()` result only; Session-only grants are not listed. `Revoke…` and
-`Allow asking again…` use the exact opaque `CuaApplicationId` that was painted,
-require a reviewable confirmation (affected work may stop / no access is
-granted), never target an application by name re-resolution, and re-read the
-official list afterwards. A confirmation is its own projection: the confirm
-key is paintable only while the complete risk text and target fit the granted
-body; a short frame paints cancel/back only. Closing the page or a Host/
-connection generation change discards late results; a dispatched Host effect
-is not claimed undone.
+`applications()` result only; Session-only grants are not listed. `Revoke
+access…` and `Allow asking again…` use the exact opaque `CuaApplicationId` that
+was painted, require a reviewable confirmation (affected work may stop / no
+access is granted), never target an application by name re-resolution, and
+re-read the official list afterwards. Two decisions in the same group whose
+public identity (sanitized name + path) cannot be told apart offer NO dangerous
+confirmation: the page never guesses an opaque target. A confirmation is its own
+projection: the confirm verb is paintable only while the complete risk text and
+the exact target fit the SAME granted body; a resize re-evaluates from scratch
+and never keeps a hidden confirm. Closing the page or a Host/connection
+generation change discards late results and retires an armed confirmation; a
+dispatched Host effect is not claimed undone.
 
-The short/narrow first screen (`44×8`) keeps the bundle/Host identity and the
-first missing permission action reachable; the body scrolls freely (wheel or
-keys) and is never jumped away from its first facts by an automatic selection
-scroll. Actions require the CURRENT painted frame and a live re-read of the
-target, and the controller admits ONE write per open (a second buffered
-Enter/click is refused). The page's `Open Settings → Plugins` action retires the
-specialist and switches the SAME lease to the Plugin Manager. After the first
-explicit bundle enable the Plugin Manager shows a one-shot recoverable next-step
-notice that points at this page; the Tools row and the card's
-`Manage Computer Use…` remain available later. The official application-consent
-Question keeps the existing Question seat and answer writer, and paints the
-official `Risks` card for the `cua-app-access` approval (no second Question
-owner or answer queue).
+The published observation identity moves on every superseding read, refresh and
+invalidation; each action carries the exact painted capture (observation
+identity plus target fact) and is re-proved at admission and again at the
+dispatch boundary. A read-only `reading` state never blocks Back. An accepted
+action owns the page until its own settlement: the bar is a truthful `Waiting…`
+with no cancel, and a second action, parent leave or local mode switch is
+refused. Closing the page never claims a Host rollback.
+
+The page's `Open Settings &#8594; Plugins` action retires the specialist and switches
+the SAME lease to the Plugin Manager. After the first explicit bundle enable the
+Plugin Manager shows a one-shot recoverable next-step notice that points at this
+page; the Tools row and the card's `Manage Computer Use…` remain available
+later. The official application-consent Question keeps the existing Question
+seat and answer writer, and paints the official `Risks` card for the
+`cua-app-access` approval (no second Question owner or answer queue).
 
 Must-not: read or write the macOS TCC database, call `osascript`/`tccutil`, run
 `open` on the Client to fake the Host's System Settings, infer the responsible

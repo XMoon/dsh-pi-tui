@@ -16,6 +16,8 @@
 
 ### 改进
 
+- **Computer Use 设置改为分组概览 + 应用工作台**：`/settings → Tools → Computer Use` 现在在同一 Detail 内按 Availability → Permissions → Authorization → Application access → Help 连续展示真实事实，短屏优先保留 Bundle/Host、首个缺失权限与对应的 Request 动作（`44×8` 也能完成）；点击行只选中，`Enter`/右方向键或显式 Open 才挂载页面，选中行不会产生任何 CUA 查询。`Manage applications` 打开同一租约内的应用工作台：按 `Always allowed` / `Refused` 分组的本地 List/Detail，点击行只选中，显式打开后才出现 `Revoke access…` / `Allow asking again…`，并且必须风险与精确目标同屏完整可见才能确认；取消/确认后回到同一实例，rail Back 也不会销毁页面或重新读取。`Set PTC default` 改为使用已捕获的 Host 设置权威与精确 revision 的一次守卫写入：替换的 Host/设置权威或变化的 revision 会在写入前被拒绝且从不改写，只有同权威的新读回读取到 `ptc` 才显示已确认。读取中的 Back 不再被阻塞，已接受的动作会显示 `Waiting…` 并拒绝第二次动作，旧帧上的键盘/点击不会再触发任何写入。
+
 - **Host 仍在建索引时即可搜索历史**：Daemon 模式下，`Ctrl+R` 首次冷重建期间会先显示已完成验证的 Session 输入，不再等待整个索引；现有 Results 行显示 `Indexing settled/total (n%)`，这些行支持精确正文 Copy/Restore，并会随着更多 Session 完成而自动更新，同时保持所选行与其已验证正文不变。完整结果、翻页、ready 空态和所有真实失败状态仍只在真正得到证明后出现；Direct 模式不变。
 
 - **`/sessions` 直接阅读 Session 统计**：PiTui 在宽/中屏为选中的 Session 内联展示完整只读统计（模型与上下文、Activity、Token usage、Performance、Workspace/日期、Goal/Todo、Lineage 以及搜索命中片段），窄屏或需要沉浸阅读时按 `F2` / 点击 `Inspect [F2]` 打开同一目标的只读详情页，`Esc` 或 Back 返回原列表、查询、展开状态和选择。右侧 Inspector 可用滚轮独立阅读且不移动列表焦点；短高或 0–2 行时不留下无法显示的隐形目标。TSP 原生 Browser 增加同一选中 Session 的侧栏摘要与原 `Details` 完整事实，数据刷新沿用同一阅读身份。两种呈现都只读，不改变 Current、选择、Resume/Return 或 Session 写入路径。

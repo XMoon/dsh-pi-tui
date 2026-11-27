@@ -930,6 +930,118 @@ test('presetDefault falls back to the roster default and round-trips the saved v
   assert.equal(port.presetDefault.get(), 'alpha')
 })
 
+test('presetDefault readDecision is current-only and setGuarded dispatches ONE exact revision', async () => {
+  const { port, state, generation } = createBackend(current => {
+    current.presetRoster.push({ id: 'alpha', isDefault: true })
+    current.namespaces.set('agent-preset-registry', {
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'beta' },
+      revision: 1,
+    })
+  })
+  // A merely readable mirror with no current committed authority proves nothing.
+  assert.equal(port.presetDefault.readDecision!(), undefined)
+  await port.describe()
+  const decision = port.presetDefault.readDecision!()
+  assert.notEqual(decision, undefined)
+  assert.equal(decision!.value, 'beta')
+  assert.equal(decision!.revision, 1)
+
+  assert.deepEqual(await port.presetDefault.setGuarded!('ptc', decision!), { kind: 'accepted' })
+  assert.deepEqual(state.mutateCalls.filter(call => call.ns === 'agent-preset-registry'), [{
+    ns: 'agent-preset-registry',
+    ops: [{ op: 'set', path: ['selectedDefault'], value: 'ptc' }],
+    revision: 1,
+  }])
+  // The authoritative post-write refresh is the ONLY new read.
+  assert.equal(port.presetDefault.get(), 'ptc')
+
+  // A lost connection has no current authority to offer a guarded decision.
+  generation.set(undefined)
+  assert.equal(port.presetDefault.readDecision!(), undefined)
+})
+
+test('a guarded preset decision queued behind a predecessor dispatches nothing after a Host generation replacement', async () => {
+  const { port, state, generation } = createBackend(current => {
+    current.presetRoster.push({ id: 'alpha', isDefault: true })
+    current.namespaces.set('agent-preset-registry', {
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'beta' },
+      revision: 1,
+    })
+  })
+  await port.describe()
+  const decision = port.presetDefault.readDecision!()!
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  state.mutateGate = async () => { await held }
+  const predecessor = port.presetDefault.set('alpha')
+  await tick()
+  const guarded = port.presetDefault.setGuarded!('ptc', decision)
+  await tick()
+  // The Host behind the connection is replaced while this decision is queued.
+  generation.set({ id: 'gen-2' })
+  release()
+  await predecessor.catch(() => {})
+  const outcome = await guarded
+  assert.equal(outcome.kind, 'rejected')
+  assert.deepEqual(
+    state.mutateCalls.filter(call => call.ns === 'agent-preset-registry'
+      && call.ops.some(op => op.path[0] === 'selectedDefault' && op.value === 'ptc')),
+    [],
+    'the queued decision must not be rebased onto the replacement Host',
+  )
+})
+
+test('a guarded preset decision queued behind a predecessor is a conflict, not a rebase, when the revision moved', async () => {
+  const { port, state } = createBackend(current => {
+    current.presetRoster.push({ id: 'alpha', isDefault: true })
+    current.namespaces.set('agent-preset-registry', {
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'beta' },
+      revision: 1,
+    })
+  })
+  await port.describe()
+  const decision = port.presetDefault.readDecision!()!
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  state.mutateGate = async () => { await held }
+  const predecessor = port.presetDefault.set('alpha')
+  await tick()
+  const guarded = port.presetDefault.setGuarded!('ptc', decision)
+  await tick()
+  // Another writer moves the same section while this decision is queued.
+  const entry = state.namespaces.get('agent-preset-registry')!
+  entry.revision = 2
+  release()
+  await predecessor.catch(() => {})
+  const outcome = await guarded
+  assert.equal(outcome.kind, 'conflict')
+  assert.deepEqual(
+    state.mutateCalls.filter(call => call.ns === 'agent-preset-registry'
+      && call.ops.some(op => op.path[0] === 'selectedDefault' && op.value === 'ptc')),
+    [],
+    'a moved revision dispatches nothing',
+  )
+})
+
+test('a dispatched guarded preset write it cannot confirm is outcome-unconfirmed, never success', async () => {
+  const { port, state } = createBackend(current => {
+    current.presetRoster.push({ id: 'alpha', isDefault: true })
+    current.namespaces.set('agent-preset-registry', {
+      ns: 'agent-preset-registry',
+      value: { selectedDefault: 'beta' },
+      revision: 1,
+    })
+  })
+  await port.describe()
+  const decision = port.presetDefault.readDecision!()!
+  state.mutateFailure = { code: 'settings/rejected', message: 'loader reconcile failed' }
+  const outcome = await port.presetDefault.setGuarded!('ptc', decision)
+  assert.equal(outcome.kind, 'outcome-unconfirmed')
+})
+
 // Typed subagent section behavior is covered by the owner-layer
 // test/runtime/remote/config-subagent-remote.test.ts suite.
 
