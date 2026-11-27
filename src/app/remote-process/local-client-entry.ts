@@ -46,6 +46,7 @@ import {
 } from '../../client/program-resume/handoff.ts'
 import {
   clientProgramResumeCapability,
+  clientProgramResumeWithdrawal,
   type ProgramResumeCapability,
 } from '../../client/program-resume/target.ts'
 import type { ProgramResumeReporter } from '../../client/program-resume/reporter.ts'
@@ -1330,7 +1331,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   const programResumeHandle: ProgramResumeClientHandle | undefined =
     options.mode === 'surface' && programResumeAdmitted(process.env) && (launchEnvelope !== undefined || expectedHostInstanceId !== undefined)
       ? (() => {
-          const capability = clientProgramResumeCapability({
+          const input = {
             token: programResumeCapture.token,
             handoff: programResumeCapture.handoff,
             expectedHome: dshHome,
@@ -1342,16 +1343,20 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
             stdinIsTTY: process.stdin.isTTY === true,
             stdoutIsTTY: process.stdout.isTTY === true,
             platform: process.platform,
-          })
-          if (capability === undefined) return undefined
-          let reporter: ProgramResumeReporter | undefined
-          const handle: ProgramResumeClientHandle = {
-            capability,
-            attach: next => { reporter = next },
-            unsupportedReloadAccepted: () => { reporter?.unsupportedReloadAccepted() },
-            forReexec: () => capability,
           }
-          return handle
+          let reporter: ProgramResumeReporter | undefined
+          const attach = (next: ProgramResumeReporter): void => { reporter = next }
+          const unsupportedReloadAccepted = (): void => { reporter?.unsupportedReloadAccepted() }
+          const capability = clientProgramResumeCapability(input)
+          if (capability !== undefined) {
+            return { capability, attach, unsupportedReloadAccepted, forReexec: () => capability }
+          }
+          // Only an accepted reexec with a valid inherited daemon handoff may
+          // withdraw the old supervisor record for an unrepresentable preset.
+          const withdrawal = clientProgramResumeWithdrawal(input)
+          return withdrawal === undefined
+            ? undefined
+            : { withdrawal, attach, unsupportedReloadAccepted, forReexec: () => undefined }
         })()
       : undefined
   const installedDshVersion = readInstalledDshVersion(options.dshAnchor)
@@ -2854,6 +2859,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     // replacement Client can spawn. A reexec starts only for a fully successful
     // teardown; its child inherits this process's terminal only after the old
     // surface/root are gone.
+    const programResumeForReexec = programResumeHandle?.forReexec()
     const reexecExitCode = await finishClientEntryShutdown({
       seat,
       ...(reexecIntent === undefined
@@ -2863,7 +2869,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
               intent: reexecIntent,
               teardownSucceeded: reexecTeardownSucceeded,
               cancelled: () => reexecCancelled,
-              ...(programResumeHandle === undefined ? {} : { programResume: programResumeHandle.forReexec() }),
+              ...(programResumeForReexec === undefined ? {} : { programResume: programResumeForReexec }),
             },
           }),
       emit,

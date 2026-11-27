@@ -243,9 +243,9 @@ Client attachment and may continue with zero active Clients. The local Host
 transport is supported on Linux, macOS and Windows for interactive Clients.
 On Windows the supported domain is native Windows 11 x64, an ordinary user and
 an ordinary local fixed-NTFS profile path; the same independent Host,
-management plane and official Web frontend are available, `daemon
-install`/`uninstall` remain unsupported because no Windows service manager owns
-the Host, and ACP ingress is truthfully unavailable. The kernel admission
+management plane, official Web frontend and ACP ingress (the same profile-scoped
+local endpoint, a native Named Pipe) are available; `daemon install`/`uninstall`
+remain unsupported because no Windows service manager owns the Host. The kernel admission
 authority is platform-owned: Linux uses abstract AF_UNIX sockets for the Host
 Singleton and the qualification-only Client seat; macOS uses `O_EXLOCK`-held
 seat files, re-proved by inode and directory identity before Ready; Windows uses
@@ -259,7 +259,8 @@ before writing runtime files with `B1_PLATFORM_UNSUPPORTED`. No PID file,
 `O_EXCL` marker, registry record or `hasLiveClient()` result may stand in for
 the kernel seat where one is required. Windows `daemon install`/`uninstall` are
 unsupported because no Windows service manager owns the Host; ACP ingress is
-truthfully unavailable on Windows.
+available on Windows over the same profile-scoped local endpoint (see
+[host-acp.md](./host-acp.md)).
 
 - **Scope.** The official `resolveDshHome()` / `resolveProfileDir()` results
   canonicalized through `realpath` plus the current POSIX UID or Windows token
@@ -520,7 +521,7 @@ owned exclusively by [host-daemon.md](./host-daemon.md#profile-scoped-host-proce
 The authoritative status/start/stop/restart/logs/install/uninstall semantics are
 in [host-daemon.md](./host-daemon.md#daemon-management-commands).
 
-### Host-owned local ACP v1 front door (Unix socket)
+### Host-owned local ACP v1 front door (local endpoint)
 
 The ACP transport and bounded connection/session-view contract are owned by
 [host-acp.md](./host-acp.md#host-owned-local-acp-v1-front-door-unix-socket).

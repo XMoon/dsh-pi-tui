@@ -13372,7 +13372,7 @@ test('an enabled Host paints the runtime actions, the preference and the client 
   const frame = acpAccessPlain(h)
   assert.match(frame, /Current Host/u)
   assert.match(frame, /Listener\s+Enabled/u)
-  assert.match(frame, /Access\s+Local Unix socket · Same OS user/u)
+  assert.match(frame, /Access\s+Local IPC · Same OS user/u)
   const acpLines = frame.split('\n')
   const acpIndex = (needle: string): number => acpLines.findIndex(line => line.includes(needle))
   assert.ok(acpIndex('Access') < acpIndex('Next Host Start')

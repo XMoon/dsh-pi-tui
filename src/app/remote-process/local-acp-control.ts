@@ -48,6 +48,24 @@ import {
 } from './local-discovery.ts'
 import { inspectInstalledProfileScope, type LocalScope } from './local-scope.ts'
 
+/** POSIX-safe single-argument profile literal for the headless hints. */
+function shellQuoteProfile(profile: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(profile)) return profile
+  return `'${profile.replace(/'/gu, `'\\''`)}'`
+}
+
+/** PowerShell single-quoted profile literal; all recognized single-quote
+ *  classes are doubled and smart double quotes stay literal. Kept local so
+ *  this control module never value-imports the startup compatibility island. */
+function powershellQuoteProfile(profile: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(profile)) return profile
+  return `'${profile.replace(/['\u2018\u2019\u201a\u201b]/gu, character => character + character)}'`
+}
+
+function shellQuoteProfileFor(profile: string, platform: NodeJS.Platform): string {
+  return platform === 'win32' ? powershellQuoteProfile(profile) : shellQuoteProfile(profile)
+}
+
 /** The fixed failure vocabulary of the headless ACP CLI. */
 export type AcpControlErrorCode =
   | 'UNSUPPORTED_PLATFORM'
@@ -100,12 +118,6 @@ interface AcpControlHttpResult {
   readonly reply?: LocalAcpControlReply
 }
 
-/** POSIX-safe single-argument quoting for the copy-paste hint. */
-function shellQuote(value: string): string {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
-  return `'${value.replace(/'/gu, `'\\''`)}'`
-}
-
 /** Replace private paths/URLs and control characters in a human reason. */
 function sanitizeReason(text: string): string {
   const line = text.split(/\r?\n/u).map(part => part.trim()).find(part => part !== '') ?? ''
@@ -124,8 +136,8 @@ function platformOf(deps: LocalAcpControlDeps): NodeJS.Platform {
   return deps.platform ?? process.platform
 }
 
-function notRunningReason(profile: DaemonControlProfile): string {
-  return `the Host for this Profile is not running; start it with: dsh --profile ${shellQuote(profile.name)} daemon start`
+function notRunningReason(profile: DaemonControlProfile, platform: NodeJS.Platform): string {
+  return `the Host for this Profile is not running; start it with: dsh --profile ${shellQuoteProfileFor(profile.name, platform)} daemon start`
 }
 
 /** Map a lower-level failure to the fixed ACP CLI taxonomy. */
@@ -134,7 +146,7 @@ function toAcpControlError(error: unknown): AcpControlError {
   const code = (error as { readonly code?: unknown } | undefined)?.code
   switch (code) {
     case 'B1_PLATFORM_UNSUPPORTED':
-      return new AcpControlError('UNSUPPORTED_PLATFORM', 'the acp CLI is only supported on Linux and macOS')
+      return new AcpControlError('UNSUPPORTED_PLATFORM', 'the acp CLI is only supported on Linux, macOS and Windows')
     case 'SCOPE_DIRECTORY_UNSAFE':
     case 'LOCAL_FILE_UNSAFE':
     case 'HOST_PROTOCOL_INCOMPATIBLE':
@@ -258,7 +270,7 @@ function assertHostStillAuthenticated(
 }
 
 /** Map one write result to the fixed settle/unknown contract. */
-function writeResult(verb: LocalAcpControlOp, state: LocalAcpControlState, profile: DaemonControlProfile): DaemonControlResult {
+function writeResult(verb: LocalAcpControlOp, state: LocalAcpControlState, profile: DaemonControlProfile, platform: NodeJS.Platform): DaemonControlResult {
   const target = verb === 'enable' ? 'enabled' : 'disabled'
   if (state === target) return { code: 0, stdout: `acp=${state}\n`, stderr: '' }
   if (state === 'unavailable') {
@@ -273,15 +285,15 @@ function writeResult(verb: LocalAcpControlOp, state: LocalAcpControlState, profi
   return {
     code: 5,
     stdout: `acp=${state}\n`,
-    stderr: `dsh-pi-tui acp: ACP_OUTCOME_UNCONFIRMED: the Host did not confirm the requested ACP listener state; run: dsh --profile ${shellQuote(profile.name)} acp status\n`,
+    stderr: `dsh-pi-tui acp: ACP_OUTCOME_UNCONFIRMED: the Host did not confirm the requested ACP listener state; run: dsh --profile ${shellQuoteProfileFor(profile.name, platform)} acp status\n`,
   }
 }
 
 /** The unreached-write outcome: the request may have been committed. */
-function unknownWriteOutcome(profile: DaemonControlProfile): AcpControlError {
+function unknownWriteOutcome(profile: DaemonControlProfile, platform: NodeJS.Platform): AcpControlError {
   return new AcpControlError(
     'ACP_OUTCOME_UNCONFIRMED',
-    `the ACP write result is unknown; run: dsh --profile ${shellQuote(profile.name)} acp status before retrying`,
+    `the ACP write result is unknown; run: dsh --profile ${shellQuoteProfileFor(profile.name, platform)} acp status before retrying`,
   )
 }
 
@@ -297,8 +309,8 @@ export async function runLocalAcpControl(
 ): Promise<DaemonControlResult> {
   try {
     const platform = platformOf(deps)
-    if (platform !== 'linux' && platform !== 'darwin') {
-      throw new AcpControlError('UNSUPPORTED_PLATFORM', 'the acp CLI is only supported on Linux and macOS')
+    if (platform !== 'linux' && platform !== 'darwin' && platform !== 'win32') {
+      throw new AcpControlError('UNSUPPORTED_PLATFORM', 'the acp CLI is only supported on Linux, macOS and Windows')
     }
     const scope = inspectInstalledProfileScope({
       dshHome: profile.home,
@@ -308,9 +320,9 @@ export async function runLocalAcpControl(
     })
     const readRecord = deps.readRecord ?? readLocalRecord
     const record = readRecord(scope)
-    if (record === undefined) throw new AcpControlError('HOST_NOT_RUNNING', notRunningReason(profile))
+    if (record === undefined) throw new AcpControlError('HOST_NOT_RUNNING', notRunningReason(profile, platform))
     const inspect = deps.inspectProcess ?? inspectHostProcess
-    if (inspect(record) === 'dead') throw new AcpControlError('HOST_NOT_RUNNING', notRunningReason(profile))
+    if (inspect(record) === 'dead') throw new AcpControlError('HOST_NOT_RUNNING', notRunningReason(profile, platform))
     assertClientHostCompatible(record, scope)
     const authenticate = deps.authenticate ?? authenticateLocalHost
     const verified = await authenticate(record, scope, deps.signal)
@@ -334,7 +346,7 @@ export async function runLocalAcpControl(
     const result = await callAcpControl(verified, intent.verb, deps)
     // No response / timeout / an abort after dispatch: the write may have
     // committed. The CLI never replays it and never claims it did not happen.
-    if (result.status === 0) throw unknownWriteOutcome(profile)
+    if (result.status === 0) throw unknownWriteOutcome(profile, platform)
     if (result.status === 401 || result.status === 403) {
       // The official Connection admission refuses BEFORE the handler, so the
       // Controller provably received no write.
@@ -354,16 +366,16 @@ export async function runLocalAcpControl(
     // A Host 503 means the controller threw: the mutation may have partially
     // committed, so it is the same unknown outcome, never "no write".
     if (result.status === 503 || result.status !== 200 || result.reply?.kind !== 'state') {
-      throw unknownWriteOutcome(profile)
+      throw unknownWriteOutcome(profile, platform)
     }
     try {
       assertReplyBelongsToAuthenticatedHost(verified, result.reply, scope, deps)
     } catch {
       // A host replaced during the write leaves the same unknown outcome; the
       // write is never replayed against the new host.
-      throw unknownWriteOutcome(profile)
+      throw unknownWriteOutcome(profile, platform)
     }
-    return writeResult(intent.verb, result.reply.state, profile)
+    return writeResult(intent.verb, result.reply.state, profile, platform)
   } catch (error) {
     const failure = toAcpControlError(error)
     return { code: failure.exitCode, stdout: '', stderr: formatAcpControlError(failure) }

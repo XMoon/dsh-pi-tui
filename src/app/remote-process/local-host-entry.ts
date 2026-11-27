@@ -34,6 +34,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlChannel } from './entry-control.ts'
+import { isAbsolutePath } from './local-acp-projections.ts'
 import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
 import { initializeHostEnvironment } from './host-environment.ts'
 import { HostActivityObserver } from './host-activity.ts'
@@ -1584,7 +1585,7 @@ export function createHostAcpSessionAccess(
       const registry = readSkillRegistry(agent, agentPresets, skills)
       if (registry === undefined) return { kind: 'absent' }
       const cwd = workingDirectory.get(session)
-      if (typeof cwd !== 'string' || cwd.length === 0 || !cwd.startsWith('/')) {
+      if (!isAbsolutePath(cwd)) {
         throw new AcpHostCommandError('unavailable', 'the exact Session has no effective working directory')
       }
       let observed: Awaited<ReturnType<SkillRegistryLike['snapshot']>>
@@ -1880,19 +1881,6 @@ function remoteErrorSessionId(error: unknown): string | undefined {
  * serialized promise chain so at most one transition runs at a time.
  */
 export function createAcpController(options: AcpControlControllerOptions): AcpControlController {
-  if (process.platform === 'win32') {
-    // The ACP ingress remains truthfully unavailable on Windows. The same
-    // controller interface answers unavailable for both reads and mutations;
-    // no socket, pipe or second listener is created.
-    const unavailable = (): AcpAccessStatus => ({ state: 'unavailable', reason: 'ACP is not available on Windows' })
-    return {
-      getStatus: async () => unavailable(),
-      setEnabled: async () => unavailable(),
-      quiesce: () => {},
-      close: async () => {},
-      cleanupSync: () => {},
-    }
-  }
   const { scope, maxConnections, diag, sessionAccess } = options
   // ONE View/claim registry for this controller's whole lifetime: an Off ->
   // On rebind must not lose a retired-turn approval fence (or any claim), or
@@ -2684,14 +2672,12 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       // The official Workspace/Session/Agent registries stay the sole authority;
       // only their callable methods are forwarded. A failure to read them is a
       // Host composition failure (the readiness audit already required them).
-      const sessionAccess = process.platform === 'win32'
-        ? undefined
-        : createHostAcpSessionAccess(
-          handle.ctx,
-          dsh.parseCommand,
-          dsh.compactionEngineClass,
-          dsh.planModeClass,
-        )
+      const sessionAccess = createHostAcpSessionAccess(
+        handle.ctx,
+        dsh.parseCommand,
+        dsh.compactionEngineClass,
+        dsh.planModeClass,
+      )
       acpController = createAcpController({ scope, maxConnections, diag: createEntryDiag('host'), sessionAccess })
       scratchOwner.acpController = acpController
       // Register the entry-owned controller as the root Host `piTuiAcpOwner`

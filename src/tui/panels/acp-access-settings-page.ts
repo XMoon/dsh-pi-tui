@@ -24,7 +24,7 @@
  *    saving it never toggles the running Host;
  *  - `Client Setup` is a pure Client-local fact: the official CLI command is
  *    composed from the CURRENTLY PROVEN Profile identity captured once per
- *    open. Copying it never reaches the Host, reads no socket path and never
+ *    open. Copying it never reaches the Host, reads no endpoint and never
  *    runs the ACP stdio bridge.
  *
  * Authority is deliberately NOT here: the page owns only transient
@@ -179,11 +179,17 @@ const SETUP_VIEW_LIFETIME = 'Closing an ACP View detaches it; Host Sessions, Age
 const SETUP_NO_COMMAND = 'Client command unavailable · Profile identity not verified'
 
 /**
- * POSIX shell quoting for the ONE copied client command: a profile name made
- * only of safe portable characters is emitted verbatim; anything else is
- * single-quoted with the POSIX `'\''` escape, so the printed and the copied
- * command are the same shell-correct token for a space, `$`, `;` or a quote.
+ * Platform shell quoting for the ONE copied client command: a profile name
+ * made only of safe portable characters is emitted verbatim; anything else is
+ * quoted for the target shell (POSIX single-quote escaping, or a PowerShell
+ * single-quoted literal whose recognized single-quote classes are doubled).
  */
+function shellQuoteForProfile(value: string, platform: NodeJS.Platform): string {
+  if (platform !== 'win32') return posixShellQuote(value)
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
+  return `'${value.replace(/['\u2018\u2019\u201a\u201b]/gu, character => character + character)}'`
+}
+
 function posixShellQuote(value: string): string {
   if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
   return `'${value.replaceAll("'", "'\\''")}'`
@@ -194,8 +200,8 @@ function posixShellQuote(value: string): string {
  * over the CURRENTLY PROVEN Profile. The SAME string is painted and copied (the
  * paint only sanitizes physical lines; it never truncates the payload).
  */
-export function acpStdioCommand(profile: string): string {
-  return `dsh --profile ${posixShellQuote(profile)} acp stdio`
+export function acpStdioCommand(profile: string, platform: NodeJS.Platform = process.platform): string {
+  return `dsh --profile ${shellQuoteForProfile(profile, platform)} acp stdio`
 }
 
 export interface AcpAccessSettingsPageIntents {
@@ -245,11 +251,11 @@ function listenerWord(status: AcpAccessStatus): { readonly text: string; readonl
   }
 }
 
-/** The access fact of the CURRENT Host. Never a guessed socket path: only an
+/** The access fact of the CURRENT Host. Never a guessed endpoint: only an
  *  enabled listener is stated with its real transport class. */
 function accessWord(status: AcpAccessStatus): { readonly text: string; readonly tone: 'text' | 'dim' | 'error' } {
   switch (status.state) {
-    case 'enabled': return { text: 'Local Unix socket · Same OS user', tone: 'text' }
+    case 'enabled': return { text: 'Local IPC · Same OS user', tone: 'text' }
     case 'disabled': return { text: 'Not listening', tone: 'dim' }
     case 'changing': return { text: 'Changing…', tone: 'dim' }
     case 'unavailable': return { text: 'Unavailable', tone: 'error' }
@@ -830,7 +836,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
 
   /**
    * Copy ONE client connection command into the Client clipboard. It is NOT a
-   * Host write: it reads no socket, starts no process and does not depend on
+   * Host write: it reads no endpoint, starts no process and does not depend on
    * the listener being enabled. Only a `true` clipboard result is stated as
    * copied.
    */

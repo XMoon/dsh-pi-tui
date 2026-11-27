@@ -1339,11 +1339,11 @@ merged:
   The writer's internal outcomes are projected through the save-feedback
   mapping above; the painted `Status` word is `Saved`, `Could not save` or
   `Could not confirm save`, never an internal settlement name.
-- `Client Setup` is Client-local: it states the local Unix socket /
+- `Client Setup` is Client-local: it states the local IPC endpoint /
   same-OS-user / stdio bridge facts and the ONE copyable command
   `dsh --profile <proven-profile> acp stdio`, composed from the OFFICIAL Profile
   identity the composition proved (`runner.profileDaemonAdmin?.profile`) with
-  POSIX-safe quoting. `Copy client command` is an explicit clipboard action: it
+  platform-appropriate quoting (POSIX on Linux/macOS, PowerShell on Windows). `Copy client command` is an explicit clipboard action: it
   reads no socket, requests no Host URL/token, starts no stdio process and works
   whether or not the listener is enabled (the page states that the listener must
   be enabled before a client can connect). A `false`/throwing clipboard is

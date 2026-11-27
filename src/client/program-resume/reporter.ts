@@ -20,7 +20,7 @@
 
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { encodeProgramResumeClear, encodeProgramResumeReport } from './codec.ts'
-import { programResumeTarget, type ProgramResumeCapability } from './target.ts'
+import { programResumeTarget, type ProgramResumeCapability, type ProgramResumeWithdrawal } from './target.ts'
 
 /** The small lifecycle surface the composition owns. */
 export interface ProgramResumeReporter {
@@ -211,6 +211,89 @@ export function createProgramResumeReporter(input: {
       const epoch = beginEmission()
       if (emitClear(epoch, 'unsupported-reload-clear-write-failed') && isCurrentEmission(epoch)) lastKind = 'clear'
     },
+    dispose: () => {
+      closed = true
+      installed = false
+    },
+  }
+}
+
+/** Build a one-shot withdrawal reporter; it never constructs a resume target. */
+export function createProgramResumeWithdrawalReporter(input: {
+  readonly withdrawal: ProgramResumeWithdrawal
+  readonly canWrite: () => boolean
+  readonly write: (frame: string, callback?: (error?: Error | null) => void) => void
+  readonly diag: Diag
+}): ProgramResumeReporter {
+  let installed = false
+  let closed = false
+  let suspended = false
+  let cleared = false
+  let emissionEpoch = 0
+  const isCurrentEmission = (epoch: number): boolean => emissionEpoch === epoch
+  const warn = (reason: string): void => {
+    try { input.diag.warn(`program resume: ${reason}`, { reason }) } catch { /* no lower sink */ }
+  }
+  const emitClear = (final: boolean, reason: string): boolean => {
+    if (!installed || suspended || !input.canWrite() || cleared || (closed && !final)) return false
+    const epoch = ++emissionEpoch
+    let failed = false
+    let warned = false
+    const fail = (): void => {
+      failed = true
+      cleared = false
+      if (!warned) {
+        warned = true
+        warn(reason)
+      }
+    }
+    let frame: string
+    try {
+      frame = encodeProgramResumeClear({
+        token: input.withdrawal.token,
+        pid: input.withdrawal.ownerPid,
+        time: Math.floor(Date.now() / 1000),
+      })
+    } catch {
+      warn(reason)
+      return false
+    }
+    try {
+      input.write(frame, error => {
+        if (error === undefined || error === null) return
+        if (!isCurrentEmission(epoch) || closed) return
+        fail()
+      })
+    } catch {
+      if (!warned) warn(reason)
+      return false
+    }
+    if (!isCurrentEmission(epoch) || failed) return false
+    cleared = true
+    return true
+  }
+  const closeAfterClear = (reason: string): void => {
+    if (closed) return
+    const shouldClear = !cleared && installed && !suspended && input.canWrite()
+    closed = true
+    if (shouldClear) emitClear(true, reason)
+    installed = false
+  }
+  return {
+    install: () => {
+      if (installed || closed) return
+      installed = true
+      emitClear(false, 'inherited-preset-withdrawal-write-failed')
+    },
+    observe: () => {},
+    suspend: () => { suspended = true },
+    resume: () => {
+      if (!installed || closed) return
+      suspended = false
+      if (!cleared) emitClear(false, 'inherited-preset-withdrawal-resume-write-failed')
+    },
+    humanExit: () => { closeAfterClear('inherited-preset-withdrawal-exit-write-failed') },
+    unsupportedReloadAccepted: () => { closeAfterClear('inherited-preset-withdrawal-reload-write-failed') },
     dispose: () => {
       closed = true
       installed = false

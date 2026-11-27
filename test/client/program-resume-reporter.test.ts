@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
-import { createProgramResumeReporter } from '../../src/client/program-resume/reporter.ts'
+import { createProgramResumeReporter, createProgramResumeWithdrawalReporter } from '../../src/client/program-resume/reporter.ts'
 import type { ProgramResumeCapability } from '../../src/client/program-resume/target.ts'
 
 const TOKEN = 'dummy-token-replace-me'
@@ -52,6 +52,20 @@ function harness(initialSession: string | undefined, options: {
     frames,
     setSession: (id: string | undefined) => { current = id },
   }
+}
+
+function withdrawalHarness(options: {
+  readonly canWrite?: () => boolean
+  readonly write?: (frame: string, callback?: (error?: Error | null) => void) => void
+} = {}) {
+  const frames: string[] = []
+  const reporter = createProgramResumeWithdrawalReporter({
+    withdrawal: { token: TOKEN, ownerPid: OWNER },
+    canWrite: options.canWrite ?? (() => true),
+    write: options.write ?? (frame => { frames.push(frame) }),
+    diag,
+  })
+  return { reporter, frames }
 }
 
 function bodyOf(frame: string): { body: string; mac: string } {
@@ -416,4 +430,82 @@ test('an unencodable report falls back to a legal clear on each target transitio
   assert.match(bodyOf(frames[1] as string).body, /clear=1$/u)
   reporter.observe()
   assert.equal(frames.length, 2, 'a clean clear for the same unencodable target is deduplicated')
+})
+
+test('the withdrawal reporter clears the inherited owner once and never reports', () => {
+  const h = withdrawalHarness()
+  h.reporter.install()
+  assert.equal(h.frames.length, 1)
+  const { body } = bodyOf(h.frames[0] as string)
+  assert.match(body, new RegExp(`pid=${String(OWNER)}:time=\\d+:clear=1$`, 'u'))
+  assert.doesNotMatch(body, /argv=/u)
+  assertMac(h.frames[0] as string)
+  h.reporter.observe()
+  h.reporter.install()
+  h.reporter.resume()
+  h.reporter.humanExit()
+  assert.equal(h.frames.length, 1, 'a successful withdrawal is final')
+})
+
+test('the withdrawal reporter requires the real tty grant and retries only on regain or exit', () => {
+  let writable = false
+  const h = withdrawalHarness({ canWrite: () => writable })
+  h.reporter.install()
+  assert.equal(h.frames.length, 0)
+  writable = true
+  h.reporter.suspend()
+  h.reporter.resume()
+  assert.equal(h.frames.length, 1)
+  assert.match(bodyOf(h.frames[0] as string).body, /clear=1$/u)
+
+  const beforeInstall = withdrawalHarness()
+  beforeInstall.reporter.humanExit()
+  assert.equal(beforeInstall.frames.length, 0)
+
+  let suspendedWritable = false
+  const suspended = withdrawalHarness({ canWrite: () => suspendedWritable })
+  suspended.reporter.install()
+  suspendedWritable = true
+  suspended.reporter.suspend()
+  suspended.reporter.humanExit()
+  assert.equal(suspended.frames.length, 0, 'a suspended surface never writes its withdrawal')
+})
+
+test('an asynchronous withdrawal failure clears the success latch and retries on regain', () => {
+  const callbacks: Array<(error?: Error | null) => void> = []
+  const frames: string[] = []
+  const h = withdrawalHarness({
+    write: (frame, callback) => {
+      frames.push(frame)
+      callbacks.push(callback as (error?: Error | null) => void)
+    },
+  })
+  h.reporter.install()
+  assert.equal(frames.length, 1)
+  callbacks.shift()?.(new Error('async withdrawal failure'))
+  h.reporter.resume()
+  assert.equal(frames.length, 2, 'the failed clear is retried by a legitimate regain')
+  assert.match(bodyOf(frames[1] as string).body, /clear=1$/u)
+})
+
+test('a failed withdrawal never becomes a report and retries only on a legitimate event', () => {
+  let fail = true
+  const frames: string[] = []
+  const h = withdrawalHarness({
+    write: frame => {
+      if (fail) throw new Error('withdrawal write failed')
+      frames.push(frame)
+    },
+  })
+  h.reporter.install()
+  assert.equal(frames.length, 0)
+  fail = false
+  h.reporter.observe()
+  assert.equal(frames.length, 0, 'observation is not a withdrawal retry event')
+  h.reporter.resume()
+  assert.equal(frames.length, 1)
+  assert.match(bodyOf(frames[0] as string).body, /clear=1$/u)
+  assert.doesNotMatch(bodyOf(frames[0] as string).body, /argv=/u)
+  h.reporter.humanExit()
+  assert.equal(frames.length, 1)
 })

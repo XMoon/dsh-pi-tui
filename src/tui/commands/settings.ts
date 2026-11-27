@@ -4457,7 +4457,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           summary: 'Live listener · next Host start · client setup',
           scope: 'local Split Host ACP listener · next-start Profile preference',
           freshness: 'runtime',
-          description: 'Control the local ACP v1 Unix socket listener of the running Split Host, copy the ACP stdio '
+          description: 'Control the local ACP v1 listener of the running Split Host, copy the ACP stdio '
             + 'client command, and set whether a new Split Host starts the listener automatically. The runtime controls '
             + 'change only the current Host; the preference changes only the next start.',
           specialist: 'acp-access',

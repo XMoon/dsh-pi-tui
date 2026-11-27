@@ -1,7 +1,9 @@
 # Local ACP v1 Host front-door contract
 
 This document owns the local ACP v1 listener transport, bounded protocol
-admission, and ACP session-view behavior. It does not define a second Host,
+admission, and ACP session-view behavior. The listener has one profile-scoped
+local endpoint on every supported platform: a pathname Unix socket on Linux and
+macOS, and a local Named Pipe on native Windows. It does not define a second Host,
 Agent, Session or Writer: their authority remains in
 [host-client.md](./host-client.md). Profile supervision belongs to
 [host-daemon.md](./host-daemon.md).
@@ -18,17 +20,19 @@ authenticated Host observation and then spawns ONE internal Node process,
 
 - **Target authority.** The parent asks the existing authenticated snapshot /
   ACP status owner (`readSnapshot`, `observeAcpFacts`) whether THIS Profile has
-  a ready Host with an enabled listener, then passes only that public logical
-  Unix-socket path in the private child environment. It never auto-starts a
+  a ready Host with an enabled listener, then passes only that public local
+  endpoint address (Unix-socket path or Windows Named Pipe) in the private child
+  environment. It never auto-starts a
   Host, enables the listener, reads `daemon status` text, trusts `instance.json`
   alone or derives an endpoint from the Client cwd.
-- **Pure byte relay.** The child imports Node builtins only and never imports
-  the ACP SDK, Cordis, a Host service or Session code. It connects to the
-  existing public UDS and pipes `stdin`/`stdout` bytes both ways; it performs
-  no JSON-RPC method special-casing, second decode/encode, retry or Session
-  cache. Linux uses the documented `/proc/self/fd/<scopeDirFd>/acp.sock`
-  short alias when the logical scope path exceeds `sun_path`; macOS uses the
-  Parent-provided short public path.
+- **Pure byte relay.** The child imports Node builtins plus the one pure
+  endpoint-shape module and never imports the ACP SDK, Cordis, a Host service or
+  Session code. It connects to the existing public local endpoint and pipes
+  `stdin`/`stdout` bytes both ways; it performs no JSON-RPC method
+  special-casing, second decode/encode, retry or Session cache. Linux uses the
+  documented `/proc/self/fd/<scopeDirFd>/acp.sock` short alias when the logical
+  scope path exceeds `sun_path`; macOS uses the Parent-provided short public
+  path; Windows uses the exact local product Named Pipe address unchanged.
 - **Lifecycle and errors.** The parent owns the one child and its `appExit`
   result. A missing/unready Host, disabled listener or unobservable status
   exits before the child is spawned with a fixed stderr code; adapter connect,
@@ -50,8 +54,10 @@ preference or an automatic Host service.
 ## Host-owned local ACP v1 front door (Unix socket)
 
 Alongside the authenticated loopback carrier, the one Host process can open ONE
-bounded ACP v1 front door over a pathname Unix domain socket on the ONE
-platform-specific physical endpoint of its canonical profile scope. It is a
+bounded ACP v1 front door on the ONE platform-specific physical endpoint of its
+canonical profile scope. The section name keeps the POSIX Unix-socket form for
+stable links; native Windows carries the SAME contract over one local Named Pipe
+(see the Windows bullet below). It is a
 Host-owned ingress owned by the same Host entry that already holds the kernel
 Host seat and the Ready commit; it is never a package export, a second Host, a
 second Agent/Session owner, a TCP/HTTP endpoint, or an ACP byte stream on the
@@ -59,25 +65,26 @@ Host's stdout (the control records remain the only stdout format). The listener
 is **OPT-IN and default-OFF**: a new Split Host binds no socket unless the
 profile's independent `autoStart` preference enables it (see below).
 
-- **One profile-scoped endpoint, two OS-specific physical paths.** The endpoint is
-  deterministic from the canonical profile `scopeId` and the current OS UID; no
-  environment variable, `$TMPDIR`, DSH home, user home or current directory may
-  move it. Linux keeps the logical `<scope.dir>/acp.sock`; macOS needs a short
-  Darwin pathname because `sockaddr_un.sun_path` is 104 bytes and there is no
-  `/proc`, so the same profile scope publishes
+- **One profile-scoped endpoint, OS-specific physical endpoints.** The endpoint is
+  deterministic from the canonical profile `scopeId` (and, on POSIX, the current
+  OS UID); no environment variable, `$TMPDIR`, DSH home, user home or current
+  directory may move it. Linux keeps the logical `<scope.dir>/acp.sock`; macOS
+  needs a short Darwin pathname because `sockaddr_un.sun_path` is 104 bytes and
+  there is no `/proc`, so the same profile scope publishes
   `/private/tmp/dpt-<decimal-uid>-<scope40>/acp.sock` (the first 160 bits of the
-  canonical scope SHA-256). These are the same profile-scoped contract at two
-  physical locations. An external advanced peer derives the local address from
+  canonical scope SHA-256). Native Windows uses the local Named Pipe
+  `\\.\pipe\dsh-pi-tui-acp-<scopeId>`. These are the same profile-scoped
+  contract at different physical endpoints. An external advanced peer derives the local address from
   the official profile scope and UID and is still not authorized by a computed
   string: only a real `connect` + ACP `initialize` against the live Host counts.
   The strict `piTuiAcpAccess` status vocabulary remains `{state}` /
   `{state:'unavailable',reason}` and never carries a path or token, and there is
   no Remote field or TUI page for the endpoint. The ONE headless discovery
   surface is `daemon status` (see [Daemon management commands](./host-daemon.md#daemon-management-commands)): a proven
-  `enabled` listener appends `acp=enabled` plus `acp-socket=<absolute public
-  logical path>` — the already-public same-UID UDS contract endpoint only, never
-  a Cookie, Host URL or private bind name — while `disabled` and every
-  unprovable state print no path. A user directory long enough to hit
+  `enabled` listener appends `acp=enabled` plus `acp-socket=<public local endpoint
+  address>` — the already-public same-user POSIX UDS path or Windows Named Pipe
+  contract endpoint only, never a Cookie, Host URL or private bind name — while
+  `disabled` and every unprovable state print no endpoint. A user directory long enough to hit
   `sun_path` does not change the printed logical endpoint: clients keep using
   the existing `/proc/self/fd/<scopeDirFd>/acp.sock` short alias, and the output
   path is never used to rebind or migrate the socket.
@@ -151,11 +158,33 @@ profile's independent `autoStart` preference enables it (see below).
   never rewrites the preference. Different canonical Host profiles keep their own
   scope and socket; the path is never derived from the Client cwd, `$PWD` or a
   guessed profile hash.
-- **Unix socket only, private new files.** A scope directory THIS product
-  creates is 0700; an existing user-chosen scope mode is neither rewritten nor
-  used as an admission gate. The socket inode is owned by the current UID and
-  forced to 0600 before Ready. There is no TCP/HTTP `/acp` port and no ACP JSON
-  on the Host stdout.
+- **Local endpoint only; private new files on POSIX.** A scope directory THIS
+  product creates is 0700; an existing user-chosen scope mode is neither
+  rewritten nor used as an admission gate. The POSIX socket inode is owned by
+  the current UID and forced to 0600 before Ready. There is no TCP/HTTP `/acp`
+  port and no ACP JSON on the Host stdout.
+  - **Windows.** The Node `net.Server` is bound to the one local Named Pipe
+    `\\.\pipe\dsh-pi-tui-acp-<scopeId>`; ONE auxiliary
+    `CreateNamedPipeW` instance with `WRITE_DAC` then applies the protected
+    owner-only DACL `D:P(D;;GA;;;NU)(A;;GA;;;<current-SID>)` via
+    `ConvertStringSecurityDescriptorToSecurityDescriptorW` and
+    `SetSecurityInfo(SE_FILE_OBJECT, DACL|PROTECTED_DACL)`; the auxiliary
+    instance never accepts, reads or listens, and is closed immediately. The
+    resulting pipe object descriptor (verified with `GetSecurityInfo` on a fresh
+    auxiliary instance using `SE_KERNEL_OBJECT`) admits the current OS user only
+    and denies the NETWORK SID; the endpoint name is not a credential. The
+    descriptor is enforced for the Node server's subsequent instances, not
+    audited per connection. The Node/libuv first instance necessarily exists
+    with the process default DACL between `net.Server.listen` and the one-shot
+    DACL write; the accept gate destroys every socket accepted in that window
+    before it enters the connection registry, receives ACP bytes, or takes a
+    peer slot, and a `setImmediate` drain delivers those pre-ACL accept events
+    through the gate before the listener reports enabled. A competing local
+    account can therefore transiently open an OS read-only handle in that short
+    window, but it cannot initialize, read protocol bytes or hold capacity; the
+    protected DACL governs every later connection. This transient OS handle is
+    a documented limitation of the Node first-instance bind, not an
+    authorization boundary.
   - **Linux.** The logical contract path stays `<scope.dir>/acp.sock`; the
     server is bound through a private `/proc/self/fd/<dirfd>/acp.sock` name so a
     long `DSH_HOME`/scope pathname still works, and the exact inode is published
@@ -173,9 +202,11 @@ profile's independent `autoStart` preference enables it (see below).
     is `LOCAL_ACP_SOCKET_PATH_UNSUPPORTED` and no fallback root is searched.
     Node's server close can therefore only unlink the already-absent private
     name.
-  - Retirement and crash recovery keep the existing exact-inode rule on BOTH
-    platforms: only the saved `(dev,ino,uid)` socket inode of this listener is
-    ever unlinked, so a foreign replacement at the public name survives.
+  - Retirement and crash recovery keep the existing exact-inode rule on the
+    POSIX platforms (Linux and macOS): only the saved `(dev,ino,uid)` socket
+    inode of this listener is ever unlinked, so a foreign replacement at the
+    public name survives. Windows has no filesystem inode; the kernel owns the
+    Named Pipe name lifetime.
 - **Opt-in; bind before Ready only when enabled.** A new Split Host starts with
   the listener DISABLED and still publishes a normal Ready. When the profile's
   `pi-tui-acp-preferences.autoStart` is true the entry reads it after profile
@@ -194,7 +225,13 @@ profile's independent `autoStart` preference enables it (see below).
   are untouched. `setEnabled(true)` re-binds the same socket through the SAME
   safety checks. A stop admitted while the listener is binding never emits Ready;
   the one official shutdown quiesces and closes the controller before it runs.
-  A SIGKILL leaves a stale inode for the next seat winner's safe reclaim.
+  A SIGKILL leaves a stale inode for the next seat winner's safe reclaim. This
+  inode/cleanup path is POSIX-only: on Windows the kernel releases the Named
+  Pipe name when the last handle closes, and a new bind succeeds after a normal
+  close or an abnormal process exit. A foreign occupant of the same pipe name
+  makes the bind fail (for example `EADDRINUSE`) and the Host stays Ready with
+  the listener not enabled; the existing Host seat remains the process
+  singleton authority, not the pipe name.
 - **ACP v1 handshake and a connection-scoped shared Session View.** The
   listener supports ACP v1 only. It answers every valid integer
   `initialize.protocolVersion` — including a client that requests a higher
@@ -249,10 +286,12 @@ profile's independent `autoStart` preference enables it (see below).
     may still reference the same Session. The eight-slot bound is this
     product's connection-local capacity policy, not an ACP v1 limit; a ninth
     `session/new|resume` is refused before any Host Session is created.
-  - `session/new` treats the request `cwd` as a proposal only: the Host
-    Workspace Controller validates/realpaths it into a `workspaceId`, the Host
-    Session Controller creates ONE Session in that Workspace, and the official
-    `resolveAgent` borrows the live Agent. The client cwd never becomes a Host
+  - `session/new` treats the request `cwd` as a proposal only: the cwd SHAPE is
+    the Host OS standard absolute path (a rooted POSIX path, or a local Windows
+    drive path such as `C:\...`/`C:/...`; UNC/device/relative paths are invalid
+    params), and the Host Workspace Controller validates/realpaths it into a
+    `workspaceId`, the Host Session Controller creates ONE Session in that
+    Workspace, and the official `resolveAgent` borrows the live Agent. The client cwd never becomes a Host
     directory authority, and one request performs exactly one creation (never
     auto-retried).
   - `session/resume` borrows the live Agent through the single official
@@ -673,8 +712,9 @@ profile's independent `autoStart` preference enables it (see below).
     false }`; without that composition both stay false. Legacy SSE and the
     experimental ACP transport are rejected before any Host create or transport
     start, as is an explicit `type: "stdio"` discriminator (standard stdio has
-    none). The trust boundary is the same-UID, explicitly enabled local Host
-    ACP Unix socket: the declaration is the local user's instruction to start
+    none). The trust boundary is the same-user, explicitly enabled local Host
+    ACP endpoint (a POSIX Unix socket or a Windows Named Pipe): the declaration
+    is the local user's instruction to start
     that stdio command or contact that HTTP endpoint for this Session, never a
     Client-selected Host role. The Host validates the complete list
     synchronously before any Workspace/Session/Agent effect: at most 4 servers
@@ -940,8 +980,8 @@ profile's independent `autoStart` preference enables it (see below).
   output in bytes (not JS character length); a breach closes only that
   connection and never the Host or a sibling connection. A capacity or
   backpressure fault never affects the official Host/TUI.
-- **Safe stale reclaim.** After the abstract Host seat is held, an existing
-  socket inode is reclaimed only when a short connect probe proves it refused
+- **Safe stale reclaim (POSIX).** After the abstract Host seat is held, an
+  existing socket inode is reclaimed only when a short connect probe proves it refused
   (`ECONNREFUSED`) and its `(dev,ino,uid)` is unchanged; a live listener is
   `LOCAL_ACP_SOCKET_IN_USE`, and a symlink, regular file or foreign-owner entry
   is `LOCAL_ACP_UNSAFE_SOCKET` and never removed. The same bounded
@@ -1082,8 +1122,9 @@ initialized is refused before the handler runs.
   standard absolute cwd are rows. A row that cannot prove an absolute cwd is
   omitted rather than represented by a fabricated entry.
 - Filtering: an omitted or null `cwd` lists every authorized root; a supplied
-  `cwd` must be a standard absolute path with no NUL and selects exactly the
-  rows of that directory.
+  `cwd` must be the Host OS standard absolute path with no NUL (rooted POSIX or
+  a local Windows drive path; UNC/device/relative is rejected) and selects
+  exactly the rows carrying that canonical cwd string.
 - Ordering: `(updatedAt DESC, sessionId UTF8 ASC)` — never locale-dependent.
 - Pagination: a fixed page of **50** rows. `nextCursor` is the canonical
   Base64URL encoding of the compact JSON array
