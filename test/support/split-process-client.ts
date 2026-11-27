@@ -117,12 +117,16 @@ export async function waitForTerminalExit(
   terminal: TuiTest,
   label: string,
   timeoutMs = 120_000,
+  options: { allowSignalOnly?: boolean } = {},
 ): Promise<TerminalExitFacts> {
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
     const state = await terminal.state().catch(() => undefined)
     if (state !== undefined && state.exited !== null) {
       return { code: state.exited, signal: state.exit_signal ?? null }
+    }
+    if (options.allowSignalOnly === true && state?.exited === null && state.exit_signal === 'SIGKILL') {
+      return { code: null, signal: 'SIGKILL' }
     }
     await sleep(50)
   }
