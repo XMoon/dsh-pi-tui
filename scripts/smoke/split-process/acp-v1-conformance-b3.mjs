@@ -438,8 +438,8 @@ export async function runAcpV1ConformanceB3(context) {
       && mainCaps?.sessionCapabilities?.options === undefined
       && mainCaps?.sessionCapabilities?.systemPrompt === undefined,
     `B3-04: unsupported Session capabilities must stay absent: ${JSON.stringify(mainCaps?.sessionCapabilities)}`)
-    assert(mainCaps?.promptCapabilities?.audio === false && mainCaps?.promptCapabilities?.embeddedContext === false,
-      'B3-04: audio/embeddedContext prompt capabilities must be false')
+    assert(mainCaps?.promptCapabilities?.audio === false && mainCaps?.promptCapabilities?.embeddedContext === true,
+      'B3-04: audio stays false and embeddedContext is real on the complete Host')
     assert(typeof mainCaps?.promptCapabilities?.image === 'boolean', 'B3-04: image prompt capability must be an explicit boolean')
     assert(mainCaps?.mcpCapabilities?.http === true && mainCaps?.mcpCapabilities?.sse === false,
       'B3-04: HTTP MCP must be advertised and Legacy SSE must be false')
@@ -491,7 +491,6 @@ export async function runAcpV1ConformanceB3(context) {
     // added when the handshake did not advertise the prompt capability.
     const beforeNegative = eventsOf(sessionA).length
     const negatives = [
-      { label: 'embedded resource', block: { type: 'resource', resource: { uri: 'file:///host/not-read.txt', mimeType: 'text/plain', text: 'secret' } } },
       { label: 'audio', block: { type: 'audio', mimeType: 'audio/wav', data: 'AAAA' } },
       { label: 'unknown block', block: { type: 'b3-unknown', text: 'x' } },
       ...(mainCaps.promptCapabilities.image === false

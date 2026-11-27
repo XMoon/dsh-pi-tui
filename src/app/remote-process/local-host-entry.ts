@@ -609,6 +609,22 @@ interface AttachmentServiceLike {
   ): AsyncIterable<Uint8Array>
 }
 
+/** The official FileUploads methods this Host may call; no private map is read. */
+interface FileUploadsSeamLike {
+  upload(
+    agent: object,
+    request: { readonly data: string; readonly name?: string },
+    signal?: AbortSignal,
+  ): Promise<{ readonly receiptId: string }>
+  resolve(agent: object, receiptId: string): unknown
+  bindPrompt(
+    agent: object,
+    receiptIds: readonly string[],
+    requestId: string,
+  ): { [Symbol.dispose](): void }
+  retirePrompt(agent: object, requestId: string): void
+}
+
 interface LlmServiceLike {
   resolveModelInfo(provider: string, model: string): Promise<{ readonly inputModalities?: readonly string[] }>
   listProviders(): readonly { readonly id: string; readonly name: string }[]
@@ -1009,6 +1025,7 @@ export function createHostAcpSessionAccess(
   const agents = context.reflect.get('agents') as AgentRegistryLike | undefined
   const sessions = context.reflect.get('sessions') as SessionRegistryLike | undefined
   const attachments = context.reflect.get('attachments') as AttachmentServiceLike | undefined
+  const fileUploads = context.reflect.get('fileUploads') as FileUploadsSeamLike | undefined
   const llm = context.reflect.get('llm') as LlmServiceLike | undefined
   const agentDefaultModel = context.reflect.get('agentDefaultModel') as DefaultModelServiceLike | undefined
   const tools = context.reflect.get('tools') as ToolsServiceLike | undefined
@@ -1278,8 +1295,10 @@ export function createHostAcpSessionAccess(
         return false
       }
     },
-    prompt: async (request, signal) => {
+
+    prompt: async (request, signal, finalCheck) => {
       if (!request.content.some(part => part.type === 'image')) {
+        finalCheck?.()
         return await sessionController.prompt(request, signal)
       }
       signal.throwIfAborted()
@@ -1313,7 +1332,56 @@ export function createHostAcpSessionAccess(
         || currentRoute?.provider !== route.provider || currentRoute.model !== route.model) {
         throw imageRouteError('IMAGE_ROUTE_CHANGED', 'the attached Agent route changed during image capability verification')
       }
+      // The LAST synchronous View authority check is adjacent to the actual
+      // official Controller call, after every async image/model await.
+      finalCheck?.()
       return await sessionController.prompt(request, signal)
+    },
+    supportsFileInput: () => fileUploads !== undefined && attachments !== undefined
+      && sessionController !== undefined
+      && typeof fileUploads.upload === 'function'
+      && typeof fileUploads.resolve === 'function'
+      && typeof fileUploads.bindPrompt === 'function'
+      && typeof fileUploads.retirePrompt === 'function',
+
+    stageFile: async (agent, session, data, name, signal) => {
+      if (fileUploads === undefined) {
+        throw new Error('local host entry: the official fileUploads service is unavailable')
+      }
+      const liveAgent = agents.get(agent.id)
+      const liveSession = sessions.get(agent.id)
+      if (liveAgent !== agent || liveSession !== session || agent.session !== session) {
+        throw Object.assign(new Error('the captured Agent/Session is no longer the live host identity'), {
+          isDSHRemoteError: true as const,
+          code: 'session/not-found' as const,
+          details: { reason: 'STALE_AGENT' as const },
+        })
+      }
+      const uploaded = await fileUploads.upload(agent as object, {
+        data,
+        ...(name === undefined ? {} : { name }),
+      }, signal)
+      return { receiptId: uploaded.receiptId }
+    },
+    cleanupStagedFiles: (agent, requestId, receiptIds) => {
+      if (fileUploads === undefined) {
+        throw new Error('local host entry: the official fileUploads service is unavailable')
+      }
+      const live = [...new Set(receiptIds)]
+        .filter(receiptId => fileUploads.resolve(agent as object, receiptId) !== undefined)
+      if (live.length === 0) return
+      const guard = fileUploads.bindPrompt(agent as object, live, requestId)
+      try {
+        fileUploads.retirePrompt(agent as object, requestId)
+      } finally {
+        guard[Symbol.dispose]()
+      }
+    },
+    retirePromptReceipts: (agent, requestId) => {
+      if (fileUploads === undefined) {
+        throw new Error('local host entry: the official fileUploads service is unavailable')
+      }
+      fileUploads.retirePrompt(agent as object, requestId)
     },
     cancelPending: (sessionId, agent, session, messageId) => {
       // The EXACT live identity is re-verified synchronously: only the very

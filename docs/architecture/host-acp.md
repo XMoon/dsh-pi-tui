@@ -264,21 +264,70 @@ profile's independent `autoStart` preference enables it (see below).
     settled View it already owns (see "Same-connection reattach" below), and the
     TUI is never subject to that limit.
   - **Prompt content admission.** The attached View accepts standard ACP `text`,
-    `resource_link`, and capability-negotiated `image` blocks in their original
-    order. Adjacent text and resource links become ordered text content using the
-    standard `[resource_link name=<JSON string> uri=<JSON string>]` literal;
-    a resource URI is descriptive text, not authorization, and is never fetched
-    or dereferenced by the Host. Embedded `resource` inputs, `audio` inputs,
-    private file/upload blocks and unknown content fail closed on the prompt
-    input path. A prompt may contain non-whitespace
-    text, an image, or both. A negotiated image must use a supported raster MIME;
-    wire bytes, canonical Base64, actual media, count/size/pixel limits and durable
-    references are validated by the official Host Session Controller and its
-    Attachment Store, which are the sole image admission and persistence owners.
-    The ACP adapter never writes a second attachment copy and durable Session
-    messages contain image references, never Base64. Image capability is not
-    inferred from a client declaration, an arbitrary available model or the TUI
-    selection display.
+    `resource_link`, capability-negotiated `image`, and capability-negotiated
+    embedded `resource` blocks in their original order. Adjacent text and
+    resource links become ordered text content using the standard
+    `[resource_link name=<JSON string> uri=<JSON string>]` literal; a resource URI
+    is descriptive text, not authorization, and is never fetched or dereferenced
+    by the Host. `audio` inputs, private file/upload blocks and unknown content
+    still fail closed. A prompt may contain non-whitespace text, an embedded
+    resource, an image, or a valid combination.
+  - **Embedded resources.** `embeddedContext` is advertised only when the
+    installed Host composes the shared Session View with the official
+    `FileUploads.upload/resolve/bindPrompt/retirePrompt`, Session Controller and
+    Attachment Store seams; any missing seam is a truthful `false` and the View
+    refuses legal resource blocks without reaching Host admission. The capability
+    is frozen per connection at `initialize`; it is not model-image support and
+    does not widen image policy. ONE legacy 1 MiB input budget covers the
+    resource fields (`uri`, present `mimeType`, and `text` or Base64 `blob`
+    UTF-8 bytes), independent of any image-derived transport widening. At most
+    16 blob occurrences per prompt are admitted; repeated URI/bytes count
+    separately. Shape, count and aggregate budget are checked atomically before
+    the first upload.
+  - A text resource contributes
+    `\n[resource uri=<JSON string> mimeType=<JSON string>]\n` followed by its
+    literal text and one newline; the `mimeType` field and its leading space are
+    omitted when absent/null, while an empty string is preserved. A blob resource
+    contributes the same header and is staged sequentially through the official
+    FileUploads service on the exact captured Agent/Session, then replaced by
+    the official `{type:'file', receiptId}` part. The optional display filename
+    is the last hierarchical URI path segment, percent-decoded once; query,
+    fragment and opaque URIs provide no name. The URI never authorizes a read:
+    no Host path, DNS, URL fetch or MCP resource read occurs. A blob declaring an
+    image MIME remains a generic file and never bypasses image admission. The
+    Attachment Store owns canonical Base64, byte and reference validation and
+    retention-neutral immutable objects; the adapter never writes a second
+    attachment copy and never deletes stored bytes.
+  - **Uncommitted receipts and cancellation.** The View mints ONE real flight
+    request id before staging. If it definitely will not call the Controller, it
+    retires every still-live receipt with the official `bindPrompt` →
+    `retirePrompt` → guard `Symbol.dispose` sequence on the captured receiver,
+    never `commit`, never a fake queue fact and never a Store deletion. If the
+    original Controller Promise actually rejects, cleanup runs only after that
+    settlement, including when an insertion fact was already observed; it never
+    turns that outcome into a definite rejection and never overrides the
+    inserted message/turn ownership. An accepted call without an observed
+    insertion is not by itself a cleanup trigger. A close/cancel/disposal during
+    a real upload or pending Controller admission waits for the original
+    Promise, records the actual returned receipt and cleans it only after that
+    settlement. If the Controller accepted and the exact user message was
+    observed, the official message owns the receipts and the View does not
+    retire them early. A queued occurrence removed through the
+    official exact `agent.inbox.remove` also invokes the official
+    `retirePrompt` for that real request id before settling `cancelled`;
+    external queue removal is idempotent and edit/steer same-id reinsertion is
+    never treated as removal. An unconfirmed retirement fails closed with
+    `LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED` and
+    `data.reason:'file-receipt-retirement-unconfirmed'`, never a clean
+    `cancelled` claim.
+  - A negotiated image must use a supported raster MIME; wire bytes, canonical
+    Base64, actual media, count/size/pixel limits and durable references are
+    validated by the official Host Session Controller and its Attachment Store,
+    which are the sole image admission and persistence owners. The ACP adapter
+    never writes a second attachment copy and durable Session messages contain
+    image references, never Base64. Image capability is not inferred from a
+    client declaration, an arbitrary available model or the TUI selection
+    display.
   - `session/prompt` mints ONE stable `requestId`, submits exactly ONE official
     `SessionController.prompt` in queue mode, and correlates the real Host facts
     — `source.rpcId` at `agent/inbox/inserted`, the claimed turn of that exact
@@ -452,7 +501,9 @@ profile's independent `autoStart` preference enables it (see below).
       `TurnEndReason` vocabulary this phase cannot prove (`refusal`,
       `max_turn_requests`) is never fabricated.
   - **Bounded input.** Text-only and unnegotiated connections retain the legacy
-    1 MiB frame and 2 MiB unconsumed-input limits. An image-enabled connection
+    1 MiB frame and 2 MiB unconsumed-input limits. Embedded-resource admission
+    always uses that legacy 1 MiB aggregate resource allowance, even when image
+    negotiation widens the raw frame. An image-enabled connection
     derives its larger per-frame and unconsumed bounds from that Host's official
     boot-frozen `attachments.imageLimits` (Base64 expansion, preserved text/wire
     allowance, bounded per-image metadata and the JSON-RPC envelope). This
@@ -704,12 +755,13 @@ profile's independent `autoStart` preference enables it (see below).
     on the exact Host identity proves there was no inserted message. The
     Session, Agent and writer keep their Host authority; a pending
     create/resume whose connection closed never publishes an attached View.
-  - MCP prompts, ACP client filesystem/terminal routes and client-to-Agent
-    file/artifact INPUT transfer are NOT provided by this View and fail closed
-    with their stable `LOCAL_ACP_*` code. A generic file already COMMITTED in the
-    durable Session is still replayed/output as a standard embedded `resource`
-    blob under the contract above; that is output projection, not an input
-    capability. `session/list` is served by
+  - Standard embedded `resource` text/blob input described above IS provided.
+    ACP client filesystem/terminal routes and arbitrary client path/artifact
+    transfer are NOT provided by this View and fail closed with their stable
+    `LOCAL_ACP_*` code. A generic file already COMMITTED in the durable Session
+    is still replayed/output as a standard embedded `resource` blob under the
+    contract above; that is output projection, not an input capability.
+    `session/list` is served by
     the local ACP front door when the official authorized roster read seam is
     bound (see “Official session facts on the stable v1 wire” below); without
     that seam it is not advertised and fails closed with
@@ -722,8 +774,10 @@ profile's independent `autoStart` preference enables it (see below).
       no Host side effect while another owner's turn keeps running;
     - a QUEUED own message is cancelled by the official synchronous exact
       `inbox.remove(messageId)` on the still-exact Agent/Session (the durable
-      `agent/inbox/spliced {outcome:'canceled'}` is the proof), and the request
-      answers `cancelled` only after the admission path is classified;
+      `agent/inbox/spliced {outcome:'canceled'}` is the proof); its real staged
+      file receipts are retired through the official same-request
+      `retirePrompt`, and the request answers `cancelled` only after the
+      admission path is classified;
     - a RUNNING own turn is cancelled only when the official current-turn
       fence still points at that exact turn in the same Host callback stack
       (`agent.cancel({kind:'user'}, {keepInbox:true})`); the request answers

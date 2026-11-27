@@ -218,8 +218,8 @@ export async function runAcpPo4aContentInput(context) {
     assert(init?.result?.agentInfo?.version === context.installation.manifest.version,
       'PO-4A initialize reports the installed bundle version')
     assert(init.result.agentCapabilities.promptCapabilities.audio === false
-      && init.result.agentCapabilities.promptCapabilities.embeddedContext === false,
-    `${label}: audio and embedded resources stay disabled`)
+      && init.result.agentCapabilities.promptCapabilities.embeddedContext === true,
+    `${label}: audio stays disabled and the real file seam is advertised`)
     assert(init.result.agentCapabilities.sessionCapabilities?.resume !== undefined
       && init.result.agentCapabilities.sessionCapabilities?.close !== undefined,
     `${label}: the connection must advertise its shared Session View`)

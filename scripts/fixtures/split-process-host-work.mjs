@@ -179,6 +179,7 @@ const FR8_TEAM_TASK_OF = (messages) => {
  * workspace files the first block links to.
  */
 const PO4B_MARKER = 'po4b:markdown-host-files:v1'
+const PO4E_MARKER = 'po4e:file-input:v1'
 const PO4B_BLOCK_1 = '# PO-4B Report\r\n\r\n- [report](./.po4b/report.md)\r\n- [missing](./.po4b/missing.md)\r\n- [private](./.po4b/private.md)\r\n\r\n'
 const PO4B_BLOCK_2 = '```json\n{"path":"./.po4b/report.md","quote":"`literal`"}\n```\n\n**bold**  _italic_  中文🙂\n'
 const PO4B_REPORT = 'PO4B HOST FILE BYTES\nline two: π\n'
@@ -1337,7 +1338,7 @@ const PR1_FOREGROUND_COMMAND = [
 const PR1_BACKGROUND_COMMAND = 'dsh-pr1-user-probe'
 
 class C1Model extends LlmAdapter {
-  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe, po4c, po4d, probeRegistry, subprocessProbe) {
+  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe, po4eFileProbe, po4c, po4d, probeRegistry, subprocessProbe) {
     super()
     this.scenario = scenario
     this.proof = proof
@@ -1346,6 +1347,7 @@ class C1Model extends LlmAdapter {
     this.neverSetup = neverSetup
     this.imageProbe = imageProbe
     this.markdownFileProbe = markdownFileProbe
+    this.po4eFileProbe = po4eFileProbe
     this.po4c = po4c
     this.po4d = po4d
     this.probeRegistry = probeRegistry
@@ -1378,6 +1380,14 @@ class C1Model extends LlmAdapter {
       block: { type: 'tool-call', id: callId, name, arguments: JSON.stringify(args) },
     }
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
+  }
+
+  /** One ordinary stopped text answer for the file-input probes. */
+  async *textAnswer(text) {
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
   }
 
   record(kind, fields = {}) {
@@ -1539,6 +1549,38 @@ class C1Model extends LlmAdapter {
       const authoredUserText = (authoredUser?.content ?? [])
         .map(part => typeof part?.text === 'string' ? part.text : '')
         .join('')
+      if (authoredUserText.includes(PO4E_MARKER)) {
+        const all = textOf((options.messages ?? []).map(message => message.content))
+        const matches = [...all.matchAll(/verbatim read-only copy saved at ("(?:[^"\\]|\\.)*")/gu)]
+        const paths = matches.map(match => JSON.parse(match[1]))
+        this.record('po4e-model', {
+          sessionId,
+          afterTool,
+          handleCount: paths.length,
+          handlePaths: paths,
+          authoredTextSha256: createHash('sha256').update(authoredUserText).digest('hex'),
+        })
+        if (!afterTool) {
+          await this.po4eFileProbe?.(sessionId)
+          if (paths.length === 0) {
+            yield* this.textAnswer('po4e file handle missing')
+            return
+          }
+          yield* this.toolCall('bash', `po4e-file-${sessionId}`, {
+            command: `sha256sum -- ${JSON.stringify(paths[0])}`,
+            description: 'Read the official saved ACP file handle for the PR-A proof',
+          })
+          return
+        }
+        const toolText = textOf(options.messages?.at(-1)?.content)
+        this.record('po4e-tool', {
+          sessionId,
+          toolText: toolText.slice(-400),
+          toolSha256: createHash('sha256').update(toolText).digest('hex'),
+        })
+        yield* this.textAnswer('po4e file consumed')
+        return
+      }
       if (authoredUserText === PO4B_MARKER) {
         await this.markdownFileProbe(sessionId)
         yield { type: 'block-start', index: 0, blockType: 'text' }
@@ -2611,6 +2653,9 @@ export async function apply(ctx) {
   if (scenario === undefined || scenario === '') return
   if (!SCENARIOS.has(scenario)) throw new Error(`m4-c1-host-work: unsupported C1_SCENARIO ${JSON.stringify(scenario)}`)
   const { root, proof } = prepareWorkRoot(process.env.C1_WORK_ROOT)
+  const po4eReturnedReceipts = new Map()
+  let po4eFileService
+  let po4eOriginalResolve
   const record = (kind, fields = {}) => {
     appendFileSync(proof, `${JSON.stringify({ kind, scenario, time: Date.now(), pid: process.pid, ...fields })}\n`, { mode: 0o600 })
   }
@@ -2951,6 +2996,111 @@ export async function apply(ctx) {
       }
     : undefined
 
+  const po4eFileProbe = scenario === 'acp-po4a' && process.env.C1_PO4E === '1'
+    ? async sessionId => {
+        const agent = ctx.agents.get(sessionId)
+        if (agent === undefined) throw new Error('m4-c1-host-work: PO-4E file probe could not resolve the live Agent')
+        const events = agent.session.snapshotEvents()
+        const message = [...events].reverse().find(event => event.type === 'user/message'
+          && textOf(event.data?.content).includes(PO4E_MARKER))
+        if (message === undefined) {
+          record('po4e-file-probe', { sessionId, error: 'no-durable-message' })
+          return
+        }
+        const content = Array.isArray(message.data?.content) ? message.data.content : []
+        const file = content.find(part => part?.type === 'file' && part.attachment?.attachmentId !== undefined)
+        if (file === undefined) {
+          record('po4e-file-probe', { sessionId, error: 'no-durable-file' })
+          return
+        }
+        const text = content.map(part => typeof part?.text === 'string' ? part.text : '').join('')
+        const digest = createHash('sha256')
+        let bytes = 0
+        for await (const chunk of ctx.get('attachments').readFileStream(file.attachment)) {
+          bytes += chunk.byteLength
+          digest.update(chunk)
+        }
+        record('po4e-file-probe', {
+          sessionId,
+          messageId: message.data?.id,
+          rpcId: message.data?.source?.rpcId,
+          contentTypes: content.map(part => part?.type),
+          text,
+          textSha256: createHash('sha256').update(text).digest('hex'),
+          attachmentId: file.attachment.attachmentId,
+          resolveAfterConsumption: (po4eReturnedReceipts.get(sessionId) ?? [])
+            .map(receiptId => po4eOriginalResolve?.call(po4eFileService, agent, receiptId) !== undefined),
+          name: file.attachment.name,
+          refBytes: file.attachment.bytes,
+          bytes,
+          sha256: digest.digest('hex'),
+        })
+      }
+    : undefined
+
+  if (scenario === 'acp-po4a' && process.env.C1_PO4E === '1') {
+    // FileUploads is mounted by a later Host row: wait for the real service
+    // instead of failing fixture setup when this row applies first.
+    ctx.inject(['fileUploads'], fileCtx => {
+      const fileUploads = fileCtx.get('fileUploads')
+      if (fileUploads === undefined) throw new Error('m4-c1-host-work: the official fileUploads service is unavailable')
+      const originalUpload = fileUploads.upload
+      const originalResolve = fileUploads.resolve
+      const originalBind = fileUploads.bindPrompt
+      const originalRetire = fileUploads.retirePrompt
+      po4eFileService = fileUploads
+      po4eOriginalResolve = originalResolve
+      const bound = new Map()
+      fileUploads.upload = async function (agent, request, signal) {
+        const result = await originalUpload.call(this, agent, request, signal)
+        const bytes = Buffer.from(request.data, 'base64')
+        const returned = po4eReturnedReceipts.get(String(agent.id)) ?? []
+        returned.push(result.receiptId)
+        po4eReturnedReceipts.set(String(agent.id), returned)
+        record('po4e-upload-returned', {
+          sessionId: String(agent.id),
+          receiptId: result.receiptId,
+          name: request.name,
+          bytes: bytes.byteLength,
+          sha256: createHash('sha256').update(bytes).digest('hex'),
+        })
+        if (request.name === 'hold.bin') {
+          const barrier = process.env.C1_PO4E_HOLD
+          if (barrier !== undefined && barrier !== '') {
+            record('po4e-upload-held', { sessionId: String(agent.id), receiptId: result.receiptId })
+            await waitForBarrier(barrier, new AbortController().signal)
+            record('po4e-upload-released', { sessionId: String(agent.id), receiptId: result.receiptId })
+          }
+        }
+        return result
+      }
+      fileUploads.resolve = function (agent, receiptId) {
+        const value = originalResolve.call(this, agent, receiptId)
+        record('po4e-resolve', { sessionId: String(agent.id), receiptId, live: value !== undefined })
+        return value
+      }
+      fileUploads.bindPrompt = function (agent, ids, requestId) {
+        const guard = originalBind.call(this, agent, ids, requestId)
+        bound.set(requestId, [...ids])
+        record('po4e-bind', { sessionId: String(agent.id), requestId, receiptIds: [...ids] })
+        return guard
+      }
+      fileUploads.retirePrompt = function (agent, requestId) {
+        const ids = bound.get(requestId) ?? []
+        originalRetire.call(this, agent, requestId)
+        const liveAfter = ids.map(receiptId => originalResolve.call(this, agent, receiptId) !== undefined)
+        record('po4e-retire', { sessionId: String(agent.id), requestId, receiptIds: ids, liveAfter })
+        bound.delete(requestId)
+      }
+      fileCtx.effect(() => () => {
+        fileUploads.upload = originalUpload
+        fileUploads.resolve = originalResolve
+        fileUploads.bindPrompt = originalBind
+        fileUploads.retirePrompt = originalRetire
+      })
+    })
+  }
+
   const po4c = scenario === 'acp-po4c'
     ? await createPo4cOutputProbe(ctx, record)
     : undefined
@@ -3000,7 +3150,7 @@ export async function apply(ctx) {
   const model = new C1Model(scenario, proof, root, sessionId => {
     const agent = ctx.agents.get(sessionId)
     return agent === undefined ? undefined : agent.status
-  }, neverSetup, imageProbe, markdownFileProbe, po4c, po4d, probeRegistry, subprocessProbe)
+  }, neverSetup, imageProbe, markdownFileProbe, po4eFileProbe, po4c, po4d, probeRegistry, subprocessProbe)
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
 
