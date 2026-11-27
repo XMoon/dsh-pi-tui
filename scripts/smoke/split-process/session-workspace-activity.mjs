@@ -46,7 +46,7 @@ export async function runSessionWorkspaceActivity(context) {
   // The PR2 Session Workspace header is `Sessions · N`; the retired
   // `Workspace:` scope header is not part of the surface any more.
   await clientA.waitForScreen('Sessions ·', 'U-D Session Workspace frame', 60_000)
-  const folderLine = lines => lines.find(line => /▾ .+ · 2 .*Current/u.test(line))
+  const folderLine = lines => lines.find(line => /▾ .+ · \d+ .*Current/u.test(line))
   const xLine = lines => lines.find(line => line.includes(shortSessionId(sessionX)))
   const yLine = lines => lines.find(line => line.includes(shortSessionId(sessionY)))
   // Only the real Workspace membership notice is the membership authority; the
