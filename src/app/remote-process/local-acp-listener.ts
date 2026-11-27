@@ -311,7 +311,8 @@ export interface LocalAcpListener {
   isListening(): boolean
   /** Stop accepting, tear down every connection, then retire the server. Idempotent. */
   close(): Promise<void>
-  /** Synchronous, inode-identity-checked retirement of THIS process's own socket inode. */
+  /** Synchronous POSIX inode retirement of THIS process's own socket inode;
+   *  a no-op on Windows, where the kernel owns the Named Pipe name lifetime. */
   cleanupSync(): void
 }
 
@@ -1925,6 +1926,14 @@ async function startWin32LocalAcpListener(
         socket.destroy()
         return
       }
+      // The Node/libuv first instance exists with the process default DACL
+      // before the one-shot protected DACL can be written. A socket accepted in
+      // that short window is destroyed here and never enters the connection
+      // registry, `serveConnection`, the peer cap or any ACP byte stream.
+      if (!secured) {
+        socket.destroy()
+        return
+      }
       if (context.connections.size >= maxConnections) {
         diag.warn('local-acp.connection.reject', { code: 'LOCAL_ACP_CAPACITY_EXCEEDED', connections: context.connections.size })
         socket.on('error', () => socket.destroy())
@@ -1947,6 +1956,9 @@ async function startWin32LocalAcpListener(
     })
     try {
       secureWin32AcpPipe(pipeName)
+      // Deliver any connection accepted by the pre-ACL instance through the
+      // gate above (and destroy it) before reporting the listener enabled.
+      await new Promise<void>(resolve => setImmediate(resolve))
       secured = true
     } catch (error) {
       throw new LocalAcpError('LOCAL_ACP_UNSAFE_SOCKET', 'local acp: the Windows named-pipe endpoint could not be secured', error)

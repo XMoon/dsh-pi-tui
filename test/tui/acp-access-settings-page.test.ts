@@ -259,12 +259,21 @@ async function highlight(h: PageHarness, label: string): Promise<void> {
 
 /* ------------------------------------------------------------ the command */
 
-test('the client command is the exact Profile token with POSIX quoting', () => {
-  assert.equal(acpStdioCommand('pi-tui'), 'dsh --profile pi-tui acp stdio')
-  assert.equal(acpStdioCommand('work profile'), "dsh --profile 'work profile' acp stdio")
-  assert.equal(acpStdioCommand("it's"), "dsh --profile 'it'\\''s' acp stdio")
-  assert.equal(acpStdioCommand('a$b;c'), "dsh --profile 'a$b;c' acp stdio")
-  assert.equal(acpStdioCommand('/abs/path'), 'dsh --profile /abs/path acp stdio')
+test('the client command is the exact Profile token with platform quoting', () => {
+  assert.equal(acpStdioCommand('pi-tui', 'linux'), 'dsh --profile pi-tui acp stdio')
+  assert.equal(acpStdioCommand('work profile', 'linux'), "dsh --profile 'work profile' acp stdio")
+  assert.equal(acpStdioCommand("it's", 'linux'), "dsh --profile 'it'\\''s' acp stdio")
+  assert.equal(acpStdioCommand('a$b;c', 'linux'), "dsh --profile 'a$b;c' acp stdio")
+  assert.equal(acpStdioCommand('/abs/path', 'linux'), 'dsh --profile /abs/path acp stdio')
+  // PowerShell: a double-quoted literal with backtick escapes; smart single
+  // quotes are literal rather than token terminators.
+  assert.equal(acpStdioCommand('pi-tui', 'win32'), 'dsh --profile pi-tui acp stdio')
+  assert.equal(acpStdioCommand('work profile', 'win32'), 'dsh --profile "work profile" acp stdio')
+  assert.equal(acpStdioCommand("it's", 'win32'), 'dsh --profile "it\'s" acp stdio')
+  assert.equal(acpStdioCommand('a\u2019b', 'win32'), 'dsh --profile "a\u2019b" acp stdio')
+  assert.equal(acpStdioCommand('a$b', 'win32'), 'dsh --profile "a`$b" acp stdio')
+  assert.equal(acpStdioCommand('a"b', 'win32'), 'dsh --profile "a`\"b" acp stdio')
+  assert.equal(acpStdioCommand('a`b', 'win32'), 'dsh --profile "a``b" acp stdio')
 })
 
 /* --------------------------------------------------------------- focus */

@@ -201,15 +201,22 @@ export function buildAcpStdioEnvironment(
   source: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...source }
+  // Windows environments are case-insensitive, but this is a plain JS object.
+  // Strip the internal facts and every case variant of the target key from the
+  // copy so the Parent-supplied target cannot be shadowed by a lowercase
+  // leftover in the child environment.
+  const internalExact = new Set([
+    'DSH_PI_TUI_ROLE',
+    'DSH_PI_TUI_HOST_ENTRY',
+    'DSH_PI_TUI_BACKEND',
+    ACP_STDIO_SOCKET_ENV,
+  ])
   for (const key of Object.keys(env)) {
-    if (key.startsWith('SPLIT_PROCESS_')) delete env[key]
+    const upper = key.toUpperCase()
+    if (upper.startsWith('SPLIT_PROCESS_') || internalExact.has(upper)) delete env[key]
   }
-  delete env.DSH_PI_TUI_ROLE
-  delete env.DSH_PI_TUI_HOST_ENTRY
-  delete env.DSH_PI_TUI_BACKEND
   // ACP stdio is a pure relay: it is never a program-resume reporter.
   scrubProgramResumeEnvironment(env)
-  delete env[ACP_STDIO_SOCKET_ENV]
   env[ACP_STDIO_SOCKET_ENV] = socketPath
   return env
 }
@@ -240,7 +247,10 @@ function daemonClientRerunCommand(
  *  the POSIX close-reopen sequence. */
 function powershellQuote(value: string): string {
   if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
-  return `'${value.replace(/'/gu, "''")}'`
+  // Double-quoted PowerShell literal: backtick-escape `"`, `$` and the escape
+  // character. This keeps smart single quotes literal instead of letting the
+  // tokenizer treat them as string terminators.
+  return `"${value.replace(/([`"$])/gu, '`$1')}"`
 }
 
 /** The copy-paste Profile literal for the ACTUAL CLI shell. */

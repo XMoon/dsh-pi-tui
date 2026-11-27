@@ -1278,9 +1278,10 @@ export type AcpStdioTarget =
   | { readonly kind: 'host-unavailable' | 'acp-disabled' | 'acp-unavailable' }
 
 /**
- * The public logical UDS endpoint of this profile scope (never the macOS private
- * bind name). The value is a single safe `key=value` line or it is omitted: a
- * malformed path is never sanitized into a fake connectable address.
+ * The public local endpoint of this profile scope: the POSIX UDS logical path or
+ * the Windows Named Pipe (never the macOS private bind name). The value is a
+ * single safe `key=value` line or it is omitted: a malformed path is never
+ * sanitized into a fake connectable address.
  */
 function acpSocketPathOf(scope: LocalScope, deps: DaemonControlDeps): string | undefined {
   const platform = platformOf(deps)

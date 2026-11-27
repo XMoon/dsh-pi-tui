@@ -274,7 +274,7 @@ and native Windows:
 
 | Platform | Verified local endpoint |
 |---|---|
-| Linux | `<scope>/acp.sock` (the documented logical path; a root-only client derives it from the authenticated profile setup) |
+| Linux | `<scope>/acp.sock` (the documented logical path; the Client derives it from the authenticated profile setup) |
 | macOS | `/private/tmp/dpt-<uid>-<scope40>/acp.sock` |
 | Windows | `\\.\pipe\dsh-pi-tui-acp-<scopeId>` |
 

@@ -174,7 +174,17 @@ profile's independent `autoStart` preference enables it (see below).
     auxiliary instance using `SE_KERNEL_OBJECT`) admits the current OS user only
     and denies the NETWORK SID; the endpoint name is not a credential. The
     descriptor is enforced for the Node server's subsequent instances, not
-    audited per connection.
+    audited per connection. The Node/libuv first instance necessarily exists
+    with the process default DACL between `net.Server.listen` and the one-shot
+    DACL write; the accept gate destroys every socket accepted in that window
+    before it enters the connection registry, receives ACP bytes, or takes a
+    peer slot, and a `setImmediate` drain delivers those pre-ACL accept events
+    through the gate before the listener reports enabled. A competing local
+    account can therefore transiently open an OS read-only handle in that short
+    window, but it cannot initialize, read protocol bytes or hold capacity; the
+    protected DACL governs every later connection. This transient OS handle is
+    a documented limitation of the Node first-instance bind, not an
+    authorization boundary.
   - **Linux.** The logical contract path stays `<scope.dir>/acp.sock`; the
     server is bound through a private `/proc/self/fd/<dirfd>/acp.sock` name so a
     long `DSH_HOME`/scope pathname still works, and the exact inode is published
@@ -192,9 +202,11 @@ profile's independent `autoStart` preference enables it (see below).
     is `LOCAL_ACP_SOCKET_PATH_UNSUPPORTED` and no fallback root is searched.
     Node's server close can therefore only unlink the already-absent private
     name.
-  - Retirement and crash recovery keep the existing exact-inode rule on BOTH
-    platforms: only the saved `(dev,ino,uid)` socket inode of this listener is
-    ever unlinked, so a foreign replacement at the public name survives.
+  - Retirement and crash recovery keep the existing exact-inode rule on the
+    POSIX platforms (Linux and macOS): only the saved `(dev,ino,uid)` socket
+    inode of this listener is ever unlinked, so a foreign replacement at the
+    public name survives. Windows has no filesystem inode; the kernel owns the
+    Named Pipe name lifetime.
 - **Opt-in; bind before Ready only when enabled.** A new Split Host starts with
   the listener DISABLED and still publishes a normal Ready. When the profile's
   `pi-tui-acp-preferences.autoStart` is true the entry reads it after profile
@@ -700,8 +712,9 @@ profile's independent `autoStart` preference enables it (see below).
     false }`; without that composition both stay false. Legacy SSE and the
     experimental ACP transport are rejected before any Host create or transport
     start, as is an explicit `type: "stdio"` discriminator (standard stdio has
-    none). The trust boundary is the same-UID, explicitly enabled local Host
-    ACP Unix socket: the declaration is the local user's instruction to start
+    none). The trust boundary is the same-user, explicitly enabled local Host
+    ACP endpoint (a POSIX Unix socket or a Windows Named Pipe): the declaration
+    is the local user's instruction to start
     that stdio command or contact that HTTP endpoint for this Session, never a
     Client-selected Host role. The Host validates the complete list
     synchronously before any Workspace/Session/Agent effect: at most 4 servers

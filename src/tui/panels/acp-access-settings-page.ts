@@ -179,15 +179,15 @@ const SETUP_VIEW_LIFETIME = 'Closing an ACP View detaches it; Host Sessions, Age
 const SETUP_NO_COMMAND = 'Client command unavailable · Profile identity not verified'
 
 /**
- * POSIX shell quoting for the ONE copied client command: a profile name made
- * only of safe portable characters is emitted verbatim; anything else is
- * single-quoted with the POSIX `'\''` escape, so the printed and the copied
- * command are the same shell-correct token for a space, `$`, `;` or a quote.
+ * Platform shell quoting for the ONE copied client command: a profile name
+ * made only of safe portable characters is emitted verbatim; anything else is
+ * quoted for the target shell (POSIX single-quote escaping, or a PowerShell
+ * double-quoted literal with backtick escapes).
  */
 function shellQuoteForProfile(value: string, platform: NodeJS.Platform): string {
   if (platform !== 'win32') return posixShellQuote(value)
   if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
-  return `'${value.replace(/'/gu, "''")}'`
+  return `"${value.replace(/([`"$])/gu, '`$1')}"`
 }
 
 function posixShellQuote(value: string): string {
