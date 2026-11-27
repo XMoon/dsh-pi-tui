@@ -993,9 +993,6 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         // gesture. Direct keeps the ordinary pre-generated fresh-id path.
         const workspaceNewCapture: WorkspaceNewConversationCapture | undefined =
           runner.backendKind === 'remote' ? runner.agents.captureWorkspaceNewConversation?.() : undefined
-        if (runner.backendKind === 'remote' && workspaceNewCapture === undefined) {
-          return done({ kind: 'error', text: 'fresh session creation failed: the remote connection is not connected' })
-        }
         // The quiesce callback is the ONLY proof that the old Turn reached
         // idle. An accepted stop is just a REQUEST until then.
         let oldOwnerQuiesced = false
@@ -1006,6 +1003,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             : '; turn stop requested (not yet confirmed)'
         }
         try {
+          if (runner.backendKind === 'remote' && workspaceNewCapture === undefined) {
+            return done({ kind: 'error', text: 'fresh session creation failed: the remote connection is not connected' })
+          }
           // WS-2 Workspace pre-selection BEFORE the navigation transition: a
           // refused directory, an unknown Workspace or an offline Host must not
           // stop the old owner, flush/consume drafts or dispatch a Session.

@@ -1052,16 +1052,19 @@ test('Remote Folder New uses the captured workspace-new branch and an actual-id 
   assert.deepEqual(target, { header: { cwd: '/ws' } }, 'no candidate-owned opening id is published')
 })
 
-test('Remote New fails closed when no Connection generation can be captured', async () => {
+test('Remote New fails closed without latching single-flight and retries after capture recovery', async () => {
   let resolutions = 0
   let creates = 0
+  let capture: { generation: { id: number } } | undefined
   const h = harness({
     backendKind: 'remote',
     currentSessionId: CURRENT,
     agents: {
+      captureWorkspaceNewConversation: () => capture,
       resolveWorkspace: (async () => { resolutions += 1; return { workspaceId: 'ws-a', path: '/ws' } }) as never,
-      create: (async () => { creates += 1; return { session: { id: 'unexpected' } } }) as never,
+      create: (async () => { creates += 1; return { session: { id: 'session-after-reconnect' } } }) as never,
     },
+    transitionToActualId: (async (steps: { create: () => Promise<unknown> }) => ({ ok: true, next: await steps.create() })) as never,
   })
   try {
     const result = await h.runCommand('new')
@@ -1070,6 +1073,12 @@ test('Remote New fails closed when no Connection generation can be captured', as
     assert.match(result.text ?? '', /remote connection is not connected/u)
     assert.equal(resolutions, 0)
     assert.equal(creates, 0)
+
+    capture = { generation: { id: 2 } }
+    const retry = await h.runCommand('new')
+    assert.equal(retry.kind, 'success')
+    assert.equal(resolutions, 1)
+    assert.equal(creates, 1)
   } finally {
     h.close()
   }
