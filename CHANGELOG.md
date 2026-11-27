@@ -10,7 +10,7 @@
 ### 新增
 
 - **ACP v1 客户端系统提示追加**：兼容的本地 ACP v1 客户端可以在 `session/new` / `session/resume` / `session/load` 中以标准 `systemPrompt` 的 append 模式为本次 View 追加普通系统提示。`sessionCapabilities.systemPrompt` 只在真实共享 Session View 与官方作用域的 SystemPrompt seam 同时装配时公布；文本按字面量拼接并受 1 MiB 上限约束，只作用于该精确 Agent 的已提交 View，并在 close、同连接重新附加、null、EOF/Off、失败与 Agent 释放时由官方 disposer 退役。官方组合保留最终文本权力，完整 persona 可以合法覆盖普通追加（已接受的 ACP v1 一致性限制）；工具、权限与当前模型不受影响。
-- **终端恢复记录（OSC 7577 v0.5 发送端）**：当运行终端注入 `OSC7577_TOKEN` 时，Direct 与 Daemon Client 会把已提交主 Session 的精确恢复命令作为 OSC 7577 记录提供给终端；Daemon 记录使用稳定的 supervisor PID，Client 重载不会丢失记录身份，旧版替换目标会在接受 reload 时撤销旧记录。手工退出会撤销记录，信号、终端丢失、崩溃、HMR 与 Client reload 不撤销；Token 不进入 argv、Session、日志或独立的 Host/manager/ACP 子进程；Direct 同进程 snapshot 按 same-UID 信任边界保留。Rex 0.1.0-preview.25 的 Direct/Daemon 记录接受与 Direct 精确命令手动重放已验证；自动重启恢复、跨 Server 重启持久化与信任规则自动执行尚未验证。
+- **终端恢复记录（OSC 7577 v0.5 发送端）**：当运行终端注入 `OSC7577_TOKEN` 时，Direct 与 Daemon Client 会把已提交主 Session 的精确恢复命令作为 OSC 7577 记录提供给终端；Daemon 记录使用稳定的 supervisor PID，正常兼容 Client reload 不会丢失记录身份；若 replacement 能验证继承的 v1 handoff 但当前 launch 带非空 `DSH_PI_TUI_PRESET`，会发送一次 best-effort clear 且不再 report，旧版替换目标也会在接受 reload 时撤销旧记录。手工退出会撤销记录，信号、终端丢失、崩溃与 HMR 不撤销；Token 不进入 argv、Session、日志或独立的 Host/manager/ACP 子进程；Direct 同进程 snapshot 按 same-UID 信任边界保留。Rex 0.1.0-preview.25 的 Direct/Daemon 记录接受与 Direct 精确命令手动重放已验证；自动重启恢复、跨 Server 重启持久化与信任规则自动执行尚未验证。
 
 - **ACP 设置统一到 Host · ACP access 页**：PiTui 的 `/acp` 与 `/settings → Host → ACP access` 现在打开同一个 Settings 页面，集中展示当前 Host 的本地 ACP Listener 状态、Enable/Disable（关闭前二次确认）、一键复制当前已验证 Profile 的 `acp stdio` 客户端命令、下次 Host 启动的 `Start automatically` 偏好以及客户端接入说明。运行状态只影响当前 Host，偏好只影响下次启动，两者互不改变；原 `/settings → Tools → ACP Server` 与 `Host → Start ACP automatically` 两行以及旧 `/acp` 弹出菜单已退役。
 - **无 TUI 的 ACP 管理命令**：`dsh --profile pi-tui acp status|enable|disable` 可在不打开 TUI、不启动 Host 的情况下查看并切换当前 Profile 已运行 Host 的本地 ACP Listener。`status` 只读并输出 Host 的真实状态；`enable` / `disable` 各自只发送一次写入，状态未确认或响应丢失时明确报告结果未知，不会猜测成功。它们不改变下次冷启动的自动启动设置，也不会停止 Host、Agent、Session 或 TUI。
@@ -31,7 +31,7 @@
 
 ### 修复
 
-- **环境变量选择 preset 不再生成丢失 preset 的恢复记录**：通过 `DSH_PI_TUI_PRESET` 选择 Agent preset 时，OSC 7577 发送端会与 `--preset` 一样拒绝注册记录，避免终端重启后把尚未开始首次 Turn 的 Session 按另一个默认 preset 重新打开。
+- **环境变量选择 preset 不再生成丢失 preset 的恢复记录**：通过 `DSH_PI_TUI_PRESET` 选择 Agent preset 时，OSC 7577 发送端会与 `--preset` 一样拒绝注册记录，避免终端重启后把尚未开始首次 Turn 的 Session 按另一个默认 preset 重新打开；兼容升级重载时还会对旧版本已生成的错误记录发送一次 best-effort clear，失败时可能保留旧记录。
 - **完整技能目录刷新不再打断同一段 Activity**：当真实工具执行已经建立连续 Activity 后，完整替换的技能目录（`update`、没有 `incomplete`）会随该 Work 一起折叠，展开后仍按原位置显示完整目录行，不再单独成行或提前切断 Activity 计时。首次目录、发现不完整、混合集群以及重要通知仍保持独立可见。
 - **同轮投递证据更可靠、且不会误折叠**：只有真实插入、官方整批 claim 并在同一开放 Turn 实际落地的消息才获得 same-turn 投递事实；部分移除、越界片段、跨 Turn、取消或被拒绝的 claim 都不再留下可复用的投递证据。投递事实与“能否折叠”分离：真实投递但来源未获准的通知仍保持独立显示。
 - **Daemon Host 能发现常见工具**：由 systemd、launchd 或 detached 启动的 Host 在官方启动前会把已存在的常见用户工具目录补到继承的 `PATH` 后面（如 `~/.local/bin`、mise/asdf shims、Cargo/Go/Volta/Bun/pnpm 的 bin 目录以及平台包管理器目录），因此在继承的 `PATH` 未覆盖这些目录、且工具已正确安装时，Agent 的 Shell、后台 Job 和子进程可以避免反复 `mise exec` 或修改 `.zshrc`。原有 `PATH` 顺序保持不变，同名系统工具仍可能优先；在 Host 的实际环境中设置 `DSH_PI_TUI_HOST_PATH_MODE=inherit` 可完全关闭补充。该设置只影响冷启动，已有的 managed Host 升级后执行 `daemon restart` 生效。

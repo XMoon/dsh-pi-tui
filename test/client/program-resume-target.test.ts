@@ -5,6 +5,7 @@ import test, { type TestContext } from 'node:test'
 import { encodeProgramResumeHandoff } from '../../src/client/program-resume/handoff.ts'
 import {
   clientProgramResumeCapability,
+  clientProgramResumeWithdrawal,
   daemonProgramResumeCapability,
   directProgramResumeCapability,
   programResumeTarget,
@@ -208,7 +209,7 @@ test('an SSH marker in the inherited layer disables the capability', t => {
   }))), undefined)
 })
 
-test('the daemon handoff validates the official scope, owner and v1 facts', t => {
+test('the daemon handoff validates the official scope, owner, v1 facts and env preset', t => {
   const f = fixture(t)
   const facts = {
     version: 1 as const,
@@ -245,6 +246,27 @@ test('the daemon handoff validates the official scope, owner and v1 facts', t =>
   assert.equal(clientProgramResumeCapability({ ...base, handoff: '{}' }), undefined)
   assert.equal(clientProgramResumeCapability({ ...base, env: { TMUX: 'x' } }), undefined)
   assert.equal(clientProgramResumeCapability({ ...base, stdinIsTTY: false }), undefined)
+  const envPreset = { ...base, env: { DSH_PI_TUI_PRESET: ' standard ' } }
+  assert.equal(clientProgramResumeCapability(envPreset), undefined)
+  assert.equal(clientProgramResumeCapability({ ...envPreset, isReexec: true, parentPid: 9999 }), undefined)
+  const reexecEnvPreset = { ...envPreset, isReexec: true, parentPid: 9999 }
+  assert.deepEqual(clientProgramResumeWithdrawal(reexecEnvPreset), { token: TOKEN, ownerPid: 4242 })
+  assert.equal(clientProgramResumeWithdrawal(envPreset), undefined, 'fresh initial launch never withdraws another record')
+  assert.equal(clientProgramResumeWithdrawal({ ...reexecEnvPreset, handoff: '{}' }), undefined)
+  assert.equal(clientProgramResumeWithdrawal({ ...reexecEnvPreset, expectedProfile: 'other' }), undefined)
+  assert.equal(clientProgramResumeWithdrawal({
+    ...reexecEnvPreset,
+    env: { DSH_PI_TUI_PRESET: '   ' },
+  }), undefined)
+  assert.equal(clientProgramResumeWithdrawal({ ...base, isReexec: true, parentPid: 9999 }), undefined)
+  // The official launch fallback treats whitespace as absent on both paths.
+  assert.ok(clientProgramResumeCapability({ ...base, env: { DSH_PI_TUI_PRESET: '   ' } }))
+  assert.ok(clientProgramResumeCapability({
+    ...base,
+    isReexec: true,
+    parentPid: 9999,
+    env: { DSH_PI_TUI_PRESET: '   ' },
+  }))
   // The existing expected-instance reexec is the only case whose parent is the
   // waiting old Client, not the stable supervisor.
   assert.ok(clientProgramResumeCapability({ ...base, isReexec: true, parentPid: 9999 }))

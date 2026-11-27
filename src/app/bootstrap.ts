@@ -94,12 +94,13 @@ import { runDetached, runOwned } from '../runtime/process/tasks.ts'
 import { captureScheduleSessionSwitch, openScheduleWorkspace } from './schedule/runtime.ts'
 import { FileHistorySearchSource } from '../client/history/search.ts'
 import { createHerdrReporter } from '../client/herdr/reporter.ts'
-import { createProgramResumeReporter, type ProgramResumeReporter } from '../client/program-resume/reporter.ts'
+import { createProgramResumeReporter, createProgramResumeWithdrawalReporter, type ProgramResumeReporter } from '../client/program-resume/reporter.ts'
 import {
   directProgramResumeCapability,
   type ProgramResumeCapability,
   type ProgramResumeLaunchEnvironment,
   type ProgramResumeProfileContext,
+  type ProgramResumeWithdrawal,
 } from '../client/program-resume/target.ts'
 import { herdrSessionProjection, type HerdrResumeTarget } from '../client/herdr/session.ts'
 import { safeErrorMessage } from '../runtime/process/errors.ts'
@@ -949,6 +950,7 @@ export function applyRunnerWithRuntime(
      * background resource. The reporter observes the SAME committed ownership
      * source as the Herdr projection.
      */
+    const clientProgramResume = override === undefined ? undefined : startupSettlement?.programResume
     const programResumeCapability: ProgramResumeCapability | undefined = override === undefined
       ? admitProgramResume(process.env, () => {
           const profileContext = ctx.get('profileContext') as ProgramResumeProfileContext | undefined
@@ -967,17 +969,27 @@ export function applyRunnerWithRuntime(
             platform: process.platform,
           })
         })
-      : startupSettlement?.programResume?.capability
-    const programResumeReporter: ProgramResumeReporter | undefined = programResumeCapability === undefined
+      : clientProgramResume?.capability
+    const programResumeWithdrawal: ProgramResumeWithdrawal | undefined = override === undefined
       ? undefined
-      : createProgramResumeReporter({
+      : clientProgramResume?.withdrawal
+    const programResumeReporter: ProgramResumeReporter | undefined = programResumeCapability !== undefined
+      ? createProgramResumeReporter({
           capability: programResumeCapability,
           currentSessionId: () => ownership.currentSessionId(),
           canWrite: () => terminalOutput.applicationOwnsTerminal(),
           write: (frame, callback) => { notificationWriter.write(frame, callback) },
           diag,
         })
-    if (programResumeReporter !== undefined) startupSettlement?.programResume?.attach(programResumeReporter)
+      : programResumeWithdrawal === undefined
+        ? undefined
+        : createProgramResumeWithdrawalReporter({
+            withdrawal: programResumeWithdrawal,
+            canWrite: () => terminalOutput.applicationOwnsTerminal(),
+            write: (frame, callback) => { notificationWriter.write(frame, callback) },
+            diag,
+          })
+    if (programResumeReporter !== undefined) clientProgramResume?.attach(programResumeReporter)
     const surface = createSurfaceRuntime<SessionEvent>({
       tuiVersion: bundleVersion(),
       notificationPresentation,
