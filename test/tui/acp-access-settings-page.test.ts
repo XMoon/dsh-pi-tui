@@ -275,6 +275,11 @@ test('the enabled first focus is the runtime Disable; the disabled one is Enable
   assert.match(enabled.frame(), /Current Host\s*\n\s+Listener\s+Enabled/u)
   assert.match(enabled.frame(), /Access\s+Local Unix socket · Same OS user/u)
   assert.match(enabled.frame(), /Disable ACP…\s+Disconnects active ACP clients/u)
+  const enabledFrame = enabled.frame()
+  const command = enabledFrame.indexOf("dsh --profile pi-tui acp stdio")
+  const copy = enabledFrame.indexOf('Copy client command')
+  assert.ok(command >= 0 && copy > command,
+    'Copy is a Client-local row after the Client Setup command, not a runtime action')
   assert.equal(enabled.reads(), 1, 'one Host read on mount, never a poll')
   enabled.close()
   const disabled = await mount({ status: { state: 'disabled' } })

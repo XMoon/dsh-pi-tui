@@ -382,6 +382,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private paintedConfirmation: { readonly identity: string; readonly blocked: boolean } | undefined
   /** The unconfirmed-leave warning whose complete body really painted. */
   private paintedWarning: { readonly identity: string; readonly blocked: boolean } | undefined
+  /** The normal Detail body verbs whose COMPLETE label really painted in the
+   *  LAST frame. A relocated secondary verb is admitted only while it is on
+   *  screen (body) or in the physical bar; the controller's own live checks
+   *  still decide whether it can run. */
+  private paintedDetailActions = new Set<McpBarAction>()
   /** The form field/input rows really painted by the CURRENT grant. */
   private formFieldRowsVisible = 0
   private formInputPainted = false
@@ -726,6 +731,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       return
     }
     if (data === 'r' || data === 'R') {
+      // In the normal active Detail, Refresh is a relocated body verb just like
+      // the others: it is admitted only while its complete body label or the
+      // physical bar span is visible. List/search and the special recovery
+      // phases keep their existing Refresh route.
+      if (this.region === 'detail' && this.focused && !this.paintedActionAdmitted('refresh')) return
       this.detailRemovalTarget = undefined
       this.controller.refresh()
       return
@@ -744,16 +754,19 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       if (matchesKey(data, 'pageUp')) return this.scrollDetail(-this.detailViewport())
       if (matchesKey(data, 'pageDown')) return this.scrollDetail(this.detailViewport())
       if (data === 'p' || data === 'P') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canOperateSelected()) this.controller.probe()
+        if (this.paintedActionAdmitted('probe')
+          && this.visibleSelection(snapshot) !== undefined && this.controller.canOperateSelected()) this.controller.probe()
         return
       }
       if (data === 'x' || data === 'X') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canOperateSelected()
+        if (this.paintedActionAdmitted('restart')
+          && this.visibleSelection(snapshot) !== undefined && this.controller.canOperateSelected()
           && snapshot.restartOutcomeUnconfirmed !== true) this.controller.beginRestart()
         return
       }
       if (data === 'e' || data === 'E') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canBeginEdit()) {
+        if (this.paintedActionAdmitted('edit')
+          && this.visibleSelection(snapshot) !== undefined && this.controller.canBeginEdit()) {
           this.formOrigin = 'detail'
           this.controller.beginEdit()
           this.enterEditor()
@@ -761,18 +774,21 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         return
       }
       if (data === 't' || data === 'T') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) this.controller.beginToggle()
+        if (this.paintedActionAdmitted('toggle')
+          && this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) this.controller.beginToggle()
         return
       }
       if (data === 'd' || data === 'D') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) {
+        if (this.paintedActionAdmitted('delete')
+          && this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) {
           this.detailRemovalTarget = undefined
           this.controller.beginDelete()
         }
         return
       }
       if (data === 'u' || data === 'U') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) this.controller.beginReset()
+        if (this.paintedActionAdmitted('reset')
+          && this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) this.controller.beginReset()
         return
       }
       return
@@ -855,6 +871,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     // The controller's own typed receipt remains the only receipt authority;
     // the page contributes the return origin, never a synthetic Saved fact.
     if (!alreadyList) this.bumpRevision()
+  }
+
+  /** Whether the LAST painted frame admits this normal-Detail semantic action
+   *  through a complete body label or a real physical-bar span. */
+  private paintedActionAdmitted(action: McpBarAction): boolean {
+    return this.paintedDetailActions.has(action)
+      || this.lastBarSpans.some(span => span.action === action)
   }
 
   /** The non-Esc Action-Bar spans this page's own bar really painted. The
@@ -1643,6 +1666,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const targets: McpPaintedTarget[] = []
     const lines: string[] = []
     this.paintedConfirmation = undefined
+    this.paintedDetailActions = new Set()
 
     if (bodyRows === 0) {
       this.formFieldRowsVisible = 0
@@ -2218,7 +2242,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       for (const action of content.actions) {
         const row = action.line - this.detailOffset
         if (row < 0 || row >= viewport) continue
-        targets.push({ kind: 'action', action: action.action, row, startCol, endCol: startCol + Math.min(width, action.width) })
+        // A line that fit() had to clip is not a complete affordance: publish
+        // neither a pointer target nor keyboard admission for it. The complete
+        // verb remains reachable by the normal Detail scroll/short grant.
+        if (action.width > width) continue
+        this.paintedDetailActions.add(action.action)
+        targets.push({ kind: 'action', action: action.action, row, startCol, endCol: startCol + action.width })
       }
     }
     if (noticeRows === 1 && notice !== undefined) lines.push(fit(this.noticeLine(notice, width), width))

@@ -568,6 +568,36 @@ test('/logout deep link with a stored credential opens the asynchronous task che
   page.dispose()
 })
 
+test('Account normal browse follows content; the protected sign-out keeps its pinned row and full risk', async () => {
+  const normal = open()
+  await flush()
+  normal.page.render(100)
+  const normalLines = normal.page.render(100).map(stripTerminalSequences)
+  const firstAction = normalLines.findIndex(line => /Sign in|Refresh|← Settings/u.test(line))
+  assert.ok(firstAction > 0)
+  assert.notEqual(normalLines[firstAction - 1]!.trim(), '', 'normal browse places the actions directly after content')
+  const oldPinned = 26 - 1 - 3
+  assert.ok(firstAction < oldPinned, 'the old pinned bottom location is now blank')
+  const before = normal.state.calls.length
+  normal.page.onCellPress(2, oldPinned)
+  normal.page.onCellClick(2, oldPinned)
+  assert.equal(normal.state.calls.length, before, 'the old bottom row is not a business target')
+  normal.page.dispose()
+
+  const protectedState: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const protectedPage = new AccountWorkspacePage(makeSource(protectedState), () => {}, { view: 'signout' })
+  protectedPage.setBodyHeight(30)
+  await flush()
+  const protectedLines = protectedPage.render(200).map(stripTerminalSequences)
+  const signOutRow = protectedLines.findIndex(line => line.trim().replace(/^> /u, '') === 'Sign out')
+  assert.ok(signOutRow >= 0)
+  assert.equal(signOutRow, 30 - 1 - 3, 'the protected sign-out keeps its three pinned rows')
+  assert.equal(protectedLines[signOutRow - 1]!.trim(), '', 'the protected row remains separated from the facts')
+  const risk = protectedLines.find(line => line.includes('This removes the locally stored'))!
+  assert.match(risk, /not switched\./u, 'the protected risk keeps the full-width exact sentence')
+  protectedPage.dispose()
+})
+
 test('a failed SignOut ACK is reported without replay or automatic recovery', async () => {
   const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
   const source = makeSource(state)

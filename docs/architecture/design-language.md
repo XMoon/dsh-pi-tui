@@ -793,23 +793,24 @@ that when the dedicated facts row *is* granted, the bar does not repeat it
 
 ### 7.4 Body actions and proximity
 
-The Action Bar is still the ONE physical last row (§8 invariants); a body that
-also paints business actions keeps them near the facts they act on:
+The ONE physical Action Bar remains the last row. A surface's own contract
+decides whether its body scrolls with its business actions or reserves them;
+this section only fixes the common proximity vocabulary:
 
-- **When the complete real content plus its existing action row fits the current
-  grant**, the action row follows the PRIMARY facts directly. A Detail that
-  first paints status/value/current facts and then secondary provenance prose
-  places the actions between the two blocks, and pads only after all content. A
-  larger grant never stretches that gap, and a short screen never fabricates
-  blank space before its actions.
-- **When the complete content plus an action row does NOT fit**, the surface
-  keeps its bounded reserved action row at the bottom of the scroll region (the
-  existing short-grant fallback) and the body scrolls. The action row is never
-  budgeted away and is never moved outside the grant.
-- **Only painted actions are pointer targets.** A body verb may alias the ONE
-  physical-bar primary action; every other body verb exists once and gets no
-  second clickable bar copy. Disabled, hidden, clipped or stale cells stay inert
-  under the owning interaction contract.
+- **Normal browse that fits its grant.** The business actions follow the primary
+  facts they act on, before optional secondary provenance/explanation prose;
+  padding comes last. Blank rows are never fabricated before the actions, and a
+  larger grant does not stretch the gap.
+- **A surface that does not fit keeps its existing policy**: a bounded reserved
+  action row where that surface already has one, or one scrolling body where it
+  does not. The fit/overflow switch must not move actions outside the grant,
+  drop a whole safety affordance, or change a protected confirmation/pending
+  layout. Each owning surface document states which fallback it uses.
+- **Only complete painted actions are pointer targets.** A surface may alias
+  its ONE physical-bar primary verb in the body where its owner allows it; the
+  no-duplicate rule for other verbs is surface-specific (MCP's one-primary bar
+  is owned by surface-settings, not by this general rule). Disabled, hidden,
+  clipped or stale cells stay inert.
 
 ## 8. Responsive degradation ladder
 

@@ -489,6 +489,32 @@ test('Probe reaches the Host once and cancels a restart that y executes exactly 
   assert.deepEqual(h.settingsMutateCalls, [])
 })
 
+test('a short real MCP Detail admits a secondary verb only after its complete label paints', async () => {
+  const h = setup({ columns: 44, rows: 8 })
+  await openMcpPage(h)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  assert.match(h.view(), /Edit \[E\]/u, 'the config-owned primary owns the physical bar')
+  assert.doesNotMatch(h.view(), /Probe \[P\]/u, 'the secondary body verb starts below the short first screen')
+  const before = h.manager.probes.length
+  await press(h.vt, 'p')
+  await frames(h.vt)
+  await flushOwnedTurns()
+  assert.equal(h.manager.probes.length, before, 'an unpainted secondary key performs no probe')
+
+  for (let step = 0; step < 20 && !/Probe \[P\]/u.test(h.view()); step += 1) {
+    await press(h.vt, '\x1b[6~')
+    await frames(h.vt, 1)
+    await flushOwnedTurns()
+  }
+  assert.match(h.view(), /Probe \[P\]/u, 'the existing Detail scroll reveals the complete verb')
+  await press(h.vt, 'p')
+  await frames(h.vt)
+  await flushOwnedTurns()
+  assert.equal(h.manager.probes.length, before + 1, 'the painted verb reaches its existing Host probe sink')
+  assert.deepEqual(h.settingsMutateCalls, [])
+})
+
 test('closing and reopening the page leaves ONE active watch and starts a new one', async () => {
   const h = setup()
   await openMcpPage(h)
@@ -1023,18 +1049,26 @@ test('a replacement manager cannot reuse the painted admission of an identical t
   if (configA.kind !== 'ready' || configB.kind !== 'ready') assert.fail('both descriptors must be ready')
   assert.notEqual(configA.generation, configB.generation)
   assert.equal(configA.revision, configB.revision, 'same revision is deliberate')
-  // Paint the OLD admitted question frame again. This is a stale PAINT, not an
-  // unpainted grant transition: B's state exists while A's frame is on screen,
-  // exactly the reuse this case forbids.
-  page.render = () => oldFrame
-  h.app.requestRender()
-  await frames(h.vt, 2)
+  // The fresh normal Detail frame is current; the toggle verb may sit below
+  // the first viewport, so scroll to its complete label before admitting `t`.
+  for (let step = 0; step < 20 && !/Enable\/Disable \[T\]/u.test(h.view()); step += 1) {
+    await press(h.vt, '\x1b[6~')
+    await frames(h.vt, 1)
+  }
+  assert.match(h.view(), /Enable\/Disable \[T\]/u, 'the toggle body verb is painted before its key')
+  // Start B's own question. Then paint the OLD A question over it: a stale
+  // PAINT, not an unpainted grant transition, is exactly the reuse this case
+  // forbids.
   h.vt.sendInput('t')
   const questionB = controller.snapshot().configConfirm!
   assert.equal(questionB.kind, questionA.kind)
   assert.equal(questionB.name, questionA.name)
   assert.equal(questionB.capturedRevision, questionA.capturedRevision)
   assert.notEqual(questionB.question, questionA.question, 'a replacement question is a fresh instance')
+
+  page.render = () => oldFrame
+  h.app.requestRender()
+  await frames(h.vt, 2)
 
   // B has not painted. The old admitted A facts must authorise neither key nor
   // the Root's old Confirm cells, even though name/revision/consequence match.

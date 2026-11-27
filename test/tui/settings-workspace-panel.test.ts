@@ -2071,6 +2071,28 @@ test('a short Detail scroll offset never leaks back in after a fit grant', () =>
   assert.match(short, /Change…/u, 'the action row is visible with the facts')
 })
 
+test('abnormal Root freshness is primary before the action row; normal metadata stays secondary', () => {
+  const staleRow = { ...SNAPSHOT.rows[0]!, freshness: 'last-known' as const }
+  const stale = setup({
+    columns: 120,
+    rows: 20,
+    initial: { initialRowId: 'theme' },
+    snapshot: () => ({ ...SNAPSHOT, rows: [staleRow] }),
+  })
+  const staleLines = plain(stale, 120).split('\n')
+  const staleFreshness = staleLines.findIndex(line => line.includes('Freshness'))
+  const staleAction = staleLines.findIndex(line => line.includes('Change…'))
+  assert.ok(staleFreshness >= 0 && staleAction > staleFreshness,
+    `the stale reason must precede the action:\n${staleLines.join('\n')}`)
+
+  const ready = setup({ columns: 120, rows: 20, initial: { initialRowId: 'theme' } })
+  const readyLines = plain(ready, 120).split('\n')
+  const readyFreshness = readyLines.findIndex(line => line.includes('Freshness'))
+  const readyAction = readyLines.findIndex(line => line.includes('Change…'))
+  assert.ok(readyAction >= 0 && readyFreshness > readyAction,
+    `normal freshness stays secondary after the action:\n${readyLines.join('\n')}`)
+})
+
 test('one- and two-row frames paint only the truthful bar and publish no body target', () => {
   for (const rows of [1, 2] as const) {
     const h = setup({ columns: 100, rows })

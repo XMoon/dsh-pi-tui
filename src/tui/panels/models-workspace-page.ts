@@ -373,6 +373,11 @@ export class ModelsWorkspacePage implements Component {
   private requestRender: () => void
   private readonly onOpenAccount: () => void
   private view: ModelsView = { kind: 'list' }
+  /** SUX-09: ordinary browse reading width and proximity apply only to the
+   *  normal home/provider/reference/records surfaces. Protected confirmations,
+   *  active authorization and the add/review flows keep their original pinned
+   *  placement and full-width exact facts. */
+  private ordinaryReading = true
   private providerRows: readonly ModelsProviderRow[] = []
   private account: ModelsAccountSummary = { available: false }
   private readonly credentialStates = new Map<string, ModelsCredentialState>()
@@ -2065,12 +2070,14 @@ export class ModelsWorkspacePage implements Component {
         this.paintedRowIds.add(target.id)
       }
     }
+    const pinned = !this.ordinaryReading
+    if (pinned) while (lines.length < height - 1 - actionLines.length) lines.push(fit('', width))
     lines.push(...actionLines.map(line => fit(line, width)))
     for (const [index, action] of projection.actions.entries()) {
       targets.push({
         kind: 'action',
         id: action.id,
-        row: lines.length - actionLines.length + index,
+        row: pinned ? height - 1 - actionLines.length + index : lines.length - actionLines.length + index,
         startCol: 0,
         endCol: width,
       })
@@ -2136,7 +2143,18 @@ export class ModelsWorkspacePage implements Component {
     return id === undefined || target === undefined ? undefined : target
   }
 
+  private protectedActionLayout(): boolean {
+    const activeAuth = this.view.kind === 'provider'
+      && (this.auth?.phase === 'starting' || this.auth?.phase === 'running')
+    return activeAuth
+      || this.view.kind === 'add-catalog'
+      || this.view.kind === 'add-provider'
+      || this.view.kind === 'review'
+      || this.view.kind === 'logout'
+  }
+
   private project(width: number): Projection {
+    this.ordinaryReading = !this.protectedActionLayout()
     this.rowIds.clear()
     this.rowTargets.clear()
     this.rowOrder.length = 0
@@ -2424,9 +2442,9 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private fact(label: string, value: string, width: number): string[] {
-    // Ordinary fields read in at most 64 cells; long identities still wrap
-    // COMPLETELY inside that width (no truncation).
-    const bodyWidth = Math.max(1, Math.min(width, 64) - LABEL_WIDTH)
+    // Ordinary browse fields read in at most 64 cells; protected states keep
+    // their original full-width exact identities/errors.
+    const bodyWidth = Math.max(1, (this.ordinaryReading ? Math.min(width, 64) : width) - LABEL_WIDTH)
     const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(value), bodyWidth)
     const parts = wrapped.length === 0 ? [''] : wrapped
     return [
@@ -2438,7 +2456,8 @@ export class ModelsWorkspacePage implements Component {
   /** Ordinary explanatory prose wraps at no more than 72 cells; long public
    *  identities/URLs and authoritative error text keep their existing grant. */
   private prose(value: string, width: number, ink: (text: string) => string): string[] {
-    return wrapTextWithAnsi(sanitizedPhysicalLine(value), Math.max(1, Math.min(width, 72))).map(line => ink(line))
+    const room = this.ordinaryReading ? Math.min(width, 72) : width
+    return wrapTextWithAnsi(sanitizedPhysicalLine(value), Math.max(1, room)).map(line => ink(line))
   }
 
   private projectReference(width: number): Projection {

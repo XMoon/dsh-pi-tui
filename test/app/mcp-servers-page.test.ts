@@ -1132,6 +1132,43 @@ test('a config write in flight removes every detail CRUD affordance from the bar
   assert.match(frame.join('\n'), /Restart \[X\]/u, 'Restart stays reachable in the body')
 })
 
+test('a relocated MCP verb is admitted only while its complete body label is painted', () => {
+  const { page, controller } = makePage(snapshot({
+    rows: [{
+      name: 'alpha',
+      configured: true,
+      status: {
+        state: 'failed',
+        reason: 'unclosed-generation',
+        lastError: 'The Host could not close the previous transport generation; the complete diagnostic occupies the first short screen so the relocated actions stay below the fold.',
+      },
+      source: 'Configured',
+    }],
+    selectedName: 'alpha',
+    selectedConfig: { ...CONFIG_FACET, canDelete: true },
+  }))
+  render(page, 44, 8)
+  page.handleInput('\r') // Detail
+  const short = render(page, 44, 8).join('\n')
+  assert.match(short, /Edit \[E\] · Back \[Esc\]/u, 'the physical bar keeps the one primary and Back')
+  assert.doesNotMatch(short, /Probe \[P\]|Restart \[X\]|Delete \[D\]/u,
+    `the secondary body verbs are below the first short Detail screen:\n${short}`)
+  page.handleInput('p')
+  page.handleInput('x')
+  page.handleInput('d')
+  page.handleInput('r')
+  assert.deepEqual(controller.calls, [],
+    'a secondary key that is not painted must not reach a Host intent or refresh')
+
+  // Scroll to the complete body verb; the SAME key now reaches its existing sink.
+  for (let step = 0; step < 20 && !/Probe \[P\]/u.test(render(page, 44, 8).join('\n')); step += 1) {
+    page.handleInput('\x1b[6~')
+  }
+  assert.match(render(page, 44, 8).join('\n'), /Probe \[P\]/u)
+  page.handleInput('p')
+  assert.deepEqual(controller.calls, ['probe'])
+})
+
 test('an explicit empty Enter commits an empty literal, while Esc keeps the value', () => {
   const { page, controller } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,

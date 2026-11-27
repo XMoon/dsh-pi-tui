@@ -98,6 +98,10 @@ interface PageLine {
   /** Optional explanation: dropped only when a short grant cannot hold the
    *  essential facts. Never a fact, action or recovery path. */
   readonly detail?: boolean
+  /** A weak section heading attached to its populated group. It is optional
+   *  presentation: a short grant omits it entirely rather than deferring a
+   *  standalone label to the prose tail. */
+  readonly heading?: boolean
 }
 
 type PaintedTarget =
@@ -666,6 +670,9 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       if (visibleWidth(text) > width) return
       push(text, { action, span: { startCol: 2, endCol: 2 + visibleWidth(verb) } })
     }
+    const pushHeading = (text: string): void => {
+      push(text, { tone: 'dim', detail: true, heading: true })
+    }
     const capture = (kind: CuaActionCapture['kind'], extra: Partial<CuaActionCapture> = {}): CuaActionCapture =>
       ({ epoch: snapshot.epoch, kind, ...extra })
     const admitted = (candidate: CuaActionCapture): boolean => cuaActionAdmitted(snapshot, candidate).ok
@@ -674,7 +681,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     const providerReady = bundle.phase === 'ready' && bundle.enabled && bundle.providerReady
 
     // 1. Availability
-    push('Availability', { tone: 'dim', detail: true })
+    pushHeading('Availability')
     switch (bundle.phase) {
       case 'idle':
         pushFact('Bundle', 'Not read', 'dim')
@@ -724,11 +731,11 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       if (!busy) pushAction('Open Settings → Plugins', { id: 'plugins', kind: 'plugins' })
     }
 
-    // 2. Permissions. Both groups are ALWAYS part of the one model, ordered
-    push('Permissions', { tone: 'dim', detail: true })
-    // missing-first so the first missing permission and its action own the
-    // first screen; an allowed group stays reachable and keeps its explicit
-    // actions. A short grant only reorders prose in the tail.
+    // 2. Permissions. The heading belongs to the group only when the real
+    // permission facts exist; an unsupported/non-ready Host gets no empty
+    // heading. Missing-first keeps the first missing permission and its action
+    // on the first screen.
+    const permissionsStart = lines.length
     if (providerReady && system?.platform === 'darwin') {
       const groups = ([
         { permission: 'accessibility' as const, allowed: system.accessibility },
@@ -736,35 +743,39 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       ]).sort((left, right) => Number(left.allowed) - Number(right.allowed))
       for (const group of groups) {
         pushFact(PERMISSION_LABEL[group.permission], permissionText(group.allowed), group.allowed ? 'fact' : 'warning')
+        if (!busy) {
+          const request = capture('request', { permission: group.permission })
+          if (admitted(request)) {
+            pushAction(group.allowed ? 'Request again' : 'Request permission', {
+              id: `request:${group.permission}`,
+              kind: 'request',
+              capture: request,
+            })
+          }
+          const open = capture('open', { permission: group.permission })
+          if (admitted(open)) {
+            pushAction('Open settings', {
+              id: `open:${group.permission}`,
+              kind: 'open',
+              capture: open,
+            })
+          }
+        }
+        // The optional explanation follows the fact and its actions.
         pushWrapped(PERMISSION_EXPLANATION[group.permission], { detail: true })
-        if (busy) continue
-        const request = capture('request', { permission: group.permission })
-        if (admitted(request)) {
-          pushAction(group.allowed ? 'Request again' : 'Request permission', {
-            id: `request:${group.permission}`,
-            kind: 'request',
-            capture: request,
-          })
-        }
-        const open = capture('open', { permission: group.permission })
-        if (admitted(open)) {
-          pushAction('Open settings', {
-            id: `open:${group.permission}`,
-            kind: 'open',
-            capture: open,
-          })
-        }
       }
       if (!system.accessibility || !system.screenRecording) {
         pushWrapped('Complete the macOS prompt on the HOST Mac, then Refresh and read the fresh observation.', { detail: true })
       }
     }
+    if (lines.length > permissionsStart) lines.splice(permissionsStart, 0, {
+      text: 'Permissions', tone: 'dim', detail: true, heading: true,
+    })
 
-    // 3. Authorization. Every project-wide preset/PTC fact and its explicit
-    push('Authorization', { tone: 'dim', detail: true })
-    // action belongs to the same model on every grant; the short grant reaches
-    // them through the same scrollport (never a second short variant). An
-    // explicit unsupported Host offers no CUA write at all.
+    // 3. Authorization. The heading is present only when this Host really
+    // exposes the preset/PTC facts; a short grant omits the optional heading
+    // instead of deferring it to the prose tail.
+    const authorizationStart = lines.length
     if (providerReady && system?.platform !== 'win32') {
       if (snapshot.preset.phase === 'ready') {
         const value = snapshot.preset.value ?? 'unknown'
@@ -798,9 +809,12 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
         pushFact('PTC execution', snapshot.ptc.reason ?? readPhaseText(snapshot.ptc), 'warning')
       }
     }
+    if (lines.length > authorizationStart) lines.splice(authorizationStart, 0, {
+      text: 'Authorization', tone: 'dim', detail: true, heading: true,
+    })
 
     // 4. Application access
-    push('Application access', { tone: 'dim', detail: true })
+    pushHeading('Application access')
     const applications = snapshot.applications
     if (applications.phase === 'ready') {
       const value = applications.value
@@ -845,7 +859,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     // the first recovery action can never be pushed off-screen by long prose,
     // and the prose stays in the same scrollport below them.
     const essential = lines.filter(line => line.detail !== true)
-    const prose = lines.filter(line => line.detail === true)
+    const prose = lines.filter(line => line.detail === true && line.heading !== true)
     return [...essential, ...prose]
   }
 

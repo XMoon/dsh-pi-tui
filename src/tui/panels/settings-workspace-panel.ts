@@ -4043,11 +4043,23 @@ export class SettingsWorkspacePanel implements Component {
       }
       if (edit.options.length === 0) field('Choice', 'No candidate is available for this setting right now.')
     }
+    // Abnormal currentness and its necessary reason are PRIMARY facts: a fit
+    // grant must not put a read-only Open/Details action before the fact that
+    // explains why this row is stale/unavailable. Normal scope/description
+    // stay secondary and follow the actions.
+    const abnormalFreshness = row.freshness === 'last-known'
+      || row.freshness === 'unavailable'
+      || row.freshness === 'read-error'
+    if (abnormalFreshness) {
+      field('Freshness', freshnessText(row, this.snapshot.configReadiness))
+      if (row.freshness === 'read-error' && this.snapshot.readIssue !== undefined) {
+        field('Issue', this.snapshot.readIssue, color.textDim, false, bodyWidth)
+      }
+    }
     const primaryCount = lines.length
     field('Scope', row.scope)
-    field('Freshness', freshnessText(row, this.snapshot.configReadiness))
+    if (!abnormalFreshness) field('Freshness', freshnessText(row, this.snapshot.configReadiness))
     field('Description', row.description, color.textDim, false, proseWidth)
-    if (row.freshness === 'read-error' && this.snapshot.readIssue !== undefined) field('Issue', this.snapshot.readIssue, color.textDim, false, proseWidth)
     // M6 UX PR2: the ONE transient service-install follow-up, painted inside
     // the SAME Detail lease. The explanation and the truthfulness line are the
     // frozen copy; the actable candidate rows exist ONLY while the command

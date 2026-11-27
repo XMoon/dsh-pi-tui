@@ -1776,9 +1776,12 @@ The physical Action Bar carries ONE primary business verb and `Back [Esc]`:
 operable, else `Refresh [R]`. Every other admitted business verb is a complete
 label in the scrollable Detail body (`Probe`, `Restart`, `Edit`,
 `Enable/Disable`, `Delete`, `Reset`, `Refresh`), uses the SAME action sink
-exactly once, and only a really painted span is a pointer target. Whole segments
-are dropped, never cut, and long diagnostics remain wrapped and reachable
-through the physical scroll.
+exactly once, and only a really painted span is a pointer target. Shortcut keys
+for these relocated verbs use that same LAST-frame body/bar admission (a
+clipped or scrolled-out verb is inert until the existing Detail scroll reveals
+its complete label); the controller's live eligibility checks still decide
+whether it runs. Whole segments are dropped, never cut, and long diagnostics
+remain wrapped and reachable through the physical scroll.
 
 Probe and Restart require a current manager observation, a live (not retained)
 listed entry and no in-flight operation; they do NOT depend on the configuration
@@ -1966,9 +1969,12 @@ The mounted instance has exactly TWO projections:
   access → Help/Recovery) paints inside the real Detail pane, the parent
   Categories/Rows stay live, and the page's own semantic line becomes the ONE
   physical last-row Action Bar. The normal and the short grant come from that
-  same model; a short grant moves the optional explanatory prose after the
-  facts/actions inside the same scrollport instead of keeping a second copy of
-  any fact or action. At the real `44×8` grant (4 body rows + the bar) the
+  same model; a short grant drops the optional weak section headings and moves
+  the optional explanatory prose after the facts/actions inside the same
+  scrollport instead of keeping a second copy of any fact or action. Each heading
+  is attached to a populated group (no empty Permissions/Authorization heading),
+  and a normal permission fact is followed by its Request/Open actions before
+  its optional explanation. At the real `44×8` grant (4 body rows + the bar) the
   bundle truth, the Host truth, the first missing permission and its request
   action are all visible. Both permission groups are ordered missing-first
   (Accessibility before Screen Recording when both are missing); an already

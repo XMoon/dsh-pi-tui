@@ -737,9 +737,16 @@ export class AccountWorkspacePage implements Component {
       const id = this.rowIds.get(lineIndex)
       if (id !== undefined) targets.push({ id, row: lines.length - 1, startCol: 0, endCol: width })
     }
+    const pinned = !this.ordinaryReading
+    if (pinned) while (lines.length < height - 1 - actionLines.length) lines.push(fit('', width))
     lines.push(...actionLines.map(line => fit(line, width)))
     for (const [index, action] of projection.actions.entries()) {
-      targets.push({ id: action.id, row: lines.length - actionLines.length + index, startCol: 0, endCol: width })
+      targets.push({
+        id: action.id,
+        row: pinned ? height - 1 - actionLines.length + index : lines.length - actionLines.length + index,
+        startCol: 0,
+        endCol: width,
+      })
       if (action.enabled) this.paintedActionIds.add(action.id)
     }
     while (lines.length < height - 1) lines.push(fit('', width))
@@ -775,6 +782,11 @@ export class AccountWorkspacePage implements Component {
     return rendered
   }
 
+  /** SUX-09: only the normal browse keeps the new proximity/reading widths;
+   *  sign-out confirmation, active authorization and pending states retain
+   *  their original pinned actions and full-width risk/identity copy. */
+  private ordinaryReading = true
+
   private rowIds = new Map<number, string>()
   private readonly rowOrder: string[] = []
   private paintedRowOrder: readonly string[] = []
@@ -788,6 +800,9 @@ export class AccountWorkspacePage implements Component {
   }
 
   private project(width: number): Projection {
+    const activeAttempt = this.view?.attempt !== null && this.view?.attempt !== undefined
+      && ACTIVE_PHASES.has(this.view.attempt.phase)
+    this.ordinaryReading = !(this.signOutConfirm || activeAttempt || this.busy !== undefined)
     this.rowIds.clear()
     this.rowOrder.length = 0
     this.copyValue = undefined
@@ -918,9 +933,9 @@ export class AccountWorkspacePage implements Component {
   }
 
   private fact(label: string, value: string, width: number): string[] {
-    // Ordinary fields read in at most 64 cells; long identities still wrap
-    // COMPLETELY inside that width (no truncation).
-    const bodyWidth = Math.max(1, Math.min(width, 64) - LABEL_WIDTH)
+    // Ordinary browse fields read in at most 64 cells; protected states keep
+    // their original full-width exact identities/errors.
+    const bodyWidth = Math.max(1, (this.ordinaryReading ? Math.min(width, 64) : width) - LABEL_WIDTH)
     const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(value), bodyWidth)
     const parts = wrapped.length === 0 ? [''] : wrapped
     return [
@@ -932,7 +947,8 @@ export class AccountWorkspacePage implements Component {
   /** Ordinary explanatory prose wraps at no more than 72 cells; the exact
    *  authorization URL/template and necessary risk/error copy keep their grant. */
   private prose(value: string, width: number, ink: (text: string) => string): string[] {
-    return wrapTextWithAnsi(sanitizedPhysicalLine(value), Math.max(1, Math.min(width, 72))).map(line => ink(line))
+    const room = this.ordinaryReading ? Math.min(width, 72) : width
+    return wrapTextWithAnsi(sanitizedPhysicalLine(value), Math.max(1, room)).map(line => ink(line))
   }
 
   private wrapText(value: string, width: number): string[] {
