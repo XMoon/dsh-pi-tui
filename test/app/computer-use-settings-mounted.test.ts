@@ -319,6 +319,13 @@ function sgrMouse(h: Harness, kind: 'press' | 'release', col: number, row: numbe
   h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}${kind === 'press' ? 'M' : 'm'}`)
 }
 
+async function sgrWheel(h: Harness, direction: 'up' | 'down', col: number, row: number): Promise<void> {
+  h.vt.sendInput(`\x1b[<${direction === 'up' ? 64 : 65};${col + 1};${row + 1}M`)
+  await frames(h.vt)
+  await flushOwnedTurns()
+  await frames(h.vt)
+}
+
 async function sgrClick(h: Harness, label: string, wordOffset = 0): Promise<void> {
   const lines = h.vt.getViewport().map(stripTerminalSequences)
   const row = lines.findIndex(line => line.includes(label))
@@ -411,6 +418,48 @@ test('the real 44x8 frame keeps the first missing permission and its exact Reque
   await press(h.vt, '\x1b[H')
   await frames(h.vt, 2)
   assert.match(h.view(), /Screen Recording: Not allowed/u)
+})
+
+test('a 44x8 pointer-only user walks Settings → Tools → Computer Use and requests the missing permission', async () => {
+  const h = setup({ columns: 44, rows: 8 })
+  h.invoke('settings')
+  await frames(h.vt)
+  await flushOwnedTurns()
+  // The narrow first frame is the About CONTENT: its painted Esc affordance is
+  // the pointer route back to the rail (no keyboard step).
+  await sgrClick(h, 'Back [Esc]')
+  await frames(h.vt, 2)
+  // The rail is a real wheel-scrollable list: scroll it by pointer until Tools
+  // is painted, then select it with a click (focus stays on the rail).
+  for (let step = 0; step < 20 && !/\bTools\b/u.test(h.view()); step += 1) {
+    await sgrWheel(h, 'down', 1, 3)
+  }
+  assert.match(h.view(), /\bTools\b/u, `the rail never scrolled to Tools:\n${h.view()}`)
+  await sgrClick(h, 'Tools')
+  await frames(h.vt, 2)
+  // The painted rail forward affordance is the pointer analogue of Enter/Right.
+  await sgrClick(h, 'Right open')
+  await frames(h.vt, 2)
+  // The Rows list is wheel-scrollable too; the row click only selects.
+  for (let step = 0; step < 20 && !/\S\s+Computer Use\b/u.test(h.view()); step += 1) {
+    await sgrWheel(h, 'down', 1, 3)
+  }
+  assert.match(h.view(), /\S\s+Computer Use\b/u, `the Rows never scrolled to Computer Use:\n${h.view()}`)
+  await sgrClick(h, 'Computer Use')
+  await frames(h.vt, 2)
+  assert.equal(h.page(), undefined, 'the row click only selects')
+  await sgrClick(h, 'Right open')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  await frames(h.vt, 2)
+  assert.notEqual(h.page(), undefined, 'the painted Rows forward hint mounts the page')
+  await waitForText(h, 'Screen Recording: Not allowed')
+  await sgrClick(h, 'Request permission')
+  await waitForText(h, 'Action: Request sent')
+  assert.deepEqual(h.requests, ['screenRecording:en-US'])
+  await sgrClick(h, 'Back [Esc]')
+  await frames(h.vt, 2)
+  assert.equal(h.page(), undefined, 'the painted Back retires the page')
 })
 
 test('the Applications workbench completes a real pointer select → open → confirm → readback journey', async () => {

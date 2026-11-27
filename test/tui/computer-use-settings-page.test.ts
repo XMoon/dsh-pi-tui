@@ -273,6 +273,40 @@ test('the 44x8 scrollport keeps the real responsible application reachable in fu
     .join('')
   assert.match(whole, /Responsible app: DSH Computer Use\.app/u)
   assert.match(whole, /\/helper\/DSH Computer Use\.app/u)
+  // RFL-001: a short grant never deletes a fact or an action. Both permission
+  // groups and the whole Authorization/Application-access model stay inside the
+  // SAME scrollport, reachable by a plain scroll.
+  assert.match(whole, /Accessibility: Allowed/u)
+  assert.ok((whole.match(/Request again/gu) ?? []).length >= 1, 'the allowed permission keeps its explicit action')
+  assert.ok((whole.match(/Request permission/gu) ?? []).length >= 1, 'the missing permission keeps its action')
+  assert.match(whole, /New Sessions: default/u)
+  assert.match(whole, /Set PTC default/u)
+  assert.match(whole, /PTC execution: Non-persistent/u)
+  assert.match(whole, /Persistent PTC mode…/u)
+  assert.match(whole, /Manage applications/u)
+  mounted.page.dispose()
+})
+
+test('a 44x8 frame with BOTH permissions missing still reaches both permission actions', async () => {
+  const mounted = mount()
+  const both = await settle(mounted, 'Bundle: Enabled')
+  assert.ok(both.length > 0)
+  mounted.page.setMaxRows(5)
+  const first = mounted.render(44)
+  assert.match(first.join('\n'), /Accessibility: Not allowed/u, 'the first missing permission owns the first screen')
+  assert.match(first.join('\n'), /Request permission/u)
+  assert.doesNotMatch(first.join('\n'), /Screen Recording: Not allowed/u, 'the second group stays below the first screen')
+  const scrollport: string[][] = [first]
+  for (let step = 0; step < 20; step += 1) {
+    mounted.page.handleInput('\x1b[6~')
+    scrollport.push(mounted.render(44))
+  }
+  const whole = scrollport
+    .map(frame => frame.slice(0, -1).map(line => line.trimEnd()).join(''))
+    .join('')
+  assert.match(whole, /Screen Recording: Not allowed/u, 'the second missing permission is reachable, never deleted')
+  assert.equal((whole.match(/Request permission/gu) ?? []).length, 2, 'BOTH missing permissions keep their request action')
+  assert.equal((whole.match(/Open settings/gu) ?? []).length, 2, 'both groups keep their Open settings action')
   mounted.page.dispose()
 })
 
@@ -478,10 +512,65 @@ test('an accepted action owns the page: Waiting bar, no Esc target, no second ac
   assert.equal(mounted.page.paintedEscapeSpan(), undefined, 'Waiting is not a Cancel affordance')
   mounted.page.handleInput('\x1b')
   mounted.page.handleInput('\r')
+  assert.equal(mounted.page.leaveEmbeddedWorkbench(), false, 'an accepted action refuses the local mode switch')
+  assert.equal(mounted.page.embeddedWorkbenchActive(), true)
   assert.equal(mounted.page.requestParentLeave(undefined as never, () => {}), 'refuse')
   release()
   await new Promise(resolve => setTimeout(resolve, 10))
   assert.equal(mounted.controller.getSnapshot().busy, false)
+  mounted.page.dispose()
+})
+
+test('both allowed permissions keep both groups and their explicit actions in one model', async () => {
+  const mounted = mount({
+    cua: { readSystemStatus: async () => ({ ...STATUS, accessibility: true, screenRecording: true }) },
+  })
+  await settle(mounted, 'Bundle: Enabled')
+  const text = mounted.view(52).replace(/\n/gu, ' ')
+  assert.match(text, /Accessibility: Allowed/u)
+  assert.match(text, /Screen Recording: Allowed/u)
+  assert.equal((text.match(/Request again/gu) ?? []).length, 2, 'each allowed group keeps its explicit request-again action')
+  assert.equal((text.match(/Open settings/gu) ?? []).length, 2, 'each group keeps its explicit Open settings action')
+  assert.match(text, /New Sessions: default/u)
+  assert.match(text, /Persistent PTC mode…/u)
+  mounted.page.dispose()
+})
+
+test('a workbench notice row never keeps the hidden action it overwrote', async () => {
+  const mounted = mount()
+  await settle(mounted, 'Bundle: Enabled')
+  selectOverviewAction(mounted, 'Manage applications')
+  mounted.page.handleInput('\r')
+  // Find the Detail action's line at a generous grant, then shrink the grant so
+  // that action occupies the LAST body row (the notice will overwrite it).
+  grantWorkbench(mounted, { width: 96, rows: 20, barWidth: 120, allowDual: false })
+  mounted.render(96)
+  mounted.page.activateBarSpan('bar:open')
+  const generous = mounted.render(96)
+  const actionRow = generous.findIndex(line => line.includes('Revoke access…'))
+  assert.ok(actionRow >= 0)
+  grantWorkbench(mounted, { width: 96, rows: actionRow + 1, barWidth: 120, allowDual: false })
+  mounted.render(96)
+  const compact = mounted.render(96)
+  assert.equal(compact.findIndex(line => line.includes('Revoke access…')), actionRow,
+    'the action is on the grant last body row')
+  // Arm it, then let a newer observation retire the confirmation: the page
+  // paints a notice over that same row.
+  const start = compact[actionRow]!.indexOf('Revoke access…')
+  const press = { type: 'press', x: start + 1, y: actionRow, width: 96, height: actionRow + 1 } as TuiMouseEvent
+  mounted.page.handleMouse(press)
+  mounted.page.handleMouse({ ...press, type: 'click' } as TuiMouseEvent)
+  assert.match(mounted.render(96).join('\n'), /Revoke this application decision\?/u)
+  await mounted.controller.refresh()
+  const notice = mounted.render(96)
+  assert.match(notice[actionRow] ?? '', /Notice:/u, 'the notice overwrote the action row')
+  mounted.page.handleMouse(press)
+  mounted.page.handleMouse({ ...press, type: 'click' } as TuiMouseEvent)
+  assert.doesNotMatch(mounted.render(96).join('\n'), /Revoke this application decision\?/u,
+    'a notice cell must never activate the action it replaced')
+  mounted.page.handleInput('y')
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.deepEqual(mounted.calls.filter(call => call.startsWith('revoke:')), [])
   mounted.page.dispose()
 })
 

@@ -387,6 +387,110 @@ test('a preset authority without the guarded seam refuses instead of falling bac
   await page.dispose()
 })
 
+test('a silent Direct provider replacement during a read is never adopted as the new basis', async () => {
+  let basis = 1
+  let releaseRead!: () => void
+  const held = new Promise<void>((resolve) => { releaseRead = resolve })
+  const fake = cuaPort({
+    observation: { readSnapshot: () => basis, subscribe: () => () => {} },
+    // The applications read belongs to the OLD provider and is held while the
+    // provider is silently replaced (Direct's subscription is inert).
+    readApplications: async () => {
+      const forBasis = basis
+      if (forBasis === 1) await held
+      return forBasis === 1
+        ? APPLICATIONS
+        : { allowedApps: [{ id: 'app-9', name: 'NewlyAllowed' }], blockedApps: [], persistentAvailable: true }
+    },
+  })
+  const page = new CuaAccessSettingsController({
+    cuaAccess: fake.port,
+    pluginManager: pluginManager({ enabled: true }),
+    presetDefault: presetDefault().config,
+    locale: () => 'zh',
+    diag: quietDiag,
+  })
+  const published: string[] = []
+  const phases: string[] = []
+  page.subscribe(() => {
+    phases.push(page.getSnapshot().applications.phase)
+    const value = page.getSnapshot().applications.value
+    if (value !== undefined) published.push(...value.allowedApps.map(application => application.id))
+  })
+  const refresh = page.refresh()
+  await new Promise(resolve => setTimeout(resolve, 5))
+  basis = 2
+  releaseRead()
+  await refresh
+  for (let attempt = 0; attempt < 100 && page.getSnapshot().applications.phase !== 'ready'; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 2))
+  }
+  assert.ok(!published.includes('app-1'), 'the crossed read\'s old-provider list may never be published')
+  assert.ok(phases.includes('unknown'),
+    'the crossed read publishes the unknown state before the settled re-read')
+  assert.deepEqual(
+    page.getSnapshot().applications.value?.allowedApps.map(application => application.id),
+    ['app-9'],
+    'the settled NEW generation is read once more and adopted',
+  )
+  await page.dispose()
+})
+
+test('a silent Direct replacement before an action dispatches nothing and states it', async () => {
+  let basis = 1
+  const { port, calls } = cuaPort({
+    observation: { readSnapshot: () => basis, subscribe: () => () => {} },
+  })
+  const page = new CuaAccessSettingsController({
+    cuaAccess: port,
+    pluginManager: pluginManager({ enabled: true }),
+    presetDefault: presetDefault().config,
+    locale: () => 'zh',
+    diag: quietDiag,
+  })
+  await page.refresh()
+  const capture = { epoch: page.getSnapshot().epoch, kind: 'request' as const, permission: 'accessibility' as const }
+  // The provider is replaced with NO epoch/subscription event (Direct).
+  basis = 2
+  await page.requestPermission(capture)
+  assert.deepEqual(calls.filter(call => call.startsWith('request:')), [],
+    'the old-provider capture dispatches zero writes on the replaced provider')
+  assert.equal(page.getSnapshot().action?.state, 'unknown')
+  assert.match(page.getSnapshot().action?.text ?? '', /NOT dispatched/u)
+  await page.dispose()
+})
+
+test('a write rejection from a silently replaced Direct provider is unknown, not failed', async () => {
+  let basis = 1
+  let rejectRun!: (error: Error) => void
+  const held = new Promise<void>((_, reject) => { rejectRun = reject })
+  const { port, calls } = cuaPort({
+    observation: { readSnapshot: () => basis, subscribe: () => () => {} },
+    revoke: async (id) => { calls.push(`revoke:${id}`); await held },
+  })
+  const page = new CuaAccessSettingsController({
+    cuaAccess: port,
+    pluginManager: pluginManager({ enabled: true }),
+    presetDefault: presetDefault().config,
+    locale: () => 'zh',
+    diag: quietDiag,
+  })
+  await page.refresh()
+  const write = page.revoke({ epoch: page.getSnapshot().epoch, kind: 'revoke', applicationId: 'app-1', applicationGroup: 'allowed' })
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.deepEqual(calls.filter(call => call.startsWith('revoke:')), ['revoke:app-1'])
+  // The OLD provider accepts the write, is replaced, then rejects.
+  basis = 2
+  rejectRun(new Error('old provider unavailable after request'))
+  await write
+  const receipt = page.getSnapshot().action
+  assert.equal(receipt?.state, 'unknown')
+  assert.match(receipt?.text ?? '', /unconfirmed/u)
+  assert.doesNotMatch(receipt?.text ?? '', /old provider unavailable after request/u,
+    'the replaced provider\'s error text is never attributed to the current provider')
+  await page.dispose()
+})
+
 test('a refresh publishes a read-only `reading` state without claiming an accepted action', async () => {
   let release: ((value: CuaSystemStatus) => void) | undefined
   const pending = new Promise<CuaSystemStatus>((resolve) => { release = resolve })

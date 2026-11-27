@@ -385,9 +385,6 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       case 'bar:confirm':
         this.confirmCurrent()
         return
-      case 'bar:cancel':
-        this.cancelConfirmation()
-        return
       default:
         return
     }
@@ -467,6 +464,12 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       this.confirmation?.offset ?? 0,
       this.notice?.text ?? 'no-notice',
     ].join('|')
+  }
+
+  /** Revoke one in-flight body press when another owner claims the gesture
+   *  (the Root calls this on a focus/seat handoff or an active wheel). */
+  cancelPointer(): void {
+    this.pressed = undefined
   }
 
   invalidate(): void {
@@ -699,14 +702,16 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       if (!busy) pushAction('Open Settings → Plugins', { id: 'plugins', kind: 'plugins' })
     }
 
-    // 2. Permissions (missing first; the short grant keeps only the first one)
+    // 2. Permissions. Both groups are ALWAYS part of the one model, ordered
+    // missing-first so the first missing permission and its action own the
+    // first screen; an allowed group stays reachable and keeps its explicit
+    // actions. A short grant only reorders prose in the tail.
     if (providerReady && system?.platform === 'darwin') {
       const groups = ([
         { permission: 'accessibility' as const, allowed: system.accessibility },
         { permission: 'screenRecording' as const, allowed: system.screenRecording },
       ]).sort((left, right) => Number(left.allowed) - Number(right.allowed))
-      const shown = shortGrant ? groups.slice(0, 1) : groups
-      for (const group of shown) {
+      for (const group of groups) {
         pushFact(PERMISSION_LABEL[group.permission], permissionText(group.allowed), group.allowed ? 'fact' : 'warning')
         pushWrapped(PERMISSION_EXPLANATION[group.permission], { detail: true })
         if (busy) continue
@@ -727,13 +732,15 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
           })
         }
       }
-      if (!shortGrant && (!system.accessibility || !system.screenRecording)) {
+      if (!system.accessibility || !system.screenRecording) {
         pushWrapped('Complete the macOS prompt on the HOST Mac, then Refresh and read the fresh observation.', { detail: true })
       }
     }
 
-    // 3. Authorization
-    if (providerReady && !shortGrant) {
+    // 3. Authorization. Every project-wide preset/PTC fact and its explicit
+    // action belongs to the same model on every grant; the short grant reaches
+    // them through the same scrollport (never a second short variant).
+    if (providerReady) {
       if (snapshot.preset.phase === 'ready') {
         const value = snapshot.preset.value ?? 'unknown'
         pushFact('New Sessions', value === 'ptc' ? 'ptc (PTC is the saved default)' : value)
@@ -788,7 +795,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     }
 
     // 5. Help / recovery
-    if (!shortGrant) push('')
+    push('', { detail: true })
     if (this.help) {
       push('Help and recovery', { tone: 'strong' })
       for (const item of HELP_LINES) pushWrapped(`  ${item}`, { detail: true })
@@ -899,12 +906,24 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     }
     // A transient notice stays visible in EVERY projection (the Overview model
     // carries its own; the workbench has no spare row, so it takes the last one).
-    if (this.notice !== undefined && out.length > 0) {
-      const text = `${this.notice.kind === 'error' ? 'Error' : 'Notice'}: ${this.notice.text}`
-      out[out.length - 1] = fit(this.toneText(this.notice.kind === 'error' ? 'error' : 'dim', text), bodyWidth)
+    // The overwritten row loses its business targets: a notice cell must never
+    // activate an action that is no longer painted there.
+    const noticeRow = this.notice !== undefined && out.length > 0 ? out.length - 1 : undefined
+    if (noticeRow !== undefined) {
+      const text = `${this.notice!.kind === 'error' ? 'Error' : 'Notice'}: ${this.notice!.text}`
+      out[noticeRow] = fit(this.toneText(this.notice!.kind === 'error' ? 'error' : 'dim', text), bodyWidth)
     }
-    for (const target of list.targets) targets.push(target)
+    for (const target of list.targets) {
+      if (target.row !== noticeRow) targets.push(target)
+    }
     for (const target of detail.targets) {
+      if (target.row === noticeRow) {
+        if (target.kind === 'action') {
+          this.detailActions = this.detailActions.filter(action => action.id !== target.action.id)
+          this.visibleActionIds.delete(target.action.id)
+        }
+        continue
+      }
       targets.push(both ? { ...target, startCol: target.startCol + listWidth + 2, endCol: target.endCol + listWidth + 2 } : target)
     }
     // A passive region cell click only moves the local focus (never a write).

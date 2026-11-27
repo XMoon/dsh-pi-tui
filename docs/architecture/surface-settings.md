@@ -1894,7 +1894,7 @@ from a replaced Host generation reach the page.
 
 ### Computer Use page
 
-`/settings &#8594; Tools &#8594; Computer Use` is ONE embedded specialist page inside the
+`/settings → Tools → Computer Use` is ONE embedded specialist page inside the
 same Settings lease (no second alt-screen, modal or Settings workspace). The
 official Experimental `Computer use` Plugin Manager card's bounded
 `Manage Computer Use…` action switches to the SAME page in the SAME lease: the
@@ -1908,8 +1908,8 @@ are the explicit mount gestures.
 The mounted instance has exactly TWO projections:
 
 - `Overview` is a Standard grouped Detail TENANT: ONE continuous semantic line
-  model (Availability &#8594; Permissions &#8594; Authorization &#8594; Application
-  access &#8594; Help/Recovery) paints inside the real Detail pane, the parent
+  model (Availability → Permissions → Authorization → Application
+  access → Help/Recovery) paints inside the real Detail pane, the parent
   Categories/Rows stay live, and the page's own semantic line becomes the ONE
   physical last-row Action Bar. The normal and the short grant come from that
   same model; a short grant moves the optional explanatory prose after the
@@ -1927,7 +1927,7 @@ The mounted instance has exactly TWO projections:
   sub-view. Entering Applications performs no Host read. A clean list may yield
   to the rail, and the rail Back is a LOCAL return to the SAME mounted Overview
   instance (no dispose, remount or extra read). Every projection change
-  (Overview&#8596;Applications, the full-width confirmation) must repaint before a
+  (Overview↔Applications, the full-width confirmation) must repaint before a
   new key or pointer may act on it.
 
 Authority is never the page: the bundle selection/availability comes from the
@@ -1984,7 +1984,7 @@ action owns the page until its own settlement: the bar is a truthful `Waiting…
 with no cancel, and a second action, parent leave or local mode switch is
 refused. Closing the page never claims a Host rollback.
 
-The page's `Open Settings &#8594; Plugins` action retires the specialist and switches
+The page's `Open Settings → Plugins` action retires the specialist and switches
 the SAME lease to the Plugin Manager. After the first explicit bundle enable the
 Plugin Manager shows a one-shot recoverable next-step notice that points at this
 page; the Tools row and the card's `Manage Computer Use…` remain available
