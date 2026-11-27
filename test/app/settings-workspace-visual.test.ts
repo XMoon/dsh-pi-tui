@@ -6297,23 +6297,27 @@ test('a new press against the previous phase frame is refused and a fresh row cl
   h.dispose()
 })
 
-test('a live notice allocation change refuses stale choice navigation until the frame repaints', async () => {
+test('a live notice allocation change refuses stale choice navigation and confirmation until the frame repaints', async () => {
   const h = setup({ columns: 80, rows: 7, doc: { theme: 'dark' } })
   await openSelectedRow(h, 'theme')
   await key(h, '\r') // Rows -> inline choice
   assert.match(h.view(), /> dark/, 'the current candidate is painted before the notice')
   // The notice changes the real row allocation (the body grant shrinks); the
-  // choice frame is still the previous one when Down arrives.
+  // choice frame is still the previous one when Down and Enter arrive.
   h.app.notify('live allocation notice', 'info')
   h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\r') // stale Enter must not use the previous frame's confirm grant
   await h.vt.waitForRender()
   assert.match(h.view(), /live allocation notice/u, 'the notice frame really painted')
   assert.match(h.view(), /> dark/, 'the stale Down did not move the candidate')
-  assert.equal(h.replacements(), 0, 'the stale Down never writes')
-  // The same key against the freshly painted grant works normally.
+  assert.equal(h.replacements(), 0, 'neither the stale Down nor the stale Enter writes')
+  // The same keys against the freshly painted grant work normally.
   await key(h, '\x1b[B')
   assert.match(h.view(), /> light/, 'the fresh frame admits the same candidate navigation')
-  assert.equal(h.replacements(), 0)
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.replacements(), 1, 'the fresh frame admits exactly one confirmation')
+  assert.equal(h.doc.theme, 'light', 'the fresh confirmation wrote the exact raw value')
   h.dispose()
 })
 
@@ -7310,6 +7314,26 @@ test('a wheel from the previous choice phase never scrolls the browse Detail', a
   wheel(h, valueRow, cellIndexOf(h, valueRow, 'Value'), true)
   await h.vt.waitForRender()
   assert.notEqual(h.view(), browseFrame, 'the fresh frame admits the same wheel and moves its viewport')
+  h.dispose()
+})
+
+test('a same-chunk wheel burst accumulates on the painted candidate region', async () => {
+  const themes = longNamedThemes(5)
+  const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' }, themes })
+  await openSelectedRow(h, 'theme')
+  await key(h, '\r')
+  const candidateRow = rowOf(h, '> dark')
+  const candidateCol = cellIndexOf(h, candidateRow, '> dark')
+  // Two notches arrive inside ONE input window: the wheel is a windowed
+  // viewport capability, not a per-press gesture, so both notches must move the
+  // same painted option region (the selection identity itself does not move).
+  wheel(h, candidateRow, candidateCol, true)
+  wheel(h, candidateRow, candidateCol, true)
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('> dark'), `the burst left the selected candidate out of view:\n${h.view()}`)
+  assert.ok(!h.view().includes('light'), `both notches accumulated instead of stopping at the first:\n${h.view()}`)
+  assert.ok(h.view().includes('plugin:acme/long0'), `the next candidate is visible after two notches:\n${h.view()}`)
+  assert.equal(h.replacements(), 0, 'a wheel burst never writes')
   h.dispose()
 })
 

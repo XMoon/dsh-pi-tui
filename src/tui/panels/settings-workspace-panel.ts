@@ -4389,11 +4389,14 @@ export class SettingsWorkspacePanel implements Component {
    *  row allocation, so `chromeGeometryStale` cannot catch a phase transition by
    *  itself any more; the existing `paintedRevision` is the map identity a fresh
    *  press/release must still match. Auth/Plugin/tenant/Workbench pages keep
-   *  their own grant/currentness owners and are excluded. */
+   *  their own grant/currentness owners, and DIRECT pages (About/Models/Account/
+   *  Plugins) are excluded: they have no inline choice and their async fact
+   *  publication may bump the revision between a valid paint and the user's
+   *  click, which is not a stale hit map. */
   private rootMapAwaitingPaint(): boolean {
     return this.specialistPage === undefined
       && this.authPage === undefined
-      && this.categoryId !== 'plugins'
+      && !isDirectCategory(this.categoryId)
       && this.paintedRevision !== this.revision
   }
 
@@ -5868,7 +5871,11 @@ export class SettingsWorkspacePanel implements Component {
         if (paintedGeometryIsCurrent && this.paintedChoiceNavigation) this.setChoice(this.choiceCount() - 1)
         return
       }
-      if (matchesKey(data, 'enter')) return this.confirmChoice('keyboard')
+      if (matchesKey(data, 'enter')) {
+        if (paintedGeometryIsCurrent) this.confirmChoice('keyboard')
+        else this.intents.requestRender()
+        return
+      }
       return
     }
     if (matchesKey(data, 'up')) return this.move(-1)
@@ -6855,18 +6862,12 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.requestRender()
       return undefined
     }
-    // The ROOT-owned legacy hit map must belong to the LIVE state version: a
-    // phase/focus/refresh change that has not repainted may not arm a new press
-    // against the previous frame's cells. Child pages below keep their own
-    // grant/currentness owners.
-    if (this.rootMapAwaitingPaint()) {
-      this.cancelPointerOwners()
-      this.intents.requestRender()
-      return undefined
-    }
     // A legacy wheel may only use the facts/option regions and visible panes
     // the last frame really painted. A phase/focus transition refuses the stale
     // wheel and asks for the fresh frame instead of scrolling the wrong box.
+    // `paintedRevision` must NOT gate this path: every real scroll bumps the
+    // revision, and a wheel burst is a windowed viewport capability, not a new
+    // press identity.
     if (this.legacyWheelProjectionStale()) {
       this.cancelPointerOwners()
       this.intents.requestRender()
