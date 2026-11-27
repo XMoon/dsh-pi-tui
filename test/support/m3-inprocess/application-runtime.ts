@@ -14,6 +14,7 @@
 
 import type { ClientUiStartupFacts, SelectedApplicationRuntime } from '../../../src/app/application-runtime.ts'
 import type { RemotePromptSerializer } from '../../../src/runtime/remote/session-writer-remote.ts'
+import type { HostShellPathLiteralDialect } from '../../../src/runtime/host-shell-completion-port.ts'
 import { mergeCause } from '../../../src/app/remote/dispose-cause.ts'
 import type { RemoteBackendRuntime } from '../../../src/app/remote/runtime.ts'
 import {
@@ -34,6 +35,9 @@ export interface RemoteApplicationRuntimeOptions {
   readonly signal?: AbortSignal
   /** Explicit serializer injection (composition-test stub). */
   readonly promptSerializer?: RemotePromptSerializer
+  /** The authenticated Host shell's literal-path grammar (the same shared
+   *  stage input as the real split wrapper). */
+  readonly hostShellPathLiteralDialect?: HostShellPathLiteralDialect
   /** Build a serializer over the joined wire (qualification wrappers that must
    * observe/decorate the PRODUCTION serializer, e.g. a hold between upload and
    * dispatch). Takes precedence only when `promptSerializer` is absent. */
@@ -76,6 +80,7 @@ export async function createRemoteApplicationRuntime(
       client: wire.client,
       fetch: wire.host.carrier.fetch,
       ...(promptSerializer === undefined ? {} : { promptSerializer }),
+      ...(options.hostShellPathLiteralDialect === undefined ? {} : { hostShellPathLiteralDialect: options.hostShellPathLiteralDialect }),
     })
   } catch (error) {
     const disposeErrors = await collectDisposeErrors(() => wire.dispose())

@@ -198,6 +198,8 @@ test('a real child process locates the package root from a symlinked dist invoke
 // ── the single child lifecycle ───────────────────────────────────────────
 
 class FakeChild extends EventEmitter {
+  /** A successful spawn has a pid; an asynchronous spawn failure has none. */
+  pid = 1234
   exitCode: number | null = null
   signalCode: NodeJS.Signals | null = null
   readonly kills: (NodeJS.Signals | undefined)[] = []
@@ -419,8 +421,9 @@ test('a refused Windows kill is not mistaken for an actual exit', async () => {
   const disposition = await withPlatform('win32', () => c.dispose())
   assert.equal(disposition, false, 'an error event is not the actual exit required by the shutdown budget')
   assert.deepEqual(children[0].kills, [undefined], 'one forced termination request')
+  assert.ok(!fatalLines.some(line => /could not start|Host was not started/u.test(line)), 'a post-spawn kill error is not a spawn failure')
+  assert.deepEqual(exitCodes, [], 'the supervisor is not asked to exit on a post-spawn cleanup error')
   assert.ok(fatalLines.some(line => /did not exit after forced process termination/u.test(line)), 'the abnormal result is reported')
-  assert.ok(!fatalLines.some(line => /client exited after forced process termination/u.test(line)), 'no false success line')
 })
 
 test('a Windows spawn throw prints the PowerShell environment hint, never the POSIX one', async () => {

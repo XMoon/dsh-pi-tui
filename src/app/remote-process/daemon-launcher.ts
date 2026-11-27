@@ -333,7 +333,16 @@ export class DaemonCoordinator {
     this.childExited = new Promise<void>(resolve => {
       child.once('exit', () => resolve())
     })
-    child.once('error', (error: Error) => { this.settle(this.spawnFailureExitCode, error) })
+    // A post-spawn 'error' is a cleanup fact, not a spawn failure. Only a
+    // never-spawned child may claim "could not start ... Host was not started".
+    const spawned = child.pid !== undefined
+    child.once('error', (error: Error) => {
+      if (spawned) {
+        this.diag.warn('pi-tui daemon: child process error after spawn', { error: error.message })
+        return
+      }
+      this.settle(this.spawnFailureExitCode, error)
+    })
     child.once('exit', (code, signal) => { this.settle(exitCodeFor(code, signal), undefined) })
   }
 

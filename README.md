@@ -78,7 +78,7 @@ Daemon 的选择也可以在 `/settings → Host → Backend` 保存，**下一�
 - **Session 与 Workspace**：`/sessions` 浏览工作区与会话；`/new`、`/resume`、`/fork`、`/rewind`、`--session` 和 `--continue`；可只读预览后再选择恢复。
 - **Team / Subagent / Job**：`/model` 可控制 Root Agent Team；`/tasks` 显示 Work/Team、嵌套 Subagent 和 Job。Subagent 默认展开，已完成的 Job 历史可以按需展开。
 - **Preset**：裸 `/preset` 打开两页 Catalog + Details——搜索、Built-in/Custom 分组与状态标记，阅读与打开详情不会写入；只有底部的 `Use next` / `Use session` 和 `Set default` 显式动作才会应用预设或保存新会话默认值。`/preset status`、`/preset default [<id>]` 与 `/preset <id>` 保留。
-- **输入与终端操作**：`@file` 补全、图片/普通文件附件、`Ctrl+V` 图片粘贴、`!` 和 `!!` Shell、外部编辑器和可编辑的 Footer。Windows Direct 与 Daemon 下 `!`/`!!` 均在 Host 使用官方 PowerShell；sandbox 使用 DSH ACL 后端（partial enforcement），Windows 没有原生命令/变量/git 补全（普通路径补全保留）。
+- **输入与终端操作**：`@file` 补全、图片/普通文件附件、`Ctrl+V` 图片粘贴、`!` 和 `!!` Shell、外部编辑器和可编辑的 Footer。Windows Direct 与 Daemon 下 `!`/`!!` 均在 Host 使用官方 PowerShell（Windows Daemon 为当前 main 候选）；sandbox 使用 DSH ACL 后端（partial enforcement），Windows 没有原生命令/变量/git 补全（普通路径补全保留）。
 - **阅读与搜索**：`/display` 切换 Full / Focus / Compact；Transcript View / Full 搜索、卡片折叠、`Ctrl+R` 历史输入召回。Current session 历史可跨工作目录读取同一 Session 的历史记录。
 - **Settings / 插件**：Provider 登录和凭据、审批、MCP Server 管理、Web Search/Fetch、Plugin Manager、动态 Extension Settings，以及 Client-local `./tui` 扩展加载。
 - **图像与交付**：受终端能力约束的图片、静态 SVG、图表、`/view-image`、`/deliverables`、`/export`；支持 Kitty、SIXEL 和受支持的 iTerm2 图像路径。
@@ -102,6 +102,8 @@ Daemon 的选择也可以在 `/settings → Host → Backend` 保存，**下一�
 这里列出的是默认键位和常见入口；自定义后以 `/keybindings` 显示的**实际生效键位**为准。输入 `/` 可搜索并选择命令与可用的 Skills；需要显式调用某个 Skill（包括与同名命令冲突时）使用 `/skill <name> [args]`，裸 `/skill` 只显示用法。`/transcript` 当前的官方 Markdown 导出路径属于 Direct；`/export` 是独立的 ZIP 归档，产物落在 Client 本地目录。`PI_IMAGE_PROTOCOL=none` 只禁止像素预览，不影响附件发送。
 
 ## Daemon 快速上手（Linux / macOS / 原生 Windows 11 x64）
+
+> Windows 的交互式 Daemon Client 属于当前 main 候选，尚未包含在已发布的 0.5.8 npm 包中。
 
 不安装系统服务也可以启动独立 Host。一次性体验（交互式 Daemon Client 支持 Linux/macOS 及原生 Windows 11 x64 普通用户、本地固定 NTFS Profile）：
 

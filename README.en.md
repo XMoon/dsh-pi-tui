@@ -78,7 +78,7 @@ You can also save `Daemon` under `/settings → Host → Backend` for the **next
 - **Sessions and workspaces:** `/sessions`, `/new`, `/resume`, `/fork`, `/rewind`, `--session` and `--continue`; browse by workspace and preview before resuming.
 - **Team / Subagent / Job:** toggle Root Agent Team in `/model`; `/tasks` displays Work/Team, nested Subagents and Jobs. Subagents are expanded by default; retained Job history is optionally disclosed.
 - **Presets:** bare `/preset` opens a two-page Catalog + Details surface — search, Built-in/Custom groups and state chips; browsing and reading Details never write. Only the explicit bottom actions `Use next` / `Use session` and `Set default` apply a preset or save the new-session default. `/preset status`, `/preset default [<id>]` and `/preset <id>` remain available.
-- **Input and shell:** `@file` completion, image and file attachments, `Ctrl+V` image paste, `!` / `!!` Host Shell, external editor, customizable Footer. On Windows Direct and Daemon, `!` / `!!` run on the Host with the official PowerShell shell; the sandbox uses DSH's ACL backend with partial enforcement, and native command/variable/git completion is unavailable (ordinary path completion remains).
+- **Input and shell:** `@file` completion, image and file attachments, `Ctrl+V` image paste, `!` / `!!` Host Shell, external editor, customizable Footer. On Windows Direct and Daemon, `!` / `!!` run on the Host with the official PowerShell shell (the Windows Daemon is a current-main candidate); the sandbox uses DSH's ACL backend with partial enforcement, and native command/variable/git completion is unavailable (ordinary path completion remains).
 - **Reading and search:** `/display` Full / Focus / Compact, Transcript View / Full search, folding, `Ctrl+R` prompt history. Current Session recall spans working-directory changes.
 - **Settings and plugins:** Provider authorization/credentials, approvals, MCP management, Web Search/Fetch, Plugin Manager, dynamic Extension Settings and Client-local `./tui` plugin loading.
 - **Images and delivery:** terminal-gated image/static SVG/charts, `/view-image`, `/deliverables`, `/export`; Kitty, SIXEL and supported iTerm2 paths.
@@ -102,6 +102,8 @@ You can also save `Daemon` under `/settings → Host → Backend` for the **next
 These are default mappings and common entries; `/keybindings` shows the **effective** keys after customizations. Type `/` to search and select commands and available Skills; use `/skill <name> [args]` to invoke a Skill explicitly (including when a same-named command would otherwise win), while bare `/skill` only prints its usage. `/transcript` currently uses the official Direct Markdown export; `/export` creates a separate ZIP archive saved on the Client filesystem. `PI_IMAGE_PROTOCOL=none` disables pixel previews, not attachments.
 
 ## Daemon quick start (Linux / macOS / native Windows 11 x64)
+
+> The Windows interactive Daemon Client is a current-main candidate and is not yet in the published 0.5.8 npm release.
 
 A system service is not required to start a standalone Host. Try one launch (the interactive Daemon Client supports Linux/macOS and native Windows 11 x64 ordinary users on a local fixed-NTFS Profile):
 

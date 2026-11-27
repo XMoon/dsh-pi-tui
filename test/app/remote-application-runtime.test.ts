@@ -50,6 +50,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { symbols } from '@deepseek-ai/cordis'
@@ -80,6 +81,29 @@ function createHostFixture(life: import('../support/temp-lifecycle.ts').TestLife
 function loadApplicationRuntimeModule(): Promise<typeof import('../support/m3-inprocess/application-runtime.ts')> {
   return import('../support/m3-inprocess/application-runtime.ts')
 }
+
+test('the authenticated Host shell dialect survives the shared stage composition', async (t) => {
+  const module = await loadApplicationRuntimeModule()
+  for (const [dialect, expected] of [['powershell', 'powershell'], [undefined, 'bash']] as const) {
+    const life = testLifecycle(t)
+    const host = await createHostFixture(life)
+    host.ctx.sessions.create(SessionId(`m3-4-pr1-seed-shell-${expected}`), { meta: { cwd: host.anchorDir } })
+    const runtime = await module.createRemoteApplicationRuntime({
+      hostContext: host.ctx,
+      waitForHostPrerequisites: async () => {},
+      clientUiStartup: {},
+      ...(dialect === undefined ? {} : { hostShellPathLiteralDialect: dialect }),
+    })
+    t.after(() => runtime.selected.disposeTransport().catch(() => host.dispose()))
+    assert.equal((runtime.selected.backend.hostShellCompletion as unknown as { pathLiteralDialect: string }).pathLiteralDialect, expected)
+  }
+  // The split wrapper is a one-line pass-through to the shared stage; a dropped
+  // spread would silently revert Windows to Bash while every behavioral test
+  // above still passes, so pin the composition shape as well.
+  const split = readFileSync(new URL('../../src/app/remote/application-runtime.ts', import.meta.url), 'utf8')
+  assert.match(split, /hostShellPathLiteralDialect: options\.hostShellPathLiteralDialect/u,
+    'the split wrapper must forward the authenticated Host dialect')
+})
 
 test('A. the aggregate composes ONE Host runtime, ONE Client runtime, ONE Backend and ONE owner registry', async (t) => {
   const life = testLifecycle(t)
