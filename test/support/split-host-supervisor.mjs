@@ -1452,8 +1452,45 @@ async function assertCrossHomeProducerJoined(handle, reservation, reason) {
 async function settleCrossHomeReservationInner(handle, reason, allowNoSpawn) {
   const reservation = handle.crossHome
   const producerJoined = await assertCrossHomeProducerJoined(handle, reservation, reason)
+  if (!producerJoined && allowNoSpawn) {
+    // Positively never dispatched: no ChildProcess and no producer ever ran.
+    // No live alias Host can be attributed to this reservation, so unreadable
+    // unrelated system processes are not possible candidates. A real captured
+    // alias entry or any alias material still fails closed.
+    const scan = scanCrossHomeCandidates(reservation, reason)
+    if (scan.found.length > 0) {
+      throw new Error(`${reason}: a live alias candidate exists for a never-dispatched reservation`)
+    }
+    if (reservation.observedCandidate !== undefined) {
+      throw new Error(`${reason}: a never-dispatched reservation has an observed candidate`)
+    }
+    const log = readCrossHomeHostLog(reservation, reason)
+    if (log.kind !== 'absent') {
+      throw new Error(`${reason}: a never-dispatched reservation has an alias Host log`)
+    }
+    assertCrossHomeAliasDirectory(reservation, reason, false)
+    assertPathAbsent(reservation.registryPath, `${reason}: the alias registry`)
+    assertPathAbsent(reservation.launchPath, `${reason}: the alias launch`)
+    await assertClientSeatFree({ dshHome: reservation.home }, reservation.scopeId, `${reason}: alias`)
+    const primary = await assertCrossHomePrimaryBusy(reservation.primary, reason, reservation)
+    return {
+      terminal: 'no-spawn',
+      conflict: null,
+      hostLogPresent: false,
+      candidate: null,
+      candidateTerminal: null,
+      scratchProvenance: null,
+      aliasHome: reservation.home,
+      aliasScopeDir: reservation.scopeDir,
+      aliasSeat: reservation.seat,
+      scopeId: reservation.scopeId,
+      aliasRegistryAbsent: true,
+      aliasLaunchAbsent: true,
+      aliasSeatFree: true,
+      ...primary,
+    }
+  }
   const producerReady = producerJoined
-    || (reservation.dispatch === 'not-dispatched' && handle.child === undefined)
   const deadline = Date.now() + CROSS_HOME_SETTLEMENT_TIMEOUT_MS
   let seenHostLog = false
   let conflict = null
@@ -1652,7 +1689,8 @@ async function assertCrossHomeFreshTerminal(handle, reason, { requirePrimaryBusy
     }
     assertCrossHomeAliasDirectory(reservation, reason, facts.terminal === 'seat-conflict')
     const scan = scanCrossHomeCandidates(reservation, reason)
-    if (scan.unknown.length > 0 || scan.found.length > 0) {
+    const neverDispatched = reservation.dispatch === 'not-dispatched' && handle.child === undefined
+    if (scan.found.length > 0 || (scan.unknown.length > 0 && !neverDispatched)) {
       throw new Error(`${reason}: a late alias candidate is not terminal (${JSON.stringify(scan)})`)
     }
     await assertClientSeatFree({ dshHome: reservation.home }, reservation.scopeId, `${reason}: alias`)
