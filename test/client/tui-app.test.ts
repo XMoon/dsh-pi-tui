@@ -217,15 +217,28 @@ test('submits editor content to the onSubmit event', async () => {
   assert.deepEqual(submitted, ['hello'])
 })
 
-test('ctrl+c twice within the window exits (pi parity)', async () => {
+test('same-key Ctrl+C confirms after two seconds but not after the three-second window', async (t) => {
   const surface = startApp()
   await surface.vt.waitForRender()
-  surface.vt.sendInput('\x03') // empty editor: first press only arms the chord
+  let elapsed = 0
+  const realNow = Date.now.bind(Date)
+  t.mock.method(Date, 'now', () => realNow() + elapsed)
+  surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
-  assert.equal(surface.exits, 0, 'a single Ctrl+C must not exit')
-  surface.vt.sendInput('\x03') // within the confirmation window: exit
+  assert.equal(surface.exits, 0, 'a single Ctrl+C only arms')
+  elapsed += 2_000
+  surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
-  assert.equal(surface.exits, 1)
+  assert.equal(surface.exits, 1, 'two seconds remains within the default window')
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  elapsed += 3_100
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 1, 'the expired press only re-arms')
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.exits, 2, 'the fresh arm still confirms')
 })
 
 test('ctrl+d requires same-key confirmation and ignores kitty repeat/release', async () => {
@@ -6756,9 +6769,16 @@ test('PR2/F5: a rejection while stopped unlocks the composer on start()', async 
   }
 })
 
-test('PR2/RFL008: Ctrl+C during a hold cancels activity without clearing the submitted draft', async () => {
+test('working Ctrl+C during a hold cancels activity without clearing the submitted draft', async () => {
   const vt = new VirtualTerminal(100, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  let cancels = 0
+  let exits = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => { exits += 1 },
+    onCancel: () => { cancels += 1 },
+    sessionActivity: () => 'working',
+  })
   app.start()
   startedApps.add(app)
   try {
@@ -6769,6 +6789,8 @@ test('PR2/RFL008: Ctrl+C during a hold cancels activity without clearing the sub
     await vt.waitForRender()
     assert.equal(app.getDraft(), 'held through ctrl+c',
       'the pre-acceptance document survives Ctrl+C (cancel-activity only)')
+    assert.equal(cancels, 1)
+    assert.equal(exits, 0)
     app.settleSubmission('attempt-ctrlc', 'accepted')
     await vt.waitForRender()
     assert.equal(app.getDraft(), '', 'the acceptance still clears the document')
@@ -6935,33 +6957,40 @@ function startAppWithActivity(activity: () => ExitActivity): {
   }
 }
 
-test('ctrl+c while working cancels ONCE and never arms an exit or clears the draft', async () => {
+test('working Ctrl+C clears an editable draft before the next press cancels', async () => {
   const surface = startAppWithActivity(() => 'working')
   await surface.vt.waitForRender()
   surface.app.setDraft('working draft')
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
-  assert.equal(surface.cancels, 1, 'a busy Ctrl+C takes the existing cancel path exactly once')
-  assert.equal(surface.exits, 0, 'a busy Ctrl+C never requests the exit intent')
-  assert.equal(surface.app.getDraft(), 'working draft', 'a busy cancel preserves the draft')
-  // A repeated press is a NEW cancel, still never an exit confirmation.
+  assert.equal(surface.cancels, 0, 'clearing the draft must not interrupt the running turn')
+  assert.equal(surface.exits, 0)
+  assert.equal(surface.app.getDraft(), '', 'the first press cleared the draft')
+  assert.ok(!surface.vt.getViewport().join('\n').includes('Press Ctrl+C again to exit'))
   surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
-  assert.equal(surface.cancels, 2, 'each busy press re-cancels the live work')
+  assert.equal(surface.cancels, 1, 'the empty-draft press takes the existing cancel path once')
   assert.equal(surface.exits, 0)
 })
 
-test('ctrl+c while unknown refuses to arm the exit and says the state is unobservable', async () => {
+test('unknown Ctrl+C clears a draft, then refuses to exit or cancel when empty', async () => {
   const surface = startAppWithActivity(() => 'unknown')
   await surface.vt.waitForRender()
+  surface.app.setDraft('unsubmitted draft')
+  await surface.vt.waitForRender()
+  surface.vt.sendInput('\x03')
+  await surface.vt.waitForRender()
+  assert.equal(surface.app.getDraft(), '')
+  assert.equal(surface.cancels, 0)
+  assert.equal(surface.exits, 0)
+  assert.ok(!surface.vt.getViewport().join('\n').includes('Press Ctrl+C again to exit'))
   surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
   assert.equal(surface.cancels, 0, 'unknown is not treated as busy')
   assert.equal(surface.exits, 0, 'unknown is never treated as idle')
   assert.match(surface.vt.getViewport().join('\n'), /running state cannot be verified/,
     'the refusal is visible')
-  // A second press within the window still must not exit.
   surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 0, 'a repeated unknown Ctrl+C still cannot exit')
@@ -6996,17 +7025,19 @@ test('an idle arm cannot be used after the session becomes busy', async () => {
   assert.equal(surface.exits, 0, 'a stale idle arm can never confirm a busy exit')
 })
 
-test('a busy cancel never arms the following idle double press by itself', async () => {
+test('clearing a busy draft never arms the following idle double press', async () => {
   let activity: ExitActivity = 'working'
   const surface = startAppWithActivity(() => activity)
   await surface.vt.waitForRender()
-  surface.vt.sendInput('\x03') // busy: cancel
+  surface.app.setDraft('working draft')
+  surface.vt.sendInput('\x03') // busy: clear only
   await surface.vt.waitForRender()
-  assert.equal(surface.cancels, 1)
+  assert.equal(surface.app.getDraft(), '')
+  assert.equal(surface.cancels, 0)
   activity = 'idle'
   surface.vt.sendInput('\x03') // idle: first real arm
   await surface.vt.waitForRender()
-  assert.equal(surface.exits, 0, 'the busy cancel did not count as an idle arm')
+  assert.equal(surface.exits, 0, 'the draft clear did not count as an idle arm')
   surface.vt.sendInput('\x03')
   await surface.vt.waitForRender()
   assert.equal(surface.exits, 1)

@@ -46,12 +46,14 @@ afterEach(() => {
  *  preference callback, a keyboard-exit counter) — never a later patch. */
 function startApp(
   options: Record<string, unknown> = {},
-  events: Partial<Pick<TuiAppEvents, 'onFullscreenChange' | 'onExit' | 'runOwned'>> = {},
+  events: Partial<Pick<TuiAppEvents, 'onFullscreenChange' | 'onExit' | 'onCancel' | 'sessionActivity' | 'runOwned'>> = {},
 ): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => events.onExit?.() ?? undefined,
+    ...(events.onCancel === undefined ? {} : { onCancel: events.onCancel }),
+    ...(events.sessionActivity === undefined ? {} : { sessionActivity: events.sessionActivity }),
     ...(events.onFullscreenChange === undefined ? {} : { onFullscreenChange: events.onFullscreenChange }),
     ...(events.runOwned === undefined ? {} : { runOwned: events.runOwned }),
   }, options)
@@ -1364,6 +1366,70 @@ test('the effective exit request keeps its Host admission inside the workspace',
   await vt.waitForRender()
   app.stop()
 })
+
+for (const [initialActivity, title] of [
+  ['working', 'Job Ctrl+C cancels work without clearing the hidden composer draft'],
+  ['unknown', 'Job Ctrl+C refuses an unobservable exit without clearing the hidden composer draft'],
+  ['idle', 'Job Ctrl+C confirms an idle exit without clearing the hidden composer draft'],
+] as const) {
+  test(title, async () => {
+    let activity: 'working' | 'unknown' | 'idle' = initialActivity
+    let exits = 0
+    let cancels = 0
+    const { vt, app } = startApp({}, {
+      onExit: () => { exits += 1 },
+      onCancel: () => { cancels += 1 },
+      sessionActivity: () => activity,
+    })
+    vt.sendInput('kept draft text')
+    await vt.waitForRender()
+    assert.equal(app.hostEditorTextForTest(), 'kept draft text')
+    const cursorBefore = app.seatEditorForTest().getCursor()
+    const handle = app.openJobInspector({
+      initial: openingRow(),
+      canStop: () => false,
+      onStop: () => {},
+      onClose: () => {},
+    })
+    try {
+      await vt.waitForRender()
+      assert.ok(app.focusedComponentForTest() instanceof JobInspectorPanel)
+      vt.sendInput('\x03')
+      await vt.waitForRender()
+      assert.equal(app.hostEditorTextForTest(), 'kept draft text', 'the hidden draft is not the input owner')
+      assert.equal(exits, 0, 'the first press must not exit')
+      assert.equal(cancels, initialActivity === 'working' ? 1 : 0)
+      if (initialActivity === 'unknown') {
+        assert.match(view(vt), /running state cannot be verified/, 'the refusal is visible on the Job screen')
+        vt.sendInput('\x03')
+        await vt.waitForRender()
+        assert.equal(exits, 0, 'a repeated unknown press never exits')
+        assert.equal(cancels, 0)
+      }
+      if (initialActivity !== 'idle') {
+        // The previous cancel/refusal must not serve as an idle exit arm.
+        activity = 'idle'
+        vt.sendInput('\x03')
+        await vt.waitForRender()
+        assert.equal(exits, 0, 'a cancel/refusal did not arm the idle exit')
+      } else {
+        vt.sendInput('\x03')
+        await vt.waitForRender()
+        assert.equal(exits, 1, 'the same-key second press confirms the idle exit')
+      }
+      assert.ok(app.focusedComponentForTest() instanceof JobInspectorPanel)
+      assert.equal(cancels, initialActivity === 'working' ? 1 : 0)
+      vt.sendInput('\x1b')
+      await vt.waitForRender()
+      assert.ok(!(app.focusedComponentForTest() instanceof JobInspectorPanel))
+      assert.equal(app.hostEditorTextForTest(), 'kept draft text', 'closing Job restores the intact draft')
+      assert.equal(app.seatEditorForTest().getCursor(), cursorBefore, 'the original cursor survives')
+    } finally {
+      handle.close()
+      app.stop()
+    }
+  })
+}
 
 test('a throwing workspace close never truncates the stop teardown', async () => {
   const { vt, app } = startApp()

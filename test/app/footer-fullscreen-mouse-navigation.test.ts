@@ -667,7 +667,8 @@ test('an armed exit hint removes the compact Footer hits and restores them after
     h.vt.sendInput('\x04')
     await h.vt.waitForRender()
     assert.ok(screen(h.vt).includes('Press Ctrl+D again to exit'), 'the hint must be re-armed for the natural-expiry probe')
-    await waitFor(() => !screen(h.vt).includes('Press Ctrl+D again to exit'), h.vt)
+    // Allow the production 3-second confirmation window to expire and repaint.
+    await waitFor(() => !screen(h.vt).includes('Press Ctrl+D again to exit'), h.vt, 5_000)
     await h.vt.waitForRender()
     const restored = cellOf(h.vt, '[deepseek/deepseek-v4-flash]')
     assert.ok(restored, `the compact model placement must return after natural expiry:\n${screen(h.vt)}`)

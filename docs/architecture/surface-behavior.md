@@ -56,9 +56,9 @@ reminder that leaving aborts the shell and that Agent idle does not prove the
 shell finished (Owner decision: remind, do not remove the exit options).
 `Current work: stopped.` is never derived from the Agent waiter alone while a
 shell runs, and a confirmation made before the shell started refreshes the same
-family with the reminder before it can act. The keyboard's busy Ctrl+C remains
-the existing cancel path, which aborts the shell and the exact live Session
-turn together.
+family with the reminder before it can act. With no editable draft, busy
+Ctrl+C uses the existing cancel path, which aborts the shell and the exact
+live Session turn together.
 
 **Daemon Stop terminal proof.** `Stop current work and disconnect` captures the
 Session scope and the exact Remote transport identity once, re-validates both
@@ -117,18 +117,20 @@ interactions) and never claims a stop before the control plane's own proof. A
 Host Question/Approval preempts it with zero management writes, exactly like the
 PR1 choice.
 
-**Keyboard rule.** The default effective exit key keeps its same-key 1.5-second
-confirmation and the Ctrl+C clear-draft / Ctrl+D forward-delete editor behavior.
-While the exact current Session is `working`, the DEFAULT physical Ctrl+C is a
-single Busy Cancel through the existing interrupt path (no exit confirmation, no
-draft clear); while `unknown` it refuses to arm the exit and states that the
-running state cannot be verified; while `idle` it keeps the existing
-clear-then-double-press exit. A user remap of the exit action, a leader
-completion, or a remap of the interrupt action onto Ctrl+C keeps its own
-semantics — only the builtin physical Ctrl+C carries the busy exception. TSP
-applies the same rule to its bound raw keys (idle Ctrl+C and empty-draft Ctrl+D
-need the same-key second press), while its pre-bind Ctrl+C remains an emergency
-exit.
+**Keyboard rule.** Effective exit keys use same-key 3-second confirmation.
+Default physical Ctrl+C first clears an editable non-empty draft (including
+PiTui's shell-mode prefix even with an empty body). While the exact current
+Session is `working` or `unknown`, that clear neither cancels work nor arms an
+exit; while `idle`, it keeps the historical clear-then-confirm behavior.
+Without an editable draft, `working` performs one existing interrupt-path
+cancel, `unknown` refuses to arm and states that the running state cannot be
+verified, and `idle` uses the same-key double press. A held submission is not
+an editable draft; its pre-acceptance document remains intact. Higher input
+owners keep their existing precedence, and a forwarded TSP Session Search
+cancel does not edit the hidden draft. Default Ctrl+D keeps its existing
+editor/exit behavior; Esc, explicit user remaps and leader completions keep
+their own semantics. TSP applies this rule to its bound raw keys, while its
+pre-bind Ctrl+C remains an emergency exit.
 
 **Compatible cross-build connection.** A Daemon/Split Client that authenticates
 a Host under the same protocol and DSH runtime but a different PiTui build

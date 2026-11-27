@@ -96,7 +96,7 @@ You can also save `Daemon` under `/settings → Host → Backend` for the **next
 | `Ctrl+F` · `Ctrl+Shift+F` | Rendered-view / available Session-history search |
 | `Ctrl+R` · `Ctrl+G` | Prompt history / external editor |
 | `Ctrl+O` · `Alt+T` | Tool/Context and Thinking disclosure |
-| `Ctrl+C` · `Ctrl+D` | Cancel while busy, or follow idle exit confirmation |
+| `Ctrl+C` · `Ctrl+D` | Ctrl+C clears editable drafts first, then cancels work or confirms exit; Ctrl+D keeps its editor/exit behavior |
 | `!` · `!!` | Host Shell with / without Session persistence |
 
 These are default mappings and common entries; `/keybindings` shows the **effective** keys after customizations. Type `/` to search and select commands and available Skills; use `/skill <name> [args]` to invoke a Skill explicitly (including when a same-named command would otherwise win), while bare `/skill` only prints its usage. `/transcript` currently uses the official Direct Markdown export; `/export` creates a separate ZIP archive saved on the Client filesystem. `PI_IMAGE_PROTOCOL=none` disables pixel previews, not attachments.

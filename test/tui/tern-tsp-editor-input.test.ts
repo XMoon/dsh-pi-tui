@@ -1128,15 +1128,15 @@ test('a key batched with the SDK handshake is consumed through the composer', as
 test('an early Ctrl+D in the handshake batch arms the bound double-press exit', async () => {
   // M6 UX PR1: only the PRE-BIND Ctrl+C is an emergency exit. The early
   // empty-draft Ctrl+D is replayed at the bind as the FIRST press of the
-  // same-key 1.5 s exit confirmation, never an immediate exit.
+  // same-key 3 s exit confirmation, never an immediate exit.
   const harness = await mountPane({ withHandshake: '\x04' })
   try {
-    // reason: the contract under test IS the 1.5 s same-key window; this flushes
+    // reason: the contract under test IS the 3 s same-key window; this flushes
     // the one replay dispatch so the arm (not an exit) is observed.
     await settle()
     assert.equal(harness.exitCount(), 0, 'the early Ctrl+D only armed the exit confirmation')
     harness.tern.input.type('\x04')
-    // reason: the confirming press lands inside the same 1.5 s contract window.
+    // reason: the confirming press lands inside the same 3 s contract window.
     await settle()
     assert.equal(harness.exitCount(), 1, 'the same-key second press routed the exit intent')
   } finally {
@@ -1217,7 +1217,7 @@ test('the bound exit handler routes the composer exit gesture', async () => {
     tern.input.type('\x7f')
     await settle()
     tern.input.type('\x04')
-    // reason: the confirmable pair is the 1.5 s same-key contract window.
+    // reason: the confirmable pair is the 3 s same-key contract window.
     await settle()
     assert.equal(boundExits, 0, 'the first empty-draft Ctrl+D only arms the exit')
     tern.input.type('\x04')
@@ -1286,7 +1286,7 @@ test('the empty-draft Ctrl+D exit shape (the real-pane v4 tail) through the boun
     await settle()
     assert.equal(lastEditorProps(harness.frames())?.text, '', 'the draft cleared')
     harness.tern.input.type('\x04')
-    // reason: the arm/confirm pair is the 1.5 s same-key contract window.
+    // reason: the arm/confirm pair is the 3 s same-key contract window.
     await settle()
     assert.equal(harness.exitCount(), 0, 'the first empty-draft Ctrl+D only arms')
     harness.tern.input.type('\x04')
@@ -2492,7 +2492,7 @@ test('a pre-bind empty-draft Ctrl+D is held, never the final emergency exit', as
     await settle()
     assert.equal(harness.exitCount(), 0, 'the held Ctrl+D replays as the first arm')
     harness.tern.input.type('\x04')
-    // reason: the arm/confirm pair is the 1.5 s same-key contract window.
+    // reason: the arm/confirm pair is the 3 s same-key contract window.
     await settle()
     assert.equal(harness.exitCount(), 1, 'the second Ctrl+D confirms after the bind')
   } finally {
@@ -2501,10 +2501,13 @@ test('a pre-bind empty-draft Ctrl+D is held, never the final emergency exit', as
   }
 })
 
-test('idle Ctrl+C clears the draft on the first press, then the same key exits', async () => {
+test('idle Ctrl+C clears the draft, then the same key exits after two seconds', async (t) => {
   // External review P2: the PiTui clear-then-arm ladder applies to the bound
-  // TSP idle Ctrl+C too. Busy/unknown never clear (covered separately).
+  // TSP idle Ctrl+C too. Working/unknown clear without arming.
   const harness = await mountPane({ activity: 'idle' })
+  let elapsed = 0
+  const realNow = Date.now.bind(Date)
+  t.mock.method(Date, 'now', () => realNow() + elapsed)
   try {
     harness.tern.input.type('abc')
     // reason: the scripted SDK pane dispatches on its own loop; this drains the one committed frame under test.
@@ -2517,6 +2520,7 @@ test('idle Ctrl+C clears the draft on the first press, then the same key exits',
     await settle()
     assert.equal(harness.exitCount(), 0, 'the first idle Ctrl+C only clears and arms')
     assert.equal(lastEditorProps(harness.frames())?.text, '', 'the first press cleared the draft')
+    elapsed += 2_000
     harness.tern.input.type('\x03')
     // reason: the same-key second press inside the contract window.
     await settle()
@@ -2527,7 +2531,7 @@ test('idle Ctrl+C clears the draft on the first press, then the same key exits',
   }
 })
 
-test('busy Ctrl+C cancels without clearing the draft or exiting', async () => {
+test('busy Ctrl+C clears the draft before the next press cancels', async () => {
   const harness = await mountPane({ activity: 'working' })
   try {
     harness.tern.input.type('abc')
@@ -2536,25 +2540,33 @@ test('busy Ctrl+C cancels without clearing the draft or exiting', async () => {
     harness.tern.input.type('\x03')
     // reason: the scripted SDK pane dispatches on its own loop; this drains the one committed frame under test.
     await settle()
-    assert.equal(harness.cancels(), 1, 'busy Ctrl+C reached the existing cancel path')
+    assert.equal(harness.cancels(), 0, 'the first press never cancels the running turn')
     assert.equal(harness.exitCount(), 0)
-    assert.equal(lastEditorProps(harness.frames())?.text, 'abc', 'the busy cancel preserves the draft')
+    assert.equal(lastEditorProps(harness.frames())?.text, '', 'the first press cleared the draft')
+    harness.tern.input.type('\x03')
+    await settle()
+    assert.equal(harness.cancels(), 1, 'the next empty-draft press cancels once')
+    assert.equal(harness.exitCount(), 0)
   } finally {
     await harness.dispose()
     await harness.session.close()
   }
 })
 
-test('two pre-bind Ctrl+D presses more than 1.5 s apart never compress into an exit at the bind', async () => {
+test('two pre-bind Ctrl+D presses more than 3 s apart never compress into an exit at the bind', async (t) => {
   // External review (held-key time compression): the held queue must replay
   // the ORIGINAL arrival times; a synchronous bind replay cannot turn two
-  // presses separated by >1.5 s into one confirmation.
+  // presses separated by >3 s into one confirmation.
   const harness = await mountPane({ bind: false })
+  let elapsed = 0
+  const realNow = Date.now.bind(Date)
+  t.mock.method(Date, 'now', () => realNow() + elapsed)
   try {
     harness.tern.input.type('\x04')
-    // reason: the contract under test IS the 1.5 s same-key window; the two
-    // held presses must be separated by MORE than that window.
-    await new Promise<void>(resolve => setTimeout(resolve, 1_650))
+    // Drain the SDK dispatch before advancing the clock: the first held key
+    // must carry its original timestamp, not the later bind time.
+    await settle()
+    elapsed += 3_100
     harness.tern.input.type('\x04')
     // reason: the second held press must reach the queue before the bind.
     await settle()
@@ -2564,7 +2576,7 @@ test('two pre-bind Ctrl+D presses more than 1.5 s apart never compress into an e
     // one replay before observing the absence of an exit.
     // reason: the scripted SDK pane dispatches on its own loop; this drains the one committed frame under test.
     await settle()
-    assert.equal(harness.exitCount(), 0, 'the 1.65 s gap stays a gap at the bind; no compressed exit')
+    assert.equal(harness.exitCount(), 0, 'the 3.1 s gap stays a gap at the bind; no compressed exit')
     harness.tern.input.type('\x04')
     // reason: the fresh post-bind press lands inside the second arm's window.
     await settle()

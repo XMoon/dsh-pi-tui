@@ -1,7 +1,7 @@
 /**
  * M6 UX PR1 TSP contract tests: the bound raw exit keys follow the product rule
- * (working Ctrl+C cancels once, idle needs a same-key second press, unknown
- * refuses), the pre-bind Ctrl+C stays the emergency exit, and the native Exit
+ * (editable drafts clear first, empty working Ctrl+C cancels once, idle needs
+ * a same-key second press, empty unknown refuses), the pre-bind Ctrl+C stays the emergency exit, and the native Exit
  * Choice layer paints real buttons whose CURRENT-epoch pointer events and
  * keyboard route the ONE selection callback while an official modal preempts it.
  *
@@ -126,6 +126,24 @@ test('TSP bound: working Ctrl+C cancels once and never exits', async () => {
   }
 })
 
+test('TSP bound: working Ctrl+C preserves a held submission and cancels once', async () => {
+  const h = await mountHarness()
+  try {
+    h.activity = 'working'
+    bindInput(h)
+    h.renderer.composer.setDraft('held draft')
+    h.renderer.composer.holdSubmission?.('attempt-held-ctrlc')
+    h.pane.key('\x03')
+    await waitFor(() => h.cancels.length === 1, 'the cancel intent reached the application')
+    assert.equal(h.renderer.composer.getDraft(), 'held draft')
+    assert.equal(h.exits.length, 0)
+    h.renderer.composer.settleSubmission?.('attempt-held-ctrlc', 'accepted')
+    assert.equal(h.renderer.composer.getDraft(), '')
+  } finally {
+    await h.dispose()
+  }
+})
+
 test('TSP bound: idle Ctrl+C needs the same-key second press', async () => {
   const h = await mountHarness()
   try {
@@ -200,11 +218,16 @@ test('TSP bound: D→C→D never confirms across the two exit keys', async () =>
   }
 })
 
-test('TSP bound: unknown Ctrl+C refuses to arm and states the unobservable state', async () => {
+test('TSP bound: unknown Ctrl+C clears a draft, then refuses to arm when empty', async () => {
   const h = await mountHarness()
   try {
     h.activity = 'unknown'
     bindInput(h)
+    h.renderer.composer.setDraft('unsubmitted draft')
+    h.pane.key('\x03')
+    await waitFor(() => h.renderer.composer.getDraft() === '', 'the draft was cleared')
+    assert.equal(h.cancels.length, 0)
+    assert.equal(h.exits.length, 0)
     h.pane.key('\x03')
     await waitFor(
       () => JSON.stringify(h.ops()).includes('running state cannot be verified'),

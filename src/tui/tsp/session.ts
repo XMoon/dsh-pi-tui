@@ -275,8 +275,9 @@ export interface TspInputHandlers {
   exit(): void
   /**
    * M6 UX PR1: the LIVE authoritative activity fact for the raw exit keys.
-   * Ctrl+C cancels once while `working`, refuses to arm while `unknown`, and
-   * keeps the same-key double press while `idle`. Optional: a mount without it
+   * Ctrl+C clears an editable draft first; without one it cancels once while
+   * `working`, refuses to arm while `unknown`, and keeps the same-key double
+   * press while `idle`. Optional: a mount without it
    * keeps the historical cancel-only Ctrl+C; the empty-draft Ctrl+D always
    * keeps the product same-key double press.
    */
@@ -4633,12 +4634,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   type RawExitIdentity = 'interrupt' | 'exit'
   /**
    * M6 UX PR1: the ONE armed raw exit key (Ctrl+C while idle / Ctrl+D on an
-   * empty draft). Only the SAME key inside the 1.5 s window confirms; any
+   * empty draft). Only the SAME key inside the 3 s window confirms; any
    * other key disarms, and an expired arm is simply replaced.
    */
   let lastExitKey: { readonly identity: RawExitIdentity; readonly at: number } | undefined
   /** M6 UX PR1: the raw exit-key confirmation window (same as PiTui's). */
-  const RAW_EXIT_CONFIRM_WINDOW_MS = 1500
+  const RAW_EXIT_CONFIRM_WINDOW_MS = 3000
   let inputBound = false
   /** The bound application input handlers (B1: editor-local + lifecycle). */
   let boundHandlers: TspInputHandlers | undefined
@@ -4949,8 +4950,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
 
   /**
-   * PR-C (TSP-7): the Stop click — the EXISTING cancel intent, exactly like
-   * Ctrl+C. It re-checks the busy fact at click time (a one-frame-old painted
+   * PR-C (TSP-7): the Stop click — the EXISTING cancel intent, like Escape.
+   * It re-checks the busy fact at click time (a one-frame-old painted
    * button must never cancel a NEW session's run) and never reads or writes
    * the draft.
    */
@@ -5677,8 +5678,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // must reach the original interrupt/cancel owner exactly once. The card
     // retires itself first so no stale query survives the interrupt, and the
     // key then falls through the ladder unchanged.
+    let forwardedSearchCancel = false
     if (transcriptSearch?.isOpen() === true) {
       if (transcriptSearch.handleKey(key)) return false
+      forwardedSearchCancel = true
     }
     // 4. `Alt+Q` (PR3-B B3 §3.8): the inspection entry for parked continued
     //    Questions — only with no modal and outside the hydration window (the
@@ -5697,25 +5700,34 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     //    unconditional exit. Interrupting a live Agent must not kill the
     //    TUI. The composer's exit-empty (below) is the only exit gesture.
     if (key.ctrl === true && key.name === 'c') {
-      // Ctrl+C always belongs to the original cancel owner; the local menu
-      // expansion is revoked without consuming the intent.
+      // Remember whether a menu owned this gesture before retiring it. The
+      // underlying draft is not that menu's input.
+      const menuOwnedKey = modelQuick?.isOpen() === true || permissionMenuOpen
+      // Revoke the local menu expansion without consuming the intent.
       if (closePermissionMenu()) render()
       // TSP-7 PR-G: the same for the quick menu — its interaction identity goes
       // first (with the frame that shows it), and the cancel intent still
       // reaches its original owner unchanged.
       retireQuickMenu()
-      // TSP I-C/I-D: the same rule for the candidate list — the popup retires
-      // FIRST and the cancel intent still reaches its original owner exactly
-      // once. An open list never turns Ctrl+C into a no-op. The frame is owed
+      // TSP I-C/I-D: retire the candidate list before applying the draft/exit
+      // ladder exactly once. An open list never turns Ctrl+C into a no-op.
+      // The frame is owed
       // only when a list actually went away (the Permission menu's own shape).
       if (completion.retire()) render()
-      // M6 UX PR1: the DEFAULT Ctrl+C is the ONE busy-cancel key. Working:
-      // cancel ONCE through the existing application path, never arm an exit.
-      // Unknown: refuse to arm and state the unobservable fact. Idle: keep the
-      // same-key 1.5 s double-press exit (no immediate cancel).
       const activity = handlers.sessionActivity?.()
-      // A mount without the live fact keeps the historical cancel-only Ctrl+C
-      // (never an unconfirmed exit); the production composition always binds it.
+      // Only the editable base composer may clear its draft. A forwarded
+      // Search cancel or a higher presenter must not edit a hidden draft;
+      // hydration and a held submission also keep their document intact.
+      // Without the live activity fact retain the legacy cancel-only route.
+      if (activity !== undefined && !forwardedSearchCancel && !menuOwnedKey
+        && composerActionsAdmitted() && !historyHoldsComposerSeat()
+        && webPicker?.isOpen() !== true && acpPicker?.isOpen() !== true
+        && !composerHeld() && composer.state().text !== '') {
+        composer.clearDraftStateOnly()
+        lastExitKey = activity === 'idle' ? { identity: 'interrupt', at } : undefined
+        render()
+        return false
+      }
       if (activity === 'working' || activity === undefined) {
         lastExitKey = undefined
         handlers.cancel()
@@ -5724,16 +5736,6 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (activity === 'unknown') {
         lastExitKey = undefined
         display.notify("The current session's running state cannot be verified.", 'error')
-        return false
-      }
-      // Inspect the CURRENT draft BEFORE confirming: a late paste/clipboard
-      // insert may have filled it after the first press. PiTui's ladder clears
-      // the live draft and re-arms; the same-key window never exits over text
-      // that arrived between the presses.
-      if (composer.state().text !== '') {
-        composer.clearDraftStateOnly()
-        render()
-        lastExitKey = { identity: 'interrupt', at }
         return false
       }
       if (armOrConfirmRawExit('interrupt', at)) {
@@ -6301,7 +6303,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // The empty-draft Ctrl+D exit is ORDER-dependent (the reducer decides it
     // against the live draft): the gesture ALWAYS waits for the bind and is
     // re-decided in arrival order there. It is not a final emergency exit —
-    // only the pre-bind Ctrl+C is. Holding it also means the same-key 1.5 s
+    // only the pre-bind Ctrl+C is. Holding it also means the same-key 3 s
     // confirmation (not one key) is required after the bind.
     // While the fence is up the composer accepts NO key: the draft (and any
     // submit) would belong to a subject the surface is replacing. Dropped, not
