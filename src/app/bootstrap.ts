@@ -5117,7 +5117,8 @@ export function applyRunnerWithRuntime(
               const child = viewer.read()
               if (child === undefined || child.id !== sessionId) return
               // The viewer owns the child's presentation: page the child's
-              // exact retained generation and re-fold THAT window.
+              // exact retained generation. The official publication drives the
+              // ONE refold pump; settlement alone never rebuilds the fold.
               await viewer.extendViewedChildHistory()
               return
             }

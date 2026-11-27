@@ -249,9 +249,6 @@ export interface ViewerRuntime<Event extends SessionPresentationEvent> {
   ): void
   /** Apply one transient assistant input to the viewed child's presentation. */
   applyAssistantInput(input: AssistantLiveInput): void
-  /** Re-fold the viewed child from its authoritative window (window replace /
-   *  older-history prepend / PageUp extension). No-op without a viewer. */
-  rehydrateViewedChild(): Promise<void>
   /** Extend the viewed child's window with one official older page. */
   extendViewedChildHistory(): Promise<void>
   /** Tear the viewer down at a session-generation bump (unconditional). */
@@ -539,8 +536,9 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
           deps.surface.repaint()
         },
         onWindowRefoldRequired: () => {
-          if (viewing === undefined || viewing.id !== childId) return
-          requestViewerChildRefold()
+          const target = viewing
+          if (target === undefined || viewHandle !== view) return
+          requestViewerChildRefold({ target, handle: view })
         },
         onSessionSnapshotChanged: () => {
           const target = viewing
@@ -612,54 +610,58 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     ])
   }
 
-  /** S3-R0: the ONE child re-fold serialization. A recovery requirement marks
-   *  INTENT (the pump coalesces it); the history-paging path ENQUEUES its
-   *  re-fold on the same FIFO so two reads can never interleave their commits —
-   *  an older read must never overwrite the fold a newer one already committed. */
-  let viewerChildRefoldInFlight = false
-  let viewerChildRefoldPending = false
-  let viewerChildRefoldChain: Promise<void> = Promise.resolve()
-  const enqueueViewerChildRefold = (): Promise<void> => {
-    const run = viewerChildRefoldChain.then(() => rehydrateViewedChild())
-    viewerChildRefoldChain = run.catch(() => {})
-    return run
+  /** S3-R0: the ONE child re-fold pump. Official window notifications are
+   *  coalesced, but each pending/in-flight operation carries its exact mounted
+   *  target and acquired handle. A retired viewer's delayed notification can
+   *  therefore neither dispatch a read for nor commit into its replacement. */
+  type ViewerRefoldWork = {
+    readonly target: NonNullable<typeof viewing>
+    readonly handle: ViewerChildView<Event>
   }
+  let viewerChildRefoldInFlight: ViewerRefoldWork | undefined
+  let viewerChildRefoldPending: ViewerRefoldWork | undefined
+
+  const ownsViewerRefold = (work: ViewerRefoldWork): boolean =>
+    !deps.isCleanedUp() && viewing === work.target && viewHandle === work.handle
+
   const pumpViewerChildRefold = (): void => {
-    if (viewerChildRefoldInFlight) return
-    viewerChildRefoldInFlight = true
+    if (viewerChildRefoldInFlight !== undefined) return
+    const work = viewerChildRefoldPending
+    if (work === undefined) return
+    viewerChildRefoldPending = undefined
+    viewerChildRefoldInFlight = work
     deps.runDetached('viewer child refold', async () => {
       try {
-        while (viewerChildRefoldPending) {
-          viewerChildRefoldPending = false
-          await enqueueViewerChildRefold()
-        }
+        await rehydrateViewedChild(work)
       } finally {
-        viewerChildRefoldInFlight = false
-        if (viewerChildRefoldPending) pumpViewerChildRefold()
+        if (viewerChildRefoldInFlight === work) viewerChildRefoldInFlight = undefined
+        if (viewerChildRefoldPending !== undefined) pumpViewerChildRefold()
       }
     })
   }
-  const requestViewerChildRefold = (): void => {
-    viewerChildRefoldPending = true
+  const requestViewerChildRefold = (work: ViewerRefoldWork): void => {
+    if (!ownsViewerRefold(work)) return
+    const busy = viewerChildRefoldInFlight
+    if (busy?.target === work.target && busy.handle === work.handle) {
+      viewerChildRefoldPending = work
+      return
+    }
+    if (viewerChildRefoldPending?.target === work.target
+      && viewerChildRefoldPending.handle === work.handle) return
+    viewerChildRefoldPending = work
     pumpViewerChildRefold()
   }
 
-  /** Re-fold the viewed child from the current authoritative window. The
-   * runner's detached ownership wrapper owns failure reporting; every commit
-   * re-checks the exact viewer identity. */
-  const runDetachedViewerRehydrate = (): void => {
-    requestViewerChildRefold()
-  }
-
-  const rehydrateViewedChild = async (): Promise<void> => {
-    const target = viewing
-    const handle = viewHandle
-    if (target === undefined || handle === undefined) return
-    if (deps.isCleanedUp()) return
+  /** Re-fold one exact viewer scope from its authoritative window. The runner's
+   * detached ownership wrapper owns failure reporting; the source's commit
+   * closure performs the last-moment generation/binding/revision fence. */
+  const rehydrateViewedChild = async (work: ViewerRefoldWork): Promise<void> => {
+    const { target, handle } = work
+    if (!ownsViewerRefold(work)) return
     const snapshot = await handle.rehydrate()
     if (snapshot === undefined) return
     // The viewer may have exited/switched while the re-read was in flight.
-    if (deps.isCleanedUp() || viewing !== target || viewHandle !== handle) return
+    if (!ownsViewerRefold(work)) return
     const own = childOwnEvents(snapshot.durableEvents)
     const folder = new TranscriptFolder()
     folder.hydrate(own)
@@ -684,20 +686,23 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
       ? (write(), true)
       : snapshot.commit(write)
     if (!committed) return
+    // The successful commit acknowledged every official notification already
+    // covered by this read. Only a notification arriving AFTER that commit may
+    // queue another fold; status/repaint callbacks run after this consumption.
+    if (viewerChildRefoldPending?.target === target
+      && viewerChildRefoldPending.handle === handle) viewerChildRefoldPending = undefined
     deps.refreshStatus()
     deps.surface.repaint()
   }
 
-  /** Page one official older window into the viewed child, then re-fold. */
+  /** Page one official older window into the exact viewed child generation.
+   *  The official publication is the ONLY refold wakeup: settlement alone is
+   *  not window-change evidence, and no second producer may rebuild the fold. */
   const extendViewedChildHistory = async (): Promise<void> => {
     const target = viewing
     const handle = viewHandle
     if (target === undefined || handle === undefined || deps.isCleanedUp()) return
     await handle.loadOlder()
-    if (deps.isCleanedUp() || viewing !== target) return
-    // Serialized with every other child re-fold: an older in-flight re-fold must
-    // never commit after this one.
-    await enqueueViewerChildRefold()
   }
 
   /** Leave the subagent viewer (single Esc). Returns whether it exited.
@@ -997,7 +1002,6 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     settleSubagentCall,
     settleSubmit: settleSubagentSubmit,
     applyAssistantInput,
-    rehydrateViewedChild,
     extendViewedChildHistory,
     teardownForSessionSwap,
     dispose,

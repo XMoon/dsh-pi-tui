@@ -69,13 +69,15 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { MessageId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { MessageId, ToolCallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { RemoteTransportLifetime } from '../../src/app/application-runtime.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import { mountRemotePresentationHost, mountRemoteRunner } from './runner-remote-presentation.test.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
+import { findFocusHeaderRow, findLastFocusHeaderRow } from '../support/focus-header.ts'
+import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -158,6 +160,76 @@ function seedTurns(append: Append, from: number, to: number, label: string): voi
   }
 }
 
+/** One settled reasoning + tool Activity. The result text is a body-only marker:
+ *  collapsed headers may name the path, but never this unique payload. */
+function seedActivityGroup(append: Append, turn: number, step: number, marker: string): void {
+  const reasoning = `reasoning for activity step ${step}`
+  const callId = ToolCallId(`call-${marker}`)
+  append('assistant/message', {
+    turn, step,
+    message: {
+      id: MessageId(`thinking-${marker}`), role: 'assistant',
+      content: [{ type: 'reasoning', text: reasoning }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+    },
+    stream: [
+      { type: 'chunk', time: Date.now(), chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+      { type: 'chunk', time: Date.now(), chunk: { type: 'reasoning-delta', index: 0, text: reasoning } },
+      { type: 'chunk', time: Date.now(), chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: reasoning } } },
+    ],
+    usage: { inputTokens: 1, outputTokens: 1 },
+  }, { surfaceOp: 'append' })
+  append('tool/call', {
+    turn, step, callId, name: 'activity_probe', arguments: JSON.stringify({ path: `${marker.replace('boundary-body-', 'source-')}.txt` }),
+  })
+  append('tool/result', {
+    turn, step,
+    message: {
+      id: MessageId(`result-${marker}`), role: 'tool', toolCallId: callId,
+      content: [{ type: 'text', text: marker }],
+      source: { kind: 'tool', callId },
+    },
+  }, { surfaceOp: 'append' })
+}
+
+/** A short completed turn with two independent Activities separated by visible
+ *  narration. Opening one leaves the other as a same-turn negative control. */
+function seedActivityTurn(append: Append, turn: number): void {
+  append('turn/start', { turn })
+  append('step/start', { turn, step: 0 })
+  append('user/message', {
+    id: MessageId(`u-activity-${turn}`), role: 'user',
+    content: [{ type: 'text', text: `inspect two activities ${turn}` }], source: { kind: 'user' },
+  }, { surfaceOp: 'append' })
+  seedActivityGroup(append, turn, 0, 'boundary-body-alpha')
+  append('step/end', { turn, step: 0 })
+  append('step/start', { turn, step: 1 })
+  append('assistant/message', {
+    turn, step: 1,
+    message: {
+      id: MessageId(`narration-activity-${turn}`), role: 'assistant',
+      content: [{ type: 'text', text: 'between the two activities' }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+    },
+    stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+  }, { surfaceOp: 'append' })
+  append('step/end', { turn, step: 1 })
+  append('step/start', { turn, step: 2 })
+  seedActivityGroup(append, turn, 2, 'boundary-body-beta')
+  append('step/end', { turn, step: 2 })
+  append('assistant/message', {
+    turn, step: 3,
+    message: {
+      id: MessageId(`a-activity-${turn}`), role: 'assistant',
+      content: [{ type: 'text', text: `childb answer ${turn}` }],
+      source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+    },
+    stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+  }, { surfaceOp: 'append' })
+  append('step/end', { turn, step: 3 })
+  append('turn/end', { turn, reason: { kind: 'completed' } })
+}
+
 /** The structural faces this suite drives on the mounted TuiApp / Client. */
 interface MountedApp {
   setDraft(text: string): void
@@ -166,6 +238,9 @@ interface MountedApp {
   getViewerGeneration(): number
   pendingInputForTest(): { queued: ReadonlyArray<{ text?: string }>; tail: ReadonlyArray<{ row?: { text?: string } }> }
   setFullscreen(on: boolean): void
+  setDisplayPreset(preset: 'full' | 'compact' | 'focus'): unknown
+  expandedWorkOwnersForTest(): ReadonlySet<object>
+  focusExpandedTurnsForTest(): ReadonlySet<number>
   scrollToTop(options?: { disableFollow?: boolean }): void
   /** The private presentation-scope provider (read through the structural escape
    *  hatch; the same value a child thumbnail would be stamped with). */
@@ -256,7 +331,8 @@ async function mountTaskCenterFixture(
   // Child A carries enough turns that the official opening window truncates
   // (the child-viewer paging proof needs a real older page).
   seedTurns(aAppend, 1, 30, 'childa')
-  seedTurns(appenderOf(host.ctx, CHILD_B_ID), 1, 2, 'childb')
+  seedTurns(appenderOf(host.ctx, CHILD_B_ID), 1, 1, 'childb')
+  seedActivityTurn(appenderOf(host.ctx, CHILD_B_ID), 2)
   seedTurns(appenderOf(host.ctx, CHILD_C_ID), 1, 2, 'childc')
   // The parent-owned discovery facts: direct children A and B on the parent,
   // the nested C on child A (the recursive-walk input).
@@ -439,6 +515,16 @@ test('`/tasks` renders the REAL Remote descendant tree and the child row opens t
     'the fixture must provide a truncating child window for the paging proof')
   const beforeMainFirst = beforeMain.durableEvents[0]!.seq
   const beforeMainCount = beforeMain.durableEvents.length
+  // Observe the REAL production fold consumer created by the viewer. One true
+  // prepend may replace the window once; a second settlement-driven rebuild of
+  // the same cut is redundant and loses manual disclosure identity.
+  const originalHydrate = TranscriptFolder.prototype.hydrate
+  let childWindowFolds = 0
+  TranscriptFolder.prototype.hydrate = function (events) {
+    childWindowFolds += 1
+    return originalHydrate.call(this, events)
+  }
+  life.defer(() => { TranscriptFolder.prototype.hydrate = originalHydrate })
   app.setFullscreen(true)
   await new Promise(resolve => setTimeout(resolve, 50))
   const pageStarted = Date.now()
@@ -462,6 +548,9 @@ test('`/tasks` renders the REAL Remote descendant tree and the child row opens t
   assert.equal(afterMain.durableEvents.length, beforeMainCount,
     'the MAIN session window length must be unchanged while the child viewer is open')
   await waitFor('the viewer visibly scrolled into the child history', () => viewport().includes('↓ Latest'), 10_000)
+  await fixture.vt.waitForRender()
+  assert.equal(childWindowFolds, 1,
+    'one official prepend commits one child fold; paging settlement cannot trigger a second rebuild')
 
   // ── §14.12 Esc restores the main transcript/status/queue anchor.
   fixture.vt.sendInput('\x1b')
@@ -477,6 +566,122 @@ test('`/tasks` renders the REAL Remote descendant tree and the child row opens t
   assert.equal(pendingTexts(app.pendingInputForTest()).includes('child A pending echo'), false,
     'the child pending echo must not leak onto the restored main surface')
 })
+
+for (const preset of ['compact', 'focus'] as const) {
+  test(`${preset}: a true history-floor wheel preserves the opened Activity owner and body while its sibling stays collapsed`, async (t) => {
+    const life = testLifecycle(t)
+    const { fixture, app, sessions, viewport } = await mountTaskCenterFixture(life)
+    const reader = fixture.aggregate.presentation.presentationReader
+    app.setDisplayPreset(preset)
+    app.setFullscreen(true)
+    await openTaskRow(fixture, app, viewport, LABEL_B)
+    await waitFor('the short child B viewer hydrated', () => viewport().includes('childb answer 2'), 20_000)
+    await fixture.vt.waitForRender()
+
+    const floor = await reader.read(CHILD_B_ID)
+    assert.ok(floor !== undefined)
+    assert.equal(floor.openState, 'open')
+    assert.equal(floor.hasMore, false)
+    assert.equal(floor.loadingOlder, false)
+    assert.equal(floor.sessionId, CHILD_B_ID)
+
+    const activityRow = (expanded: boolean): number => viewport().split('\n').findIndex(line =>
+      new RegExp(`^\\s*${expanded ? '▾' : '▸'} Activity(?: | ·|$)`).test(line))
+    if (preset === 'focus') {
+      const thoughtRow = findLastFocusHeaderRow(viewport().split('\n'), false)
+      assert.ok(thoughtRow >= 0, `the short child Focus Thought must be painted:\n${viewport()}`)
+      fixture.vt.sendInput(`\x1b[<0;3;${thoughtRow + 1}M`)
+      fixture.vt.sendInput(`\x1b[<0;3;${thoughtRow + 1}m`)
+      await fixture.vt.waitForRender()
+      assert.ok(findFocusHeaderRow(viewport().split('\n'), true) >= 0,
+        `the real header click must open the outer Thought:\n${viewport()}`)
+    }
+
+    const collapsedActivity = activityRow(false)
+    assert.ok(collapsedActivity >= 0, `an Activity header must be painted:\n${viewport()}`)
+    fixture.vt.sendInput(`\x1b[<0;3;${collapsedActivity + 1}M`)
+    fixture.vt.sendInput(`\x1b[<0;3;${collapsedActivity + 1}m`)
+    await fixture.vt.waitForRender()
+    const toolRow = viewport().split('\n').findIndex(line => line.includes('source-alpha.txt'))
+    assert.ok(toolRow >= 0, `the opened Activity must expose its compact tool card:\n${viewport()}`)
+    fixture.vt.sendInput(`\x1b[<0;10;${toolRow + 1}M`)
+    fixture.vt.sendInput(`\x1b[<0;10;${toolRow + 1}m`)
+    await fixture.vt.waitForRender()
+    assert.ok(viewport().includes('boundary-body-alpha'),
+      `the real Activity click must reveal its unique body marker:\n${viewport()}`)
+    assert.equal(viewport().includes('boundary-body-beta'), false,
+      `the same-turn sibling Activity must remain collapsed:\n${viewport()}`)
+    const openedOwner = [...app.expandedWorkOwnersForTest()][0]
+    assert.ok(openedOwner !== undefined, 'the painted expansion must own one canonical Work object')
+    const openedThoughts = [...app.focusExpandedTurnsForTest()]
+    if (preset === 'focus') assert.ok(openedThoughts.includes(2), 'the outer Thought remains manually open')
+
+    // Observe the REAL paging operation's settlement, not a guessed delay. The
+    // shared reader returns the unchanged floor snapshot without calling the
+    // official SessionFace.loadOlder; any refold after that settlement is the
+    // redundant producer this regression must eliminate.
+    const originalLoadOlder = reader.loadOlder
+    let pageCalls = 0
+    let pageSettled = false
+    reader.loadOlder = async (sessionId, signal) => {
+      pageCalls += 1
+      try {
+        return await originalLoadOlder.call(reader, sessionId, signal)
+      } finally {
+        pageSettled = true
+      }
+    }
+    life.defer(() => { reader.loadOlder = originalLoadOlder })
+    const binding = sessions.binding(SessionId(CHILD_B_ID))
+    assert.ok(binding !== undefined)
+    const officialFace = binding.session as typeof binding.session & { loadOlder?: () => Promise<void> }
+    const originalOfficialLoadOlder = officialFace.loadOlder
+    assert.ok(originalOfficialLoadOlder !== undefined, 'the official child face exposes loadOlder')
+    let officialPageCalls = 0
+    officialFace.loadOlder = async () => {
+      officialPageCalls += 1
+      await originalOfficialLoadOlder.call(officialFace)
+    }
+    life.defer(() => { officialFace.loadOlder = originalOfficialLoadOlder })
+
+    app.scrollToTop({ disableFollow: true })
+    await fixture.vt.waitForRender()
+    const beforeFrame = viewport()
+    for (let wheel = 0; wheel < 3; wheel += 1) {
+      fixture.vt.sendInput('\x1b[<64;12;12M')
+    }
+    await waitFor('the true-floor paging read settled', () => pageSettled, 10_000)
+    await fixture.vt.waitForRender()
+    const after = await reader.read(CHILD_B_ID)
+    assert.ok(after !== undefined)
+    assert.equal(pageCalls, 1, 'the subject latch coalesces repeated boundary wheels into one read')
+    assert.equal(officialPageCalls, 0, 'hasMore=false must dispatch no official older-page RPC')
+    assert.equal(after.revision, floor.revision, 'the authoritative window cut is unchanged')
+    assert.equal(after.durableEvents.length, floor.durableEvents.length, 'no older events joined the window')
+    assert.ok(viewport().includes('boundary-body-alpha'),
+      `the opened Activity body must survive the true-floor wheel:\nbefore:\n${beforeFrame}\nafter:\n${viewport()}`)
+    assert.equal(viewport().includes('boundary-body-beta'), false,
+      `the wheel must not expand the sibling Activity:\n${viewport()}`)
+    assert.equal(app.expandedWorkOwnersForTest().size, 1,
+      'the unchanged window must keep exactly the manually opened Work owner')
+    assert.ok([...app.expandedWorkOwnersForTest()].includes(openedOwner),
+      'the unchanged window must preserve the canonical Work object identity')
+    if (preset === 'focus') {
+      assert.ok(findFocusHeaderRow(viewport().split('\n'), true) >= 0,
+        `the outer Thought must remain expanded:\n${viewport()}`)
+      assert.deepEqual([...app.focusExpandedTurnsForTest()], openedThoughts,
+        'the true-floor wheel must preserve the manual Thought disclosure')
+    }
+
+    const expandedActivity = activityRow(true)
+    assert.ok(expandedActivity >= 0, `the opened Activity must remain painted:\n${viewport()}`)
+    fixture.vt.sendInput(`\x1b[<0;4;${expandedActivity + 1}M`)
+    fixture.vt.sendInput(`\x1b[<0;4;${expandedActivity + 1}m`)
+    await fixture.vt.waitForRender()
+    assert.equal(viewport().includes('boundary-body-alpha'), false,
+      `a fresh explicit header click must still collapse the Activity:\n${viewport()}`)
+  })
+}
 
 test('the RENDERED /tasks row and badge follow the official Client Session running fact for an UNRETAINED child, with no Direct Host read', async (t) => {
   const life = testLifecycle(t)
@@ -1840,7 +2045,7 @@ test('sink: the MOUNTED Remote child viewer converges its committed subject and 
   // Every OTHER status-commit path for this child is suppressed with a witness:
   // durable events (`routeSessionEvent` → `beginTurn`/`endTurn` + `refreshFooter`),
   // coalesced projection events (`onProjectionsChanged` → `refreshStatus`), and
-  // the window sinks (`rehydrateViewedChild` → `target.activity` + `refreshStatus`).
+  // the window-refold pump (`target.activity` + `refreshStatus`).
   // The Direct Host firehose that also feeds `routeSessionEvent` is registered ONLY
   // when `remoteSources` is absent (bootstrap.ts), and Remote events arrive through
   // this ingress alone. Hence `viewing.activity` has exactly two writers — the open
@@ -1855,7 +2060,7 @@ test('sink: the MOUNTED Remote child viewer converges its committed subject and 
   // produce a projection change — so the snapshot counter (not the projection
   // counter) is the witness that the flip really arrived and was re-derived.
   let snapshotNotifications = 0
-  // The window sinks drive `rehydrateViewedChild`, which ALSO re-derives the
+  // The window-refold pump ALSO re-derives the
   // subject status (`deps.refreshStatus()` + `target.activity` from the binding).
   // They are suppressed and counted too: if they ever fired inside the measured
   // window the causality claim below would be false, so a non-zero count fails
