@@ -2091,23 +2091,22 @@ test('the real Tern SDK ↑ sink reads the root and a carrier scope reset retire
     await waitUntil('the real SDK ↑ continues to the older root row', () =>
       harness.surface.composer.getDraft() === 'A older original')
 
-    // A real carrier/Session scope change clears the root. The browse is at
-    // the OLDER row; one more real ↑ before any new seed must NOT wrap back to
-    // A's newest row through a stale positional browse. This discriminates the
-    // TSP reset seam: an empty implementation would move the draft.
+    // A real carrier/Session scope change clears the root and invalidates the
+    // positional browse. The DOWN observation keeps the current row; the
+    // DISCRIMINATING step is the B reseed below (probe: with the reset omitted,
+    // the stale browse/bookmark state makes B's first ↑ never reach B only).
     assert.equal(recall.bindScope(scopeB), true)
     harness.surface.display.resetInputRecallScope()
-    harness.tern.input.type('\x1b[A')
+    harness.tern.input.type('\x1b[B')
     // Bounded key-drain window: an inert reset key produces no repaint to await.
     await settle()
-    assert.notEqual(harness.surface.composer.getDraft(), 'A newest original',
-      'the outgoing carrier row is not recallable after resetInputRecallScope')
-    assert.notEqual(harness.surface.composer.getDraft(), 'B only original')
+    assert.equal(harness.surface.composer.getDraft(), 'A older original',
+      'the outgoing browse position did not advance into a stale row')
 
     // The new scope's seed reaches the same real ↑ sink from an empty draft.
-    harness.surface.composer.setDraft('')
     recall.applySeed([{ messageId: 'host-b', text: 'B only original' }], 'session-b')
     harness.surface.display.reseedInputRecall()
+    harness.surface.composer.setDraft('')
     harness.tern.input.type('\x1b[A')
     await waitUntil('the real SDK ↑ recalls the new scope seed', () =>
       harness.surface.composer.getDraft() === 'B only original')
