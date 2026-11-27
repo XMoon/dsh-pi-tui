@@ -8802,6 +8802,13 @@ test('resuming an excluded Session during an open round schedules only one autho
         currentStarted.finally(() => clearTimeout(timer))
       }),
     ])
+    const round = (wire.service() as unknown as {
+      coverageRound?: { readonly settled: Map<string, { readonly liveObject: object | undefined; readonly readable: boolean }> }
+    }).coverageRound
+    const legacySettled = round?.settled.get(REAL_LEGACY_ID)
+    assert.ok(legacySettled !== undefined, 'the legacy omission must settle before the held current candidate')
+    assert.equal(legacySettled.liveObject, undefined)
+    assert.equal(legacySettled.readable, false)
     handle = await wire.host.ctx.agentLoop.resume(wire.host.ctx, {
       resumeSessionId: SessionId(REAL_LEGACY_ID),
       agentOptions: { provider: 'smoke', model: 'smoke' },
