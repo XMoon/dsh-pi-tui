@@ -265,12 +265,15 @@ test('the client command is the exact Profile token with platform quoting', () =
   assert.equal(acpStdioCommand("it's", 'linux'), "dsh --profile 'it'\\''s' acp stdio")
   assert.equal(acpStdioCommand('a$b;c', 'linux'), "dsh --profile 'a$b;c' acp stdio")
   assert.equal(acpStdioCommand('/abs/path', 'linux'), 'dsh --profile /abs/path acp stdio')
-  // PowerShell: a double-quoted literal with backtick escapes; smart single
-  // quotes are literal rather than token terminators.
+  // PowerShell: a single-quoted literal; every recognized single-quote class
+  // is doubled, while smart double quotes are literal inside it.
   assert.equal(acpStdioCommand('pi-tui', 'win32'), 'dsh --profile pi-tui acp stdio')
   assert.equal(acpStdioCommand('work profile', 'win32'), "dsh --profile 'work profile' acp stdio")
   assert.equal(acpStdioCommand("it's", 'win32'), "dsh --profile 'it''s' acp stdio")
+  assert.equal(acpStdioCommand('a\u2018b', 'win32'), "dsh --profile 'a\u2018\u2018b' acp stdio")
   assert.equal(acpStdioCommand('a\u2019b', 'win32'), "dsh --profile 'a\u2019\u2019b' acp stdio")
+  assert.equal(acpStdioCommand('a\u201ab', 'win32'), "dsh --profile 'a\u201a\u201ab' acp stdio")
+  assert.equal(acpStdioCommand('a\u201bb', 'win32'), "dsh --profile 'a\u201b\u201bb' acp stdio")
   assert.equal(acpStdioCommand('a$b', 'win32'), "dsh --profile 'a$b' acp stdio")
   assert.equal(acpStdioCommand('a"b', 'win32'), 'dsh --profile \'a"b\' acp stdio')
   assert.equal(acpStdioCommand('a`b', 'win32'), 'dsh --profile \'a`b\' acp stdio')
