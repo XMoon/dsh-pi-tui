@@ -20,7 +20,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { Context } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
-import { startLocalClient, type LocalClientStatus } from '../../src/app/remote-process/client-bootstrap.ts'
+import { hostShellPathLiteralDialectOf, startLocalClient, type LocalClientStatus } from '../../src/app/remote-process/client-bootstrap.ts'
 import { attachEntryControl, createControlDispatcher } from '../../src/app/remote-process/entry-control.ts'
 import {
   assertHandoffRestored,
@@ -1397,7 +1397,7 @@ test('the reexec trigger is internal, singular and starts only after the ONE shu
   // probe flag, but the ONE request handler of a real surface Client is
   // created for BOTH the probe and the public `/reload-client` capability.
   assert.match(source, /const reexecProbe = process\.env\.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1'/u)
-  assert.match(source, /if \(reexecProbe\) process\.on\('SIGUSR2', \(\) => \{ reexecHandler\?\.request\('qualification'\) \}\)/u)
+  assert.match(source, /if \(reexecProbe && process\.platform !== 'win32'\) \{\s*process\.on\('SIGUSR2', \(\) => \{ reexecHandler\?\.request\('qualification'\) \}\)/u)
   assert.equal((source.match(/= createClientReexecRequestHandler\(/gu) ?? []).length, 1,
     'the surface Client must own exactly ONE reexec request handler')
   assert.match(source, /requestStop: \(\) => \{[\s\S]*?runDetached\('local client: reexec handoff', \(\) => stop\(0\)/u,
@@ -1533,4 +1533,10 @@ test('the handoff expectation is a surface-only UUID and rejects every SIGUSR2 c
       /may not inherit another SIGUSR2 qualification mode/u,
     )
   })
+})
+
+test('the authenticated Host publication decides the Client shell literal dialect', () => {
+  assert.equal(hostShellPathLiteralDialectOf({ schema: 3 }), 'powershell', 'the Windows schema-3 Host owns the PowerShell literal grammar')
+  assert.equal(hostShellPathLiteralDialectOf({ schema: 2 }), 'bash', 'the macOS schema-2 Host keeps Bash')
+  assert.equal(hostShellPathLiteralDialectOf({ schema: 1 }), 'bash', 'the Linux schema-1 Host keeps Bash')
 })

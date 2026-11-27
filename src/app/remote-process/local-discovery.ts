@@ -525,14 +525,14 @@ function parseRecord(value: unknown, scope: RecordScope): LocalInstanceRecord {
 /** Reject a schema that cannot belong to the running local platform. A Linux
  *  schema1 record on macOS (or the reverse) is not a candidate this process may
  *  authenticate, spawn around or treat as a readiness proof. */
-function assertRecordSchemaPlatform(record: LocalInstanceRecord): void {
-  if (record.schema === 1 && process.platform !== 'linux') {
+function assertRecordSchemaPlatform(record: LocalInstanceRecord, platform: NodeJS.Platform = process.platform): void {
+  if (record.schema === 1 && platform !== 'linux') {
     throw new LocalScopeError('HOST_PROTOCOL_INCOMPATIBLE', 'local discovery: schema 1 is a Linux Host publication')
   }
-  if (record.schema === 2 && process.platform !== 'darwin') {
+  if (record.schema === 2 && platform !== 'darwin') {
     throw new LocalScopeError('HOST_PROTOCOL_INCOMPATIBLE', 'local discovery: schema 2 is a macOS Host publication')
   }
-  if (record.schema === 3 && process.platform !== 'win32') {
+  if (record.schema === 3 && platform !== 'win32') {
     throw new LocalScopeError('HOST_PROTOCOL_INCOMPATIBLE', 'local discovery: schema 3 is a Windows Host publication')
   }
 }
@@ -904,8 +904,12 @@ export async function readAuthenticatedIdentity(
 export function assertRecordedHostKernelIdentityCurrent(
   record: LocalInstanceRecord,
   readKernel: (pid: number) => KernelObservation = readKernelProcess,
+  /** The platform the caller is classifying for; production always uses the
+   *  current process platform (the deterministic classifier test seam is the
+   *  only override). */
+  platform: NodeJS.Platform = process.platform,
 ): void {
-  assertRecordSchemaPlatform(record)
+  assertRecordSchemaPlatform(record, platform)
   if (record.schema === 2 || record.schema === 3) {
     const observed = readKernel(record.hostPid)
     if (observed.kind === 'unknown') {

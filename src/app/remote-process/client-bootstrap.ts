@@ -55,6 +55,7 @@ import { runDetached } from '../../runtime/process/tasks.ts'
 import type { CliSessionLaunchIntent } from '../../startup.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { LocalInstanceRecord } from './local-discovery.ts'
+import type { HostShellPathLiteralDialect } from '../../runtime/host-shell-completion-port.ts'
 import type { LocalClientTransport } from './local-transport.ts'
 import type { ProfileDaemonAdmin } from './local-profile-daemon-admin.ts'
 import type { SplitClientInteractionDeliveryOwner } from './client-interaction-delivery.ts'
@@ -290,6 +291,15 @@ export interface LocalClientHandle {
 }
 
 /** Project the authenticated record without the profile path. */
+/** The ONE split-Client Host shell dialect projection: the AUTHENTICATED Host
+ *  publication schema decides the Host shell's literal grammar. Schema 3 is the
+ *  Windows Host (PowerShell); schema 1/2 keep the POSIX Bash grammar. The Client
+ *  OS never participates, and a missing authenticated publication has no
+ *  dialect at all. */
+export function hostShellPathLiteralDialectOf(host: Pick<LocalInstanceRecord, 'schema'>): HostShellPathLiteralDialect {
+  return host.schema === 3 ? 'powershell' : 'bash'
+}
+
 function hostFacts(record: LocalInstanceRecord): LocalClientHostFacts {
   const shared = {
     schema: record.schema,
@@ -884,6 +894,8 @@ async function startSurfaceLocalClient(
       domains,
       fetch: authenticatedFetch,
       trustedHostOrigin: host.origin,
+      // The AUTHENTICATED Host publication's schema is the ONLY dialect source.
+      hostShellPathLiteralDialect: hostShellPathLiteralDialectOf(host),
       clientUi: revision.ui,
       delivery,
       surfaceRevision: revision.id,

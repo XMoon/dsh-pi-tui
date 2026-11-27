@@ -17,6 +17,7 @@ import test, { type TestContext } from 'node:test'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
   createWorkspaceObjectHandler,
+  isBoundedWorkspaceObjectPath,
   LOCAL_WORKSPACE_OBJECT_ROUTE,
   observeHostWorkspaceObject,
 } from '../../src/app/remote-process/local-workspace-object.ts'
@@ -101,6 +102,19 @@ test('the handler refuses every method, body, instance and path shape outside it
   assert.equal(await status(request({ instanceId: INSTANCE, path: join(root, 'missing') })), 404)
   // An oversize body is refused before JSON parsing.
   assert.equal(await status(request(undefined, { raw: JSON.stringify({ instanceId: INSTANCE, path: dir, pad: 'x'.repeat(9 * 1024) }) })), 413)
+})
+
+test('Windows path admission accepts only an ordinary drive-absolute spelling', () => {
+  for (const accepted of ['C:\\Users\\x', 'c:/Users/x', 'D:\\ws A']) {
+    assert.equal(isBoundedWorkspaceObjectPath(accepted, 'win32'), true, accepted)
+  }
+  for (const refused of ['C:foo', '\\Users', '\\\\server\\share', '\\\\?\\C:\\x', '\\\\.\\pipe\\x', '', '/home/x']) {
+    assert.equal(isBoundedWorkspaceObjectPath(refused, 'win32'), false, refused)
+  }
+  // The POSIX contract is unchanged.
+  assert.equal(isBoundedWorkspaceObjectPath('/home/x', 'linux'), true)
+  assert.equal(isBoundedWorkspaceObjectPath('relative', 'linux'), false)
+  assert.equal(isBoundedWorkspaceObjectPath('C:\\Users\\x', 'linux'), false)
 })
 
 test('the Client observation accepts only the exact positive response', async () => {

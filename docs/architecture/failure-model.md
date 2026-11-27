@@ -17,7 +17,9 @@ ctx.logger is a log line that never exists here.
 The Daemon surface Client is a separate process and owns a SEPARATE fatal
 diagnostics contract (`src/app/remote-process/client-fatal-diagnostics.ts`).
 A real surface fatal writes one private incident artifact at
-`$DSH_HOME/logs/pi-tui-client/startup-*.log` (directory `0700`, file `0600`)
+`$DSH_HOME/logs/pi-tui-client/startup-*.log` (POSIX directory `0700` / file
+`0600`; Windows product-owned directory and file with a protected owner-only
+DACL, while the user's shared `logs` parent is never chmodded or ACL-rewritten)
 with the bounded, redacted error name/code/message/stack and its cause chain.
 The artifact is created only for a real fatal, never for a successful start;
 the terminal receives only one controlled Client line plus the file locator.

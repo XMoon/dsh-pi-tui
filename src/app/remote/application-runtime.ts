@@ -29,6 +29,7 @@ import type { RemoteApplicationSource } from './presentation-source.ts'
 import type { RemoteClientUiRuntime } from './client-ui-runtime.ts'
 import type { MountedRemoteClientDomains } from './client-runtime.ts'
 import type { SplitClientInteractionDelivery } from '../../runtime/remote/interaction-remote.ts'
+import type { HostShellPathLiteralDialect } from '../../runtime/host-shell-completion-port.ts'
 import {
   collectDisposeErrors,
   composeRemoteApplicationStage,
@@ -58,6 +59,9 @@ export interface SplitRemoteApplicationRuntimeOptions {
   readonly fetch: RemoteBackendFetch
   /** The authenticated Host listener origin from the Client's verified identity. */
   readonly trustedHostOrigin?: string
+  /** The authenticated Host shell's literal-path grammar, projected from the
+   *  SAME authenticated Host identity. */
+  readonly hostShellPathLiteralDialect?: HostShellPathLiteralDialect
   /** The already-mounted Client UI subtree (identity source of the extension
    * service). */
   readonly clientUi: RemoteClientUiRuntime
@@ -97,6 +101,9 @@ export async function createRemoteApplicationRuntimeFromClient(
     client: options.domains,
     fetch: options.fetch,
     ...(options.trustedHostOrigin === undefined ? {} : { trustedHostOrigin: options.trustedHostOrigin }),
+    ...(options.hostShellPathLiteralDialect === undefined
+      ? {}
+      : { hostShellPathLiteralDialect: options.hostShellPathLiteralDialect }),
     ...(options.promptSerializer === undefined ? {} : { promptSerializer: options.promptSerializer }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.delivery === undefined ? {} : { delivery: options.delivery }),

@@ -212,8 +212,9 @@ duplicates it (see [`../tsp/overview.md`](../tsp/overview.md)).
 ## Direct and Remote
 
 Direct is the current production/default provider. Remote is the internal
-split-process backend on Linux and macOS, selected by the public `daemon`
-backend (`direct` remains the default): a real Host process plus zero or more
+split-process backend on Linux, macOS and Windows native x64, selected by the
+public `daemon` backend (`direct` remains the default): a real Host process
+plus zero or more
 real Client processes, each composing its own Context (the Host lifetime is
 independent of Client attachment). Both implement the same
 transport-neutral semantic contracts defined by `src/runtime/**`; the contract

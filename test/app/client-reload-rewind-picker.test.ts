@@ -169,6 +169,7 @@ function setup(mode: TerminalMode): Harness {
   let requests = 0
   const gate = createClientReloadCommandRequest({
     facts: {
+      supported: () => true,
       capable: () => true,
       ready: () => true,
       draftText: () => draft.value,

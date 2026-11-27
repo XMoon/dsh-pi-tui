@@ -36,6 +36,13 @@ import {
 import { join } from 'node:path'
 import { dshHome } from '../../runtime/process/diagnostics.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import {
+  ensureWin32PrivateDirectory,
+  isWin32LocalFixedNtfs,
+  win32FileAttributes,
+  win32PrivateDirectorySafe,
+  win32PrivateFileStatus,
+} from '../../runtime/native-process/win32.ts'
 
 /** The existing lifecycle state a fatal is observed from. */
 export type ClientFatalPhase = 'pre-entry' | 'pre-context' | 'client-assembly' | 'client-runtime'
@@ -312,6 +319,7 @@ function ensurePrivateClientDirectory(path: string, uid: number | undefined): st
  * directory when missing. The shared `logs` directory is never chmodded.
  */
 function prepareDiagnosticDirectory(env: NodeJS.ProcessEnv): string {
+  if (process.platform === 'win32') return prepareWin32DiagnosticDirectory(env)
   const home = realpathSync(dshHome(env))
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   const homeInfo = statSync(home)
@@ -333,6 +341,39 @@ function prepareDiagnosticDirectory(env: NodeJS.ProcessEnv): string {
   if ((logsInfo.mode & 0o022) !== 0) throw new DiagnosticWriteRefusal('EPERM')
   const directory = ensurePrivateClientDirectory(join(logs, 'pi-tui-client'), uid)
   if (realpathSync(directory) !== directory) throw new DiagnosticWriteRefusal('ELOOP')
+  return directory
+}
+
+/**
+ * Windows diagnostic directory: the official DSH home must be an ordinary
+ * local fixed-NTFS directory and the shared `logs` parent a real directory
+ * (never a reparse/junction). Its owner-chosen ACL is NEVER modified. Only the
+ * product-owned `pi-tui-client` child is created/reused through the PR2
+ * protected owner-only DACL helper; an unsafe existing child fails closed.
+ */
+function prepareWin32DiagnosticDirectory(env: NodeJS.ProcessEnv): string {
+  const home = realpathSync(dshHome(env))
+  if (!isWin32LocalFixedNtfs(home)) throw new DiagnosticWriteRefusal('ENOTDIR')
+  if (!statSync(home).isDirectory()) throw new DiagnosticWriteRefusal('ENOTDIR')
+  const logs = join(home, 'logs')
+  let logsInfo: ReturnType<typeof lstatSync>
+  try {
+    logsInfo = lstatSync(logs)
+  } catch (error) {
+    if (controlledErrno(error) !== 'ENOENT') throw error
+    mkdirSync(logs)
+    logsInfo = lstatSync(logs)
+  }
+  if (logsInfo.isSymbolicLink() || !logsInfo.isDirectory()) throw new DiagnosticWriteRefusal('ELOOP')
+  const attributes = win32FileAttributes(logs)
+  if (attributes === undefined || !attributes.directory || attributes.reparse) {
+    throw new DiagnosticWriteRefusal(attributes === undefined ? 'NATIVE_UNAVAILABLE' : 'ELOOP')
+  }
+  const directory = join(logs, 'pi-tui-client')
+  // Create with the protected owner-only DACL at creation, or reuse only an
+  // existing proven owner-only directory. Never chmod/ACL-tighten a shared dir.
+  ensureWin32PrivateDirectory(directory)
+  if (!win32PrivateDirectorySafe(directory)) throw new DiagnosticWriteRefusal('EPERM')
   return directory
 }
 
@@ -374,18 +415,33 @@ export function writeClientFatalDiagnostic(
   let fd: number | undefined
   let created = false
   try {
-    fd = openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+    fd = openSync(
+      target,
+      process.platform === 'win32'
+        // Windows has no POSIX mode/NOFOLLOW semantics; the already-proven
+        // private parent plus the exclusive create are the protection, and the
+        // actual DACL is verified below before any payload is written.
+        ? constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL
+        : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    )
     created = true
     let info = fstatSync(fd)
     if (!info.isFile()) throw new DiagnosticWriteRefusal('EPERM')
-    const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-    if (uid !== undefined && info.uid !== uid) throw new DiagnosticWriteRefusal('EPERM')
-    if ((info.mode & 0o777) !== 0o600) {
-      fchmodSync(fd, 0o600)
-      info = fstatSync(fd)
-    }
-    if (!info.isFile() || (info.mode & 0o777) !== 0o600 || (uid !== undefined && info.uid !== uid)) {
-      throw new DiagnosticWriteRefusal('EPERM')
+    if (process.platform === 'win32') {
+      // ACL before bytes: a file that does not inherit the product directory's
+      // protected owner-only DACL is never written to.
+      if (win32PrivateFileStatus(target) !== 'private') throw new DiagnosticWriteRefusal('EPERM')
+    } else {
+      const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+      if (uid !== undefined && info.uid !== uid) throw new DiagnosticWriteRefusal('EPERM')
+      if ((info.mode & 0o777) !== 0o600) {
+        fchmodSync(fd, 0o600)
+        info = fstatSync(fd)
+      }
+      if (!info.isFile() || (info.mode & 0o777) !== 0o600 || (uid !== undefined && info.uid !== uid)) {
+        throw new DiagnosticWriteRefusal('EPERM')
+      }
     }
     writeAllBytes(fd, clientFatalErrorDetails(error, phase).text)
     closeSync(fd)

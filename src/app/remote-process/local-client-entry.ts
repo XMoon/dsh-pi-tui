@@ -29,6 +29,7 @@
 
 import { spawn } from 'node:child_process'
 import { constants, closeSync, existsSync, fchmodSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, statSync, writeSync } from 'node:fs'
+import { win32PrivateDirectorySafe, win32PrivateFileStatus } from '../../runtime/native-process/win32.ts'
 import { createRequire } from 'node:module'
 import { constants as osConstants } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
@@ -208,6 +209,39 @@ function createSurfaceRecordSink(): { emit: EntryRecordSink; close(): void } | u
   const directoryStats = statSync(directory)
   if (!directoryStats.isDirectory()) {
     throw new Error('local client entry: the surface record directory is not a directory')
+  }
+  if (process.platform === 'win32') {
+    // Qualification-only Windows sink: the injected parent must already be an
+    // isolated protected owner-only directory (the test harness creates it);
+    // this product code never chmods/ACLs a foreign directory. The target is
+    // an existing verified private regular file or an exclusively created new
+    // one, and its ACL is re-proved BEFORE any record byte is written.
+    if (!win32PrivateDirectorySafe(directory)) {
+      throw new Error('local client entry: the surface record directory is not a private owner-only directory')
+    }
+    const existing = win32PrivateFileStatus(target)
+    if (existing === 'unsafe') {
+      throw new Error('local client entry: the surface record file is not a private regular file')
+    }
+    let fd: number
+    try {
+      fd = openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_APPEND, 0o600)
+    } catch (error) {
+      if (existing !== 'private' || (error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      fd = openSync(target, constants.O_WRONLY | constants.O_APPEND, 0o600)
+    }
+    try {
+      if (!fstatSync(fd).isFile() || win32PrivateFileStatus(target) !== 'private') {
+        throw new Error('local client entry: the surface record file must be a private regular file')
+      }
+    } catch (error) {
+      closeSync(fd)
+      throw error
+    }
+    return {
+      emit: record => { writeSync(fd, `${JSON.stringify(record)}\n`) },
+      close: () => { closeSync(fd) },
+    }
   }
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   if (uid !== undefined && directoryStats.uid !== uid) {
@@ -2366,6 +2400,11 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // and remounts the Client surface on the SAME PID/Context/transport. It
       // is mutually exclusive with the T34/T36 SIGUSR2 qualification modes.
       if (process.env.SPLIT_PROCESS_CLIENT_HMR_PROBE === '1') {
+        // Windows has no catchable POSIX SIGUSR2; a fake signal registration
+        // would never fire. The real native reload path is `/reload-client`.
+        if (process.platform === 'win32') {
+          throw new Error('local client entry: the SIGUSR2 surface HMR qualification is unavailable on Windows; use the real /reload-client path')
+        }
         if (process.env.SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF === '1'
           || process.env.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1'
           || (process.env.SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE !== undefined
@@ -2428,7 +2467,11 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           if (accepted.targetProgramResumeHandoff !== true) programResumeHandle?.unsupportedReloadAccepted()
         },
       })
-      if (reexecProbe) process.on('SIGUSR2', () => { reexecHandler?.request('qualification') })
+      // The qualification reexec trigger is POSIX-only; Windows uses the real
+      // `/reload-client` command and never registers a signal that cannot fire.
+      if (reexecProbe && process.platform !== 'win32') {
+        process.on('SIGUSR2', () => { reexecHandler?.request('qualification') })
+      }
       // A closed terminal (PTY HUP) is a normal Client exit: the physical
       // surface can no longer render or accept input. It joins the SAME
       // idempotent stop path as Esc / `/exit` / SIGINT / SIGTERM.
@@ -2440,10 +2483,15 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // Qualification-only transport-rollover trigger (the B1 control channel
       // has no tty in surface mode): SIGUSR1 drops the physical mux socket
       // exactly like `qualification-drop-websocket`, never a production path.
-      process.on('SIGUSR1', () => {
-        transport?.dropWebSocketsForQualification()
-        emit({ m4b2s: 'qualification', op: 'drop-websocket', processRole: 'client', pid: process.pid })
-      })
+      // Qualification-only transport rollover is a POSIX signal trigger; it is
+      // never registered on Windows, where the qualification lane has no fake
+      // signal to send.
+      if (process.platform !== 'win32') {
+        process.on('SIGUSR1', () => {
+          transport?.dropWebSocketsForQualification()
+          emit({ m4b2s: 'qualification', op: 'drop-websocket', processRole: 'client', pid: process.pid })
+        })
+      }
     }
     const composition: LocalClientComposition = options.mode === 'surface'
       ? {

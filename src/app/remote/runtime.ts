@@ -31,6 +31,7 @@ import { RemoteAcpAccessPort } from '../../runtime/remote/acp-access-remote.ts'
 import { mergeCause } from './dispose-cause.ts'
 import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf, type RemoteM3ARuntimeSource, type RemoteM3ASemantics } from './m3a-semantics.ts'
 import type { SplitClientInteractionDelivery } from '../../runtime/remote/interaction-remote.ts'
+import type { HostShellPathLiteralDialect } from '../../runtime/host-shell-completion-port.ts'
 
 /** Compile-time proof that the shared Client runtime source satisfies the
  *  Remote ConfigPort's narrow source face (never called; referenced by the
@@ -74,6 +75,10 @@ export interface RemoteBackendRuntimeOptions {
   readonly fetch: RemoteBackendFetch
   /** The authenticated Host listener origin from the verified Client Host identity. */
   readonly trustedHostOrigin?: string
+  /** The AUTHENTICATED Host shell's literal-path grammar, projected from the
+   *  Host identity by the split-Client composition. Absent keeps the historical
+   *  Bash behavior for in-process POSIX qualification callers. */
+  readonly hostShellPathLiteralDialect?: HostShellPathLiteralDialect
   /** The composition-owned surface/process lifetime for pre-prompt preparation. */
   readonly signal?: AbortSignal
   /** The composition-owned pre-dispatch dispatch admission (the surface-stop
@@ -200,6 +205,7 @@ export async function createRemoteBackendRuntime(
         hostShellCompletion: new RemoteHostShellCompletionPort(
           options.runtime.remote.piTuiHostUserShell,
           options.runtime.connection.generation,
+          options.hostShellPathLiteralDialect,
         ),
         // M5-W PR-C: the Split Client's Web frontend control over the package's
         // ONE private `piTuiWebAccess` namespace and the SAME Connection

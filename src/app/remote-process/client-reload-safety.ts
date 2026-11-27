@@ -29,6 +29,7 @@
  * every other reason describes a real, resolvable local state.
  */
 export type ClientReloadRefusal =
+  | 'unsupported-platform'
   | 'unavailable'
   | 'not-ready'
   | 'draft-text'
@@ -59,6 +60,9 @@ export type ClientReloadRefusal =
  *   writer barrier is still in flight.
  */
 export interface ClientReloadSafetyFacts {
+  /** The platform supports Client process reload in this release (Windows is
+   *  deferred: the replacement spawn context cannot be qualified). */
+  readonly supported: boolean
   readonly capable: boolean
   readonly ready: boolean
   readonly draftText: string
@@ -76,6 +80,11 @@ export interface ClientReloadSafetyFacts {
  * @returns the refusal reason, or `undefined` when reload is safe.
  */
 export function clientReloadRefusal(facts: ClientReloadSafetyFacts): ClientReloadRefusal | undefined {
+  // The platform refusal is the FIRST fact: a Windows Client must never accept
+  // a reexec intent, release its surface or touch its draft/Session, even when
+  // another local fact would also refuse. The command notice carries the exact
+  // "current Client is kept" guidance.
+  if (!facts.supported) return 'unsupported-platform'
   if (!facts.capable) return 'unavailable'
   if (!facts.ready) return 'not-ready'
   if (facts.draftText.length !== 0) return 'draft-text'

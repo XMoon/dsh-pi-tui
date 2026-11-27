@@ -260,6 +260,25 @@ function shellQuoteProfile(profile: string): string {
   return `'${profile.replace(/'/gu, `'\\''`)}'`
 }
 
+/** The same profile literal for the TARGET shell: PowerShell doubles an
+ *  embedded single quote instead of the POSIX close-reopen sequence. */
+function shellQuoteProfileFor(profile: string, platform: NodeJS.Platform): string {
+  if (platform !== 'win32') return shellQuoteProfile(profile)
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(profile)) return profile
+  return `'${profile.replace(/'/gu, "''")}'`
+}
+
+/** The one re-run hint for a failed daemon launch: Windows gets the
+ *  PowerShell-equivalent environment form; POSIX keeps the assignment form.
+ *  `startup.ts` stays dependency-free, so this tiny hint is local rather than
+ *  imported from the launcher module. */
+function daemonRerunHint(profile: string): string {
+  const profileArg = shellQuoteProfileFor(profile, process.platform)
+  return process.platform === 'win32'
+    ? `$env:DSH_PI_TUI_BACKEND='daemon'; dsh --profile ${profileArg}`
+    : `DSH_PI_TUI_BACKEND=daemon dsh --profile ${profileArg}`
+}
+
 /** The actionable compatibility notice printed when the installed harness
  * falls in an incompatible range. `entry` MUST be the entry
  * {@link harnessCompatEntryFor} matched for `installed`. The notice is
@@ -465,15 +484,16 @@ interface BackendDecisionError {
 }
 
 /** Resolve the daemon platform/tty prerequisite, or undefined when satisfiable.
- *  Daemon is a local Linux/macOS foreground process that owns a real
+ *  Daemon is a local Linux/macOS/Windows foreground process that owns a real
  *  interactive TTY; any other OS or a non-interactive launch must fail closed
- *  with a reason. The Host process itself is not launched here. */
+ *  with a reason. The Host process itself is not launched here; the supported
+ *  Windows filesystem/account domain is enforced by the existing scope. */
 function daemonPrerequisiteError(): BackendDecisionError | undefined {
-  if (process.platform !== 'linux' && process.platform !== 'darwin') {
+  if (process.platform !== 'linux' && process.platform !== 'darwin' && process.platform !== 'win32') {
     return {
       kind: 'error',
       code: 'unsupported-platform',
-      message: `the daemon backend is only supported on Linux and macOS (this is ${process.platform}); use DSH_PI_TUI_BACKEND=direct or unset it`,
+      message: `the daemon backend is only supported on Linux, macOS and Windows (this is ${process.platform}); use DSH_PI_TUI_BACKEND=direct or unset it`,
     }
   }
   if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
@@ -543,7 +563,7 @@ function coordinatorNotMountedMessage(profile: string): string {
   return [
     `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked for the daemon backend, but the daemon launcher row did not mount.`,
     'The pi-tui-daemon-launcher row failed to import/apply or stayed pending on tuiDaemonStartup (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
-    `This installation cannot start the daemon TUI; reinstall the profile or fix its composition, then re-run: DSH_PI_TUI_BACKEND=daemon dsh --profile ${shellQuoteProfile(profile)}`,
+    `This installation cannot start the daemon TUI; reinstall the profile or fix its composition, then re-run: ${daemonRerunHint(profile)}`,
   ].join('\n')
 }
 

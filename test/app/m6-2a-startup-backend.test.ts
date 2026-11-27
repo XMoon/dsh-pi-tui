@@ -198,9 +198,19 @@ test('Profile daemon on macOS with a TTY resolves to Daemon', (t) => {
   })
 })
 
+test('Profile daemon on Windows with a TTY resolves to Daemon', (t) => {
+  withEnv(undefined, () => {
+    withDaemonPlatform('win32', true, () => {
+      const { ctx } = mount(t, [], configOf('daemon'))
+      assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined, 'Daemon never provides the Direct service')
+      assert.ok(ctx.get(TUI_DAEMON_STARTUP_SERVICE) !== undefined, 'Windows daemon provides tuiDaemonStartup')
+    })
+  })
+})
+
 test('daemon on an unsupported platform fails closed with the platform reason', (t) => {
   withEnv('daemon', () => {
-    withDaemonPlatform('win32', true, () => {
+    withDaemonPlatform('freebsd', true, () => {
       const { ctx, exitCodes } = mount(t, [])
       assert.equal(ctx.get(TUI_DAEMON_STARTUP_SERVICE), undefined)
       assert.deepEqual(exitCodes, [1])
@@ -265,6 +275,19 @@ test('daemon readiness without a mounted Coordinator exits nonzero with an actio
       assert.match(text, /tuiDaemonStartup/u)
       assert.match(text, /DSH_PI_TUI_BACKEND=daemon dsh --profile tui-custom/u)
       assert.doesNotMatch(text, /--profile pi-tui/u, 'the recovery command must not fall back to the default Profile')
+    })
+  })
+})
+
+test('Windows readiness failure prints the PowerShell-equivalent re-run command', (t) => {
+  withEnv('daemon', () => {
+    withDaemonPlatform('win32', true, () => {
+      const { ctx, fireReady, exitCodes } = mount(t, [])
+      assert.ok(ctx.get(TUI_DAEMON_STARTUP_SERVICE) !== undefined)
+      const { text } = captureStderr(() => { fireReady() })
+      assert.deepEqual(exitCodes, [1])
+      assert.match(text, /\$env:DSH_PI_TUI_BACKEND='daemon'; dsh --profile tui-custom/u)
+      assert.doesNotMatch(text, /DSH_PI_TUI_BACKEND=daemon dsh --profile/u, 'Windows must never print the POSIX assignment form')
     })
   })
 })

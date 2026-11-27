@@ -7,7 +7,7 @@ English | [简体中文](README.md)
 
 **A terminal frontend for DeepSeek Harness. One Host, with TUI, Web and ACP clients accessing the same Agent Session.**
 
-**Direct** remains the default, ready-to-use mode. Starting in **0.5.8**, Linux/macOS users can explicitly choose a **Daemon**: an independent local Host retains sessions and ongoing work as terminal Clients disconnect and reconnect. Other TUIs, the official Web frontend and an opt-in local ACP client can access sessions belonging to that same Host.
+**Direct** remains the default, ready-to-use mode. Starting in **0.5.8**, Linux, macOS and native Windows 11 x64 users can explicitly choose a **Daemon**: an independent local Host retains sessions and ongoing work as terminal Clients disconnect and reconnect. Other TUIs, the official Web frontend and an opt-in local ACP client can access sessions belonging to that same Host.
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) remains the authority for the Agent Loop, models, tools, persistence, permissions and concurrent writes. `dsh-pi-tui` is a third-party frontend, not a second Agent Runtime.
 
@@ -64,7 +64,7 @@ dsh --profile pi-tui
 
 | | Direct (default) | Daemon (opt-in from 0.5.8) |
 |---|---|---|
-| Launch | `dsh --profile pi-tui` | `DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui` |
+| Launch | `dsh --profile pi-tui` | `DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui` (PowerShell: `$env:DSH_PI_TUI_BACKEND='daemon'; dsh --profile pi-tui`) |
 | Process | TUI and Host in one process | Independent Host; TUI is a detachable Client |
 | Frontends | Current in-process terminal surface | Multiple TUIs + official Web + optional local ACP on one Host/Session |
 | Exit | Ends the Direct application | Normally detaches only the Client; does not stop Host |
@@ -78,7 +78,7 @@ You can also save `Daemon` under `/settings → Host → Backend` for the **next
 - **Sessions and workspaces:** `/sessions`, `/new`, `/resume`, `/fork`, `/rewind`, `--session` and `--continue`; browse by workspace and preview before resuming.
 - **Team / Subagent / Job:** toggle Root Agent Team in `/model`; `/tasks` displays Work/Team, nested Subagents and Jobs. Subagents are expanded by default; retained Job history is optionally disclosed.
 - **Presets:** bare `/preset` opens a two-page Catalog + Details surface — search, Built-in/Custom groups and state chips; browsing and reading Details never write. Only the explicit bottom actions `Use next` / `Use session` and `Set default` apply a preset or save the new-session default. `/preset status`, `/preset default [<id>]` and `/preset <id>` remain available.
-- **Input and shell:** `@file` completion, image and file attachments, `Ctrl+V` image paste, `!` / `!!` Host Shell, external editor, customizable Footer. On Windows Direct, `!` / `!!` use the official PowerShell shell; the sandbox uses DSH's ACL backend with partial enforcement, and native command/variable completion is unavailable (ordinary path completion remains).
+- **Input and shell:** `@file` completion, image and file attachments, `Ctrl+V` image paste, `!` / `!!` Host Shell, external editor, customizable Footer. On Windows Direct and Daemon, `!` / `!!` run on the Host with the official PowerShell shell; the sandbox uses DSH's ACL backend with partial enforcement, and native command/variable/git completion is unavailable (ordinary path completion remains).
 - **Reading and search:** `/display` Full / Focus / Compact, Transcript View / Full search, folding, `Ctrl+R` prompt history. Current Session recall spans working-directory changes.
 - **Settings and plugins:** Provider authorization/credentials, approvals, MCP management, Web Search/Fetch, Plugin Manager, dynamic Extension Settings and Client-local `./tui` plugin loading.
 - **Images and delivery:** terminal-gated image/static SVG/charts, `/view-image`, `/deliverables`, `/export`; Kitty, SIXEL and supported iTerm2 paths.
@@ -101,9 +101,9 @@ You can also save `Daemon` under `/settings → Host → Backend` for the **next
 
 These are default mappings and common entries; `/keybindings` shows the **effective** keys after customizations. Type `/` to search and select commands and available Skills; use `/skill <name> [args]` to invoke a Skill explicitly (including when a same-named command would otherwise win), while bare `/skill` only prints its usage. `/transcript` currently uses the official Direct Markdown export; `/export` creates a separate ZIP archive saved on the Client filesystem. `PI_IMAGE_PROTOCOL=none` disables pixel previews, not attachments.
 
-## Daemon quick start (Linux / macOS; Windows is headless management)
+## Daemon quick start (Linux / macOS / native Windows 11 x64)
 
-A system service is not required to start a standalone Host. Try one launch (the interactive Daemon Client is Linux/macOS only):
+A system service is not required to start a standalone Host. Try one launch (the interactive Daemon Client supports Linux/macOS and native Windows 11 x64 ordinary users on a local fixed-NTFS Profile):
 
 ~~~sh
 DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui
@@ -121,7 +121,7 @@ dsh --profile pi-tui daemon install   # Linux / macOS only
 dsh --profile pi-tui daemon uninstall # Linux / macOS only
 ~~~
 
-On Windows this release supports the independent headless Host through `status`, `start`, `stop`, `restart`, `logs` and the official Web frontend. The interactive Daemon Client, `install`/`uninstall` and ACP remain unavailable. Windows `status` reports `manager=process` for an authenticated Host and `manager=unmanaged` with no Host; `unit=none`, and it never invokes systemd/launchd; `stop` enters the official shutdown through that instance's native stop Event.
+On Windows this release supports the independent Host, the interactive Daemon Client, `status`, `start`, `stop`, `restart`, `logs` and the official Web frontend. `install`/`uninstall` and ACP remain unavailable. `/reload-client` is not available on Windows: it refuses before any reload starts and keeps the current Client/Session/draft; exit with `/exit` and relaunch to adopt an updated build. Windows `status` reports `manager=process` for an authenticated Host and `manager=unmanaged` with no Host; `unit=none`, and it never invokes systemd/launchd; `stop` enters the official shutdown through that instance's native stop Event.
 
 `daemon install` only creates/verifies the optional Profile-scoped OS user service definition; it does **not** start, enable or migrate the Host. `daemon stop` and `restart` can interrupt in-flight Turns/Jobs across connected Clients. A manager reporting “running” is not proof of authenticated Host readiness.
 

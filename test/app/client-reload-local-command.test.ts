@@ -171,6 +171,7 @@ function startHarness(options: { pendingTransition?: boolean } = {}): Harness {
   let controller: ReturnType<typeof createSubmissionController<AgentLike>> | undefined
   const request = createClientReloadCommandRequest({
     facts: {
+      supported: () => true,
       capable: () => true,
       ready: () => true,
       draftText: () => '',

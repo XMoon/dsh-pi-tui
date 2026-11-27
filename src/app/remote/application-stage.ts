@@ -30,6 +30,7 @@ import {
   type RemotePresentationClientSource,
 } from './presentation-source.ts'
 import type { SplitClientInteractionDelivery } from '../../runtime/remote/interaction-remote.ts'
+import type { HostShellPathLiteralDialect } from '../../runtime/host-shell-completion-port.ts'
 
 /** The ONE shared composition stage: Backend + owner registry + presentation. */
 export interface ComposedRemoteApplicationStage {
@@ -80,6 +81,9 @@ export async function composeRemoteApplicationStage(input: {
   readonly client: RemotePresentationClientSource
   readonly fetch: RemoteBackendFetch
   readonly trustedHostOrigin?: string
+  /** The authenticated Host shell's literal-path grammar; absent keeps the
+   *  historical Bash behavior for in-process POSIX qualification callers. */
+  readonly hostShellPathLiteralDialect?: HostShellPathLiteralDialect
   readonly promptSerializer?: RemotePromptSerializer
   readonly signal?: AbortSignal
   readonly delivery?: SplitClientInteractionDelivery
@@ -110,6 +114,7 @@ export async function composeRemoteApplicationStage(input: {
       runtime: input.client,
       fetch: input.fetch,
       ...(input.trustedHostOrigin === undefined ? {} : { trustedHostOrigin: input.trustedHostOrigin }),
+      ...(input.hostShellPathLiteralDialect === undefined ? {} : { hostShellPathLiteralDialect: input.hostShellPathLiteralDialect }),
       isDispatchAllowed: () => dispatchAdmissionOpen,
       signal: lifetimeSignal,
       // Absent = the production serializer (see createRemoteBackendRuntime).

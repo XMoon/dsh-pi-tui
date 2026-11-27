@@ -28,6 +28,7 @@ import { clientReloadRefusal, type ClientReloadSafetyFacts } from '../../src/app
 /** One fully safe fact set: every case below flips exactly one fact. */
 function safeFacts(overrides: Partial<ClientReloadSafetyFacts> = {}): ClientReloadSafetyFacts {
   return {
+    supported: true,
     capable: true,
     ready: true,
     draftText: '',
@@ -42,6 +43,17 @@ function safeFacts(overrides: Partial<ClientReloadSafetyFacts> = {}): ClientRelo
 
 test('a ready split Client with no local input may retire', () => {
   assert.equal(clientReloadRefusal(safeFacts()), undefined)
+})
+
+test('a platform without Client reload refuses FIRST, even when other facts also refuse', () => {
+  assert.equal(clientReloadRefusal(safeFacts({ supported: false })), 'unsupported-platform')
+  assert.equal(clientReloadRefusal(safeFacts({
+    supported: false,
+    capable: false,
+    ready: false,
+    draftText: 'unsent',
+    unsettledUserWrite: true,
+  })), 'unsupported-platform', 'Windows must refuse before any local teardown reason')
 })
 
 test('the refusal priority is unavailable -> not-ready -> draft-text -> attachments -> submission -> interaction -> transition', () => {

@@ -148,6 +148,7 @@ function startHarness(options: {
   let requests = 0
   const request = createClientReloadCommandRequest({
     facts: {
+      supported: () => true,
       capable: () => true,
       ready: () => true,
       draftText: () => '',

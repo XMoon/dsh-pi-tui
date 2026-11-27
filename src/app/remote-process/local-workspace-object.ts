@@ -17,7 +17,8 @@
  * @module app/remote-process/local-workspace-object
  */
 
-import { statSync } from 'node:fs'
+import { realpathSync, statSync } from 'node:fs'
+import { isWin32LocalFixedNtfs } from '../../runtime/native-process/win32.ts'
 
 /** The exact Owner-only route path on the official local Connection. */
 export const LOCAL_WORKSPACE_OBJECT_ROUTE = '/api/pi-tui.workspace-object'
@@ -102,11 +103,39 @@ function failure(status: number): Response {
   return new Response(null, { status, headers: { 'cache-control': 'no-store' } })
 }
 
-/** Validate one absolute path against the route's hard limits. */
-function isBoundedAbsolutePath(value: unknown): value is string {
+/**
+ * Validate one absolute path against the route's hard limits.
+ *
+ * POSIX keeps its original `/` root semantics. Windows admits ONLY an ordinary
+ * drive-absolute spelling: a drive-relative `C:foo`, a root-relative `\foo`,
+ * a UNC/network `\\server\share`, and an extended/device `\\?\`/`\\.\` form are
+ * refused here even though `path.win32.isAbsolute` accepts the UNC/device
+ * spellings. Volume/type proof is a separate observation ({@link isSupportedWin32WorkspacePath}).
+ */
+export function isBoundedWorkspaceObjectPath(
+  value: unknown,
+  platform: NodeJS.Platform = process.platform,
+): value is string {
   if (typeof value !== 'string' || value === '' || value.includes('\0')) return false
-  if (!value.startsWith('/')) return false
-  return Buffer.byteLength(value, 'utf8') <= MAX_WORKSPACE_OBJECT_PATH_BYTES
+  if (Buffer.byteLength(value, 'utf8') > MAX_WORKSPACE_OBJECT_PATH_BYTES) return false
+  if (platform === 'win32') return /^[A-Za-z]:[\\/]/u.test(value)
+  return value.startsWith('/')
+}
+
+/**
+ * Prove one Windows path resolves to an ordinary directory on a LOCAL FIXED
+ * NTFS volume. The grammar alone is not evidence (a UNC spelling or a mapped
+ * volume can be absolute); the real target's volume type is. The caller keeps
+ * the ORIGINAL path for its `(dev, ino)` observation — the resolved spelling is
+ * never substituted for object identity.
+ */
+export function isSupportedWin32WorkspacePath(value: string): boolean {
+  try {
+    const resolved = realpathSync.native(value)
+    return /^[A-Za-z]:[\\/]/u.test(resolved) && isWin32LocalFixedNtfs(resolved)
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -133,7 +162,7 @@ export function createWorkspaceObjectHandler(
     }
     if (!isRecord(value) || !hasExactKeys(value, REQUEST_KEYS)) return failure(400)
     if (value.instanceId !== currentInstanceId || !UUID_PATTERN.test(currentInstanceId)) return failure(409)
-    if (!isBoundedAbsolutePath(value.path)) return failure(400)
+    if (!isBoundedWorkspaceObjectPath(value.path)) return failure(400)
     let directory: ReturnType<typeof statDirectory>
     try {
       directory = statDirectory(value.path)
@@ -143,6 +172,10 @@ export function createWorkspaceObjectHandler(
       return failure(404)
     }
     if (!directory.isDirectory()) return failure(404)
+    // The Windows supported domain is an ordinary local fixed-NTFS path. A
+    // drive-absolute spelling on a mapped/network/unsupported volume is not
+    // evidence, so it is refused before any object is reported.
+    if (process.platform === 'win32' && !isSupportedWin32WorkspacePath(value.path)) return failure(400)
     return jsonResponse({
       schema: 1,
       instanceId: currentInstanceId,

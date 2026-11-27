@@ -1,12 +1,13 @@
 # Run dsh-pi-tui in daemon mode
 
 Daemon mode gives one DSH Profile an independently running local Host and, on
-Linux/macOS, a terminal Client that attaches to it. The Host can keep sessions
-and turns alive after the terminal Client disconnects. It is a **local** mode,
-not a remote-network login or a second session authority. On Windows the
-independent headless Host, `daemon` management and the official Web frontend
-are available; the interactive TUI Client, service install/uninstall and ACP
-remain unavailable.
+Linux, macOS and native Windows 11 x64, a terminal Client that attaches to it.
+The Host can keep sessions and turns alive after the terminal Client
+disconnects. It is a **local** mode, not a remote-network login or a second
+session authority. On Windows the supported domain is an ordinary (non-elevated)
+user and an ordinary local fixed-NTFS profile path; service install/uninstall
+and ACP remain unavailable. The same independent Host, management commands and
+official Web frontend work as on Linux/macOS.
 
 ## Select a backend
 
@@ -16,17 +17,26 @@ Direct is the default. To try daemon mode for a single interactive launch:
 DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui
 ~~~
 
+PowerShell:
+
+~~~powershell
+$env:DSH_PI_TUI_BACKEND='daemon'; dsh --profile pi-tui
+~~~
+
 Alternatively, set **/settings → Host → Backend** to `daemon`
 and start a new TUI. This stored setting applies on the next launch only;
 it does not change the backend of a Client already running. A one-launch
 `DSH_PI_TUI_BACKEND` override has precedence over the Profile setting and
 does not write it back.
 
-On Linux and macOS daemon mode requires a real interactive TTY. Windows
-currently supports the headless management commands only: `daemon start` brings
-up the independent Host without a TTY, and the interactive daemon backend stays
-refused. A supported daemon launch authenticates or starts the Profile's one
-Host as necessary; it does **not** automatically install a system service.
+Daemon mode requires a real interactive TTY on every supported platform. A
+supported daemon launch authenticates or starts the Profile's one Host as
+necessary; it does **not** automatically install a system service. On Windows a
+launch from a real ConPTY terminal (Windows Terminal, PowerShell console, or a
+real terminal host) is supported; a redirected/no-TTY launch fails closed. On
+the Windows supported domain the terminal Client is a native process attached
+to the same independent Host; closing it or using `/exit` leaves the Host
+running, and only the explicit commands below stop it.
 
 ## Leave a Client or stop the Host
 
@@ -74,9 +84,11 @@ service manager in this contract.
 `daemon logs` selects Host-process output only. A Split Client surface that
 fails reports its own controlled line in the terminal and writes a private
 incident file at `$DSH_HOME/logs/pi-tui-client/startup-*.log` (`DSH_HOME`
-defaults to `~/.dsh`; `DSH_PI_TUI_LOG=off` suppresses the file). `daemon logs`
-is not a Client log entry. The incident file contains the real stack and
-private local details; review it before sharing.
+defaults to `~/.dsh`; `DSH_PI_TUI_LOG=off` suppresses the file). On Windows the
+product-owned incident directory/file carry a protected owner-only DACL and the
+shared `logs` parent is never chmodded or ACL-rewritten. `daemon logs` is not a
+Client log entry. The incident file contains the real stack and private local
+details; review it before sharing.
 
 ## Control the official Web frontend from the CLI
 

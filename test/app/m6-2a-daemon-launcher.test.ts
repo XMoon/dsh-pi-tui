@@ -35,6 +35,18 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
+/** Force `process.platform` for the duration of an async test (the launcher
+ *  chooses its direct-child stop semantics from the live platform). */
+async function withPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true })
+  try {
+    return await fn()
+  } finally {
+    Object.defineProperty(process, 'platform', descriptor)
+  }
+}
+
 const silentDiag = {
   debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {},
 } as unknown as Diag
@@ -188,12 +200,17 @@ test('a real child process locates the package root from a symlinked dist invoke
 class FakeChild extends EventEmitter {
   exitCode: number | null = null
   signalCode: NodeJS.Signals | null = null
-  readonly kills: NodeJS.Signals[] = []
+  readonly kills: (NodeJS.Signals | undefined)[] = []
   autoExitSignal: NodeJS.Signals | undefined
-  kill(signal: NodeJS.Signals): boolean {
+  /** Windows `kill()` carries no signal: the OS forcibly terminates. */
+  autoExitForced = false
+  kill(signal?: NodeJS.Signals): boolean {
     this.kills.push(signal)
-    if (this.autoExitSignal === signal && this.exitCode === null && this.signalCode === null) {
-      this.exitCode = signal === 'SIGKILL' ? 1 : 0
+    const forced = signal === undefined
+    const signalExit = this.autoExitSignal !== undefined && this.autoExitSignal === signal
+    if (((forced && this.autoExitForced) || signalExit)
+      && this.exitCode === null && this.signalCode === null) {
+      this.exitCode = signal === 'SIGKILL' || forced ? 1 : 0
       setImmediate(() => this.emit('exit', this.exitCode, null))
     }
     return true
@@ -355,6 +372,42 @@ test('an unresponsive child is an ABNORMAL cleanup result, never success', async
   assert.deepEqual(children[0].kills, ['SIGTERM', 'SIGKILL'], 'the whole budget is used, then SIGKILL')
   assert.equal(fatalLines.length, 1)
   assert.match(fatalLines[0], /did not exit after SIGKILL/u)
+})
+
+test('Windows dispose forcibly terminates the direct child once and waits for its real exit', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const c = coordinator(children, [], spawnImpl, { shutdownBudgetMs: 200 })
+  c.start()
+  children[0].autoExitForced = true
+  const disposition = await withPlatform('win32', () => c.dispose())
+  assert.equal(disposition, true)
+  assert.deepEqual(children[0].kills, [undefined], 'the OS forced termination is requested exactly once; no POSIX SIGTERM/SIGKILL sequence')
+})
+
+test('an unresponsive Windows child is an abnormal result, never a graceful claim', async () => {
+  const { spawnImpl, children } = fakeSpawn()
+  const fatalLines: string[] = []
+  const c = coordinator(children, [], spawnImpl, {
+    shutdownBudgetMs: 60,
+    reportFatal: (line: string) => { fatalLines.push(line) },
+  })
+  c.start()
+  const disposition = await withPlatform('win32', () => c.dispose())
+  assert.equal(disposition, false)
+  assert.deepEqual(children[0].kills, [undefined], 'one forced termination request, no fabricated escalation')
+  assert.equal(fatalLines.length, 1)
+  assert.match(fatalLines[0], /forced process termination/u)
+  assert.doesNotMatch(fatalLines[0], /SIGKILL|SIGTERM/u)
+})
+
+test('a Windows spawn throw prints the PowerShell environment hint, never the POSIX one', async () => {
+  const spawnImpl = (() => { throw Object.assign(new Error('spawn EPERM'), { code: 'EPERM' }) }) as unknown as typeof import('node:child_process').spawn
+  const fatalLines: string[] = []
+  const c = coordinator([], [], spawnImpl, { reportFatal: (line: string) => { fatalLines.push(line) } })
+  await withPlatform('win32', async () => { c.start() })
+  assert.equal(fatalLines.length, 1)
+  assert.match(fatalLines[0], /\$env:DSH_PI_TUI_BACKEND='daemon'; dsh --profile pi-tui/u)
+  assert.doesNotMatch(fatalLines[0], /DSH_PI_TUI_BACKEND=daemon dsh/u)
 })
 
 test('the Coordinator installs no second SIGTERM/SIGINT handler (single stop owner)', () => {

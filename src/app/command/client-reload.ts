@@ -20,6 +20,8 @@ import type { ClientReloadCommandResult } from '../../commands.ts'
 
 /** The live Client-local facts of ONE reload decision, read at gesture time. */
 export interface ClientReloadCommandFacts {
+  /** The platform supports Client process reload in this release. */
+  supported(): boolean
   /** A real split-Client process composition with the reexec capability. */
   capable(): boolean
   /** The application surface itself is still alive (not disposed/stopping). */
@@ -59,6 +61,7 @@ export function createClientReloadCommandRequest(
 ): () => ClientReloadCommandResult {
   return () => {
     const reason = clientReloadRefusal({
+      supported: options.facts.supported(),
       capable: options.facts.capable(),
       ready: options.facts.ready(),
       draftText: options.facts.draftText(),

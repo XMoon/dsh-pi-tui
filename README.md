@@ -7,7 +7,7 @@
 
 **面向 DeepSeek Harness 的终端交互界面；一个 Host，让终端、Web 和 ACP 客户端访问同一个 Agent Session。**
 
-默认以 **Direct** 模式运行，开箱即用；从 **0.5.8** 起，可在 Linux/macOS 显式选择 **Daemon**：独立的本地 Host 持有 Session 和执行中的工作，终端 Client 可以断开、重新连接；其他 TUI、官方 Web 与本地 ACP 客户端也可以访问同一 Host 的会话。
+默认以 **Direct** 模式运行，开箱即用；从 **0.5.8** 起，可在 Linux/macOS 及原生 Windows 11 x64 显式选择 **Daemon**：独立的本地 Host 持有 Session 和执行中的工作，终端 Client 可以断开、重新连接；其他 TUI、官方 Web 与本地 ACP 客户端也可以访问同一 Host 的会话。
 
 Agent Loop、模型、工具、持久化、权限和并发写入权威都属于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)；`dsh-pi-tui` 是第三方前端，而不是另一套 Agent Runtime。
 
@@ -64,7 +64,7 @@ dsh --profile pi-tui
 
 | | Direct（默认） | Daemon（0.5.8 起，可选） |
 |---|---|---|
-| 启动 | `dsh --profile pi-tui` | `DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui` |
+| 启动 | `dsh --profile pi-tui` | `DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui`（PowerShell：`$env:DSH_PI_TUI_BACKEND='daemon'; dsh --profile pi-tui`） |
 | 进程 | TUI 与 Host 同进程 | Host 独立运行，TUI 是可断开的 Client |
 | 多入口 | 当前进程内的交互界面 | 多个 TUI + 官方 Web + 可选本地 ACP 访问同一 Host/Session |
 | 退出 | 结束 Direct 程序 | 默认仅断开 Client，Host 不因此自动停止 |
@@ -78,7 +78,7 @@ Daemon 的选择也可以在 `/settings → Host → Backend` 保存，**下一�
 - **Session 与 Workspace**：`/sessions` 浏览工作区与会话；`/new`、`/resume`、`/fork`、`/rewind`、`--session` 和 `--continue`；可只读预览后再选择恢复。
 - **Team / Subagent / Job**：`/model` 可控制 Root Agent Team；`/tasks` 显示 Work/Team、嵌套 Subagent 和 Job。Subagent 默认展开，已完成的 Job 历史可以按需展开。
 - **Preset**：裸 `/preset` 打开两页 Catalog + Details——搜索、Built-in/Custom 分组与状态标记，阅读与打开详情不会写入；只有底部的 `Use next` / `Use session` 和 `Set default` 显式动作才会应用预设或保存新会话默认值。`/preset status`、`/preset default [<id>]` 与 `/preset <id>` 保留。
-- **输入与终端操作**：`@file` 补全、图片/普通文件附件、`Ctrl+V` 图片粘贴、`!` 和 `!!` Shell、外部编辑器和可编辑的 Footer。Windows Direct 下 `!`/`!!` 使用官方 PowerShell；sandbox 使用 DSH ACL 后端（partial enforcement），且没有原生命令/变量补全（普通路径补全保留）。
+- **输入与终端操作**：`@file` 补全、图片/普通文件附件、`Ctrl+V` 图片粘贴、`!` 和 `!!` Shell、外部编辑器和可编辑的 Footer。Windows Direct 与 Daemon 下 `!`/`!!` 均在 Host 使用官方 PowerShell；sandbox 使用 DSH ACL 后端（partial enforcement），Windows 没有原生命令/变量/git 补全（普通路径补全保留）。
 - **阅读与搜索**：`/display` 切换 Full / Focus / Compact；Transcript View / Full 搜索、卡片折叠、`Ctrl+R` 历史输入召回。Current session 历史可跨工作目录读取同一 Session 的历史记录。
 - **Settings / 插件**：Provider 登录和凭据、审批、MCP Server 管理、Web Search/Fetch、Plugin Manager、动态 Extension Settings，以及 Client-local `./tui` 扩展加载。
 - **图像与交付**：受终端能力约束的图片、静态 SVG、图表、`/view-image`、`/deliverables`、`/export`；支持 Kitty、SIXEL 和受支持的 iTerm2 图像路径。
@@ -101,9 +101,9 @@ Daemon 的选择也可以在 `/settings → Host → Backend` 保存，**下一�
 
 这里列出的是默认键位和常见入口；自定义后以 `/keybindings` 显示的**实际生效键位**为准。输入 `/` 可搜索并选择命令与可用的 Skills；需要显式调用某个 Skill（包括与同名命令冲突时）使用 `/skill <name> [args]`，裸 `/skill` 只显示用法。`/transcript` 当前的官方 Markdown 导出路径属于 Direct；`/export` 是独立的 ZIP 归档，产物落在 Client 本地目录。`PI_IMAGE_PROTOCOL=none` 只禁止像素预览，不影响附件发送。
 
-## Daemon 快速上手（Linux / macOS；Windows 为 headless 管理）
+## Daemon 快速上手（Linux / macOS / 原生 Windows 11 x64）
 
-不安装系统服务也可以启动独立 Host。一次性体验（交互式 Daemon Client 仅 Linux/macOS）：
+不安装系统服务也可以启动独立 Host。一次性体验（交互式 Daemon Client 支持 Linux/macOS 及原生 Windows 11 x64 普通用户、本地固定 NTFS Profile）：
 
 ~~~sh
 DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui
@@ -121,7 +121,7 @@ dsh --profile pi-tui daemon install   # 仅 Linux / macOS
 dsh --profile pi-tui daemon uninstall # 仅 Linux / macOS
 ~~~
 
-Windows 当前只支持独立 headless Host 的 `status`、`start`、`stop`、`restart`、`logs` 与官方 Web；交互式 Daemon Client、`install`/`uninstall` 和 ACP 仍不可用。Windows 的 `status` 对已认证 Host 报告 `manager=process`，无 Host 报告 `manager=unmanaged`；`unit=none`，不调用 systemd/launchd；`stop` 通过该实例的原生 stop Event 进入官方 shutdown。
+Windows 支持独立 Host、交互式 Daemon Client、`status`、`start`、`stop`、`restart`、`logs` 与官方 Web；`install`/`uninstall` 和 ACP 仍不可用。Windows 的 `/reload-client` 本版不提供：会在任何 reload 开始前明确拒绝并保留当前 Client/Session/草稿；需要采用更新构建时请 `/exit` 后正常重启。Windows 的 `status` 对已认证 Host 报告 `manager=process`，无 Host 报告 `manager=unmanaged`；`unit=none`，不调用 systemd/launchd；`stop` 通过该实例的原生 stop Event 进入官方 shutdown。
 
 `daemon install` 仅选择性地创建/验证当前 Profile 的用户服务定义，**不会**自动启动、启用或迁移 Host。`daemon stop` / `restart` 可能中断所有连接 Client 的进行中 Turn/Job；manager 显示运行中不代表 Host 已 Ready，须以认证身份确认。
 
