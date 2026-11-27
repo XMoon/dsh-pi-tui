@@ -201,6 +201,17 @@ export async function runBlankSessionDefaultSync(context) {
     await selectPreset(b, target, 'UX-PR3-SYNC restarted')
     await waitForPresetBadge(b, target, '[default]', 'UX-PR3-SYNC restarted Host default readback')
     await closeCatalog(b, 'UX-PR3-SYNC restarted Catalog')
+    // The split lane shares this packed Profile with later scenarios. Restore
+    // its standard baseline through the same real writer after the persistence
+    // proof so a later Session is not created with the minimal preset (which
+    // intentionally omits the ask-user tool required by the next case).
+    await setDefault(b, 'standard', 'UX-PR3-SYNC restore lane baseline default')
+    await openCatalog(b, 'UX-PR3-SYNC restored baseline readback')
+    b.send('standard')
+    await waitForScreenText(b, 'standard', 'UX-PR3-SYNC restored baseline filter')
+    await waitForCondition(async () => (await frameText(b)).includes('[default]'),
+      'UX-PR3-SYNC restored Host default readback', 60_000)
+    await closeCatalog(b, 'UX-PR3-SYNC restored baseline Catalog')
     await exitC1Client(b, 'UX-PR3-SYNC client B')
 
     context.trace?.('ux-pr3-blank-session-default-sync', {
@@ -210,6 +221,7 @@ export async function runBlankSessionDefaultSync(context) {
       sessionSwitched: true,
       statusReadback: target.id,
       hostRestartPersisted: true,
+      restoredLaneDefault: 'standard',
     })
     return { status: 'PASS' }
   } finally {
