@@ -198,6 +198,24 @@ async function clearSeededComposerDraft(client, label) {
   await waitForComposerDraft(client, '', label, 5_000)
 }
 
+/** Walk the REAL ↑ sink from an empty draft through every distinct recalled
+ *  row (wrap-safe), so the caller can assert the COMPLETE browse membership,
+ *  not just the one row the wait helper happened to accept. */
+async function browseAllRecallDrafts(client, label) {
+  const drafts = []
+  const seen = new Set()
+  for (let step = 0; step < 100; step += 1) {
+    client.send('\x1b[A')
+    await new Promise(resolve => setTimeout(resolve, 60))
+    const draft = composerDraftOf(await client.viewport())
+    if (!draft || seen.has(draft)) break
+    seen.add(draft)
+    drafts.push(draft)
+  }
+  assert(drafts.length >= 1, `${label}: the ↑ sink recalled no row`)
+  return drafts
+}
+
 async function waitForComposerDraft(client, target, label, timeoutMs = 30_000) {
   const started = Date.now()
   for (;;) {
@@ -1360,6 +1378,11 @@ export async function runHostHistorySearch(context) {
     const recalledText = await waitForSeededComposerDraft(recallA, targetRecallTexts, 'W04b A seed')
     // ↑ is the ONLY input; ↓ restores the exact pre-browse empty draft.
     await clearSeededComposerDraft(recallA, 'W04b ↓ returns to the empty draft')
+    const aAllowed = [...new Set([...targetRecallTexts, recalledText])]
+    const aDrafts = await browseAllRecallDrafts(recallA, 'W04b A complete browse')
+    assert(aDrafts.every(text => aAllowed.includes(text)),
+      `W04b: A browse carried a foreign row: ${JSON.stringify(aDrafts)}`)
+    await clearSeededComposerDraft(recallA, 'W04b A browse cleared')
     const countAcceptedText = (text) => {
       const ids = new Set()
       for (const event of hostSessionEvents(dshHome, sessionId) ?? []) {
@@ -1395,6 +1418,13 @@ export async function runHostHistorySearch(context) {
     const sentinelRecallText = await waitForSeededComposerDraft(recallB, sentinelTexts, 'W04b B seed')
     assert(targetRecallTexts.includes(sentinelRecallText) === false, 'W04b: A history leaked into B')
     await clearSeededComposerDraft(recallB, 'W04b B ↓ empty')
+    const bAllowed = [...new Set([...sentinelTexts, appendedText])]
+    const bDrafts = await browseAllRecallDrafts(recallB, 'W04b B complete browse')
+    assert(bDrafts.every(text => bAllowed.includes(text)),
+      `W04b: B browse carried a foreign row: ${JSON.stringify(bDrafts)}`)
+    assert(bDrafts.some(text => targetRecallTexts.includes(text)) === false,
+      'W04b: an A row appeared anywhere in B\'s complete browse')
+    await clearSeededComposerDraft(recallB, 'W04b B browse cleared before exit')
     await scene.exitC1Client(recallB, 'history recall client B exit')
     // Back to A in a NEW Client: B's history never leaks into the restored A.
     const recallA2Start = await scene.startC1Client('history recall client A again', {
@@ -1407,6 +1437,13 @@ export async function runHostHistorySearch(context) {
     const backToA = await waitForSeededComposerDraft(recallA2, targetRecallTexts, 'W04b A reseed')
     assert(sentinelTexts.includes(backToA) === false, 'W04b: B history leaked into the restored A')
     await clearSeededComposerDraft(recallA2, 'W04b A ↓ empty')
+    const a2Drafts = await browseAllRecallDrafts(recallA2, 'W04b A complete browse again')
+    assert(a2Drafts.every(text => aAllowed.includes(text)),
+      `W04b: restored A browse carried a foreign row: ${JSON.stringify(a2Drafts)}`)
+    const bOnly = [...new Set([...sentinelTexts, appendedText])]
+    assert(a2Drafts.some(text => bOnly.includes(text)) === false,
+      'W04b: a B row appeared anywhere in the restored A browse')
+    await clearSeededComposerDraft(recallA2, 'W04b A browse cleared before exit')
     await scene.exitC1Client(recallA2, 'history recall client A again exit')
     await scene.stopC1Host(recallHost.host)
     await scene.awaitSceneSeatFree()
