@@ -107,11 +107,8 @@ export function createDualSurfaceSceneTools(context) {
     } = options
     const { host, ready: hostReady, workRoot } = await startC1Host(scenario, label, extraHostEnv)
     const hostBefore = await hostIdentityFacts(host)
-    // Both Clients launch from this scene's own work root, so their explicit
-    // New gestures share one fresh Host Workspace instead of inheriting blanks
-    // and roster growth from earlier cases in the packed Profile.
     assert(hostBefore.hostPid === hostReady.pid, `${label} the Host ready record does not own the Host identity`)
-    const { client: clientA, ready: aReady } = await startC1Client(`${label} A`, { ...clientEnv, ...aEnv }, { cwd: workRoot })
+    const { client: clientA, ready: aReady } = await startC1Client(`${label} A`, { ...clientEnv, ...aEnv })
     await submitPrompt(clientA, '/new', `${label} A /new`)
     const aOpen = await waitForSurfaceStatus(clientA,
       record => record.sessionOpen === true
@@ -130,7 +127,7 @@ export function createDualSurfaceSceneTools(context) {
     const { client: clientB, ready: bReady } = await startC1Client(
       `${label} B`,
       { ...clientEnv, ...bEnv },
-      { cwd: bCwd ?? workRoot },
+      bCwd === undefined ? {} : { cwd: bCwd },
     )
     let sessionX
     if (openB) {
