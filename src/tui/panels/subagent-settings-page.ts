@@ -89,7 +89,7 @@ const SECTION_OF: Record<SubagentSettingsField, 'Limits' | 'Model selection'> = 
 }
 const LIMITS_EFFECT = 'Limits apply to new delegations; already running activations and child processes are unchanged.'
 const SELECTION_EFFECT = 'Model selection is sampled by new top-level Sessions; the current Agent tool schema is unchanged.'
-const SAVE_NOTE = 'Changes are staged until Save.'
+const SAVE_NOTE = 'Edit values, then Save to apply.'
 const SCOPE = 'DSH Host profile · official settings'
 // These local, deliberately non-rebindable keys supply both handlers and badges.
 const KEYS = { save: 's', refresh: 'r', reset: 'x', discard: 'd', search: '/' } as const
@@ -1288,10 +1288,36 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     }
     return lines
   }
-  private bodyAction(label: string, action: BodyAction, width: number): ContentLine {
-    if (visibleWidth(label) > width) return { text: '' }
-    const suffix = action.kind === 'field' ? `:${action.field}` : ''
-    return { text: color.primary(label), targets: [{ id: `${action.kind}${suffix}`, action, startCol: 0, endCol: visibleWidth(label) }] }
+  /** Compact complete body verbs on shared rows. Separators and padding are
+   *  inert; every target keeps the exact span its verb really painted. */
+  private bodyActions(
+    actions: readonly { readonly label: string; readonly action: BodyAction }[],
+    width: number,
+  ): ContentLine[] {
+    const lines: ContentLine[] = []
+    let text = ''
+    let targets: BodyTarget[] = []
+    let column = 0
+    const flush = (): void => {
+      if (text === '') return
+      lines.push({ text, targets })
+      text = ''
+      targets = []
+      column = 0
+    }
+    for (const entry of actions) {
+      const label = sanitizedPhysicalLine(entry.label)
+      const cells = visibleWidth(label)
+      if (cells > width) continue
+      const separator = text === '' ? 0 : visibleWidth(ACTION_BAR_SEPARATOR)
+      if (text !== '' && column + separator + cells > width) flush()
+      const startCol = column + (text === '' ? 0 : visibleWidth(ACTION_BAR_SEPARATOR))
+      text += `${text === '' ? '' : color.textMuted(ACTION_BAR_SEPARATOR)}${color.primary(label)}`
+      targets.push({ id: entry.action.kind, action: entry.action, startCol, endCol: startCol + cells })
+      column = startCol + cells
+    }
+    flush()
+    return lines
   }
   private acceptAction(label: string, width: number): ContentLine {
     if (visibleWidth(label) > width) return { text: '' }
@@ -1424,22 +1450,24 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       }
       const issue = snapshot.issues[field]
       if (issue !== undefined) lines.push(...this.note(issue, copyWidth, color.error))
-      if (field === 'maxActiveSubagents') lines.push(...this.note(LIMITS_EFFECT, copyWidth))
-      if (field === 'allowedModels') lines.push(...this.note(SELECTION_EFFECT, copyWidth))
       index += 1
     }
-    lines.push(...this.note(SAVE_NOTE, copyWidth))
     const field = FIELDS[this.fieldIndex]!
+    const actions: { label: string; action: BodyAction }[] = []
     if (this.editable(field, snapshot)) {
-      lines.push(this.bodyAction(this.fieldActionLabel(field), { kind: this.fieldActionOf(field) as 'edit' | 'toggle' | 'manage' }, width))
+      actions.push({ label: this.fieldActionLabel(field), action: { kind: this.fieldActionOf(field) as 'edit' | 'toggle' | 'manage' } })
     }
     if (this.sectionOf(snapshot, field).source.kind === 'ready') {
-      lines.push(this.bodyAction('Details…', { kind: 'details' }, width))
+      actions.push({ label: 'Details…', action: { kind: 'details' } })
     }
     if (snapshot.dirty && !this.ambiguous(snapshot) && !snapshot.saving && !snapshot.loading) {
-      lines.push(this.bodyAction('Discard…', { kind: 'discard' }, width))
+      actions.push({ label: 'Discard…', action: { kind: 'discard' } })
     }
-    if (!snapshot.loading && !snapshot.saving) lines.push(this.bodyAction('Refresh…', { kind: 'refresh' }, width))
+    if (!snapshot.loading && !snapshot.saving) actions.push({ label: 'Refresh…', action: { kind: 'refresh' } })
+    lines.push(...this.bodyActions(actions, width))
+    lines.push(...this.note(SAVE_NOTE, copyWidth))
+    lines.push(...this.note(LIMITS_EFFECT, copyWidth))
+    lines.push(...this.note(SELECTION_EFFECT, copyWidth))
     // A settled ambiguous outcome is the FIRST truth about the capture.
     for (const section of [snapshot.limits, snapshot.selection]) {
       if (section.source.kind !== 'ready') lines.push(...this.note(section.source.reason, copyWidth))

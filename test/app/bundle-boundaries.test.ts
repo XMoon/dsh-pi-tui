@@ -503,7 +503,10 @@ test('the release Experimental members paint their real TUI surface and platform
       painted += `\n${detailFrame()}`
     }
     assert.match(painted, /TUI surface/u, `${name} paints its bounded TUI surface:\n${painted}`)
-    for (let page = 0; page < 20 && !RELEASE_FRAME_HINTS[name].test(painted); page += 1) {
+    // The ordinary Detail places the bounded surface/risk facts right after
+    // Status, so the reachability target is the Risk fact itself; the limit
+    // hint lives in the same surface paragraph and is asserted below.
+    for (let page = 0; page < 20 && !RELEASE_FRAME_RISK_HINTS[name].test(painted); page += 1) {
       vt.sendInput('\x1b[6~')
       await renderFrame()
       painted += `\n${detailFrame()}`

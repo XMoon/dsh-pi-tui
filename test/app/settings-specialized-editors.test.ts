@@ -320,8 +320,13 @@ test('/footer deeplinks into the same lease, edits and saves through the one Foo
   assert.equal(h.app.getFooterMode(), 'custom', 'the runtime applies the persisted layout')
   assert.match(h.view(), /Settings · Appearance · Rows/u,
     'the SAME lease returns to the Appearance Rows after the page completes')
-  assert.match(h.view(), /Configure footer layout…\s+custom · 2 rows/u,
-    'the source row re-reads the authoritative custom layout')
+  // The frozen row summary keeps a real 2-cell gap, so the 42-cell Rows pane
+  // may ellipsize this summary; the Detail's Value fact carries the complete
+  // authoritative layout in the SAME frame.
+  assert.match(h.view(), /Configure footer layout…\s+custom · 2 ro/u,
+    'the source row re-reads the custom layout within its 2-cell gap')
+  assert.match(h.view(), /Value\s+custom · 2 rows/u,
+    'the Detail keeps the complete authoritative layout')
   assert.equal((h.app as unknown as { workspaceLease?: object }).workspaceLease, lease,
     'the page open/save/close cycle never replaced the Settings lease')
   assert.doesNotMatch(h.view(), /Select row to edit/u, 'the page is gone; no overlay was stacked')

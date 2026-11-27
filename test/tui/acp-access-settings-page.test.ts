@@ -269,9 +269,9 @@ test('the client command is the exact Profile token with POSIX quoting', () => {
 
 /* --------------------------------------------------------------- focus */
 
-test('the enabled first focus is Copy client command; the disabled one is Enable ACP', async () => {
+test('the enabled first focus is the runtime Disable; the disabled one is Enable ACP', async () => {
   const enabled = await mount({ status: { state: 'enabled' } })
-  assert.match(enabled.frame(), /^> Copy client command/mu)
+  assert.match(enabled.frame(), /^> Disable ACP…/mu)
   assert.match(enabled.frame(), /Current Host\s*\n\s+Listener\s+Enabled/u)
   assert.match(enabled.frame(), /Access\s+Local Unix socket · Same OS user/u)
   assert.match(enabled.frame(), /Disable ACP…\s+Disconnects active ACP clients/u)
@@ -461,7 +461,8 @@ test('a Host replacement DURING the preflight is a definitive zero-write Not cha
   h.resolveRead(1, { state: 'enabled' })
   await h.flush()
   assert.match(h.frame(), /Listener\s+Enabled/u, 'the replacement Host owns the painted fact')
-  assert.match(h.frame(), /^> Copy client command/mu, 'only the new Host state admits its action')
+  assert.match(h.frame(), /^> Copy client command/mu,
+    'the retained Client-local Copy stays a valid selection on the replacement page')
   const diagnostic = h.diagnoses().find(entry => entry.label === 'acp access runtime write')
   assert.ok(diagnostic !== undefined)
   assert.equal(diagnostic.detail.invoked, false)
@@ -546,6 +547,7 @@ test('a superseded status reply is never painted as the current Host fact', asyn
 
 test('Copy client command copies the exact command and calls no Host', async () => {
   const h = await mount({ status: { state: 'enabled' }, profile: 'work profile', holdCopy: true })
+  await highlight(h, 'Copy client command')
   const readsBefore = h.reads()
   await h.key('\r') // Copy client command
   assert.match(h.frame(), /Copying the client command…/u)
@@ -561,11 +563,13 @@ test('Copy client command copies the exact command and calls no Host', async () 
 
 test('a false or failing clipboard is an honest error, never a fake copy', async () => {
   const refused = await mount({ status: { state: 'enabled' }, copy: false })
+  await highlight(refused, 'Copy client command')
   await refused.key('\r')
   await refused.flush()
   assert.match(refused.frame(), /Status\s+Clipboard unavailable/u)
   refused.close()
   const thrown = await mount({ status: { state: 'enabled' }, copyFailure: 'the clipboard is not mounted' })
+  await highlight(thrown, 'Copy client command')
   await thrown.key('\r')
   await thrown.flush()
   assert.match(thrown.frame(), /Status\s+Clipboard unavailable/u)
@@ -575,6 +579,7 @@ test('a false or failing clipboard is an honest error, never a fake copy', async
 
 test('a pending copy left by Esc is diagnosed and never revives the page', async () => {
   const h = await mount({ status: { state: 'enabled' }, holdCopy: true })
+  await highlight(h, 'Copy client command')
   await h.key('\r')
   await h.key('\x1b')
   assert.equal(h.doneCalls(), 1, 'Esc leaves the page; it never cancels the clipboard operation')
@@ -718,7 +723,7 @@ test('a non-current authority does not scroll the page back to the selected row'
   assert.match(h.frame(), /Start automatically\s+Unavailable/u)
   assert.equal(h.reads(), reads, 'the repaint performs no extra Host read')
   await h.key('\x1b[H') // Home returns to a painted action without a write
-  assert.match(h.frame(), /> Copy client command/u)
+  assert.match(h.frame(), /> Disable ACP…/u)
   assert.deepEqual(h.commits(), [])
   h.close()
 })
@@ -752,7 +757,7 @@ test('a same-revision Host rollover still retires the staged next-start confirma
   assert.doesNotMatch(h.frame(), /Save the next Host start preference|Confirm save/u,
     'the staged confirmation is revoked by the rollover')
   assert.equal(h.commits().length, 0, 'the rollover itself writes nothing')
-  assert.match(h.frame(), /> Copy client command/u, 'the clean page returns to its real first focus')
+  assert.match(h.frame(), /> Disable ACP…/u, 'the clean page returns to its real first focus')
   h.close()
 })
 

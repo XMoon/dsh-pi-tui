@@ -737,16 +737,15 @@ export class AccountWorkspacePage implements Component {
       const id = this.rowIds.get(lineIndex)
       if (id !== undefined) targets.push({ id, row: lines.length - 1, startCol: 0, endCol: width })
     }
-    while (lines.length < height - 1 - actionLines.length) lines.push(fit('', width))
     lines.push(...actionLines.map(line => fit(line, width)))
     for (const [index, action] of projection.actions.entries()) {
-      targets.push({ id: action.id, row: height - 1 - actionLines.length + index, startCol: 0, endCol: width })
+      targets.push({ id: action.id, row: lines.length - actionLines.length + index, startCol: 0, endCol: width })
       if (action.enabled) this.paintedActionIds.add(action.id)
     }
+    while (lines.length < height - 1) lines.push(fit('', width))
     this.paintedTargets = targets
     this.paintedRowOrder = rowOrder
     const out = [...lines, color.textMuted(this.actionBar(width, projection.actions))]
-    while (out.length < height) out.push(fit('', width))
     return out.slice(0, height)
   }
 

@@ -653,7 +653,8 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
       lines.push({ text, ...options })
     }
     const pushWrapped = (text: string, options: Omit<PageLine, 'text' | 'label'> = {}): void => {
-      for (const part of wrapText(text, width)) push(part, options)
+      const room = options.detail === true ? Math.min(width, 72) : width
+      for (const part of wrapText(text, room)) push(part, options)
     }
     const pushFact = (label: string, value: string, tone: LineTone = 'fact'): void => {
       for (const part of wrapText(`${label}: ${value}`, width)) {
@@ -673,6 +674,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     const providerReady = bundle.phase === 'ready' && bundle.enabled && bundle.providerReady
 
     // 1. Availability
+    push('Availability', { tone: 'dim', detail: true })
     switch (bundle.phase) {
       case 'idle':
         pushFact('Bundle', 'Not read', 'dim')
@@ -723,6 +725,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     }
 
     // 2. Permissions. Both groups are ALWAYS part of the one model, ordered
+    push('Permissions', { tone: 'dim', detail: true })
     // missing-first so the first missing permission and its action own the
     // first screen; an allowed group stays reachable and keeps its explicit
     // actions. A short grant only reorders prose in the tail.
@@ -758,6 +761,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     }
 
     // 3. Authorization. Every project-wide preset/PTC fact and its explicit
+    push('Authorization', { tone: 'dim', detail: true })
     // action belongs to the same model on every grant; the short grant reaches
     // them through the same scrollport (never a second short variant). An
     // explicit unsupported Host offers no CUA write at all.
@@ -796,6 +800,7 @@ export class ComputerUseSettingsPage implements EmbeddedSpecialistPage {
     }
 
     // 4. Application access
+    push('Application access', { tone: 'dim', detail: true })
     const applications = snapshot.applications
     if (applications.phase === 'ready') {
       const value = applications.value

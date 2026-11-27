@@ -62,6 +62,17 @@ This surface owns the controller/read-epoch/state-machine/workspace behavior; it
 never invents catalog facts, and a `@deepseek-ai/` scope or `experimental`
 substring is not identity proof.
 
+### Ordinary Detail order
+
+The ordinary (non-install/update/confirmation) Detail paints the package
+identity, its `Status` facts and any necessary `Compatibility` warnings first,
+then the existing `Actions` block, then the `Source`/`Description`/`Components`
+diagnostics. The Actions block keeps its labels, enablement, disabled reasons
+and selected-action reveal; moving it up does not change any action's
+controller/admission path, and the install/update/confirmation bodies keep their
+own risk-first layout. A Detail that does not fit its grant still scrolls as
+ONE body; the block is never pinned over the diagnostics.
+
 ### Default listing, explicit search and refused bundles
 
 The Host's `BundleInfo.listedByDefault` is a DISPLAY decision, never enablement

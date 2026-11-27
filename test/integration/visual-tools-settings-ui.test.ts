@@ -1358,18 +1358,18 @@ test('Root pointer journeys save the real Agent-loop and Shell-execution pages t
   const shellFrame = (): string => ui.vt.getViewport().join('\n')
   // Selecting the row is NOT a mount; the painted `Open…` body entry IS.
   await clickUiPainted(ui, '> Shell execution')
-  assert.doesNotMatch(shellFrame(), /Command timeout \(ms\)/u, 'a row click only selects the row')
+  assert.doesNotMatch(shellFrame(), /Command timeout/u, 'a row click only selects the row')
   assert.match(shellFrame(), /Open…/u, 'the Detail preview paints its explicit OPEN entry')
   assert.equal(recorder.calls.length, 1, 'selecting the row never writes and never mounts the group')
   await clickUiPainted(ui, 'Open…')
   await waitForFrame(
     () => shellFrame(),
-    frame => /Settings · Tools · Shell execution/u.test(frame) && /Command timeout \(ms\)\s+60000 ms/u.test(frame),
+    frame => /Settings · Tools · Shell execution/u.test(frame) && /Command timeout\s+60 s/u.test(frame),
     () => ui.vt.waitForRender(), 'the real Root opens the grouped Shell tenant',
   )
   const shellOpened = readySection(port.shellExecutionSettings.read())
   // A field click only SELECTS; the explicit Edit opens the raw Input.
-  await clickUiPainted(ui, 'Command timeout (ms)')
+  await clickUiPainted(ui, 'Command timeout')
   assert.doesNotMatch(shellFrame(), /Value:|Edit Command timeout/u, 'a field click never starts the editor')
   await clickUiPainted(ui, 'Edit [Enter]')
   await waitForFrame(
@@ -1382,14 +1382,14 @@ test('Root pointer journeys save the real Agent-loop and Shell-execution pages t
   await clickUiPainted(ui, 'Stage [Enter]')
   await waitForFrame(
     () => shellFrame(),
-    frame => /Command timeout \(ms\)\s+45000 ms/u.test(frame) && /1 unsaved change/u.test(frame),
+    frame => /Command timeout\s+45 s/u.test(frame) && /1 unsaved change/u.test(frame),
     () => ui.vt.waitForRender(), 'Stage only stages the local draft',
   )
   assert.equal(recorder.calls.length, 1, 'Stage never dispatches an official mutation')
   assert.equal(readySection(port.shellExecutionSettings.read()).effective.timeoutMs, 60_000,
     'the Host still serves the old timeout')
   // The second field gets its OWN explicit Edit -> Stage.
-  await clickUiPainted(ui, 'Output cap per stream (bytes)')
+  await clickUiPainted(ui, 'Output cap per stream')
   await clickUiPainted(ui, 'Edit [Enter]')
   await waitForFrame(
     () => shellFrame(),
@@ -1401,8 +1401,8 @@ test('Root pointer journeys save the real Agent-loop and Shell-execution pages t
   await clickUiPainted(ui, 'Stage [Enter]')
   await waitForFrame(
     () => shellFrame(),
-    frame => /2 unsaved changes/u.test(frame) && /Command timeout \(ms\)\s+45000 ms/u.test(frame)
-      && /Output cap per stream \(bytes\)\s+128000 bytes/u.test(frame),
+    frame => /2 unsaved changes/u.test(frame) && /Command timeout\s+45 s/u.test(frame)
+      && /Output cap per stream\s+128 kB/u.test(frame),
     () => ui.vt.waitForRender(), 'both local drafts stay in the same group',
   )
   assert.equal(recorder.calls.length, 1, 'two local Stages still write nothing')
@@ -1433,7 +1433,7 @@ test('Root pointer journeys save the real Agent-loop and Shell-execution pages t
 
   // ── second batch: set ONE cap and officially unset the other ─────────────
   const second = readySection(port.shellExecutionSettings.read())
-  await clickUiPainted(ui, 'Command timeout (ms)')
+  await clickUiPainted(ui, 'Command timeout')
   await clickUiPainted(ui, 'Edit [Enter]')
   await waitForFrame(
     () => shellFrame(),
@@ -1445,10 +1445,10 @@ test('Root pointer journeys save the real Agent-loop and Shell-execution pages t
   await clickUiPainted(ui, 'Stage [Enter]')
   await waitForFrame(
     () => shellFrame(),
-    frame => /Command timeout \(ms\)\s+5000 ms/u.test(frame),
+    frame => /Command timeout\s+5 s/u.test(frame),
     () => ui.vt.waitForRender(), 'the next timeout is staged locally',
   )
-  await clickUiPainted(ui, 'Output cap per stream (bytes)')
+  await clickUiPainted(ui, 'Output cap per stream')
   await clickUiPainted(ui, 'Details…')
   await waitForFrame(
     () => shellFrame(),
@@ -1486,11 +1486,14 @@ test('Root pointer journeys save the real Agent-loop and Shell-execution pages t
   }, 'the readback is the REAL inherited cap, never a guessed default')
   assert.equal(liveShell.config.timeoutMs.get(), 5_000)
   assert.equal(liveShell.config.maxOutputBytes.get(), second.inherited.maxOutputBytes)
+  const inheritedCap = second.inherited.maxOutputBytes % 1000 === 0
+    ? `${second.inherited.maxOutputBytes / 1000} kB`
+    : `${second.inherited.maxOutputBytes} bytes`
   await clickUiPainted(ui, 'Back [Esc]')
   await waitForFrame(
     () => shellFrame(),
-    frame => /Settings · Tools · Rows/u.test(frame) && /> Shell execution\s+Timeout 5000 ms/u.test(frame)
-      && new RegExp(`Value\\s+Timeout 5000 ms · Output cap ${second.inherited.maxOutputBytes} bytes`, 'u').test(frame),
+    frame => /Settings · Tools · Rows/u.test(frame) && new RegExp(`> Shell execution\\s+5 s · ${inheritedCap}`, 'u').test(frame)
+      && new RegExp(`Value\\s+5 s · ${inheritedCap}`, 'u').test(frame),
     () => ui.vt.waitForRender(), 'the Rows summary and its Detail preview follow the official readback',
   )
 })

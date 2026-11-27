@@ -909,6 +909,21 @@ page/controller path a key press uses. The Shell row keeps its internal
 summary; it is entered only through its explicit forward action (`Enter`/`Right`
 from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
 
+- **Grouped browse presentation.** The grouped page paints the Host heading, the
+  settlement/current facts and the field group first, then the existing
+  `Edit…`/`Details…`/`Discard…`/`Refresh…` verbs as ONE compact body group
+  (whole verbs only; separators and padding are inert), then the single clean
+  staging note `Edit values, then Save to apply.` and the effect/help prose. The
+  same real targets still select a field, open the raw Input, open Advanced or
+  discard; Stage never writes and each verb keeps its own admission.
+- **Shell numeric display.** The browse paints an exact SI display form
+  (`60000 ms` → `60 s`, `64000 bytes` → `64 kB`) only for a positive safe
+  integer divisible by 1000; every other value keeps its raw ms/bytes text.
+  Inputs, Advanced facts, Reset/CAS, dirty equality and the official mutation
+  always use the raw numbers. The Root `Shell execution` row uses the same
+  display form (`60 s · 64 kB`), and the Host-served executor identity stays in
+  the page's source heading.
+
 - **Row identity and entry.** The `Agent` row keeps its internal `agent-loop`
   id, category, order, scope, freshness and `agent-loop-settings` specialist
   tag; its visible label is `Parallel tool calls`, its summary is the
@@ -1107,6 +1122,20 @@ scientific text are legal, and the browse paints the canonical number).
   presents a stale On/Off as the current Host state. Retaining a historical row
   is a TUI presentation choice, not a requirement of the official namespace
   lifecycle.
+
+- **Normal Detail action placement.** A browse projection whose complete content
+  plus its existing action row fits the grant paints the primary facts, then the
+  row's existing action row, then the secondary Scope/Freshness/Description
+  prose, padding last. A projection that does not fit keeps the bounded reserved
+  action row and its scroll extent; the physical Action Bar is still the ONE last
+  row. Every published button carries the body row it really painted, so a click
+  only reaches the LAST frame's action; the old bottom-row coordinate, gaps and
+  gutters carry no business target. Choice, dirty confirmation, the
+  service-install follow-up and risk seen-tracking keep their own pinned and
+  visibility contracts. Ordinary value fields wrap at most 64 cells and
+  explanatory prose at most 72; a settlement reason keeps the pane's full width
+  because it is primary exception information, and long identities/commands may
+  use the whole grant.
 
 ### Web UI page (Host)
 
@@ -1467,6 +1496,14 @@ The page never infers a stored key from a route/profile.
   Host scan before the state frame reaches the terminal. The rule covers the
   first catalog read, the catalog R refresh, the stored-credential list
   (opening it and R) and the record-clear confirmation.
+- **Normal browse action flow.** The ordinary home/provider/reference/records
+  browse paints its real content first, then its existing action block, then
+  pads to the ONE physical bar. Action rows and their targets come from the
+  actually appended rows (never a `height − 1 − actions` guess), so a short page
+  keeps its actions near its facts. The picker, QuestionFlow, pending and
+  short/no-body fallbacks keep their specialised placement. Provider facts lead
+  with route/profile and the independent `Auth kind`/`Credential` presence;
+  protocol/endpoint/models and the masked secret editor stay fully readable.
 - The read state is explicit: `Loading` (no authoritative rows yet), `Ready`,
   `Refreshing` (a read in flight over a live snapshot), `Stale` (the last
   snapshot is not the current authority — a failed refresh over the last good
@@ -1634,6 +1671,12 @@ The page never infers a stored key from a route/profile.
   AccountView; Refresh releases the current subscription and waits for its complete
   initial snapshot. Stale Profile/Balance facts are marked last-known, and a stale
   authorization URL is not presented as current.
+- **Normal browse action flow.** The ordinary signed-in/signed-out page paints
+  Status, the independent Profile and Balance first, then its existing action
+  block and padding, with the normal Callback/source helper facts after the
+  account facts. `Usage`/`Top up` keep the official links and the sign-out
+  confirmation, running-task check, attempt URL/SSH and pending states keep
+  their specialised order.
 - Wallet decimal strings are forwarded verbatim. `Usage` and `Top up` use the
   client-local HTTP(S) opener with the official `AccountView.links`; the page
   never receives a token or grant payload.
@@ -1688,6 +1731,17 @@ probe's stage/closure facts. Status words are the official ones; there is no
 invented `connected-ish`/`installed` flag. `Source` is `Configured`,
 `Plugin-owned`, `Retained/removed` or `Unknown`, and a non-current settings read
 never becomes `Plugin-owned`.
+
+The Detail follows the action boundary: `Server`, `State`, tool count/attempt,
+the sanitized last error/cleanup, the current operation and the configuration
+receipt come first; the legally admitted body actions (`Probe`, `Restart`,
+`Edit`, `Enable/Disable`, `Delete`, `Reset`, `Refresh`) follow as ONE body group;
+`Source`, the saved configuration/transport, the last probe and other
+diagnostics come after. The physical bar keeps ONE primary business verb (`Edit`
+if present, else `Probe`, else `Refresh`) and the page's `Back [Esc]`; secondary
+verbs get no second clickable bar copy. Only a verb whose complete span really
+painted publishes a target, and the controller predicates, confirmations and
+official SettingsForms writes are unchanged.
 
 The workbench shares the Web UI workbench's ONE Root seat, rail grant and
 physical last row. The Root owns the Categories rail and the ONE Action Bar; the

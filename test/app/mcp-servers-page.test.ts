@@ -667,12 +667,17 @@ test('a config-owned detail offers e/t/d/u beside the FR3 p/x; a plugin-owned ro
   const owned = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
   render(owned.page, 100, 14)
   owned.page.handleInput('\r')
-  const bar = render(owned.page, 100, 14).at(-1) ?? ''
+  const configured = render(owned.page, 100, 14)
+  const bar = configured.at(-1) ?? ''
+  // The physical bar keeps the ONE primary business verb and Back.
   assert.match(bar, /Edit \[E\]/u)
-  assert.match(bar, /Enable\/Disable \[T\]/u)
-  assert.match(bar, /Delete \[D\]/u)
-  assert.match(bar, /Probe \[P\]/u)
-  assert.match(bar, /Restart \[X\]/u)
+  assert.match(bar, /Back \[Esc\]/u)
+  assert.doesNotMatch(bar, /Enable\/Disable \[T\]|Delete \[D\]|Probe \[P\]|Restart \[X\]/u)
+  // Every other legal verb stays in the nearby body group exactly once.
+  const frame = configured.join('\n')
+  for (const hint of [/Edit \[E\]/u, /Enable\/Disable \[T\]/u, /Delete \[D\]/u, /Probe \[P\]/u, /Restart \[X\]/u]) {
+    assert.match(frame, hint, `configured detail must offer ${String(hint)} in its body`)
+  }
   owned.page.handleInput('e')
   assert.deepEqual(owned.controller.calls.filter(call => ['beginEdit', 'beginToggle', 'beginDelete'].includes(call)), ['beginEdit'])
   const toggle = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
@@ -694,8 +699,11 @@ test('a config-owned detail offers e/t/d/u beside the FR3 p/x; a plugin-owned ro
   pluginOwned.controller.addable = false
   render(pluginOwned.page, 100, 14)
   pluginOwned.page.handleInput('\r')
-  const pluginBar = render(pluginOwned.page, 100, 14).at(-1) ?? ''
+  const pluginFrame = render(pluginOwned.page, 100, 14)
+  const pluginBar = pluginFrame.at(-1) ?? ''
+  assert.match(pluginBar, /Probe \[P\]/u, 'a plugin-owned server keeps its primary probe')
   assert.doesNotMatch(pluginBar, /Edit \[E\]|Enable\/Disable \[T\]|Delete \[D\]|Reset \[U\]/u)
+  assert.doesNotMatch(pluginFrame.join('\n'), /Edit \[E\]|Enable\/Disable \[T\]|Delete \[D\]|Reset \[U\]/u)
   pluginOwned.page.handleInput('e')
   pluginOwned.page.handleInput('d')
   pluginOwned.page.handleInput('u')
@@ -1033,11 +1041,14 @@ test('the Detail Action Bar advertises exactly the actions the controller allows
   }))
   render(userAdded.page, 120, 20)
   userAdded.page.handleInput('\r')
-  const userBar = render(userAdded.page, 120, 20).at(-1) ?? ''
-  for (const hint of [/Probe \[P\]/u, /Restart \[X\]/u, /Edit \[E\]/u, /Enable\/Disable \[T\]/u, /Delete \[D\]/u]) {
-    assert.match(userBar, hint, `user-added bar must offer ${String(hint)}`)
+  const userAddedFrame = render(userAdded.page, 120, 20)
+  const userBar = userAddedFrame.at(-1) ?? ''
+  const userBody = userAddedFrame.join('\n')
+  assert.match(userBar, /Edit \[E\]/u, 'the editable facet keeps the primary Edit on the bar')
+  for (const hint of [/Probe \[P\]/u, /Restart \[X\]/u, /Enable\/Disable \[T\]/u, /Delete \[D\]/u]) {
+    assert.match(userBody, hint, `user-added detail must offer ${String(hint)} in its body`)
   }
-  assert.doesNotMatch(userBar, /Reset \[U\]/u, 'user-added has no override to reset')
+  assert.doesNotMatch(userBody, /Reset \[U\]/u, 'user-added has no override to reset')
 
   // Inherited (unmodified): edit + toggle, NEITHER delete nor reset.
   const inherited = makePage(snapshot({
@@ -1045,11 +1056,11 @@ test('the Detail Action Bar advertises exactly the actions the controller allows
   }))
   render(inherited.page, 120, 20)
   inherited.page.handleInput('\r')
-  const inheritedBar = render(inherited.page, 120, 20).at(-1) ?? ''
-  assert.match(inheritedBar, /Edit \[E\]/u)
-  assert.match(inheritedBar, /Enable\/Disable \[T\]/u)
-  assert.doesNotMatch(inheritedBar, /Delete \[D\]/u, 'an inherited entry offers no Delete')
-  assert.doesNotMatch(inheritedBar, /Reset \[U\]/u, 'an unmodified inherited entry offers no Reset')
+  const inheritedBody = render(inherited.page, 120, 20).join('\n')
+  assert.match(inheritedBody, /Edit \[E\]/u)
+  assert.match(inheritedBody, /Enable\/Disable \[T\]/u)
+  assert.doesNotMatch(inheritedBody, /Delete \[D\]/u, 'an inherited entry offers no Delete')
+  assert.doesNotMatch(inheritedBody, /Reset \[U\]/u, 'an unmodified inherited entry offers no Reset')
 
   // Overridden: edit + toggle + reset, no Delete.
   const overridden = makePage(snapshot({
@@ -1057,19 +1068,21 @@ test('the Detail Action Bar advertises exactly the actions the controller allows
   }))
   render(overridden.page, 120, 20)
   overridden.page.handleInput('\r')
-  const overriddenBar = render(overridden.page, 120, 20).at(-1) ?? ''
-  assert.match(overriddenBar, /Reset \[U\]/u)
-  assert.doesNotMatch(overriddenBar, /Delete \[D\]/u)
+  const overriddenBody = render(overridden.page, 120, 20).join('\n')
+  assert.match(overriddenBody, /Reset \[U\]/u)
+  assert.doesNotMatch(overriddenBody, /Delete \[D\]/u)
 
   // Plugin-owned: NO CRUD, but the FR3 Probe/Restart ARE available.
   const pluginOwned = makePage(snapshot({ selectedConfig: undefined }))
   pluginOwned.controller.canOperateSelected = () => true
   render(pluginOwned.page, 120, 20)
   pluginOwned.page.handleInput('\r')
-  const pluginBar = render(pluginOwned.page, 120, 20).at(-1) ?? ''
-  assert.match(pluginBar, /Probe \[P\]/u, 'a plugin-owned server is still probeable (FR3)')
-  assert.match(pluginBar, /Restart \[X\]/u, 'a plugin-owned server is still restartable (FR3)')
-  assert.doesNotMatch(pluginBar, /Edit \[E\]|Enable\/Disable \[T\]|Delete \[D\]|Reset \[U\]/u)
+  const pluginFrame = render(pluginOwned.page, 120, 20)
+  const pluginBar = pluginFrame.at(-1) ?? ''
+  const pluginBody = pluginFrame.join('\n')
+  assert.match(pluginBar, /Probe \[P\]/u, 'a plugin-owned server is still probeable (FR3) and owns the primary bar verb')
+  assert.match(pluginBody, /Restart \[X\]/u, 'a plugin-owned server is still restartable (FR3) in the body')
+  assert.doesNotMatch(pluginBody, /Edit \[E\]|Enable\/Disable \[T\]|Delete \[D\]|Reset \[U\]/u)
 
   // Retained cleanup record: no CRUD and no Probe/Restart.
   const retained = makePage(snapshot({
@@ -1080,8 +1093,10 @@ test('the Detail Action Bar advertises exactly the actions the controller allows
   retained.controller.canOperateSelected = () => false
   render(retained.page, 120, 20)
   retained.page.handleInput('\r')
-  const retainedBar = render(retained.page, 120, 20).at(-1) ?? ''
-  assert.doesNotMatch(retainedBar, /Probe \[P\]|Restart \[X\]|Edit \[E\]|Delete \[D\]|Reset \[U\]/u)
+  const retainedFrame = render(retained.page, 120, 20)
+  const retainedBar = retainedFrame.at(-1) ?? ''
+  assert.match(retainedBar, /Refresh \[R\]/u, 'only the re-observation action remains')
+  assert.doesNotMatch(retainedFrame.join('\n'), /Probe \[P\]|Restart \[X\]|Edit \[E\]|Delete \[D\]|Reset \[U\]/u)
 
   // A write in flight: the editor bar no longer advertises `Save [S]`.
   const saving = makePage(snapshot({
@@ -1109,11 +1124,12 @@ test('a config write in flight removes every detail CRUD affordance from the bar
   controller.canBeginEdit = () => false
   render(page, 120, 20)
   page.handleInput('\r')
-  const bar = render(page, 120, 20).at(-1) ?? ''
-  assert.doesNotMatch(bar, /Edit \[E\]/u, 'no Edit while a write is unsettled')
-  assert.match(bar, /Probe \[P\]/u, 'Probe is independent of the config write')
-  assert.match(bar, /Restart \[X\]/u)
+  const frame = render(page, 120, 20)
+  const bar = frame.at(-1) ?? ''
+  assert.match(bar, /Probe \[P\]/u, 'the independently available primary owns the bar')
   assert.match(bar, /Back \[Esc\]/u)
+  assert.doesNotMatch(bar, /Edit \[E\]/u, 'no Edit while a write is unsettled')
+  assert.match(frame.join('\n'), /Restart \[X\]/u, 'Restart stays reachable in the body')
 })
 
 test('an explicit empty Enter commits an empty literal, while Esc keeps the value', () => {

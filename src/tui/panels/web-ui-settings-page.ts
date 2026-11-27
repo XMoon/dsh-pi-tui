@@ -1310,7 +1310,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       }
       return lines
     }
-    const valueRoom = width - indentCells - labelRoom - 1
+    const valueRoom = Math.min(64, width - indentCells - labelRoom - 1)
     const labelPad = ' '.repeat(labelRoom - labelCells)
     const paintedLabel = `${INDENT}${color.textDim(label)}${labelPad} `
     if (valueRoom >= 1) {
@@ -1507,7 +1507,6 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     const runtimeRows = rows.filter(row => row.kind === 'action')
     const fieldRow = rows.find(row => row.kind === 'field')
     if (runtimeRows.length > 0) {
-      lines.push(this.header('Actions'))
       for (const row of runtimeRows) lines.push(...this.entryLines(row, width))
     }
     lines.push(this.header('Next Host Start'))

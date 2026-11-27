@@ -1309,22 +1309,15 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     if (host !== undefined) {
       switch (host.status.state) {
         case 'enabled':
-          if (this.clientCommand() !== undefined) rows.push({ id: 'copy', kind: 'action', label: 'Copy client command' })
           rows.push({ id: 'disable', kind: 'action', label: 'Disable ACP…', value: 'Disconnects active ACP clients', valueInk: 'dim' })
           break
         case 'disabled':
           rows.push({ id: 'enable', kind: 'action', label: 'Enable ACP' })
-          if (this.clientCommand() !== undefined) rows.push({ id: 'copy', kind: 'action', label: 'Copy client command' })
           break
         case 'changing':
         case 'unavailable':
-          if (this.clientCommand() !== undefined) rows.push({ id: 'copy', kind: 'action', label: 'Copy client command' })
           break
       }
-    } else if (this.clientCommand() !== undefined) {
-      // checking / unreadable / split-host-only: no Host action exists, but the
-      // Client-local Copy still depends only on the proven Profile.
-      rows.push({ id: 'copy', kind: 'action', label: 'Copy client command' })
     }
     // A ready/settled page ALWAYS keeps its explicit Refresh body route: the
     // live listener can change under a same-generation external writer, and
@@ -1341,12 +1334,13 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
         affordance: 'Change…',
       })
     }
+    if (this.clientCommand() !== undefined) rows.push({ id: 'copy', kind: 'action', label: 'Copy client command' })
     return rows
   }
 
   /** The first focus the page should land on for the CURRENT observations: the
-   *  primary Host action (or the Client-local Copy when no runtime toggle
-   *  exists), else the editable next-start preference, else Refresh. */
+   *  real runtime toggle (Enable/Disable), else the Client-local Copy when no
+   *  runtime toggle exists, else the editable next-start preference. */
   private firstFocusId(): string | undefined {
     const rows = this.rowSpecs()
     const host = this.hostCurrent()
@@ -1356,7 +1350,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       // real action; without it the editable preference owns the focus.
       ? (hasCopy ? 'copy' : undefined)
       : host.status.state === 'enabled'
-        ? (hasCopy ? 'copy' : 'disable')
+        ? 'disable'
         : host.status.state === 'disabled'
           ? 'enable'
           // changing / unavailable: no runtime toggle, but Copy still only
@@ -1408,7 +1402,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       }
       return lines
     }
-    const valueRoom = width - indentCells - labelRoom - 1
+    const valueRoom = Math.min(64, width - indentCells - labelRoom - 1)
     const labelPad = ' '.repeat(labelRoom - labelCells)
     const paintedLabel = `${INDENT}${color.textDim(label)}${labelPad} `
     if (valueRoom >= 1) {
@@ -1609,10 +1603,9 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       return lines
     }
     const rows = this.rowSpecs()
-    const runtimeRows = rows.filter(row => row.kind === 'action')
+    const runtimeRows = rows.filter(row => row.kind === 'action' && row.id !== 'copy')
     const fieldRow = rows.find(row => row.kind === 'field')
     if (runtimeRows.length > 0) {
-      lines.push(this.header('Actions'))
       for (const row of runtimeRows) lines.push(...this.entryLines(row, width))
     }
     lines.push(this.header('Next Host Start'))
@@ -1647,6 +1640,8 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     lines.push(...(command === undefined
       ? this.wrapped(SETUP_NO_COMMAND, 'error', width)
       : this.wrapped(command, 'text', width)))
+    const copy = rows.find(row => row.id === 'copy')
+    if (copy !== undefined) lines.push(...this.entryLines(copy, width))
     lines.push(...this.wrapped(SETUP_ENABLE_FIRST, 'dim', width))
     lines.push(...this.wrapped(SETUP_VIEW_LIFETIME, 'dim', width))
     return lines

@@ -606,11 +606,15 @@ test('the mounted Detail keeps the FR3 p/x actions beside the new CRUD actions',
   await press(h.vt, '\r') // focus the Detail region
   await frames(h.vt)
   const bar = lastLine(h)
-  assert.match(bar, /Probe \[P\]/u)
-  assert.match(bar, /Restart \[X\]/u)
+  // The physical bar keeps the ONE primary business verb and Back; every other
+  // legal verb lives in the nearby body group exactly once.
   assert.match(bar, /Edit \[E\]/u)
-  assert.match(bar, /Enable\/Disable \[T\]/u)
-  assert.match(bar, /Delete \[D\]/u)
+  assert.match(bar, /Back \[Esc\]/u)
+  assert.doesNotMatch(bar, /Probe \[P\]|Restart \[X\]|Enable\/Disable \[T\]|Delete \[D\]/u)
+  assert.match(h.view(), /Probe \[P\]/u)
+  assert.match(h.view(), /Restart \[X\]/u)
+  assert.match(h.view(), /Enable\/Disable \[T\]/u)
+  assert.match(h.view(), /Delete \[D\]/u)
   // The saved transport now comes from the same configuration descriptor.
   assert.match(h.view(), /Saved transport: stdio/u)
 })

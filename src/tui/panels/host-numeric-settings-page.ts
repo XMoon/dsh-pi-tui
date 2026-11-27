@@ -19,6 +19,7 @@ import type {
 import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { paintActionSpan } from '../presentation/action-ink.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
+import { formatShellSettingValue } from '../presentation/settings-values.ts'
 import { color } from '../theme/runtime.ts'
 import type { EmbeddedSpecialistPage, SpecialistParentLeaveTarget } from './settings-workspace-panel.ts'
 
@@ -1135,9 +1136,36 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     }
     return lines
   }
-  private bodyAction(label: string, action: 'edit' | 'details' | 'refresh' | 'discard', width: number): ContentLine {
-    if (visibleWidth(label) > width) return { text: color.primary(label) }
-    return { text: color.primary(label), targets: [{ id: action, action: { kind: action }, startCol: 0, endCol: visibleWidth(label) }] }
+  /** Compact complete body verbs on shared rows. Separators and padding are
+   *  inert; every target keeps the exact span its verb really painted. */
+  private bodyActions(
+    actions: readonly { readonly label: string; readonly action: BodyTarget['action'] }[],
+    width: number,
+  ): ContentLine[] {
+    const lines: ContentLine[] = []
+    let text = ''
+    let targets: BodyTarget[] = []
+    let column = 0
+    const flush = (): void => {
+      if (text === '') return
+      lines.push({ text, targets })
+      text = ''
+      targets = []
+      column = 0
+    }
+    for (const entry of actions) {
+      const label = sanitizedPhysicalLine(entry.label)
+      const cells = visibleWidth(label)
+      if (cells > width) continue
+      const separator = text === '' ? 0 : visibleWidth(ACTION_BAR_SEPARATOR)
+      if (text !== '' && column + separator + cells > width) flush()
+      const startCol = column + (text === '' ? 0 : visibleWidth(ACTION_BAR_SEPARATOR))
+      text += `${text === '' ? '' : color.textMuted(ACTION_BAR_SEPARATOR)}${color.primary(label)}`
+      targets.push({ id: entry.action.kind, action: entry.action, startCol, endCol: startCol + cells })
+      column = startCol + cells
+    }
+    flush()
+    return lines
   }
   private acceptAction(label: string, width: number): ContentLine {
     if (visibleWidth(label) > width) return { text: color.primary(label) }
@@ -1145,6 +1173,14 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   }
   private unitSuffix(field: HostNumericSettingsField<T>): string {
     return field.unit === undefined ? '' : ` ${field.unit}`
+  }
+  /** The browse label must not repeat the unit the value cell already paints:
+   *  the field's own trailing `(<unit>)` is dropped from the DISPLAY text only
+   *  (the raw Input/Advanced keep the complete authoritative label). */
+  private browseLabel(field: HostNumericSettingsField<T>): string {
+    if (field.unit === undefined) return field.label
+    const suffix = ` (${field.unit})`
+    return field.label.endsWith(suffix) ? field.label.slice(0, -suffix.length) : field.label
   }
   private fieldValue(snapshot: HostNumericSettingsSnapshot<T>, field: HostNumericSettingsField<T>): string {
     return snapshot.source.kind === 'ready' ? String(snapshot.source.effective[field.key]) : 'Unknown'
@@ -1263,6 +1299,8 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       const selected = index === this.fieldIndex
       const staged = snapshot.dirtyFields.includes(field.key)
       const reset = snapshot.resetFields.includes(field.key)
+      const browseLabel = this.browseLabel(field)
+      const displayUnit = field.unit === 'ms' || field.unit === 'bytes' ? field.unit : undefined
       const unit = this.unitSuffix(field)
       const raw = snapshot.texts[field.key]
       // The browse paints the CANONICAL value of a legal draft (1e3 -> 1000),
@@ -1270,26 +1308,31 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       const candidate = raw !== undefined && this.controller.numberIssue(field.key, raw) === undefined
         ? String(Number(raw))
         : raw
+      const candidateIsValid = raw === undefined || this.controller.numberIssue(field.key, raw) === undefined
+      const authoritative = source.kind === 'ready' ? source.effective[field.key] : undefined
+      const displayNumber = candidateIsValid ? Number(candidate ?? authoritative) : undefined
       const value = source.kind !== 'ready'
         ? 'Unknown'
         : reset ? 'Reset staged'
-          : `${candidate ?? String(source.effective[field.key])}${unit}`
+          : displayNumber !== undefined && displayUnit !== undefined
+            ? formatShellSettingValue(displayNumber, displayUnit)
+            : `${candidate ?? String(authoritative)}${unit}`
       const valueWidth = visibleWidth(value)
       const blockStart = lines.length
       let blockComplete = valueWidth <= rowWidth
       const marker = selected ? '> ' : '  '
       // Every wrapped label fragment carries the 2-cell marker/indent, so the
       // wrap width is the real row width MINUS that prefix.
-      const labelLines = wrapTextWithAnsi(sanitizedPhysicalLine(field.label), Math.max(1, rowWidth - 2))
+      const labelLines = wrapTextWithAnsi(sanitizedPhysicalLine(browseLabel), Math.max(1, rowWidth - 2))
       const target: BodyTarget = {
         id: `field:${field.key}`,
         action: { kind: 'field', field: field.key },
         startCol: 0,
         endCol: rowWidth,
       }
-      if (labelLines.length === 1 && visibleWidth(marker) + visibleWidth(field.label) + 2 + valueWidth <= rowWidth) {
-        const gap = Math.max(2, rowWidth - visibleWidth(marker) - visibleWidth(field.label) - valueWidth)
-        const label = selected ? color.textStrong(field.label) : color.text(field.label)
+      if (labelLines.length === 1 && visibleWidth(marker) + visibleWidth(browseLabel) + 2 + valueWidth <= rowWidth) {
+        const gap = Math.max(2, rowWidth - visibleWidth(marker) - visibleWidth(browseLabel) - valueWidth)
+        const label = selected ? color.textStrong(browseLabel) : color.text(browseLabel)
         lines.push({ text: `${marker}${sanitizedPhysicalLine(label)}${' '.repeat(gap)}${color.text(sanitizedPhysicalLine(value))}`, field: field.key, targets: [target] })
       } else {
         // A label and its canonical value that cannot share ONE line keep the
@@ -1313,7 +1356,11 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
         // its REAL physical lines and mark it complete only when the value and
         // the Unsaved marker are both fully painted.
         const prefix = `${stale ? 'Last confirmed' : 'Current'}:`
-        const current = `${this.fieldValue(snapshot, field)}${unit}`
+        const currentValue = this.fieldValue(snapshot, field)
+        const currentUnit = field.unit === 'ms' || field.unit === 'bytes' ? field.unit : undefined
+        const current = currentUnit === undefined
+          ? currentValue
+          : formatShellSettingValue(Number(currentValue), currentUnit)
         const suffix = 'Unsaved'
         const prefixWidth = visibleWidth(prefix)
         const currentWidth = visibleWidth(current)
@@ -1348,15 +1395,15 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       countLine = lines.length
       lines.push({ text: color.text(`${count} unsaved change${count === 1 ? '' : 's'} · ${this.title}`) })
     }
-    lines.push(...this.note('Changes are staged until Save.', copyWidth))
-    // The REAL body routes sit with the draft facts, before the explanatory
-    // prose: a short or refused grant must not bury its local Discard.
+    const actions: { label: string; action: BodyTarget['action'] }[] = []
     if (editable) {
-      lines.push(this.bodyAction('Edit…', 'edit', width))
-      lines.push(this.bodyAction('Details…', 'details', width))
+      actions.push({ label: 'Edit…', action: { kind: 'edit' } })
+      actions.push({ label: 'Details…', action: { kind: 'details' } })
     }
-    if (snapshot.dirty && !this.ambiguous(snapshot)) lines.push(this.bodyAction('Discard…', 'discard', width))
-    if (editable) lines.push(this.bodyAction('Refresh…', 'refresh', width))
+    if (snapshot.dirty && !this.ambiguous(snapshot)) actions.push({ label: 'Discard…', action: { kind: 'discard' } })
+    if (editable) actions.push({ label: 'Refresh…', action: { kind: 'refresh' } })
+    lines.push(...this.bodyActions(actions, width))
+    lines.push(...this.note('Edit values, then Save to apply.', copyWidth))
     if (source.kind !== 'ready') lines.push(...this.note(source.reason, copyWidth, color.error))
     if (this.waitNotice && snapshot.saving) lines.push(...this.note('Dispatched writes continue.', copyWidth))
     if (snapshot.notice !== undefined) lines.push(...this.note(snapshot.notice, copyWidth, color.error))

@@ -2065,18 +2065,18 @@ export class ModelsWorkspacePage implements Component {
         this.paintedRowIds.add(target.id)
       }
     }
-    while (lines.length < height - 1 - actionLines.length) lines.push(fit('', width))
     lines.push(...actionLines.map(line => fit(line, width)))
     for (const [index, action] of projection.actions.entries()) {
       targets.push({
         kind: 'action',
         id: action.id,
-        row: height - 1 - actionLines.length + index,
+        row: lines.length - actionLines.length + index,
         startCol: 0,
         endCol: width,
       })
       if (action.enabled) this.paintedActionIds.add(action.id)
     }
+    while (lines.length < height - 1) lines.push(fit('', width))
     lines.push(this.actionBar(width, projection.actions))
     this.paintedTargets = targets
     return this.pad(lines, height, width)
@@ -2338,17 +2338,21 @@ export class ModelsWorkspacePage implements Component {
     const standalone = this.isStandaloneSignIn(row)
     const content: string[] = [color.textStrong(`${standalone ? 'Sign-in' : 'Provider'} · ${sanitizedPhysicalLine(row.label)}`), '']
     content.push(...this.fact(standalone ? 'Sign-in key' : 'Route', standalone ? (row.key ?? '—') : row.route, width))
-    if (standalone && row.route !== '') content.push(...this.fact('Route', row.route, width))
+    if (row.route !== '' && standalone) content.push(...this.fact('Route', row.route, width))
+    const state = this.credentialStateOf(row)
     if (!standalone) {
       content.push(...this.fact('Profile', row.profile.configured ? 'configured' : 'not configured', width))
+      content.push(...this.fact('Auth kind', row.kind === 'authorization' ? 'provider-native authorization' : 'API key reference', width))
+      content.push(...this.fact('Credential', credentialWord(state, row.kind, this.presenceIsStale()).word, width))
+      content.push('', color.textDim('Credential presence only — not a connection test.'))
       content.push(...this.fact('API protocol', row.profile.api ?? 'unknown', width))
       content.push(...this.fact('Endpoint', row.profile.baseURL ?? 'unknown', width))
       content.push(...this.fact('Models', row.profile.models.length === 0 ? 'none listed' : row.profile.models.join(', '), width))
+    } else {
+      content.push(...this.fact('Auth kind', row.kind === 'authorization' ? 'provider-native authorization' : 'API key reference', width))
+      content.push(...this.fact('Credential', credentialWord(state, row.kind, this.presenceIsStale()).word, width))
+      content.push('', color.textDim('Credential presence only — not a connection test.'))
     }
-    content.push(...this.fact('Auth kind', row.kind === 'authorization' ? 'provider-native authorization' : 'API key reference', width))
-    const state = this.credentialStateOf(row)
-    content.push(...this.fact('Credential', credentialWord(state, row.kind, this.presenceIsStale()).word, width))
-    content.push('', color.textDim('Credential presence only — not a connection test.'))
     if (this.auth !== undefined && this.auth.targetIdentity === row.identity) {
       content.push('', color.textStrong('Sign-in'))
       content.push(color.text(sanitizedPhysicalLine(this.auth.status ?? this.auth.phase)))

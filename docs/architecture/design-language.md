@@ -791,6 +791,26 @@ This contract therefore allows state facts on the bar under §7.1's shape rule, 
 that when the dedicated facts row *is* granted, the bar does not repeat it
 (the existing `facts.readingFacts` gate).
 
+### 7.4 Body actions and proximity
+
+The Action Bar is still the ONE physical last row (§8 invariants); a body that
+also paints business actions keeps them near the facts they act on:
+
+- **When the complete real content plus its existing action row fits the current
+  grant**, the action row follows the PRIMARY facts directly. A Detail that
+  first paints status/value/current facts and then secondary provenance prose
+  places the actions between the two blocks, and pads only after all content. A
+  larger grant never stretches that gap, and a short screen never fabricates
+  blank space before its actions.
+- **When the complete content plus an action row does NOT fit**, the surface
+  keeps its bounded reserved action row at the bottom of the scroll region (the
+  existing short-grant fallback) and the body scrolls. The action row is never
+  budgeted away and is never moved outside the grant.
+- **Only painted actions are pointer targets.** A body verb may alias the ONE
+  physical-bar primary action; every other body verb exists once and gets no
+  second clickable bar copy. Disabled, hidden, clipped or stale cells stay inert
+  under the owning interaction contract.
+
 ## 8. Responsive degradation ladder
 
 Frozen order of what yields as space shrinks (both workspaces already follow it;
