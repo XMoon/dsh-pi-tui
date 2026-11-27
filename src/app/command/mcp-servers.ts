@@ -62,6 +62,9 @@ export type McpServerSourceLabel = 'Configured' | 'Plugin-owned' | 'Retained/rem
 /** One row of the validated projection. */
 export interface McpServersRow {
   readonly name: string
+  /** Opaque continuity token for this exact roster entry. A removed and
+   *  re-added same-name entry is a new instance with a new token. */
+  readonly entryToken?: object
   /** Whether the official manager still holds a LIVE entry for this name. A
    *  retained cleanup record (`false`) is diagnostic only and NOT operable. */
   readonly configured: boolean
@@ -128,6 +131,16 @@ export interface McpServersSnapshot {
    * pointer currency; never a business authority.
    */
   readonly configurationReadEpoch: number
+  /**
+   * SUX-07 D8b: an unconfirmed configuration write keeps this page's local
+   * recovery admission closed until an explicit `r` has produced a real current
+   * roster AND a same-generation configuration read. It is never a Host
+   * terminal/authority fact; the configStatus receipt stays `unconfirmed`.
+   */
+  readonly configOutcomeUnconfirmed?: boolean
+  /** SUX-07 D8b: a lost restart settlement keeps blind restart retry closed
+   *  until an explicit `r` re-observes the current roster. */
+  readonly restartOutcomeUnconfirmed?: boolean
 }
 
 /** FR4: what may be done with the currently selected server. */
@@ -149,6 +162,8 @@ export interface McpSelectedConfigFacet {
 export interface McpEditorSnapshot {
   readonly mode: 'add' | 'edit'
   readonly name: string
+  /** The exact Edit target; absent for Add. */
+  readonly entryToken?: object
   /** Edit keeps the name read-only (rename = Add then Delete). */
   readonly nameEditable: boolean
   readonly transport: McpServerTransport
@@ -192,6 +207,7 @@ export interface McpConfigConfirmSnapshot {
 export type McpConfigStatus =
   | { readonly kind: 'saving'; readonly text: string }
   | { readonly kind: 'saved'; readonly text: string }
+  | { readonly kind: 'no-changes'; readonly text: string }
   | { readonly kind: 'conflict'; readonly text: string }
   | { readonly kind: 'rejected'; readonly text: string }
   | { readonly kind: 'unconfirmed'; readonly text: string }
@@ -205,6 +221,7 @@ export const MCP_HTTP_TARGET_MARKER = 'Target: '
 export const MCP_CONFIG_TEXT = {
   saving: 'Saving configuration…',
   saved: 'Saved · waiting for Host reconcile',
+  noChanges: 'No changes',
   conflict: 'Not saved · configuration changed; refresh to review',
   unconfirmed: 'Outcome unconfirmed; inspect the Host configuration before retrying',
   unavailable: 'Unavailable · Host settings not current',
@@ -242,6 +259,8 @@ interface McpEditorState {
   readonly mode: 'add' | 'edit'
   /** The exact entry an Edit was opened on (absent for Add). */
   readonly entry: McpClassifiedServerEntry | undefined
+  /** Continuity token captured when Edit opened; absent for Add. */
+  readonly entryToken: object | undefined
   readonly generation: McpServerGeneration
   readonly revision: number
   draft: McpEditorDraftState
@@ -425,6 +444,18 @@ export class McpServersController {
   private configWriteToken = 0
   /** FR4: identity of the LATEST configuration read (only it may commit). */
   private configReadToken = 0
+  /**
+   * SUX-07 D8b: the two local recovery admissions. They are UI-only gates: a
+   * dispatched Host write is never claimed cancelled/replayed here. The config
+   * gate releases only after an EXPLICIT `r` produces a newer current roster
+   * and a same-generation ready descriptor read; the restart gate releases only
+   * after an explicit `r` produces a newer current roster. A background roster
+   * publication alone never releases either.
+   */
+  private configOutcomeUnconfirmed = false
+  private restartOutcomeUnconfirmed = false
+  private configRecovery: { readonly rosterEpoch: number; readonly readToken: number } | undefined
+  private restartRecovery: { readonly rosterEpoch: number } | undefined
 
   constructor(deps: McpServersControllerDeps) {
     this.deps = deps
@@ -462,6 +493,10 @@ export class McpServersController {
     this.editor = undefined
     this.configConfirm = undefined
     this.configStatus = undefined
+    this.configOutcomeUnconfirmed = false
+    this.restartOutcomeUnconfirmed = false
+    this.configRecovery = undefined
+    this.restartRecovery = undefined
     this.servers.clear()
     this.order.length = 0
   }
@@ -470,7 +505,13 @@ export class McpServersController {
   snapshot(): McpServersSnapshot {
     const rows: McpServersRow[] = this.order.map(name => {
       const view = this.servers.get(name) as McpServerView
-      return { name, configured: view.configured, status: view.status, source: this.sourceOf(view) }
+      return {
+        name,
+        entryToken: this.entryTokens.get(name),
+        configured: view.configured,
+        status: view.status,
+        source: this.sourceOf(view),
+      }
     })
     const selectedFacet = this.selectedConfigFacet()
     return {
@@ -491,6 +532,8 @@ export class McpServersController {
       // currency. No new counter and no new Host identity is introduced.
       observationEpoch: this.rosterEpoch,
       configurationReadEpoch: this.configReadToken,
+      ...this.configOutcomeUnconfirmed ? { configOutcomeUnconfirmed: true } : {},
+      ...this.restartOutcomeUnconfirmed ? { restartOutcomeUnconfirmed: true } : {},
     }
   }
 
@@ -544,9 +587,17 @@ export class McpServersController {
     this.deps.requestRender()
   }
 
-  /** Re-open the observation (the `r` action): one watcher at a time. */
+  /** Re-open the observation (the `r` action): one watcher at a time. An
+   *  explicit refresh is the ONLY action that can re-open the two local
+   *  recovery admissions after an unconfirmed outcome. */
   refresh(): void {
     if (this.disposed) return
+    if (this.configOutcomeUnconfirmed) {
+      this.configRecovery = { rosterEpoch: this.rosterEpoch, readToken: this.configReadToken }
+    }
+    if (this.restartOutcomeUnconfirmed) {
+      this.restartRecovery = { rosterEpoch: this.rosterEpoch }
+    }
     this.openWatch()
     this.deps.requestRender()
   }
@@ -561,7 +612,7 @@ export class McpServersController {
 
   /** Enter the restart confirmation for the selected server. */
   beginRestart(): void {
-    if (!this.canOperateSelected()) return
+    if (!this.canOperateSelected() || this.restartOutcomeUnconfirmed) return
     const name = this.selected as string
     const generation = this.currentGeneration()
     const entryToken = this.entryTokens.get(name)
@@ -581,6 +632,9 @@ export class McpServersController {
       this.deps.requestRender()
       return
     }
+    // SUX-07 D8b: a lost settlement closes blind restart retry until an
+    // explicit `r` re-observes the current roster.
+    if (this.restartOutcomeUnconfirmed) return
     // The confirmation is authority-bound: the exact Host generation and the
     // exact roster entry that were confirmed must still be current. A name
     // match on another Host is NOT a valid target.
@@ -632,6 +686,9 @@ export class McpServersController {
       && this.configConfirm === undefined
       && this.operation?.phase !== 'running'
       && !this.configStatusIsInFlight()
+      // SUX-07 D8b: an unconfirmed write must not be blindly resubmitted; the
+      // user first performs an explicit `r` re-observation.
+      && !this.configOutcomeUnconfirmed
   }
 
   /** Whether `a` (Add) may open right now: a current descriptor is required
@@ -682,6 +739,18 @@ export class McpServersController {
       if (this.disposed || token !== this.openToken || epoch !== this.rosterEpoch) return
       if (readToken !== this.configReadToken) return
       this.configuration = this.deps.configuration.read()
+      // SUX-07 D8b: the explicit `r` re-opens the configuration admission only
+      // when a LATER current roster exists AND this post-refresh descriptor read
+      // is ready for that same generation. An old read, a failed read or a
+      // background roster publication cannot release it.
+      const recovery = this.configRecovery
+      if (recovery !== undefined
+        && this.rosterEpoch > recovery.rosterEpoch
+        && readToken > recovery.readToken
+        && this.configIsCurrent()) {
+        this.configOutcomeUnconfirmed = false
+        this.configRecovery = undefined
+      }
       this.deps.requestRender()
     })
   }
@@ -696,6 +765,7 @@ export class McpServersController {
     this.editor = {
       mode: 'add',
       entry: undefined,
+      entryToken: undefined,
       generation: this.generation,
       revision: this.configuration.revision,
       draft: emptyDraft(),
@@ -714,6 +784,7 @@ export class McpServersController {
     this.editor = {
       mode: 'edit',
       entry,
+      entryToken: this.entryTokens.get(entry.name),
       generation: this.generation,
       revision: this.configuration.revision,
       draft: draftFromEntry(entry),
@@ -933,6 +1004,9 @@ export class McpServersController {
   saveEditor(): void {
     if (this.disposed || this.editor === undefined) return
     if (this.configStatusIsInFlight()) return
+    // SUX-07 D8b: the previous write may still have been applied; only an
+    // explicit `r` re-observation can re-open a NEW intentional save.
+    if (this.configOutcomeUnconfirmed) return
     const prepared = this.prepareEditorSave()
     if (prepared.kind === 'refused') {
       this.configStatus = prepared.status
@@ -940,9 +1014,11 @@ export class McpServersController {
       return
     }
     if (prepared.ops.length === 0) {
-      // A zero-diff Edit already IS the saved state: no CAS write at all.
+      // SUX-07 D8a: a zero-diff Edit already IS the current state. There is no
+      // Host mutation and no reconcile to wait for; the status says exactly
+      // `No changes` and never claims a save.
       this.editor = undefined
-      this.configStatus = { kind: 'saved', text: MCP_CONFIG_TEXT.saved }
+      this.configStatus = { kind: 'no-changes', text: MCP_CONFIG_TEXT.noChanges }
       this.deps.requestRender()
       return
     }
@@ -996,6 +1072,7 @@ export class McpServersController {
   /** Perform the acknowledged Save (also the no-warning path of {@link saveEditor}). */
   private commitEditorSave(): void {
     if (this.disposed || this.editor === undefined) return
+    if (this.configOutcomeUnconfirmed) return
     const editor = this.editor
     const prepared = this.prepareEditorSave()
     if (prepared.kind === 'refused') {
@@ -1005,7 +1082,7 @@ export class McpServersController {
     }
     if (prepared.ops.length === 0) {
       this.editor = undefined
-      this.configStatus = { kind: 'saved', text: MCP_CONFIG_TEXT.saved }
+      this.configStatus = { kind: 'no-changes', text: MCP_CONFIG_TEXT.noChanges }
       this.deps.requestRender()
       return
     }
@@ -1085,6 +1162,9 @@ export class McpServersController {
       this.deps.requestRender()
       return
     }
+    // SUX-07 D8b: an unconfirmed write may still have been applied; a new
+    // affirmative answer requires the explicit `r` re-observation first.
+    if (this.configOutcomeUnconfirmed) return
     // A Save answers a question about the FORM's draft (which for an Add has
     // no entry yet and no list selection), so it is dispatched through the
     // editor's own fences instead of the selected-entry ones.
@@ -1194,6 +1274,8 @@ export class McpServersController {
             this.refreshConfiguration()
             break
           case 'outcome-unconfirmed':
+            this.configOutcomeUnconfirmed = true
+            this.configRecovery = undefined
             this.configStatus = { kind: 'unconfirmed', text: MCP_CONFIG_TEXT.unconfirmed }
             break
           case 'rejected':
@@ -1213,6 +1295,7 @@ export class McpServersController {
     return {
       mode: editor.mode,
       name: editor.draft.name,
+      ...editor.entryToken === undefined ? {} : { entryToken: editor.entryToken },
       nameEditable: editor.mode === 'add',
       transport: editor.draft.transport,
       command: editor.draft.command,
@@ -1302,8 +1385,18 @@ export class McpServersController {
       const text = this.operation.kind === 'restart'
         ? RESTART_LOST_NOTE
         : 'Observation lost; the result was discarded'
+      if (this.operation.kind === 'restart') {
+        // The dispatched restart lost the authority that could settle it.
+        // Record the typed gate at the actual loss-of-observation boundary;
+        // a later completion cannot repair it.
+        this.restartOutcomeUnconfirmed = true
+        this.restartRecovery = undefined
+      }
       this.operation = { ...this.operation, phase: 'failed', text }
       this.notice = { text, kind: 'error' }
+    } else if (this.restartOutcomeUnconfirmed) {
+      // SUX-07 D8b: the prior unconfirmed restart notice survives a Host
+      // replacement rather than being silently cleared.
     } else {
       this.operation = undefined
       this.notice = undefined
@@ -1323,7 +1416,15 @@ export class McpServersController {
     // painted before it can be answered.
     this.questionSerial += 1
     this.configWriteToken += 1
-    this.configStatus = undefined
+    if (this.configStatus?.kind === 'saving') {
+      // The write was dispatched but its authority is gone. The in-flight
+      // latch must not disappear as if the write had been cancelled.
+      this.configOutcomeUnconfirmed = true
+      this.configRecovery = undefined
+      this.configStatus = { kind: 'unconfirmed', text: MCP_CONFIG_TEXT.unconfirmed }
+    } else if (!this.configOutcomeUnconfirmed) {
+      this.configStatus = undefined
+    }
   }
 
   private acceptWatchEvent(event: McpServerWatchEvent): void {
@@ -1359,6 +1460,13 @@ export class McpServersController {
     this.phase = 'ready'
     this.phaseReason = undefined
     this.rosterEpoch += 1
+    // SUX-07 D8b: a real current roster that arrived AFTER the user's explicit
+    // `r` re-opens the restart admission. A background roster frame alone never
+    // does (no recovery record exists without the explicit refresh).
+    if (this.restartRecovery !== undefined && this.rosterEpoch > this.restartRecovery.rosterEpoch) {
+      this.restartOutcomeUnconfirmed = false
+      this.restartRecovery = undefined
+    }
     // A roster frame is only one half of the non-atomic joint snapshot: the
     // previous settings key set does NOT describe this roster until a fresh
     // same-generation read confirms it. Everything is Unknown in between.
@@ -1511,6 +1619,8 @@ export class McpServersController {
         // The page now speaks for a different Host generation or the target is
         // no longer the listed entry: a dispatched request's settlement is not
         // this page's fact, and it is never claimed cancelled.
+        this.restartOutcomeUnconfirmed = true
+        this.restartRecovery = undefined
         this.operation = { kind: 'restart', name, phase: 'failed', text: RESTART_LOST_NOTE }
         this.notice = { text: RESTART_LOST_NOTE, kind: 'error' }
         this.operationController = undefined
@@ -1526,6 +1636,8 @@ export class McpServersController {
         // A dispatched restart that lost its confirmation is NEVER reported as
         // "could not be dispatched" (Direct's manager-replacement settlement
         // arrives as `superseded` after the call was issued).
+        this.restartOutcomeUnconfirmed = true
+        this.restartRecovery = undefined
         this.operation = { kind: 'restart', name, phase: 'failed', text: RESTART_LOST_NOTE }
         this.notice = { text: RESTART_LOST_NOTE, kind: 'error' }
       } else if (outcome.failure.kind === 'rejected') {
