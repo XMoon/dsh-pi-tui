@@ -1,7 +1,7 @@
 /**
  * The Client's narrow ACP server control port.
  *
- * ONE semantic surface for the local Host ACP v1 Unix socket listener, served by
+ * ONE semantic surface for the local Host ACP v1 listener, served by
  * each backend's own adapter:
  *
  * ```text

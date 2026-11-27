@@ -3,7 +3,7 @@
  * (`@xmoon76/dsh-pi-tui/acp-preferences`).
  *
  * This row owns ONE durable fact: whether a NEW Split Host should bind the local
- * ACP v1 Unix socket listener while it boots. It is a Host CONFIGURATION entry,
+ * ACP v1 listener while it boots. It is a Host CONFIGURATION entry,
  * not a runtime ACP state: the live `enabled/disabled/changing/unavailable`
  * authority stays the Host-entry-owned ACP runtime controller (surfaced through
  * the private `piTuiAcpAccess` service), and this preference never writes it.

@@ -836,9 +836,15 @@ export function readSessionListRequest(params: {
   return { ...(cwd === undefined ? {} : { cwd }), ...(cursor === undefined ? {} : { cursor }) }
 }
 
-/** A standard absolute path: non-empty, rooted and containing no NUL. */
-export function isAbsolutePath(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.startsWith('/') && !value.includes('\u0000')
+/**
+ * A standard absolute path for THIS Host OS: a rooted POSIX path, or a local
+ * Windows drive path (`C:\...` / `C:/...`). A UNC/device path is not part of
+ * this product's supported local domain and stays outside the ACP cwd shape;
+ * the official Workspace Controller remains the authority for the proposal.
+ */
+export function isAbsolutePath(value: unknown, platform: NodeJS.Platform = process.platform): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\u0000')) return false
+  return platform === 'win32' ? /^[A-Za-z]:[\\/]/u.test(value) : value.startsWith('/')
 }
 
 /** The structural official image attachment of one committed image block. */

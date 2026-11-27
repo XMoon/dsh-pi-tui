@@ -6,8 +6,9 @@ The Host can keep sessions and turns alive after the terminal Client
 disconnects. It is a **local** mode, not a remote-network login or a second
 session authority. On Windows the supported domain is an ordinary (non-elevated)
 user and an ordinary local fixed-NTFS profile path; service install/uninstall
-and ACP remain unavailable. The same independent Host, management commands and
-official Web frontend work as on Linux/macOS.
+remain unavailable. The same independent Host, management commands and official
+Web frontend work as on Linux/macOS, and ACP uses the same profile-scoped local
+endpoint (a native Windows Named Pipe).
 
 ## Select a backend
 
@@ -77,7 +78,9 @@ profile.
 On Windows `daemon status`, `start`, `stop`, `restart` and `logs` operate on
 the independent process: an authenticated Host reports `manager=process`; no
 Host reports `manager=unmanaged`. `user-manager=not-checked`, `unit=none`, no
-`systemctl`/`launchctl`, and `acp=unavailable`. `install` and
+`systemctl`/`launchctl`; an authenticated Host reports its real
+`acp=enabled|disabled|unavailable` state, and an enabled listener prints its
+local Named Pipe address. `install` and
 `uninstall` exit 3 before any scope or manager work because Windows has no
 service manager in this contract.
 
@@ -262,13 +265,22 @@ launch field during an explicit start or restart.
 ## Optional local ACP listener
 
 The split Host can expose an optional Host-owned ACP v1 listener, which is
-default-off. It is not a Direct-backend listener or a second Host authority. Its Profile auto-start preference and the **current**
-running listener state are separate controls. `daemon status` shows a
-socket address only for a listener that has been positively verified as
-enabled; never guess a socket from the home/profile path. The ACP listener,
-`acp` CLI and stdio bridge remain Linux/macOS only for now; Windows honestly
-reports `acp=unavailable` and creates no socket, pipe or adapter until the
-Windows ACP transport is separately designed and qualified.
+default-off. It is not a Direct-backend listener or a second Host authority. Its
+Profile auto-start preference and the **current** running listener state are
+separate controls. `daemon status` shows a local endpoint only for a listener
+that has been positively verified as enabled; never guess one from the
+home/profile path. The same listener and `acp` CLI are supported on Linux, macOS
+and native Windows:
+
+| Platform | Verified local endpoint |
+|---|---|
+| Linux | `<scope>/acp.sock` (the documented logical path; the Client derives it from the authenticated profile setup) |
+| macOS | `/private/tmp/dpt-<uid>-<scope40>/acp.sock` |
+| Windows | `\\.\pipe\dsh-pi-tui-acp-<scopeId>` |
+
+The endpoint is local IPC, not a network listener. On Windows the Host applies a
+protected owner-only DACL that also denies the NETWORK SID before it reports the
+listener enabled; only the same ordinary OS user can connect.
 
 From an attached Split Client, `/acp` can inspect or change the current
 listener state without creating a Session or updating the next-launch
@@ -281,7 +293,7 @@ control.
 ### External ACP client over stdio
 
 An ACP client can use the official stdio bridge instead of opening the local
-Unix socket itself. The bridge still targets the SAME running Host and existing
+endpoint itself. The bridge still targets the SAME running Host and existing
 Session View; it does not start a Host or enable the listener:
 
 ~~~sh
@@ -290,6 +302,14 @@ dsh --profile pi-tui daemon start
 dsh --profile pi-tui daemon status        # look for acp=enabled
 
 # Run your ACP client as a child process and speak ACP v1 over its stdio.
+dsh --profile pi-tui acp stdio
+~~~
+
+PowerShell:
+
+~~~powershell
+dsh --profile pi-tui daemon start
+dsh --profile pi-tui daemon status        # look for acp=enabled
 dsh --profile pi-tui acp stdio
 ~~~
 
@@ -310,7 +330,7 @@ detach guarantees, see [Host/Client](../architecture/host-client.md),
 
 ## Local ACP v1 SDK client example
 
-This example uses the official `@agentclientprotocol/sdk@1.4.0` client and the authenticated local Host's ACP socket. ACP must first be enabled for the target Profile; the listener remains **default OFF** and is enabled only through the explicit runtime control or the profile's next-launch `autoStart` preference. Install the SDK in an **independent Node.js ≥24.9.0 project** and save the example as `acp-client.mjs`. Obtain the endpoint from `dsh --profile pi-tui daemon status`: the `acp-socket=` line is emitted only after the Host positively verifies the listener. Pass that exact value as `ACP_SOCKET`; do not derive a socket path from the profile directory. Run the example from a directory that the Host Workspace Controller will admit; an available model and credentials are also required.
+This example uses the official `@agentclientprotocol/sdk@1.4.0` client and the authenticated local Host's ACP endpoint. ACP must first be enabled for the target Profile; the listener remains **default OFF** and is enabled only through the explicit runtime control or the profile's next-launch `autoStart` preference. Install the SDK in an **independent Node.js ≥24.9.0 project** and save the example as `acp-client.mjs`. Obtain the endpoint from `dsh --profile pi-tui daemon status`: the `acp-socket=` line is emitted only after the Host positively verifies the listener. Pass that exact value as `ACP_SOCKET`; do not derive an endpoint from the profile directory. Run the example from a directory that the Host Workspace Controller will admit; an available model and credentials are also required.
 
 ~~~sh
 npm install @agentclientprotocol/sdk@1.4.0
@@ -320,12 +340,20 @@ ACP_MCP_COMMAND=/absolute/path/to/a/trusted-stdio-mcp-server \
 node acp-client.mjs
 ~~~
 
-This is a **local** Unix socket, not a network listener.
+This is a **local** IPC endpoint (Unix socket on Linux/macOS, Named Pipe on
+Windows), not a network listener. The same `node:net` client example connects to
+the Windows pipe address unchanged. PowerShell:
+
+~~~powershell
+$env:ACP_SOCKET='\\.\pipe\dsh-pi-tui-acp-<scopeId>'
+$env:ACP_MCP_COMMAND='C:\absolute\path\to\a\trusted-stdio-mcp-server.exe'
+node acp-client.mjs
+~~~
 
 An ACP `session/new|resume|load.mcpServers` stdio declaration starts that
 absolute executable as the Host's own user for the Session. Treat it as running
-a local command: use only your own same-UID, explicitly enabled ACP socket and a
-server you trust. A standard Streamable HTTP declaration uses the explicit
+a local command: use only your own same-user, explicitly enabled ACP endpoint and
+a server you trust. A standard Streamable HTTP declaration uses the explicit
 `type: "http"` form instead, for example:
 
 ~~~js
@@ -338,7 +366,7 @@ const httpServers = [{
 ~~~
 
 This is an MCP HTTP endpoint, not the local ACP transport (which remains a
-same-UID Unix socket). Use the endpoint you actually trust and its final URL;
+same-user local Unix socket or Windows Named Pipe). Use the endpoint you actually trust and its final URL;
 header values are real credentials and must not be shared in screenshots,
 logs or diagnostics. Legacy SSE remains unsupported because no official DSH
 transport exists.

@@ -125,6 +125,7 @@ import {
   planUpdate,
   projectSessionHistory,
   sessionInfoUpdateOf,
+  isAbsolutePath,
   usageUpdateOf,
   type AcpHistoryAgentMessage,
   type AcpHistoryEvent,
@@ -8079,9 +8080,9 @@ function invalidSystemPromptAppend(): LocalAcpViewError {
   )
 }
 
-/** A `session/new|resume` cwd is a non-empty Linux absolute path with no NUL. */
+/** A `session/new|resume` cwd is a standard absolute path for THIS Host OS. */
 function validateCwd(cwd: string): void {
-  if (typeof cwd !== 'string' || cwd.length === 0 || !cwd.startsWith('/') || cwd.includes('\u0000')) {
+  if (!isAbsolutePath(cwd)) {
     throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'cwd must be a non-empty absolute path', JSONRPC_INVALID_PARAMS)
   }
 }

@@ -9,6 +9,7 @@
 
 ### 新增
 
+- **Windows 本地 ACP**：当前 main 线的原生 Windows Daemon Host 现在通过每个 Profile 的本地 Named Pipe 提供 ACP v1 入口；`/acp`、`acp status|enable|disable`、`acp stdio` 与下次启动 autoStart 沿用 Linux/macOS 语义。Listener 只有在一次性所有者 ACL（同时拒绝 NETWORK）成功生效后才会报告 enabled，其他普通 OS 账户无法连接；默认仍为 Off，Direct 及 Linux/macOS 行为不变。
 - **ACP v1 客户端系统提示追加**：兼容的本地 ACP v1 客户端可以在 `session/new` / `session/resume` / `session/load` 中以标准 `systemPrompt` 的 append 模式为本次 View 追加普通系统提示。`sessionCapabilities.systemPrompt` 只在真实共享 Session View 与官方作用域的 SystemPrompt seam 同时装配时公布；文本按字面量拼接并受 1 MiB 上限约束，只作用于该精确 Agent 的已提交 View，并在 close、同连接重新附加、null、EOF/Off、失败与 Agent 释放时由官方 disposer 退役。官方组合保留最终文本权力，完整 persona 可以合法覆盖普通追加（已接受的 ACP v1 一致性限制）；工具、权限与当前模型不受影响。
 - **终端恢复记录（OSC 7577 v0.5 发送端）**：当运行终端注入 `OSC7577_TOKEN` 时，Direct 与 Daemon Client 会把已提交主 Session 的精确恢复命令作为 OSC 7577 记录提供给终端；Daemon 记录使用稳定的 supervisor PID，Client 重载不会丢失记录身份，旧版替换目标会在接受 reload 时撤销旧记录。手工退出会撤销记录，信号、终端丢失、崩溃、HMR 与 Client reload 不撤销；Token 不进入 argv、Session、日志或独立的 Host/manager/ACP 子进程；Direct 同进程 snapshot 按 same-UID 信任边界保留。终端 ACK 与真实 Rex 互操作尚未验证。
 

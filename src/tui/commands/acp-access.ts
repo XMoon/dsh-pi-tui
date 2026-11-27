@@ -1,6 +1,6 @@
 /**
  * The `/acp` command (PO-5E / PR-B): the ONE Client entry to the local ACP v1
- * Unix-socket listener of the Split Host.
+ * local ACP listener of the Split Host.
  *
  * On PiTui it is a TYPED SETTINGS DEEP LINK: `/acp` forwards to the ONE
  * `Settings · Host · ACP access` page (the same lease, the same runtime port

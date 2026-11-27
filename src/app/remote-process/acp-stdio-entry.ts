@@ -4,9 +4,11 @@
  *
  * This internal process is the ONE byte relay between the public
  * `dsh --profile pi-tui acp stdio` command's inherited stdin/stdout and the
- * already-running Host-owned ACP v1 Unix socket. It imports only Node core:
- * it is not an ACP SDK server, owns no Session/Agent/Writer/Host Context and
- * performs no JSON parsing, method dispatch, retry or second protocol cache.
+ * already-running Host-owned ACP v1 local endpoint (Unix socket on POSIX,
+ * profile-scoped Named Pipe on Windows). It imports only Node core plus the
+ * one pure endpoint-shape module: it is not an ACP SDK server, owns no
+ * Session/Agent/Writer/Host Context and performs no JSON parsing, method
+ * dispatch, retry or second protocol cache.
  *
  * The Parent overwrites `DSH_PI_TUI_ACP_STDIO_SOCKET_V1` with the authenticated
  * public logical endpoint of THIS canonical Profile. A Linux pathname longer
@@ -19,7 +21,8 @@
 
 import { closeSync, openSync } from 'node:fs'
 import { connect, type Socket } from 'node:net'
-import { dirname, isAbsolute } from 'node:path'
+import { dirname } from 'node:path'
+import { isSafeLocalAcpEndpoint } from './local-acp-endpoint.ts'
 
 /** The parent-owned target channel. */
 const SOCKET_ENV = 'DSH_PI_TUI_ACP_STDIO_SOCKET_V1'
@@ -34,10 +37,6 @@ function report(code: string): void {
   } catch {
     // A closed stderr cannot change the Adapter's exit classification.
   }
-}
-
-function isSafeSocketPath(value: string): boolean {
-  return isAbsolute(value) && value !== '' && !/[\u0000-\u001f\u007f]/u.test(value)
 }
 
 /**
@@ -64,7 +63,7 @@ function connectLocalAcpSocket(socketPath: string): { socket: Socket; release():
 
 function main(): void {
   const rawSocketPath = process.env[SOCKET_ENV]
-  if (rawSocketPath === undefined || rawSocketPath === '' || !isSafeSocketPath(rawSocketPath)) {
+  if (rawSocketPath === undefined || rawSocketPath === '' || !isSafeLocalAcpEndpoint(rawSocketPath, process.platform)) {
     report('ACP_STDIO_SOCKET_INVALID')
     process.exitCode = 2
     return

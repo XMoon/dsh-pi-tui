@@ -158,6 +158,9 @@ test('buildAcpStdioEnvironment strips every internal role fact and overwrites th
     DSH_PI_TUI_HOST_ENTRY: '/x/local-host.mjs',
     DSH_PI_TUI_BACKEND: 'daemon',
     DSH_PI_TUI_ACP_STDIO_SOCKET_V1: '/foreign/acp.sock',
+    split_process_client_launch_v1: 'ENVELOPE',
+    dsh_pi_tui_role: 'host',
+    dsh_pi_tui_acp_stdio_socket_v1: '/stale/lowercase.sock',
     DSH_PI_TUI_PRESET: 'keep-me',
     PATH: '/usr/bin',
   }
@@ -170,6 +173,14 @@ test('buildAcpStdioEnvironment strips every internal role fact and overwrites th
   assert.equal(env.DSH_PI_TUI_BACKEND, undefined)
   assert.equal(env.DSH_PI_TUI_PRESET, 'keep-me', 'ordinary ambient environment is preserved')
   assert.equal(env.DSH_PI_TUI_ACP_STDIO_SOCKET_V1, '/profile/run/acp.sock', 'the Parent-supplied target wins')
+  assert.equal(env.dsh_pi_tui_acp_stdio_socket_v1, undefined, 'a lowercase target variant must not survive the copy')
+  assert.equal(env.split_process_client_launch_v1, undefined, 'the SPLIT_PROCESS_ prefix is stripped case-insensitively')
+  assert.equal(env.dsh_pi_tui_role, undefined, 'internal role facts are stripped case-insensitively')
+  assert.deepEqual(
+    Object.keys(env).filter(key => key.toLowerCase() === 'dsh_pi_tui_acp_stdio_socket_v1'),
+    ['DSH_PI_TUI_ACP_STDIO_SOCKET_V1'],
+    'exactly one canonical target key remains',
+  )
   assert.equal(env.PATH, '/usr/bin')
 })
 

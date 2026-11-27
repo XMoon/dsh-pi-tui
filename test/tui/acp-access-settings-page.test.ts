@@ -259,12 +259,28 @@ async function highlight(h: PageHarness, label: string): Promise<void> {
 
 /* ------------------------------------------------------------ the command */
 
-test('the client command is the exact Profile token with POSIX quoting', () => {
-  assert.equal(acpStdioCommand('pi-tui'), 'dsh --profile pi-tui acp stdio')
-  assert.equal(acpStdioCommand('work profile'), "dsh --profile 'work profile' acp stdio")
-  assert.equal(acpStdioCommand("it's"), "dsh --profile 'it'\\''s' acp stdio")
-  assert.equal(acpStdioCommand('a$b;c'), "dsh --profile 'a$b;c' acp stdio")
-  assert.equal(acpStdioCommand('/abs/path'), 'dsh --profile /abs/path acp stdio')
+test('the client command is the exact Profile token with platform quoting', () => {
+  assert.equal(acpStdioCommand('pi-tui', 'linux'), 'dsh --profile pi-tui acp stdio')
+  assert.equal(acpStdioCommand('work profile', 'linux'), "dsh --profile 'work profile' acp stdio")
+  assert.equal(acpStdioCommand("it's", 'linux'), "dsh --profile 'it'\\''s' acp stdio")
+  assert.equal(acpStdioCommand('a$b;c', 'linux'), "dsh --profile 'a$b;c' acp stdio")
+  assert.equal(acpStdioCommand('/abs/path', 'linux'), 'dsh --profile /abs/path acp stdio')
+  // PowerShell: a single-quoted literal; every recognized single-quote class
+  // is doubled, while smart double quotes are literal inside it.
+  assert.equal(acpStdioCommand('pi-tui', 'win32'), 'dsh --profile pi-tui acp stdio')
+  assert.equal(acpStdioCommand('work profile', 'win32'), "dsh --profile 'work profile' acp stdio")
+  assert.equal(acpStdioCommand("it's", 'win32'), "dsh --profile 'it''s' acp stdio")
+  assert.equal(acpStdioCommand('a\u2018b', 'win32'), "dsh --profile 'a\u2018\u2018b' acp stdio")
+  assert.equal(acpStdioCommand('a\u2019b', 'win32'), "dsh --profile 'a\u2019\u2019b' acp stdio")
+  assert.equal(acpStdioCommand('a\u201ab', 'win32'), "dsh --profile 'a\u201a\u201ab' acp stdio")
+  assert.equal(acpStdioCommand('a\u201bb', 'win32'), "dsh --profile 'a\u201b\u201bb' acp stdio")
+  assert.equal(acpStdioCommand('a$b', 'win32'), "dsh --profile 'a$b' acp stdio")
+  assert.equal(acpStdioCommand('a"b', 'win32'), 'dsh --profile \'a"b\' acp stdio')
+  assert.equal(acpStdioCommand('a`b', 'win32'), 'dsh --profile \'a`b\' acp stdio')
+  assert.equal(acpStdioCommand('a\u201cb', 'win32'), "dsh --profile 'a\u201cb' acp stdio")
+  assert.equal(acpStdioCommand('a\u201db', 'win32'), "dsh --profile 'a\u201db' acp stdio")
+  assert.equal(acpStdioCommand('a\u201eb', 'win32'), "dsh --profile 'a\u201eb' acp stdio")
+  assert.equal(acpStdioCommand('a\u2019b\u201cc', 'win32'), "dsh --profile 'a\u2019\u2019b\u201cc' acp stdio")
 })
 
 /* --------------------------------------------------------------- focus */
@@ -273,7 +289,7 @@ test('the enabled first focus is Copy client command; the disabled one is Enable
   const enabled = await mount({ status: { state: 'enabled' } })
   assert.match(enabled.frame(), /^> Copy client command/mu)
   assert.match(enabled.frame(), /Current Host\s*\n\s+Listener\s+Enabled/u)
-  assert.match(enabled.frame(), /Access\s+Local Unix socket · Same OS user/u)
+  assert.match(enabled.frame(), /Access\s+Local IPC · Same OS user/u)
   assert.match(enabled.frame(), /Disable ACP…\s+Disconnects active ACP clients/u)
   assert.equal(enabled.reads(), 1, 'one Host read on mount, never a poll')
   enabled.close()

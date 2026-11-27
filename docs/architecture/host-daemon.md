@@ -21,7 +21,9 @@ are explicitly `UNSUPPORTED_PLATFORM` before any scope or manager work. The
 Windows Host is a normal independent Host: a supported interactive daemon
 Client attaches to it exactly like on Linux/macOS, client exit never stops it,
 and only an explicit authenticated stop or real process failure ends it. ACP
-remains truthfully unavailable on Windows. The supported domain is native
+uses the same profile-scoped local endpoint as Linux/macOS, with a local Named
+Pipe on Windows (see [host-acp.md](./host-acp.md)); the runtime controls, stdio
+bridge and next-launch preference keep the same contract. The supported domain is native
 Windows 11 x64, an ordinary (non-elevated) user and an ordinary local fixed-NTFS
 profile path.
 
@@ -322,8 +324,8 @@ state authority and the only mutation writer.
   `unit-state` and `compatibility` (plus a bounded `pid`/`instance` while one
   is live). When the authenticated Host is `ready`, `status` also makes ONE
   read-only observation through the Owner-only `/api/pi-tui.acp-status` route
-  and appends `acp=enabled|disabled|unavailable`; `acp-socket=<absolute public
-  logical path>` is appended ONLY when that same Host's ACP controller proves
+  and appends `acp=enabled|disabled|unavailable`; `acp-socket=<public local endpoint
+  address>` is appended ONLY when that same Host's ACP controller proves
   the listener `enabled`. Every other outcome (no Host, an
   unauthenticated/unreadable/incompatible Host, a failed, invalid or
   foreign-instance response, `changing` or a Host-reported `unavailable`)
@@ -349,7 +351,9 @@ state authority and the only mutation writer.
   definition or manager query at all: `status` always reports
   `user-manager=not-checked`, `unit=none`, `unit-state=not-found`; an
   authenticated Host is `manager=process`, and no Host is `manager=unmanaged`.
-  It never invokes `systemctl` or `launchctl`. `manager`
+  It never invokes `systemctl` or `launchctl`; the ACP observation is the same
+  authenticated `GET /api/pi-tui.acp-status` read as on the other platforms, and
+  an enabled listener prints its local Named Pipe address. `manager`
   names the VERIFIED supervision attribution: `systemd` only when the loaded
   unit's `MainPID` equals the authenticated Host PID, `launchd` only when the
   printed job source/anchors match and its real PID equals the authenticated Host
@@ -574,7 +578,7 @@ TUI, create a Session/Agent/Writer, spawn the ACP stdio adapter, install or
 start/stop a Host, or enable a Profile `autoStart`. `acp stdio` remains the
 machine protocol bridge and the management verbs never write human text into
 that stream; `acp` and `acp --help` are pure help and publish no service. The
-verbs are supported on Linux and macOS; `--session`, `--continue` and
+verbs are supported on Linux, macOS and Windows; `--session`, `--continue` and
 `--preset` are refused before any Host probe, in either argument position.
 
 Every verb operates on the official `profileContext` Profile and the current
@@ -597,10 +601,11 @@ authority the Web CLI uses, and no verb starts a Host.
   authenticated Owner-only `POST /api/pi-tui.acp-control` with the current
   instance id and the requested operation; the Host-entry's ONE ACP runtime
   controller remains the only listener owner. The CLI never connects to the
-  public `acp.sock`, never opens a second controller and never starts a Host.
+  public local endpoint, never opens a second controller and never starts a Host.
   Runtime toggling does not rewrite the profile `acp-autostart` preference, does
   not stop the Host/Agent/Session/TUI, and disabling closes existing ACP peers,
-  stops accepting new ones and retires the owned socket inode.
+  stops accepting new ones and retires the owned endpoint (the POSIX inode or the
+  Windows Named Pipe name).
 - **Fixed write result contract.** A reply that proves the requested target was
   reached prints `acp=enabled|disabled` and exits `0`. A verified settled
   `unavailable` prints `acp=unavailable` and exits `4` with `ACP_UNAVAILABLE`.

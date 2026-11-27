@@ -201,15 +201,22 @@ export function buildAcpStdioEnvironment(
   source: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...source }
+  // Windows environments are case-insensitive, but this is a plain JS object.
+  // Strip the internal facts and every case variant of the target key from the
+  // copy so the Parent-supplied target cannot be shadowed by a lowercase
+  // leftover in the child environment.
+  const internalExact = new Set([
+    'DSH_PI_TUI_ROLE',
+    'DSH_PI_TUI_HOST_ENTRY',
+    'DSH_PI_TUI_BACKEND',
+    ACP_STDIO_SOCKET_ENV,
+  ])
   for (const key of Object.keys(env)) {
-    if (key.startsWith('SPLIT_PROCESS_')) delete env[key]
+    const upper = key.toUpperCase()
+    if (upper.startsWith('SPLIT_PROCESS_') || internalExact.has(upper)) delete env[key]
   }
-  delete env.DSH_PI_TUI_ROLE
-  delete env.DSH_PI_TUI_HOST_ENTRY
-  delete env.DSH_PI_TUI_BACKEND
   // ACP stdio is a pure relay: it is never a program-resume reporter.
   scrubProgramResumeEnvironment(env)
-  delete env[ACP_STDIO_SOCKET_ENV]
   env[ACP_STDIO_SOCKET_ENV] = socketPath
   return env
 }
@@ -218,6 +225,16 @@ export function buildAcpStdioEnvironment(
 function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
   return `'${value.replace(/'/gu, `'\\''`)}'`
+}
+
+/** PowerShell single-quoted literal: every recognized single-quote class
+ *  (ASCII and U+2018/2019/201A/201B) is doubled; `$`, backtick and the
+ *  smart-double-quote classes are literal inside it. Kept local so the daemon
+ *  Client plugin never pulls the startup compatibility island (and its
+ *  `@deepseek-ai/dsh-cmdline` import) into its runtime graph. */
+function powershellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
+  return `'${value.replace(/['\u2018\u2019\u201a\u201b]/gu, character => character + character)}'`
 }
 
 /**
@@ -236,11 +253,9 @@ function daemonClientRerunCommand(
     : `DSH_PI_TUI_BACKEND=daemon dsh --profile ${profileArg}`
 }
 
-/** PowerShell single-quoted literal: an embedded quote is doubled (`''`), not
- *  the POSIX close-reopen sequence. */
-function powershellQuote(value: string): string {
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value
-  return `'${value.replace(/'/gu, "''")}'`
+/** The copy-paste Profile literal for the ACTUAL CLI shell. */
+function platformProfileQuote(value: string): string {
+  return process.platform === 'win32' ? powershellQuote(value) : shellQuote(value)
 }
 
 /** The child-exit mapping: a real code, or 128+signal when the child was signalled. */
@@ -483,7 +498,7 @@ export class AcpStdioRunner {
         .catch(() => {
           if (this.disposed) return
           this.fail('ACP_STDIO_STATUS_UNAVAILABLE',
-            `check the Host state with dsh --profile ${shellQuote(this.options.profileName)} daemon status`, 3)
+            `check the Host state with dsh --profile ${platformProfileQuote(this.options.profileName)} daemon status`, 3)
         })
     }
     return this.launchPromise
@@ -523,21 +538,21 @@ export class AcpStdioRunner {
     } catch {
       if (this.disposed || this.controller.signal.aborted) return
       this.fail('ACP_STDIO_STATUS_UNAVAILABLE',
-        `check the Host state with dsh --profile ${shellQuote(this.options.profileName)} daemon status`, 3)
+        `check the Host state with dsh --profile ${platformProfileQuote(this.options.profileName)} daemon status`, 3)
       return
     }
     if (this.disposed || this.controller.signal.aborted) return
     switch (target.kind) {
       case 'host-unavailable':
         this.fail('ACP_STDIO_HOST_NOT_READY',
-          `start the Host explicitly with dsh --profile ${shellQuote(this.options.profileName)} daemon start`, 3)
+          `start the Host explicitly with dsh --profile ${platformProfileQuote(this.options.profileName)} daemon start`, 3)
         return
       case 'acp-disabled':
         this.fail('ACP_STDIO_LISTENER_DISABLED', 'enable ACP from a connected TUI with /acp', 3)
         return
       case 'acp-unavailable':
         this.fail('ACP_STDIO_LISTENER_UNAVAILABLE',
-          `check the Host state with dsh --profile ${shellQuote(this.options.profileName)} daemon status`, 3)
+          `check the Host state with dsh --profile ${platformProfileQuote(this.options.profileName)} daemon status`, 3)
         return
       case 'ready':
         break
