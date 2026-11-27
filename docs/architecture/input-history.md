@@ -391,15 +391,15 @@ empty scope starts no browse and keeps no bookmark either). A whole-document
 recall replacement retires old pasted-path leases, so a late image read cannot
 rewrite bytes inside a history row.
 
-### Seeding at boot, Direct only (trap: deferred start has no session)
+### Seeding at boot (trap: deferred start has no session)
 
 With a deferred Direct start no session exists at boot, so the per-session
 seed in `initLiveSession` has not run. The runner seeds the Direct recall
 history from the LAUNCH cwd at boot too, so ↑ works immediately in a new
 window; `initLiveSession` replaces it when the first session is born (and on
-every session switch). The Daemon/Split Client does NOT do this: it never reads the Client file; its
-boot recall is empty until the current Session's Host seed commits (see the
-next section).
+every session switch). The Daemon/Split Client does NOT do this: it never reads
+the Client file; its boot recall is empty until the current Session's Host seed
+commits (see the next section).
 
 ### Daemon/Split Client: Session-scoped Host recall (↑/↓)
 
@@ -574,9 +574,10 @@ the editor recall).
 
 On Direct, a Session publication (ordinary `/new` / switch, `/fork` adoption,
 the first-session creation) makes the new owner current BEFORE its hydration
-reseeds ↑/↓ from the session-scoped JSONL rows. The Daemon/Split Client has no
-hydration reseed (its process list is not a Session scope), so this race does
-not exist there; its publication only retires the outgoing browse bookmark. A submission accepted inside
+reseeds ↑/↓ from the session-scoped JSONL rows. On the Daemon/Split Client the
+publication binds the exact carrier+Session root and the renderer drops the
+outgoing browse bookmark; its post-hydration Host seed fills the root, so this
+Direct file-write race does not exist there. A submission accepted inside
 that window is already owned by the NEW Session, but its own persistence is
 ordered behind the transition — the submit FIFO turn and `ensureSession()`
 (`persistAfterSession`) — so the write can run AFTER the snapshot read: the row

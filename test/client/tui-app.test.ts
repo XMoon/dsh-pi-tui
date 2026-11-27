@@ -6597,6 +6597,54 @@ test('PR2-C: the Host seed and an official rpcId merge through the real editor m
   }
 })
 
+test('PR2-C: a legacy recorded input evicts an older root candidate from the editor ↑ sink too', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const recall = createInputMemoryRecall()
+  recall.bindScope({ carrier: { connection: {}, binding: {} }, sessionId: 'session-a' })
+  // The bounded candidate window is full: 99 identical display rows plus one
+  // older distinct B. The visible projection is [A, B], but the editor must
+  // never keep an independently unshifted B after the root evicts it.
+  recall.applySeed([
+    ...Array.from({ length: 99 }, (_value, index) => ({
+      messageId: `a-${String(index)}`,
+      text: 'A',
+    })),
+    { messageId: 'b', text: 'B' },
+  ], 'session-a')
+  const submitted: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: (text) => { submitted.push(text) },
+    onExit: () => {},
+  }, { inputRecall: recall })
+  app.start()
+  startedApps.add(app)
+  try {
+    assert.deepEqual([...app.getInputHistory()], ['A', 'B'],
+      'the bounded root starts with the visible A/B projection')
+    // A REAL legacy Enter (not the accepted-hold settlement): the root records C
+    // without an official rpcId and evicts the oldest candidate B.
+    vt.sendInput('C')
+    await vt.waitForRender()
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    assert.deepEqual(submitted, ['C'])
+    assert.deepEqual([...app.getInputHistory()], ['C', 'A'],
+      'the root window evicted B when the 101st candidate arrived')
+    const recalled: string[] = []
+    for (let index = 0; index < 3; index += 1) {
+      vt.sendInput('\x1b[A')
+      await vt.waitForRender()
+      recalled.push(app.getDraft())
+    }
+    assert.equal(recalled[0], 'C', 'the real ↑ sink starts at the new legacy input')
+    assert.equal(recalled[1], 'A', 'the next ↑ reaches the remaining root row')
+    assert.notEqual(recalled[2], 'B',
+      'the editor mirror was rebuilt from the root, so the evicted B is unreachable')
+  } finally {
+    app.stop()
+  }
+})
+
 test('PR2-A: a legacy steer draft is recalled once and an empty queue sweep records nothing', async () => {
   const vt = new VirtualTerminal(100, 24)
   const recall = createInputMemoryRecall()
