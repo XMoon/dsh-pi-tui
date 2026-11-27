@@ -732,8 +732,8 @@ test('Esc during an unsettled Save never offers a Discard that would imply cance
   await frames(h.vt, 2)
   assert.doesNotMatch(h.view(), /Discard changes\?/u,
     'a dispatched write must never offer a Discard prompt')
-  assert.match(h.view(), /cannot be cancelled here/u,
-    'the page states the write cannot be cancelled')
+  assert.match(h.view(), /Saving configuration/u,
+    'the form keeps the truthful saving status, without an exit target')
   await press(h.vt, 'd')
   await frames(h.vt, 2)
   assert.match(h.view(), /Saving configuration/u, 'the draft/write stays alive after `d`')

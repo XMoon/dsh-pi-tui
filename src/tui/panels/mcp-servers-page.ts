@@ -364,16 +364,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private discardConfirm: 'dirty' | 'unknown' | undefined
   /** A fresh instance on each opening, including a reopen before repaint. */
   private discardQuestion = 0
-  /** FR4: Esc while the Save is unsettled — a notice, never a discard prompt. */
-  private configSavingNotice = false
   /** SUX-07 D8b: the explicit parent-leave warning after an unconfirmed
    *  outcome. Only the user's own `d`/Leave anyway confirms it. */
   private unknownLeave = false
   /** The one current configuration receipt's region (never painted twice). */
   private receiptRegion: 'list' | 'detail' = 'detail'
-  /** A refused List Back asked for the transient Waiting notice; the text is
-   *  derived from the CURRENT pending state and disappears at settlement. */
-  private waitingNoticeRequested = false
   /** The number of leading List rows that are header/search chrome, never item
    *  targets or wheel owners. */
   private listHeaderRows = 0
@@ -551,7 +546,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       this.formOrigin ?? '',
       this.confirmationIdentity(snapshot) ?? '',
       this.unknownLeave ? 'unknown-leave' : '',
-      this.configSavingNotice ? 'saving-notice' : '',
       snapshot.configOutcomeUnconfirmed === true ? 'config-unknown' : '',
       snapshot.restartOutcomeUnconfirmed === true ? 'restart-unknown' : '',
       `rev:${String(this.revision)}`,
@@ -650,7 +644,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         this.bumpRevision()
         return
       }
-      if (this.formFieldRowsVisible < 1 || !this.formInputPainted) return
+      if (!this.formInputAdmitted()) return
       if (matchesKey(data, 'enter')) {
         this.commitFormInput()
         return
@@ -701,13 +695,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       }
       // List Back is the REAL parent exit. A dispatched operation keeps the
       // page mounted and states that it is still being observed.
-      if (snapshot.operation?.phase === 'running') {
-        this.waitingNoticeRequested = true
-        this.bumpRevision()
-        return
-      }
-      if (snapshot.configStatus?.kind === 'saving') {
-        this.waitingNoticeRequested = true
+      if (snapshot.operation?.phase === 'running' || snapshot.configStatus?.kind === 'saving') {
         this.bumpRevision()
         return
       }
@@ -810,7 +798,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     this.formOffset = 0
     this.formInput = undefined
     this.discardConfirm = undefined
-    this.configSavingNotice = false
     this.unknownLeave = false
     this.bumpRevision()
   }
@@ -968,6 +955,15 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   }
 
   /** Commit the active input through the controller (never a direct write). */
+  /** The ONE actual Input admission: its field rows, focused field and Input
+   *  row are all painted in the current grant. */
+  private formInputAdmitted(): boolean {
+    return this.formInput !== undefined
+      && this.formFieldRowsVisible > 0
+      && this.formFocusedRowPainted
+      && this.formInputPainted
+  }
+
   private commitFormInput(): void {
     const active = this.formInput
     if (active === undefined) return
@@ -1011,14 +1007,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const editor = snapshot.editor
     if (editor === undefined) return
     if (!matchesKey(data, 'escape')
-      && (this.formFieldRowsVisible < 1 || (this.formInput !== undefined && !this.formInputPainted))) return
+      && (this.formFieldRowsVisible < 1 || !this.formFocusedRowPainted)) return
     const rows = this.currentFormRows()
     if (matchesKey(data, 'escape')) {
       // A DISPATCHED write is already on its way to the Host: leaving the form
       // cannot cancel it, so a `Discard changes?` prompt here would imply that
       // it can. The form stays put and says so instead.
       if (snapshot.configStatus?.kind === 'saving') {
-        this.configSavingNotice = true
         this.bumpRevision()
         return
       }
@@ -1031,14 +1026,8 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       this.controller.discardEditor()
       this.formFocus = 0
       this.formOffset = 0
-      this.configSavingNotice = false
       this.returnFromEditor(false)
       return
-    }
-    if (this.configSavingNotice) {
-      this.configSavingNotice = false
-      this.bumpRevision()
-      if (matchesKey(data, 'escape')) return
     }
     if (data === 's' || data === 'S') {
       // Save runs ONLY while the form is the current, painted view and while no
@@ -1243,6 +1232,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       // A server-row click is ALWAYS a selection — during a search it selects
       // the result without leaving the search or running a Host intent.
       this.controller.select(target.name, this.visibleNames(snapshot))
+      this.retireRemovalTargetOnSelectionDeparture()
       this.region = 'list'
       this.bumpRevision()
       return { handled: true }
@@ -1269,7 +1259,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       case 'back':
         if (snapshot.editor !== undefined) {
           if (snapshot.configStatus?.kind === 'saving') {
-            this.configSavingNotice = true
             break
           }
         }
@@ -1279,7 +1268,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         this.openSelectedDetail(snapshot)
         return
       case 'apply-input':
-        if (this.formInputPainted) this.handleInput('\r')
+        if (this.formInputAdmitted()) this.handleInput('\r')
         return
       case 'cancel':
         this.handleInput('\x1b')
@@ -1303,8 +1292,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
           this.discardConfirm = undefined
           this.formInput = undefined
           this.controller.discardEditor()
-          this.configSavingNotice = false
-          this.returnFromEditor(kind === 'unknown')
+                this.returnFromEditor(kind === 'unknown')
         }
         return
       case 'keep-editing':
@@ -1390,7 +1378,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     this.paintedEscapeSpanValue = undefined
     this.formInput = undefined
     this.discardConfirm = undefined
-    this.configSavingNotice = false
     this.unknownLeave = false
     this.controller.dispose()
     this.onDispose?.()
@@ -1559,7 +1546,19 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (names.length === 0) return
     this.controller.move(delta, names)
     this.reconcileSelection(snapshot)
+    this.retireRemovalTargetOnSelectionDeparture()
     this.bumpRevision()
+  }
+
+  /** A deliberate selection departure ends the optional Delete return intent.
+   *  Automatic roster fallback is not a departure and must keep it. */
+  private retireRemovalTargetOnSelectionDeparture(): void {
+    const target = this.detailRemovalTarget
+    if (target === undefined) return
+    const snapshot = this.controller.snapshot()
+    const selected = this.visibleSelection(snapshot)
+    const row = selected === undefined ? undefined : snapshot.rows.find(candidate => candidate.name === selected)
+    if (selected !== target.name || row?.entryToken !== target.token) this.detailRemovalTarget = undefined
   }
 
   /** Selection must stay inside the visible (filtered) rows. */
@@ -1629,9 +1628,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private renderForGrant(bodyWidth: number, bodyRows: number, rawWidth: number): string[] {
     const snapshot = this.controller.snapshot()
     this.currentBarWidth = this.barWidth(rawWidth)
-    if (snapshot.operation?.phase !== 'running' && snapshot.configStatus?.kind !== 'saving') {
-      this.waitingNoticeRequested = false
-    }
     if (snapshot.editor !== undefined || snapshot.phase === 'loading'
       || (snapshot.configConfirm !== undefined && snapshot.configConfirm.kind !== 'delete')) {
       this.detailRemovalTarget = undefined
@@ -1764,11 +1760,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     this.formFocusedRowPainted = false
     const identity = this.editorIdentity(editor)
     lines.push(...this.wrapIdentity(identity, width))
-    const statusText = this.configSavingNotice
-      ? 'Already saving — the write cannot be cancelled here'
-      : this.discardConfirm !== undefined
-        ? 'Leave the form to answer the discard question'
-        : `${mcpFormStatusText(editor, snapshot.configStatus?.text)} · rev ${String(editor.capturedRevision)}`
+    const statusText = this.discardConfirm !== undefined
+      ? 'Leave the form to answer the discard question'
+      : `${mcpFormStatusText(editor, snapshot.configStatus?.text)} · rev ${String(editor.capturedRevision)}`
     const statusLines = wrapCellsHard(statusText, Math.max(1, width), 2).lines
     const statusRows = statusLines.length
     const inputRows = this.formInput === undefined ? 0 : 1
@@ -1935,7 +1929,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private renderList(snapshot: McpServersSnapshot, width: number, rows: number, targets: McpPaintedTarget[]): string[] {
     const lines: string[] = []
     const visible = this.visibleRows(snapshot)
-    const notice = (this.waitingNoticeRequested ? this.waitingNotice(snapshot) : undefined) ?? snapshot.notice
+    const notice = this.waitingNotice(snapshot) ?? snapshot.notice
     const columns = this.listColumns(width, visible)
     const showHeader = rows >= 4 && width >= 24
     this.listHeaderRows = 0
@@ -2207,7 +2201,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   ): string[] {
     const lines: string[] = []
     this.listHeaderRows = 0
-    const notice = (this.waitingNoticeRequested ? this.waitingNotice(snapshot) : undefined) ?? snapshot.notice
+    const notice = this.waitingNotice(snapshot) ?? snapshot.notice
     const noticeRows = notice === undefined || (this.allowDual() && this.region !== 'detail') ? 0 : 1
     const viewport = Math.max(1, rows - noticeRows)
     const content = this.detailContent(snapshot, width)
@@ -2352,7 +2346,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         { text: 'Back [Esc]', priority: 999, action: 'back' },
       ]
     }
-    if (this.formInput !== undefined && !this.formInputPainted) {
+    if (this.formInput !== undefined && !this.formInputAdmitted()) {
       return [
         { text: 'Resize to review the input', priority: 1000 },
         { text: 'Cancel [Esc]', priority: 999, action: 'cancel' },
@@ -2455,7 +2449,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (snapshot.editor !== undefined) {
       if (this.formInput !== undefined) {
         if (zeroBody) return paintBar([{ text: 'Esc cancel', priority: 1000, action: 'cancel' }], width, true)
-        if (!this.formInputPainted) {
+        if (!this.formInputAdmitted()) {
           return paintBar([
             { text: 'Resize to review the input', short: 'Resize to review', priority: 1000 },
             { text: 'Cancel [Esc]', priority: 999, action: 'cancel' },
@@ -2467,8 +2461,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         ], width, true)
       }
       if (snapshot.configStatus?.kind === 'saving') {
-        if (zeroBody) return paintBar([{ text: 'Saving configuration…', short: 'Saving…', priority: 1000 }, { text: 'Esc', priority: 999, action: 'cancel' }], width, true)
-        return paintBar([{ text: 'Saving configuration…', short: 'Saving…', priority: 1000 }, { text: 'Esc', priority: 999, action: 'cancel' }], width, true)
+        return paintBar([{ text: 'Saving configuration…', short: 'Saving…', priority: 1000 }], width, false)
       }
       if (zeroBody) {
         const dirty = snapshot.editor.dirty
@@ -2487,9 +2480,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         { text: 'Cancel [Esc]', priority: 1000, action: 'cancel' },
       ], width, true)
     }
+    const pending = this.waitingNotice(snapshot) !== undefined
     if (this.region === 'detail') {
       if (zeroBody) return paintBar([{ text: 'Back [Esc]', priority: 1000, action: 'back' }], width, true)
       return paintBar(this.detailBarSegments(snapshot), width, true)
+    }
+    if (pending) {
+      return paintBar([{ text: 'Waiting for the Host…', priority: 1000 }], width, false)
     }
     if (zeroBody) return paintBar([{ text: 'Back [Esc]', priority: 1000, action: 'back' }], width, true)
     const addable = this.controller.canBeginAdd()

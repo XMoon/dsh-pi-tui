@@ -1093,7 +1093,8 @@ test('the Detail Action Bar advertises exactly the actions the controller allows
   const savingBar = render(saving.page, 120, 20).at(-1) ?? ''
   assert.doesNotMatch(savingBar, /Save \[S\]/u, 'a frozen draft must not advertise Save')
   assert.match(savingBar, /Saving/u)
-  assert.match(savingBar, /Esc/u)
+  assert.doesNotMatch(savingBar, /Esc/u,
+    'the informational saving bar has no exit target')
 })
 
 test('a config write in flight removes every detail CRUD affordance from the bar', () => {
@@ -2298,7 +2299,7 @@ test('an input hidden by a short non-zero grant cannot stage text or Apply until
   render(page, 100, 20)
   page.handleInput('x')
   assert.match(render(page, 100, 20).join('\n'), /edit: > \/bin\/echox/u)
-  const clipped = render(page, 100, 2).join('\n')
+  const clipped = render(page, 100, 3).join('\n')
   assert.match(clipped, /Resize to review the input/u)
   assert.doesNotMatch(clipped, /Apply \[Enter\]/u)
   const input = (page as unknown as { formInput: { input: { getValue(): string } } }).formInput
@@ -2343,4 +2344,56 @@ test('a clipped warning pointer Refresh retires the warning through the real rec
   assert.equal(done, 0)
   assert.doesNotMatch(render(page, 100, 16).join('\n'), /Outcome unconfirmed/u,
     'the recovery transfer closes the warning')
+})
+
+test('a deliberate selection departure retires the saved Delete return intent before A is removed', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
+  render(page, 120, 20)
+  page.handleInput('\r')
+  const detail = controller.snapshotValue
+  controller.snapshotValue = {
+    ...detail,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 3 },
+  }
+  render(page, 120, 20)
+  page.handleInput('y')
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    configConfirm: undefined,
+    configStatus: { kind: 'saved', text: 'Config removed · waiting for Host reconcile' },
+  }
+  render(page, 120, 20)
+  assert.equal(pageRegion(page), 'detail', 'A is still listed while its delete saves')
+  page.handleInput('\x1b')
+  page.handleInput('\x1b[B') // deliberate selection B
+  render(page, 120, 20)
+  page.handleInput('\t')
+  render(page, 120, 20)
+  assert.equal(pageRegion(page), 'detail')
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    rows: controller.snapshotValue.rows.filter(row => row.name !== 'alpha'),
+    selectedName: 'beta',
+  }
+  const frame = render(page, 120, 20).join('\n')
+  assert.equal(pageRegion(page), 'detail', 'the old A return intent does not redirect B')
+  assert.match(frame, /Server: beta/u)
+})
+
+test('a pending List publishes Wait, not a clickable Back, at H0', () => {
+  let done = 0
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configStatus: { kind: 'saving', text: 'Saving configuration…' },
+  }), () => { done += 1 })
+  const frame = render(page, 100, 1).join('\n')
+  assert.match(frame, /Waiting for the Host/u)
+  assert.doesNotMatch(frame, /Back \[Esc\]|Open \[Enter\]/u)
+  assert.deepEqual(page.paintedBarSpans(), [], 'no hidden clickable parent exit at H0')
+  page.handleInput('\x1b')
+  assert.equal(done, 0)
+  assert.match(render(page, 100, 1).join('\n'), /Waiting for the Host/u)
+  controller.snapshotValue = { ...controller.snapshotValue, configStatus: undefined }
+  assert.match(render(page, 100, 1).join('\n'), /Back \[Esc\]/u,
+    'settlement restores the real H0 Back')
 })

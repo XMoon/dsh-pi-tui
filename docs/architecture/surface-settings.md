@@ -1796,8 +1796,9 @@ returns to the List once the roster proves the deleted target gone; a nearest
 fallback selection is never presented as the original target. A removal receipt
 is retained only for a saved Delete, and the next explicit configuration action
 clears it; an unconfirmed/refused Delete never becomes a success receipt. A
-refused/unknown Delete, or an explicit open of another target, retires the old
-return intent so it cannot redirect the new Detail. An
+refused/unknown Delete, a deliberate selection departure, or an explicit open
+of another target retires the old return intent so it cannot redirect the new
+Detail; automatic roster fallback is not a departure. An
 exact Edit/Delete target means the same roster entry instance, not merely the
 same name: a removed and same-name re-added entry is a new instance.
 
@@ -1831,7 +1832,10 @@ never commit an unreviewed write.
 
 While a configuration write is unsettled, the page keeps only the truthful
 `Saving configuration…` status and a real `Esc` notice; it offers no discard and
-no false Back. A dispatched write is never cancelled or replayed. A write that
+no false Back. A pending List bar (normal or H0) states Wait and publishes no
+clickable parent exit; Detail→List remains legal, and the form's saving bar is
+informational with no exit target. Settlement restores the real receipt/notice
+without requiring another key. A dispatched write is never cancelled or replayed. A write that
 loses its settlement paints `Outcome unconfirmed …` and keeps the prior receipt;
 an unconfirmed configuration write closes the local configuration admission and
 a lost restart settlement closes blind restart retry until an EXPLICIT `R`
@@ -1852,9 +1856,10 @@ dispatched Host operation. The parent-leave warning is admission-bound like ever
 if its complete consequence does not fit the CURRENT grant, only Keep (plus the
 read-only Refresh recovery) is published; Leave is absent and its key/pointer is
 inert until a fresh frame paints the whole warning. The form likewise publishes
-Save, field verbs and Apply only for the field/input rows actually painted in
-the current grant; otherwise it offers resize/Back/Cancel and preserves the draft
-and active input across resize, never staging hidden text.
+Save, field verbs and Apply only when the exact current field AND its active
+Input row are actually painted in the current grant; otherwise it offers
+resize/Back/Cancel and preserves the draft and active input across resize, never
+staging hidden text.
 
 Pointer ownership is the last painted frame's. A List click, including the
 passive rail preview, only selects and hands the keyboard to the List; a Detail
