@@ -70,6 +70,31 @@ async function waitFrameGone(client: SplitProcessClient, text: string, label: st
   }
 }
 
+function composerDraft(frame: string): string | undefined {
+  const lines = frame.split('\n')
+  const marker = lines.findLastIndex(line => line.includes('❯'))
+  if (marker < 0) return undefined
+  const at = lines[marker]!.indexOf('❯')
+  return lines[marker]!.slice(at + '❯'.length).trim()
+}
+
+async function waitForComposerDraft(
+  client: SplitProcessClient,
+  expected: string,
+  label: string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const started = Date.now()
+  for (;;) {
+    const draft = composerDraft(await client.text())
+    if (draft === expected) return
+    if (Date.now() - started >= timeoutMs) {
+      throw new Error(`${label}: composer draft was ${JSON.stringify(draft)}, expected ${JSON.stringify(expected)}`)
+    }
+    await sleep(25)
+  }
+}
+
 async function waitRecordAfter(
   client: SplitProcessClient,
   afterIndex: number,
@@ -1164,14 +1189,16 @@ test('settles a pending Approval as cancelled and ignores a late allow', async (
     )
     expect(decided.data?.outcome).toBe('cancelled')
     await waitFrameGone(client, '[y] Allow once', 't55b Approval sheet withdrawal')
-    // The official request is already terminal and its sheet is gone, so no
-    // producer can execute the command after this ordinary editor input.
+    // The official request is already terminal and its sheet is gone, so the
+    // late allow must become ordinary editor text rather than a Host decision.
     await client.type('y')
+    await waitForComposerDraft(client, 'y', 't55b late allow reached the composer')
+    await client.press('Ctrl+U')
+    await waitForComposerDraft(client, '', 't55b late allow cleared from the composer')
     expect(existsSync(join(host.workloadRoot!, 'approval-allow.marker'))).toBe(false)
     expect((scene.sessionEvents(sessionId) ?? []).filter(
       event => event.type === 'approval/decided' && String(event.data?.id) === requestId,
     )).toHaveLength(1)
-    await client.type('\x15')
     await exitClientNormally(client, 't55b-c1')
     await scene.stopHost(host)
   } catch (error) {

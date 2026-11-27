@@ -6008,6 +6008,21 @@ function assertProcessClientActiveHost(handle, label) {
   return host
 }
 
+function assertProcessClientSignalHost(handle, signal, label) {
+  try {
+    assertProcessClientActiveHost(handle, label)
+    return
+  } catch (error) {
+    if (signal !== 'SIGTERM') throw error
+    const host = hosts.find(value => value.hostId === handle.hostId)
+    if (host?.finished !== true || host.terminal?.outcome !== 'business-crash'
+      || host.terminal?.signal !== 'SIGHUP'
+      || host.ready?.localHost?.hostPid !== handle.readyHost?.hostPid) {
+      throw error
+    }
+  }
+}
+
 function releaseProcessClientBarrier(path, label) {
   try {
     writeFileSync(path, 'release\n', { mode: 0o600, flag: 'wx' })
@@ -6914,7 +6929,7 @@ async function handleSignalProcessClient(message) {
     return { clientId: handle.clientId, signal, pid: business.identity.pid, birth: business.birth }
   }
   assertProcessClientBusinessLive(handle, business, `SIGNAL_PROCESS_CLIENT ${signal}`)
-  assertProcessClientActiveHost(handle, `SIGNAL_PROCESS_CLIENT ${signal}`)
+  assertProcessClientSignalHost(handle, signal, `SIGNAL_PROCESS_CLIENT ${signal}`)
   if (signal === 'SIGUSR2' && handle.hmr !== undefined) handle.hmrSignalled = true
   handle.signalIntents.push(signal)
   appendNote('process-client-signalled', {

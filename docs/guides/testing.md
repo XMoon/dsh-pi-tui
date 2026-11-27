@@ -676,14 +676,16 @@ Two further non-PTY contracts are fixed (Linux and macOS):
 
 The Session write/recovery, shared-session interaction, prompt-policy and
 detached-turn continuity owners use only declared Supervisor operations. The
-Supervisor allocates private launch directories, startup/serialization barriers
-and installation-mutation targets; the Worker never supplies arbitrary paths,
-environment, PIDs, RPC names or result envelopes. A declared Client business
-`SIGKILL` is a single exact business-PID signal, never a process-group or Host
-signal. Pre-ready stops and module-absence failures return terminal-only facts;
-they never expose a half-ready Client handle. A stale authenticated Peer result
-is derived by the Supervisor from that Peer's actual interaction/frame identity
-and sent once through the existing official result route.
+Supervisor allocates private public-launch workspace directories,
+startup/serialization barriers and installation-mutation targets; typed
+process-Client `home`/`cwd` remain Worker-supplied and Scene-validated. The
+Worker never supplies arbitrary environment, PIDs, RPC names or result
+envelopes. A declared Client business `SIGKILL` is a single exact business-PID
+signal, never a process-group or Host signal. Pre-ready stops and module-absence
+failures return terminal-only facts; they never expose a half-ready Client
+handle. A stale authenticated Peer result is derived by the Supervisor from that
+Peer's actual interaction/frame identity and sent once through the existing
+official result route.
 
 Two fixed external Worker-kill selectors cover the added lifecycle risks:
 `--case p2a-client-domain-absent` at `client-opened-before-ack`, and

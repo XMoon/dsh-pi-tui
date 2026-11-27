@@ -201,10 +201,18 @@ async function waitForAnswer(
     event => event.type === 'assistant/message' && assistantText(event).includes(text), label)
 }
 
-function expectOneUser(events: SessionEvent[], id: string, text: string, label: string): void {
+function expectOneUser(
+  events: SessionEvent[],
+  id: string,
+  text: string,
+  source: Record<string, any>,
+  label: string,
+): void {
   const matches = events.filter(event => event.type === 'user/message' && event.data?.id === id)
   expect(matches, `${label}: exact user occurrence count`).toHaveLength(1)
   expect(userText(matches[0]), `${label}: exact user occurrence text`).toBe(text)
+  expect(matches[0]?.data?.source?.kind, `${label}: claimed occurrence is not human-authored`).toBe('user')
+  expect(matches[0]?.data?.source, `${label}: claimed occurrence provenance changed`).toEqual(source)
 }
 
 async function exitClient(client: SplitProcessClient, label: string): Promise<void> {
@@ -291,6 +299,7 @@ async function queueMessage(
     .find((message: Record<string, any>) => messageText(message) === text)
   expect(item?.id, `${label}: Host occurrence identity`).toBeTypeOf('string')
   expect(item.id, `${label}: empty Host occurrence identity`).not.toBe('')
+  expect(item.source?.kind, `${label}: queued occurrence is not human-authored`).toBe('user')
   return { event, item }
 }
 
@@ -447,8 +456,8 @@ test('shares queued occurrences across Clients and claims the steered occurrence
       .toBeLessThan(aClaimIndex)
     await waitFrame(clientA, assistantText(aAnswer), 'A painted its own settlement')
     await waitFrame(clientB, assistantText(bAnswer), 'B painted the shared steered settlement')
-    expectOneUser(finalEvents, bQueued.item.id, 'shared-b-queued', 'B occurrence')
-    expectOneUser(finalEvents, aQueued.item.id, 'shared-a-queued', 'A occurrence')
+    expectOneUser(finalEvents, bQueued.item.id, 'shared-b-queued', bQueued.item.source, 'B occurrence')
+    expectOneUser(finalEvents, aQueued.item.id, 'shared-a-queued', aQueued.item.source, 'A occurrence')
 
     await exitClient(clientB, 'shared queue B')
     await expectHostIdentity(scene, host, 'shared queue after B exit')
@@ -614,13 +623,20 @@ test('recalls accepted Session input without reading or rewriting legacy history
     mkdirSync(historyDirectory, { recursive: true, mode: 0o700 })
     const sentinel = 'history-file-only-sentinel-never-host-accepted'
     const sentinelPath = historyFilePath(scene.installation.dshHome, bDirs.cwd)
-    const sentinelLine = JSON.stringify({ v: 2, content: sentinel, cwd: bDirs.cwd, ts: Date.now() })
+    const sentinelLine = JSON.stringify({
+      v: 2,
+      content: sentinel,
+      cwd: bDirs.cwd,
+      ts: Date.now(),
+      sessionId: sessionX,
+    })
     writeFileSync(sentinelPath, `${sentinelLine}\n`, { mode: 0o600, flag: 'wx' })
     const parsed = parseHistoryRecordLine(sentinelLine)
     expect(parsed, 'the real history parser did not accept the positive control').toMatchObject({
       version: 2,
       content: sentinel,
       cwd: bDirs.cwd,
+      sessionId: sessionX,
     })
     const historyBefore = snapshotHistory(historyDirectory)
 
@@ -641,6 +657,15 @@ test('recalls accepted Session input without reading or rewriting legacy history
       'B resumed exact Session X')
     expect(resumed.openSessionId, 'B resumed another Session').toBe(sessionX)
     await waitFrame(clientB, 'history-x-seed', 'B read X history')
+    await waitForComposerDraft(clientB, '', 'B Session composer is empty before the single recall key')
+    const xBeforeHostRecall = scene.sessionEvents(sessionX) ?? []
+    await clientB.press('Up')
+    await waitForComposerDraft(clientB, 'history-x-seed', 'B recalled the legitimate Host seed with one Up')
+    expect((await clientB.text()).includes(sentinel), 'B recalled the file-only sentinel in Session X').toBe(false)
+    expect(scene.sessionEvents(sessionX), 'Host-seed recall changed durable X facts').toEqual(xBeforeHostRecall)
+    await clientB.press('Down')
+    await waitForComposerDraft(clientB, '', 'B returned from Host-seed recall to the empty Session draft')
+    expect((await clientB.text()).includes(sentinel), 'file-only sentinel appeared after leaving recall').toBe(false)
     await exitClient(clientB, 'history B')
     expect(snapshotHistory(historyDirectory), 'B changed legacy history files').toEqual(historyBefore)
 
@@ -860,6 +885,9 @@ test('edits and removes exact queued occurrences without claiming the cancelled 
           message.id === queuedEdit.item.id && messageText(message) === editReplacement),
       'official edit splice kept the exact occurrence identity')
     expect(edited.data?.start, 'edit moved the occurrence to another queue position').toBe(queuedEdit.event.data?.start)
+    const editedItem = (edited.data?.inserted ?? [])
+      .find((message: Record<string, any>) => message.id === queuedEdit.item.id)
+    expect(editedItem?.source, 'edit changed the original Host provenance').toEqual(queuedEdit.item.source)
     expect((scene.sessionEvents(sessionId) ?? []).slice(editBoundary).some(event =>
       event.type === 'agent/inbox/spliced' && event.data?.target === 'next-step'),
     'queue-page Ctrl+S reached the global steer path').toBe(false)
@@ -899,7 +927,7 @@ test('edits and removes exact queued occurrences without claiming the cancelled 
     await waitFrame(clientA, 'long-turn answer 2', 'A painted edited settlement')
     await waitFrame(clientB, 'long-turn answer 2', 'B painted edited settlement')
     const finalEvents = scene.sessionEvents(sessionId) ?? []
-    expectOneUser(finalEvents, queuedEdit.item.id, editReplacement, 'edited occurrence')
+    expectOneUser(finalEvents, queuedEdit.item.id, editReplacement, queuedEdit.item.source, 'edited occurrence')
     expect(finalEvents.some(event => event.type === 'user/message' && event.data?.id === queuedRemove.item.id),
       'removed occurrence was claimed').toBe(false)
     expect(finalEvents.some(event => event.type === 'user/message' && userText(event) === editOriginal),
