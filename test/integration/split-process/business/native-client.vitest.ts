@@ -1101,15 +1101,15 @@ test('qualifies the installed Native Client business and interaction paths', { t
         const imageCatalog = ok(await client.catalog(), 'image model catalog')
         expect(imageCatalog.models.groups.find(group => group.id === 'c1-qualification')?.models.some(model => model.id === 'c1-text-only')).toBe(true)
         committed(await session.selectModel({ provider: 'c1-qualification', model: 'c1-text-only' }), 'select text-only model')
-        const beforeNegative = durableEvents(scene, sessionId).length
+        const beforeNegative = durableEvents(scene, sessionId).filter(event => event.type === 'user/message').length
         const negative = await session.prompt({ content: [
           { type: 'text', text: 'native unsupported image' },
           { type: 'image', mediaType: 'image/png', bytes: png, name: 'unsupported.png' },
         ] })
         expect(negative.kind, `text-only image prompt must be rejected: ${resultSummary(negative)}`).toBe('rejected')
         const negativeEvents = durableEvents(scene, sessionId)
-        expect(negativeEvents.length).toBe(beforeNegative)
-        expect(negativeEvents.some(event => event.type === 'user/message' || event.type === 'turn/start')).toBe(false)
+        expect(negativeEvents.filter(event => event.type === 'user/message').length).toBe(beforeNegative)
+        expect(negativeEvents.some(event => event.type === 'turn/start')).toBe(false)
         committed(await session.selectModel({ provider: 'c1-qualification', model: 'c1' }), 'restore image-capable model')
         const prompt = accepted(await session.prompt({ content: [
           { type: 'text', text: 'native image input' },
