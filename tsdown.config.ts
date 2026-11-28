@@ -69,6 +69,10 @@ const processEntryConfig = defineConfig({
   entry: {
     'local-host': './src/app/remote-process/local-host-entry.ts',
     'local-client': './src/app/remote-process/local-client-entry.ts',
+    // NAF-1 public headless entry. It shares the local-client runtime graph so
+    // both consume the ONE bundled Store closure; declarations are emitted by
+    // the declaration-only pass below.
+    'native-client': './src/app/remote-process/native-client.ts',
     'acp-stdio': './src/app/remote-process/acp-stdio-entry.ts',
   },
   format: ['esm'],
@@ -80,4 +84,18 @@ const processEntryConfig = defineConfig({
   },
 })
 
-export default [bundleConfig, processEntryConfig]
+// Public declarations for the headless entry. The pinned declaration plugin
+// emits no runtime chunks, so this pass cannot create a second Store closure or
+// overwrite the process-entry runtime graph.
+const nativeClientDtsConfig = defineConfig({
+  entry: { 'native-client': './src/app/remote-process/native-client.ts' },
+  format: ['esm'],
+  outDir: 'dist',
+  clean: false,
+  dts: { emitDtsOnly: true },
+  deps: {
+    onlyBundle: ['@xmoon76/pi-tui', '@deepseek-ai/dsh-client-store', 'zustand', 'immer'],
+  },
+})
+
+export default [bundleConfig, processEntryConfig, nativeClientDtsConfig]

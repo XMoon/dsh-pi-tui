@@ -409,14 +409,29 @@ function main() {
       check('other DSH runtime packages remain external',
         externalDshImports > 0 && externalCordisImports > 0,
         `dsh=${String(externalDshImports)} cordis=${String(externalCordisImports)}`)
-      const clientEntryPath = join(extracted, 'dist', 'local-client.mjs')
-      if (existsSync(clientEntryPath)) {
-        const clientEntryText = readFileSync(clientEntryPath, 'utf8')
-        check('the Client entry reaches the bundled Store chunk',
-          storeChunks.length === 1 && clientEntryText.includes(`./${basename(storeChunks[0])}`), storeChunks[0] ?? '(none)')
-      } else {
-        checks.push('skip Client-entry Store reachability — synthetic fixture has no dist/local-client.mjs')
+      const relativeTargets = name => specifiersOf(readFileSync(join(extracted, name), 'utf8'))
+        .filter(specifier => specifier.startsWith('./'))
+        .map(specifier => `dist/${specifier.slice(2)}`)
+      const reachesStore = (entryName, storeName) => {
+        if (storeChunks.length !== 1 || !files.includes(entryName)) return false
+        const target = storeChunks[0]
+        const seen = new Set([entryName])
+        const queue = [entryName]
+        while (queue.length > 0) {
+          const current = queue.shift()
+          if (current === target) return true
+          for (const next of relativeTargets(current)) {
+            if (seen.has(next) || !files.includes(next)) continue
+            seen.add(next)
+            queue.push(next)
+          }
+        }
+        return false
       }
+      check('the Client entry reaches the bundled Store chunk',
+        reachesStore('dist/local-client.mjs'), storeChunks[0] ?? '(none)')
+      check('the native headless entry reaches the bundled Store chunk',
+        reachesStore('dist/native-client.mjs'), storeChunks[0] ?? '(none)')
     }
     check('exports entry dist/extension/unstable.mjs', has('dist/extension/unstable.mjs'))
     check('types dist/extension/advanced.d.mts', has('dist/extension/advanced.d.mts'))
@@ -614,7 +629,7 @@ function main() {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/preferences|app\/config\/schema|app\/host\/acp-preferences|app\/host\/features\/file-reference|app\/host\/features\/terminal-progress|app\/host\/performance-host|app\/host\/pi-tui-host-runtime|app\/host\/extension-config-carrier|app\/host\/visual-tools|app\/host\/web-preferences|app\/remote-process\/daemon-launcher|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/preferences|app\/config\/schema|app\/host\/acp-preferences|app\/host\/features\/file-reference|app\/host\/features\/terminal-progress|app\/host\/performance-host|app\/host\/pi-tui-host-runtime|app\/host\/extension-config-carrier|app\/host\/visual-tools|app\/host\/web-preferences|app\/remote-process\/daemon-launcher|app\/remote-process\/native-client|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }

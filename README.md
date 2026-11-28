@@ -48,6 +48,8 @@ dsh --profile pi-tui
 
 **升级注意**：跨 DSH Runtime 升级必须先完成正在运行的 Turn/Job、停止旧 Host 并备份 Profile、Session 与所需数据；不保证跨 DSH 数据 Schema 的原地回退。不要将 0.5.8 配到 DSH rc.2 或更早版本。完整配对和恢复方法见[兼容性指南](docs/guides/dsh-compatibility.md)。
 
+**无 TUI 的程序化接入**：Linux/macOS 可使用 `import { attachNativeClient } from '@xmoon76/dsh-pi-tui/native-client'`。调用方需提供已安装 DSH 的 `package.json` 锚点、Profile 名和包根目录，并自行管理 Host；`close()` 只释放该 Client 自有资源与已正式持有的连接，不停止 Host。当前 DSH 在 `/connect` 响应丢失时可能保留一个未认领的轻量 Peer 直到 Host 关闭，公共接入不提供未知 Cookie 重试或全局 Peer 回收保证。
+
 ### Next / npm 线（验证）
 
 `@next` 与 DSH `@alpha` 是独立移动的验证渠道，不承诺始终互相兼容；安装前确认实际版本及 peer/engine 范围：
