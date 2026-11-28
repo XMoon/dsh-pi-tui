@@ -1458,12 +1458,18 @@ and must be main-origin, unarchived members with the canonical header cwd,
 the official create's optional reuse candidate; with none, `sessionId` is omitted.
 The Host may return that candidate or another actual identity, and only the
 returned identity is retained and committed. Every explicit New dispatches exactly
-one official create: a returned exact binding maps back to the existing owner, so
-the surface keeps its generation, drafts, recall, ingress and live owner; a
-same-id different binding remains a real replacement. The raw proof and generation capture
-are operation-local and never serialized or cached. Every dispatched create is one-shot: rejection,
-published-with-error and indeterminate outcomes keep their distinct truth and are
-never retried automatically.
+one official create. The original capture/lifetime/scope is rechecked before
+owner mapping and after wrapper transfer. A returned exact binding keeps the
+current generation, drafts, attachments, recall and ingress, restores deferred
+recalls, and still refreshes the live catalog. A different binding opens the
+actual returned identity before publication and follows ordinary
+publish-new-before-release-old; no old owner uses first-publication ordering
+without a target-idle wait. Only real replacement clears outgoing unpinned stores,
+and post-commit degradation never rolls the committed owner back. The raw proof
+and generation capture are operation-local and never serialized or cached.
+Every dispatched create is one-shot: rejection, published-with-error and
+indeterminate outcomes keep their distinct truth and are never retried
+automatically.
 
 An ordinary create naming an unknown WorkspaceId is refused before publication.
 A create that published and then failed to attach its membership reports the

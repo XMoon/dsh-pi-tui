@@ -95,13 +95,20 @@ export function runForkCommit(seams: ForkCommitSeams, next: unknown): void {
   seams.setCompletionOwner(identity)
 }
 
+/** Publish the first Session owner and completion identity. The caller owns the
+ *  later C-shape quiesce/bump/init ordering. */
+export function publishFirstSessionOwner(seams: OwnerPublicationSeams, next: unknown): string | undefined {
+  const identity = seams.publishOwner(next)
+  seams.setCompletionOwner(identity)
+  return identity
+}
+
 /**
  * C — the first-session commit. Returns `false` when the committed child's
  * quiesce aborted (the caller must skip its post-init work).
  */
 export async function runFirstSessionCommit(seams: FirstSessionCommitSeams, next: unknown): Promise<boolean> {
-  const identity = seams.publishOwner(next)
-  seams.setCompletionOwner(identity)
+  publishFirstSessionOwner(seams, next)
   if (await seams.quiesceChild()) return false
   seams.bumpGeneration()
   await seams.initChild()

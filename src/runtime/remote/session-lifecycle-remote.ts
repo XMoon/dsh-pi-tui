@@ -311,7 +311,10 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
 
   captureWorkspaceNewConversation(): WorkspaceNewConversationCapture | undefined {
     const generation = this.generation.getSnapshot()
-    return generation === undefined ? undefined : { generation }
+    return generation === undefined ? undefined : {
+      generation,
+      isCurrent: () => Object.is(generation, this.generation.getSnapshot()),
+    }
   }
 
   /**

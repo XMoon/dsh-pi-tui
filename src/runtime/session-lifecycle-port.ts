@@ -55,6 +55,8 @@ export interface FreshCreateSessionRequest {
  * wire. */
 export interface WorkspaceNewConversationCapture {
   readonly generation: unknown
+  /** Client-local recheck of the captured Connection generation. */
+  isCurrent?(): boolean
 }
 
 /** Remote explicit New asks the official create operation to reuse the first

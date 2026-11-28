@@ -1193,7 +1193,15 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             if (freshSessionId === undefined) {
               const transition = runner.transitionToActualId
               if (transition === undefined) throw new Error('actual-id session transition is unavailable')
-              result = await transition({ ...steps, target: { header: { cwd: workspace.path } } })
+              result = await transition({
+                ...steps,
+                target: { header: { cwd: workspace.path } },
+                isCommitCurrent: () => !signal.aborted
+                  && !runner.signal.aborted
+                  && runner.isSessionScopeCurrent(navigation.scope)
+                  && (nextIntentCapture?.isCurrent() ?? true)
+                  && (workspaceNewCapture?.isCurrent?.() ?? true),
+              })
             } else {
               result = await runner.transitionTo({ ...steps, target: { id: String(freshSessionId), header: { cwd: workspace.path } } })
             }
@@ -1226,11 +1234,19 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             // drop the unpinned ones only when this was a genuine owner change.
             // Exact-binding reuse and the sessionless first-owner path keep the
             // active draft and staged attachments.
-            if (navigation.scope.sessionId !== undefined && !runner.isSessionScopeCurrent(navigation.scope)) {
+            const ownerReplaced = freshSessionId === undefined
+              ? result.ownerReplaced === true
+              : navigation.scope.sessionId !== undefined && !runner.isSessionScopeCurrent(navigation.scope)
+            if (ownerReplaced) {
               runner.imageStore.clearUnpinned()
               runner.fileStore?.clearUnpinned()
             }
-            return { kind: 'success', text: freshSessionId === undefined ? 'Session ready' : 'started a fresh session' }
+            return {
+              kind: 'success',
+              text: freshSessionId === undefined
+                ? result.degraded === true ? 'Session committed' : 'Session ready'
+                : 'started a fresh session',
+            }
           }, navigation))
         } catch (error) {
           if (error instanceof SessionNavigationStopError) {

@@ -31,6 +31,7 @@ import type {
   SessionLifecycle,
 } from '../../src/runtime/session-lifecycle-port.ts'
 import type { ClientSessionOwner } from '../../src/runtime/session-lifecycle-port.ts'
+import { LifecycleError } from '../../src/runtime/session-lifecycle-port.ts'
 import type { RemoteConnectionGenerationSource } from '../../src/runtime/remote/session-reader-remote.ts'
 import type { RemoteResultLike } from '../../src/runtime/remote/session-writer-remote.ts'
 
@@ -99,7 +100,7 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
     ...fakeDiag,
     error: (message, fields) => { diagnostics.push({ message, fields }) },
   }
-  const calls = { forks: 0, opens: [] as string[], creates: 0, fromHandle: 0, openings: 0 }
+  const calls = { forks: 0, opens: [] as string[], creates: 0, fromHandle: 0, openings: 0, openingIds: [] as string[] }
   const live = new Map<string, { binding: FakeBinding; refs: number }>()
   const arms = new Map<string, OpenArm>()
   let forkHook: (() => void) | undefined
@@ -247,7 +248,7 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
     warnRetirement: () => {},
     warnRetirementSkipped: () => {},
     isSurfaceDisposed: (): boolean => disposed,
-    beginOpening: (sessionId) => { calls.openings += 1; return { sessionId } },
+    beginOpening: (sessionId) => { calls.openings += 1; calls.openingIds.push(sessionId); return { sessionId } },
     clearOpening: () => {},
     settlePendingQueueRecalls: (committed) => {
       events.push(`recalls:${committed}`)
@@ -399,7 +400,7 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
   }
 }
 
-test('an exact-binding create reuse keeps the current generation and skips replacement work', async () => {
+test('an exact-binding create reuse keeps the current generation and refreshes the live catalog', async () => {
   const h = harness()
   const current = h.publishRetained('session-a')
   h.events.length = 0
@@ -410,12 +411,12 @@ test('an exact-binding create reuse keeps the current generation and skips repla
   })
   assert.equal(result.ok, true)
   assert.equal(h.core.generation(), generation)
-  assert.equal(h.calls.openings, 0, 'actual-id reuse must not open a candidate-owned journal entry')
+  assert.equal(h.calls.openings, 0, 'same-binding reuse must not open a journal entry')
   assert.equal(h.countRefs('session-a'), 1)
-  assert.deepEqual(h.events, ['recalls:true'], 'same-binding reuse only commits deferred recalls; it does not reset, retire, hydrate, refresh or report a replacement')
+  assert.deepEqual(h.events, ['recalls:false', 'catalog:session-a'], 'same-binding reuse restores recalls and refreshes the live catalog without replacement work')
 })
 
-test('an actual-id transition commits the returned owner without a candidate opening journal', async () => {
+test('an actual-id replacement opens the returned identity before publication', async () => {
   const h = harness()
   h.publishRetained('session-a')
   h.events.length = 0
@@ -426,10 +427,110 @@ test('an actual-id transition commits the returned owner without a candidate ope
   })
   assert.equal(result.ok, true, JSON.stringify(result))
   assert.equal(h.core.currentSessionId(), 'session-host-chosen')
-  assert.equal(h.calls.openings, 0)
+  assert.deepEqual(h.calls.openingIds, ['session-host-chosen'])
   assert.equal(h.countRefs('session-a'), 0)
   assert.equal(h.countRefs('session-host-chosen'), 1)
   assert.ok(h.events.includes('release:session-a@current=session-host-chosen'))
+})
+
+test('an actual-id first owner uses first-publication ordering without target idle or draft drop', async () => {
+  let idleCalls = 0
+  const h = harness({ retirement: {
+    whenIdleOrAbort: async () => { idleCalls += 1; return false },
+  } })
+  const beforeGeneration = h.core.generation()
+  const next = h.retain('session-first')
+  const result = await h.runtime.transitionTo({
+    target: { header: { cwd: '/workspace' } },
+    create: async () => ({ session: { id: 'session-first' }, client: next }),
+  })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.ok && result.ownerReplaced, false)
+  assert.equal(h.core.currentSessionId(), 'session-first')
+  assert.ok(h.core.generation() > beforeGeneration)
+  assert.deepEqual(h.calls.openingIds, ['session-first'])
+  assert.equal(h.countRefs('session-first'), 1)
+  assert.equal(idleCalls, 0, 'explicit Remote first-owner New never waits for target idle')
+  assert.equal(h.events.includes('dropDraft'), false)
+  assert.equal(h.events.includes('switch:undefined->session-first'), false)
+  assert.ok(h.events.includes('init:session-first'))
+  assert.ok(h.events.includes('catalog:session-first'))
+})
+
+test('an actual-id acquisition stale before owner mapping is released without commit', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const beforeMap = h.calls.fromHandle
+  const next = h.retain('session-host-chosen')
+  let failure: unknown
+  try {
+    await h.runtime.transitionTo({
+      target: { header: { cwd: '/workspace' } },
+      isCommitCurrent: () => false,
+      create: async () => ({ session: { id: 'session-host-chosen' }, client: next }),
+    })
+  } catch (error) {
+    failure = error
+  }
+  assert.ok(failure instanceof LifecycleError)
+  assert.equal(failure.ownership, 'superseded')
+  assert.equal(failure.publishedSessionId, 'session-host-chosen')
+  assert.equal(h.calls.fromHandle, beforeMap, 'a stale acquisition is never mapped into the owner registry')
+  assert.equal(h.core.currentSessionId(), 'session-a')
+  assert.equal(h.countRefs('session-a'), 1)
+  assert.equal(h.countRefs('session-host-chosen'), 0)
+  assert.equal(h.events.some(entry => entry.startsWith('init:') || entry.startsWith('catalog:') || entry.startsWith('switch:')), false)
+})
+
+test('an actual-id replacement stale after owner mapping releases only the uncommitted new owner', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const beforeMap = h.calls.fromHandle
+  const next = h.retain('session-host-chosen')
+  let checks = 0
+  let failure: unknown
+  try {
+    await h.runtime.transitionTo({
+      target: { header: { cwd: '/workspace' } },
+      isCommitCurrent: () => { checks += 1; return checks === 1 },
+      create: async () => ({ session: { id: 'session-host-chosen' }, client: next }),
+    })
+  } catch (error) {
+    failure = error
+  }
+  assert.ok(failure instanceof LifecycleError)
+  assert.equal(failure.ownership, 'superseded')
+  assert.equal(h.calls.fromHandle, beforeMap + 1)
+  assert.equal(h.core.currentSessionId(), 'session-a')
+  assert.equal(h.countRefs('session-a'), 1)
+  assert.equal(h.countRefs('session-host-chosen'), 0)
+  assert.equal(h.events.some(entry => entry.startsWith('init:') || entry.startsWith('catalog:') || entry.startsWith('switch:')), false)
+})
+
+test('an actual-id same-owner transfer stale after mapping leaves the current wrapper to normal retirement', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const beforeMap = h.calls.fromHandle
+  const next = h.retain('session-a')
+  let checks = 0
+  let failure: unknown
+  try {
+    await h.runtime.transitionTo({
+      target: { header: { cwd: '/workspace' } },
+      isCommitCurrent: () => { checks += 1; return checks === 1 },
+      create: async () => ({ session: { id: 'session-a' }, client: next }),
+    })
+  } catch (error) {
+    failure = error
+  }
+  assert.ok(failure instanceof LifecycleError)
+  assert.equal(failure.ownership, 'superseded')
+  assert.equal(h.calls.fromHandle, beforeMap + 1)
+  assert.equal(h.core.currentSessionId(), 'session-a')
+  assert.equal(h.countRefs('session-a'), 1, 'the transferred current wrapper is not retired by the stale operation')
+  assert.equal(h.events.filter(entry => entry === 'release:session-a@current=session-a').length, 1,
+    'fromHandle releases only the replaced wrapper')
+  assert.equal(h.events.some(entry => entry.startsWith('init:') || entry.startsWith('catalog:') || entry.startsWith('switch:')), false)
 })
 
 test('ordinary switch = retain NEW → commit NEW → release OLD → post-handoff init', async () => {

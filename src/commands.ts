@@ -668,8 +668,10 @@ export interface TuiCommandRunner {  ctx: Context
     target: { header?: { cwd?: string } }
     prepare?: () => Promise<void> | void
     onOldOwnerQuiesced?: () => void
+    /** Revalidate the original explicit-New operation at commit. */
+    isCommitCurrent?: () => boolean
     create: () => Promise<T>
-  }): Promise<{ ok: true; next: T } | { ok: false; message: string; error?: unknown }>
+  }): Promise<{ ok: true; next: T; ownerReplaced?: boolean; degraded?: boolean } | { ok: false; message: string; error?: unknown }>
   /** The preset the live agent runs on, when the deployment composes one. */
   currentPreset(): string | undefined
   /** The Host turn-boundary authority's blank state for the live Session

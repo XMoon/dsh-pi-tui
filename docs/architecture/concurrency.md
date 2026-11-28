@@ -167,16 +167,24 @@ On top of the gate, ordinary session transitions share ONE transaction shape
 Remote explicit New may not know the child identity before dispatch. Its
 transition target therefore carries no candidate-owned opening id: the official
 create's returned identity is retained first and becomes the only committed
-Session id. A pre-dispatch read/refusal creates nothing; a dispatched unknown
-outcome is never replayed. If the returned handle maps to the exact current
-`SessionOwnerRef`, the commit is a no-op rather than an ordinary replacement:
-no generation bump, surface reset, outgoing-draft drop, recall rebind, retirement,
-hydrate or switch report runs. The current reference and live ingress stay
-authoritative. A different binding — including the same Session string with a new
-binding object — follows the ordinary publish-new-before-release-old order. A
-sessionless explicit New uses the same actual-id adoption without waiting for the
-target Host Turn to become idle and preserves the sessionless draft and staged
-references; the normal first-prompt path is unchanged.
+Session id. The original capture/lifetime/scope is rechecked immediately before
+owner mapping and again after the synchronous wrapper transfer. A stale,
+untransferred acquisition is released without publication; a stale transferred
+current wrapper is left to its normal owner retirement. A pre-dispatch
+read/refusal creates nothing; a dispatched unknown outcome is never replayed.
+
+The authorized result has exactly three commit shapes. The same exact
+`SessionOwnerRef` keeps the current generation, surface, draft, attachments,
+recall and ingress; deferred recalls restore as non-replacement, no opening
+journal or switch report starts, and the existing live catalog refresh still
+runs. A different binding — including the same Session string with a new binding
+object — opens the actual returned identity before publication and follows the
+ordinary publish-new-before-release-old order. With no old owner, first
+publication commits owner and completion before the generation bump/init, never
+waits for the target Host Turn to become idle, and preserves the sessionless
+draft and staged references. Only a real owner replacement clears outgoing
+unpinned stores. Post-commit hydrate/catalog failure leaves the committed owner
+standing and is reported as degraded; the normal first-prompt path is unchanged.
 
 ### Fork dispatch and adoption
 
