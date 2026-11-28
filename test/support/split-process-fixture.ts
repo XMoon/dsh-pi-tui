@@ -714,7 +714,6 @@ export interface SplitProcessScene {
   publicDaemonParallelRelease(): Promise<void>
   startHostAttempts(options: {
     mode: HostAttemptMode
-    count?: number
     scratchTarget?: string
     signal?: 'SIGTERM' | 'SIGINT'
   }): Promise<HostAttemptHandle[]>
@@ -1488,13 +1487,11 @@ class ProcessScene implements SplitProcessScene {
 
   async startHostAttempts(options: {
     mode: HostAttemptMode
-    count?: number
     scratchTarget?: string
     signal?: 'SIGTERM' | 'SIGINT'
   }): Promise<HostAttemptHandle[]> {
     const payload = await this.request('START_HOST_ATTEMPTS', {
       mode: options.mode,
-      ...(options.count === undefined ? {} : { count: options.count }),
       ...(options.scratchTarget === undefined ? {} : { scratchTarget: options.scratchTarget }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     }, 240_000)
@@ -2312,6 +2309,52 @@ async function createScene(): Promise<ProcessScene> {
  */
 export async function createSplitProcessScene(): Promise<SplitProcessScene> {
   return await createScene()
+}
+
+const CLIENT_CLOSE_OWNER_KEYS = ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs'] as const
+
+/**
+ * Business-level Keep disconnect: clear any draft, submit `/exit`, take the
+ * default Keep row only when the CURRENT painted frame shows the busy exit
+ * choice, then require normal native close (0/null) and a zero-owner
+ * `client-closed` product record. Distinct from teardown-only `exitGracefully`.
+ */
+export async function keepAndDisconnect(client: SplitProcessClient, label: string): Promise<void> {
+  await client.press('Ctrl+U')
+  await client.submit('/exit')
+  const deadline = Date.now() + 60_000
+  let choiceTaken = false
+  for (;;) {
+    const state = await client.state().catch(() => undefined)
+    if (state !== undefined && state.exited) break
+    if (!choiceTaken) {
+      const frame = await client.text().catch(() => '')
+      if (frame.includes('Disconnect from dsh-pi-tui') && frame.includes('> Keep working and disconnect')) {
+        await client.press('Enter')
+        choiceTaken = true
+      }
+    }
+    if (Date.now() >= deadline) {
+      const frame = await client.text().catch(() => '')
+      throw new Error(`${label}: did not exit after /exit; frame=${JSON.stringify(frame.slice(-2000))}`)
+    }
+    await sleep(50)
+  }
+  const closed = await client.close()
+  if (closed.code !== 0 || closed.signal !== null) {
+    throw new Error(`${label}: Supervisor Keep close exited with ${JSON.stringify(closed)}`)
+  }
+  const inventory = readOfficialClientRecords(client.recordFile, client.label)
+    .filter(record => record.m4b2s === 'client-closed')
+    .at(-1)
+  if (inventory === undefined) {
+    throw new Error(`${label}: official close inventory missing`)
+  }
+  for (const owner of CLIENT_CLOSE_OWNER_KEYS) {
+    if (inventory.owners?.[owner] !== 0) {
+      throw new Error(`${label}: ${owner} owner remains (${String(inventory.owners?.[owner])})`)
+    }
+  }
 }
 
 export type { SessionEvent }

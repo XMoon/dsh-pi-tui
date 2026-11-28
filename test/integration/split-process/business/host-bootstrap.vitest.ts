@@ -9,8 +9,9 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { join, relative, sep } from 'node:path'
 
 import { expect, test } from 'vitest'
 
@@ -68,9 +69,45 @@ async function assertAuthenticatedCurrentHost(scene: SplitProcessScene, host: Sp
 }
 
 test('admits the installed Host composition and refuses missing required owners', async () => {
-  const scene = await createSplitProcessScene()
+  const previousFailurePoint = process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT
+  process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT = 'client-domain-set-fault-post-rename'
+  let scene: SplitProcessScene
+  try {
+    scene = await createSplitProcessScene()
+  } finally {
+    if (previousFailurePoint === undefined) delete process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT
+    else process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT = previousFailurePoint
+  }
   let testError: unknown
   try {
+    // 0. Before any child exists, unqualified installed-entry operations are
+    // refused at the IPC boundary, redact synthetic credential markers, and
+    // leave the Scene directory and owner ledgers untouched.
+    const entriesBefore = readdirSync(scene.workDir).sort()
+    const marker = 'SYNTHETIC_MARKER_SECRET'
+    const unknownEntryError = await scene.request('SIGNAL_ENTRY', {
+      entryId: `token=${marker}`,
+      signal: 'SIGTERM',
+    }, 30_000).then(() => undefined, error => asError(error))
+    expect(unknownEntryError?.message).toMatch(/unknown entryId/u)
+    expect(unknownEntryError?.message).toContain('[redacted]')
+    expect(unknownEntryError?.message).not.toContain(marker)
+    await expect(scene.request('START_HOST_ATTEMPTS', { mode: 'not-a-mode' }, 30_000))
+      .rejects.toThrow(/INPUT_HOST_ATTEMPT_MODE/u)
+    await expect(scene.request('START_HOST_ATTEMPTS', { mode: 'seat-race', count: 3 }, 30_000))
+      .rejects.toThrow(/INPUT_UNEXPECTED_FIELD.*rejects the field "count"/u)
+    await expect(scene.request('START_HOST_ATTEMPTS', { mode: 'host-runtime-disabled', extraEnv: {} }, 30_000))
+      .rejects.toThrow(/extraEnv/u)
+    await expect(scene.request('START_QUALIFICATION_CLIENTS', { mode: 'attach' }, 30_000))
+      .rejects.toThrow(/no accepted Host/u)
+    await expect(scene.request('RESTORE_INSTALLATION', {}, 30_000))
+      .rejects.toThrow(/no scoped installation mutation/u)
+    expect(readdirSync(scene.workDir).sort()).toEqual(entriesBefore)
+    const preChildReceipt = await scene.readSupervisorReceipt()
+    expect(preChildReceipt.hosts ?? []).toEqual([])
+    expect(preChildReceipt.qualificationClients ?? []).toEqual([])
+    expect(preChildReceipt.qualificationHelpers ?? []).toEqual([])
+
     // 1. The pristine installed Host really composes and publishes current
     // facts; Ready is the product's own record, never a Supervisor synthesis.
     const host = await scene.startHost()
@@ -126,7 +163,42 @@ test('admits the installed Host composition and refuses missing required owners'
     expect(ready.forbiddenActive).toEqual([])
     assertDirectOnlyRowsDisabled(ready)
 
-    // 3. Real authenticated identity, then the owner-governed stop.
+    // 3. Real authenticated identity, then prove a post-rename Client Domain
+    // registration failure rolls back the installed module in place without
+    // leaving an active mutation or disturbing the authenticated Host.
+    await assertAuthenticatedCurrentHost(scene, host)
+    const profileRequire = createRequire(scene.installation.anchor)
+    const clientDomainModule = '@deepseek-ai/dsh-api-session-controller/client'
+    const moduleTarget = realpathSync(profileRequire.resolve(clientDomainModule))
+    const moduleRel = relative(scene.workDir, moduleTarget)
+    expect(moduleRel !== '' && moduleRel !== '..' && !moduleRel.startsWith(`..${sep}`),
+      'the Client Domain module resolves outside this Scene').toBe(true)
+    const moduleStatBefore = lstatSync(moduleTarget)
+    expect(moduleStatBefore.isFile(), 'the Client Domain module is not a regular file').toBe(true)
+    const moduleBytesBefore = readFileSync(moduleTarget)
+    const moduleModeBefore = moduleStatBefore.mode & 0o777
+    const absentBackup = `${moduleTarget}.absent`
+    const expectAbsentEnoent = (label: string): void => {
+      let code: string | undefined
+      try {
+        lstatSync(absentBackup)
+      } catch (error) {
+        code = (error as NodeJS.ErrnoException).code
+      }
+      expect(code, `${label}: backup ${absentBackup} exists`).toBe('ENOENT')
+    }
+    expectAbsentEnoent('before post-rename failure')
+    await expect(scene.setInstallationFault('client-domain-module-absent'))
+      .rejects.toThrow(/Client Domain fault registration failed after rename/u)
+    expect(realpathSync(profileRequire.resolve(clientDomainModule))).toBe(moduleTarget)
+    const moduleStatAfter = lstatSync(moduleTarget)
+    expect(moduleStatAfter.isFile(), 'the restored Client Domain module is not a regular file').toBe(true)
+    expect(moduleStatAfter.uid).toBe(moduleStatBefore.uid)
+    expect(moduleStatAfter.gid).toBe(moduleStatBefore.gid)
+    expect(moduleStatAfter.mode & 0o777).toBe(moduleModeBefore)
+    expect(readFileSync(moduleTarget).equals(moduleBytesBefore), 'the restored Client Domain module bytes changed').toBe(true)
+    expectAbsentEnoent('after post-rename rollback')
+    await expect(scene.restoreInstallation()).rejects.toThrow(/no scoped installation mutation/u)
     await assertAuthenticatedCurrentHost(scene, host)
     await scene.stopHost(host)
 
@@ -538,55 +610,6 @@ test('removes its owned scratch on a forced exit before profile boot', async () 
   }
 })
 
-test('refuses unqualified installed-entry operations before any child exists', async () => {
-  const scene = await createSplitProcessScene()
-  let testError: unknown
-  try {
-    const entriesBefore = readdirSync(scene.workDir).sort()
-    const reject = async (type: string, payload: Record<string, unknown>, pattern: RegExp): Promise<void> => {
-      await expect(scene.request(type, payload, 30_000)).rejects.toThrow(pattern)
-    }
-    await reject('SIGNAL_ENTRY', { entryId: 'unknown-entry', signal: 'SIGTERM' }, /unknown entryId/u)
-    await reject('START_HOST_ATTEMPTS', { mode: 'not-a-mode' }, /INPUT_HOST_ATTEMPT_MODE/u)
-    await reject('START_HOST_ATTEMPTS', { mode: 'seat-race', count: 17 }, /INPUT_HOST_ATTEMPT_COUNT/u)
-    await reject('START_HOST_ATTEMPTS', { mode: 'host-runtime-disabled', extraEnv: {} }, /extraEnv/u)
-    await reject('START_QUALIFICATION_CLIENTS', { mode: 'attach' }, /no accepted Host/u)
-    await reject('RESTORE_INSTALLATION', {}, /no scoped installation mutation/u)
-
-    // A synthetic credential marker in an IPC diagnostic is redacted at the
-    // boundary; the real assertion is that it never reaches the Worker text.
-    const marker = 'SYNTHETIC_MARKER_SECRET'
-    const diagnostic = await scene.request('SIGNAL_ENTRY', {
-      entryId: `token=${marker}`,
-      signal: 'SIGTERM',
-    }, 30_000).then(() => undefined, error => (error instanceof Error ? error : new Error(String(error))))
-    expect(diagnostic?.message).toContain('[redacted]')
-    expect(diagnostic?.message).not.toContain(marker)
-
-    // No refused input created an entry; THIS Scene's actual owner ledgers
-    // remain empty (sibling worker receipts are a different authority).
-    expect(readdirSync(scene.workDir).sort()).toEqual(entriesBefore)
-    const receipt = await scene.readSupervisorReceipt()
-    expect(receipt.hosts ?? []).toEqual([])
-    expect(receipt.qualificationClients ?? []).toEqual([])
-    expect(receipt.qualificationHelpers ?? []).toEqual([])
-  } catch (error) {
-    testError = error
-    throw error
-  } finally {
-    try {
-      await scene.dispose()
-    } catch (cleanupError) {
-      if (testError !== undefined) {
-        throw new AggregateError([testError, asError(cleanupError)],
-          'the admission test failed and its Scene cleanup also failed')
-      }
-      throw new AggregateError([asError(cleanupError)],
-        'the admission test passed but its Scene cleanup failed')
-    }
-  }
-})
-
 test('compensates a failed finalization without leaking a live Client or witness', async () => {
   const scene = await createSplitProcessScene()
   let client: QualificationClientHandle | undefined
@@ -669,14 +692,8 @@ test('refuses installed-entry operations in a real non-process Scene before any 
       workerPid: process.pid,
       workerPpid: process.ppid,
     }, { timeoutMs: 600_000 })
-    for (const [type, payload] of [
-      ['START_HOST_ATTEMPTS', { mode: 'seat-race', count: 2 }],
-      ['SET_INSTALLATION_FAULT', { fault: 'host-runtime-absent' }],
-      ['SIGNAL_ENTRY', { entryId: 'unknown', signal: 'SIGTERM' }],
-    ] as const) {
-      await expect(pilot.request(type, payload, { timeoutMs: 30_000 }))
-        .rejects.toThrow(/no process scene/u)
-    }
+    await expect(pilot.request('START_HOST_ATTEMPTS', { mode: 'seat-race' }, { timeoutMs: 30_000 }))
+      .rejects.toThrow(/no process scene/u)
     const receipt = JSON.parse(readFileSync(join(tmpBase!, 'split-resources', `${pilotRunId}.json`), 'utf8')) as Record<string, any>
     expect(receipt.kind).toBe('pilot')
     expect(receipt.hosts ?? []).toEqual([])

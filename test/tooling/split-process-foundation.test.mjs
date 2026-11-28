@@ -591,7 +591,7 @@ test('the installed-entry qualification operations are refused before any proces
   const supervisor = new SupervisorClient({ runId: `split-process-entry-admission-${String(process.pid)}` })
   try {
     for (const [type, payload] of [
-      ['START_HOST_ATTEMPTS', { mode: 'seat-race', count: 2 }],
+      ['START_HOST_ATTEMPTS', { mode: 'seat-race' }],
       ['SET_INSTALLATION_FAULT', { fault: 'host-runtime-absent' }],
       ['SIGNAL_ENTRY', { entryId: 'probe', signal: 'SIGTERM' }],
     ]) {

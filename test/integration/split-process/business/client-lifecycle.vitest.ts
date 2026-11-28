@@ -66,11 +66,9 @@ const PROTECTED_HOST_ROWS = [
 
 type ProtectedHostRow = { state: string; fiberUid: number }
 
-async function protectedHostRows(
-  scene: SplitProcessScene,
-  host: SplitProcessHostHandle,
-): Promise<Map<string, ProtectedHostRow>> {
-  const status = await scene.hostStatus(host)
+function protectedHostRows(
+  status: Record<string, any>,
+): Map<string, ProtectedHostRow> {
   const rows = new Map<string, ProtectedHostRow>()
   for (const entry of status.entries ?? []) {
     if (!PROTECTED_HOST_ROWS.includes(entry.id)) continue
@@ -276,22 +274,22 @@ test('replaces the settled Client surface without changing the Host and submits 
   try {
     host = await scene.startHost({ scenario: 'long-turn' })
     client = await scene.startClient({ label: 'hmr-settled', ...clientDirectories(scene, 'hmr-settled'), hmr: 'replace' })
-    const sessionId = await settleInitialPrompt(scene, client, host, 't57 initial prompt', 'long-turn-held', 'T57')
-    await waitFrame(client, 'long-turn answer 1', 'T57 initial answer')
+    const sessionId = await settleInitialPrompt(scene, client, host, 'settled hmr initial prompt', 'long-turn-held', 'settled HMR')
+    await waitFrame(client, 'long-turn answer 1', 'settled HMR initial answer')
     const before = await client.waitForSurfaceStatus(
       record => record.surfaceMounted === true && record.sessionOpen === true && record.openSessionId === sessionId,
-      'T57 initial surface',
+      'settled HMR initial surface',
     )
     expect(before.surfaceRevision).toBeTypeOf('number')
     const hostBefore = await scene.hostStatus(host)
-    const rowsBefore = await protectedHostRows(scene, host)
+    const rowsBefore = protectedHostRows(hostBefore)
     await client.signal('SIGUSR2')
-    const start = await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T57 HMR start')
-    const retired = await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'T57 HMR retired')
-    const ready = await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready', 'T57 HMR ready')
+    const start = await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'settled HMR start')
+    const retired = await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'settled HMR retired')
+    const ready = await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready', 'settled HMR ready')
     const after = await client.waitForSurfaceStatus(
       record => record.surfaceRevision === ready.revision && record.surfaceMounted === true,
-      'T57 new surface',
+      'settled HMR new surface',
     )
     expect(start.revision).not.toBe(before.surfaceRevision)
     expect(retired.revision).toBe(before.surfaceRevision)
@@ -305,31 +303,32 @@ test('replaces the settled Client surface without changing the Host and submits 
     expect(after.openSessionId).toBe(sessionId)
     expect(after.owners).toMatchObject({ typert: 1, connection: 1, remote: 1, fileUpload: 1, sessions: 1, jobs: 1 })
     expect(after.privateNamespaces).toBe(3)
-    const rowsAfter = await protectedHostRows(scene, host)
-    expectHostRowsKept(rowsBefore, rowsAfter, 'T57')
+    const hostAfterHmr = await scene.hostStatus(host)
+    expect(hostAfterHmr.localHost.hostPid).toBe(hostBefore.localHost.hostPid)
+    expect(hostAfterHmr.localHost.instanceId).toBe(hostBefore.localHost.instanceId)
+    expectHostRowsKept(rowsBefore, protectedHostRows(hostAfterHmr), 'settled HMR')
     for (const operation of ['hmr-revision-start', 'hmr-revision-retired', 'hmr-revision-ready']) {
       expect(client.readRecords().filter(record => record.m4b2s === 'qualification' && record.op === operation)).toHaveLength(1)
     }
-    await waitFrame(client, 'long-turn answer', 'T57 new surface paint')
+    await waitFrame(client, 'long-turn answer', 'settled HMR new surface paint')
     const beforeSecondTurn = scene.sessionEvents(sessionId)?.length ?? 0
-    await client.submit('t57 post-hmr prompt')
+    await client.submit('settled hmr follow-up prompt')
     await scene.waitForSessionEvent(sessionId, beforeSecondTurn,
-      event => event.type === 'turn/start' && event.data?.turn === 2, 'T57 post-HMR turn/start')
+      event => event.type === 'turn/start' && event.data?.turn === 2, 'settled HMR post-HMR turn/start')
     await scene.waitForSessionEvent(sessionId, beforeSecondTurn,
-      event => event.type === 'turn/end' && event.data?.turn === 2, 'T57 post-HMR turn/end')
-    await waitFrame(client, 'long-turn answer 2', 'T57 post-HMR answer')
-    await waitFrame(client, 't57 post-hmr prompt', 'T57 post-HMR prompt readback')
+      event => event.type === 'turn/end' && event.data?.turn === 2, 'settled HMR post-HMR turn/end')
+    await waitFrame(client, 'long-turn answer 2', 'settled HMR post-HMR answer')
+    await waitFrame(client, 'settled hmr follow-up prompt', 'settled HMR post-HMR prompt readback')
     const hostAfter = await scene.hostStatus(host)
     expect(hostAfter.localHost.hostPid).toBe(hostBefore.localHost.hostPid)
     expect(hostAfter.localHost.instanceId).toBe(hostBefore.localHost.instanceId)
-    expectHostRowsKept(rowsBefore, await protectedHostRows(scene, host), 'T57 post-HMR Host')
-    await exitChat(client, 'T57 Client')
+    await exitChat(client, 'settled HMR Client')
     await closeHost(scene, host)
   } catch (error) {
     primary = error
     throw error
   } finally {
-    await disposeScene(scene, primary, 'T57')
+    await disposeScene(scene, primary, 'settled HMR')
   }
 })
 
@@ -343,21 +342,23 @@ test('keeps a real Host Job running across HMR and observes its settlement after
     const directories = clientDirectories(scene, 'hmr-job')
     directories.cwd = scene.installation.profileDir
     client = await scene.startClient({ label: 'hmr-job', ...directories, hmr: 'replace' })
-    const sessionId = await settleInitialPrompt(scene, client, host, 't58 prompt', 'job-event', 'T58')
+    const sessionId = await settleInitialPrompt(scene, client, host, 'job hmr prompt', 'job-event', 'job HMR')
     const job = await fixtureHelpers.waitForC1WorkEvent(host.jobWorkRoot!, event => event.kind === 'job-event' && event.event === 'registered',
-      'T58 running Job')
+      'job HMR running Job')
     expect(job.status).toBe('running')
     const before = await client.waitForSurfaceStatus(record => record.sessionOpen === true && record.openSessionId === sessionId,
-      'T58 initial surface')
+      'job HMR initial surface')
     const hostBefore = await scene.hostStatus(host)
-    const rowsBefore = await protectedHostRows(scene, host)
+    const jobRowBefore = protectedHostRows(hostBefore).get('job-controller')
+    expect(jobRowBefore?.state, 'job HMR: job-controller was not active before HMR').toBe('active')
+    expect(Number.isInteger(jobRowBefore?.fiberUid), 'job HMR: job-controller had no live fiber UID').toBe(true)
     const jobOwner = job.owner
     await client.signal('SIGUSR2')
-    await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T58 HMR start')
-    await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'T58 HMR retired')
-    const ready = await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready', 'T58 HMR ready')
+    await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'job HMR start')
+    await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'job HMR retired')
+    const ready = await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready', 'job HMR ready')
     const after = await client.waitForSurfaceStatus(record => record.surfaceRevision === ready.revision && record.sessionOpen === true
-      && record.openSessionId === sessionId, 'T58 new surface Session')
+      && record.openSessionId === sessionId, 'job HMR new surface Session')
     expect(after.pid).toBe(before.pid)
     expect(after.generationId).toBe(before.generationId)
     expect(after.openSessionId).toBe(sessionId)
@@ -366,23 +367,25 @@ test('keeps a real Host Job running across HMR and observes its settlement after
     const hostAfter = await scene.hostStatus(host)
     expect(hostAfter.localHost.hostPid).toBe(hostBefore.localHost.hostPid)
     expect(hostAfter.localHost.instanceId).toBe(hostBefore.localHost.instanceId)
-    expectHostRowsKept(rowsBefore, await protectedHostRows(scene, host), 'T58 Host')
+    const jobRowAfter = protectedHostRows(hostAfter).get('job-controller')
+    expect(jobRowAfter?.state, 'job HMR: job-controller left active state').toBe('active')
+    expect(jobRowAfter?.fiberUid, 'job HMR: job-controller was re-mounted').toBe(jobRowBefore?.fiberUid)
     expect(fixtureHelpers.readC1WorkEvents(host.jobWorkRoot!)).not.toContainEqual(
       expect.objectContaining({ kind: 'job-event', jobId: job.jobId, event: 'settled' }),
     )
-    releaseFile(join(host.jobWorkRoot!, 'job.release'), 'T58 job release')
+    releaseFile(join(host.jobWorkRoot!, 'job.release'), 'job HMR job release')
     const settled = await fixtureHelpers.waitForC1WorkEvent(host.jobWorkRoot!,
       event => event.kind === 'job-event' && event.jobId === job.jobId && event.event === 'settled',
-      'T58 settled Job', 120_000)
+      'job HMR settled Job', 120_000)
     expect(settled.status).toBe('completed')
     expect(settled.owner).toBe(jobOwner)
-    await exitChat(client, 'T58 Client')
+    await exitChat(client, 'job HMR Client')
     await closeHost(scene, host)
   } catch (error) {
     primary = error
     throw error
   } finally {
-    await disposeScene(scene, primary, 'T58')
+    await disposeScene(scene, primary, 'job HMR')
   }
 })
 
