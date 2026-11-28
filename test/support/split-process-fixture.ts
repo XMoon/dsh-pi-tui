@@ -97,7 +97,14 @@ export interface SplitProcessScopeFacts {
 export type ProcessHostScenario =
   | 'long-turn' | 'job' | 'question' | 'approval-allow' | 'approval-reject'
   | 'foreground-tool' | 'child' | 'unowned-job' | 'goal-armed' | 'goal-round'
-  | 'maintenance' | 'schedule'
+  | 'maintenance' | 'schedule' | 'plan-review' | 'team-board'
+
+/** A bounded read-authority operation: the Supervisor owns the concrete wire values. */
+export type ProcessReadAuthorityRequest =
+  | { readonly op: 'read' }
+  | { readonly op: 'activity'; readonly window: 'warm' | 'cold' }
+  | { readonly op: 'workspaces'; readonly window: 'peer-baseline' | 'stream' | 'recovering' }
+  | { readonly op: 'answer-continued'; readonly sessionId: string; readonly callId: string }
 
 export interface StartProcessHostOptions {
   scenario?: ProcessHostScenario
@@ -194,7 +201,9 @@ export interface SplitProcessClientExitFacts {
   ownerExit?: { code: number | null; signal: string | null } | null
 }
 
-export type ProcessClientTerminalMode = 'normal' | 'sigint' | 'hmr-failure' | 'terminal-owner-loss' | 'business-kill'
+export type ProcessClientTerminalMode =
+  | 'normal' | 'sigint' | 'hmr-failure' | 'terminal-owner-loss' | 'business-kill'
+  | 'business-hangup' | 'host-replacement-refusal'
 export type ProcessStartupStopStage = 'domain' | 'surface' | 'loader-gate' | 'before-start'
 export type ProcessClientExpectedFailure = 'client-domain-module-absent'
 
@@ -264,6 +273,10 @@ export interface SplitProcessClient {
   readonly terminalKind: ProcessClientTerminalMode
   /** Send SIGKILL only to the exact live business PID of a business-kill Client. */
   killBusiness(): Promise<{ pid: number; birth: string; signal: 'SIGKILL' }>
+  /** Send SIGHUP only to the exact live business PID of a business-hangup Client. */
+  hangupBusiness(): Promise<{ pid: number; birth: string; signal: 'SIGHUP' }>
+  /** Dispatch one bounded, typed read-authority operation; returns its correlation nonce. */
+  readAuthority(request: ProcessReadAuthorityRequest): Promise<{ nonce: string; op: string }>
   /** Release the Supervisor-allocated serializer hold exactly once. */
   releaseSerializeHold(): void
 }
@@ -495,6 +508,7 @@ export interface StartProcessClientOptions {
   startupStop?: ProcessStartupStopStage
   expectedFailure?: ProcessClientExpectedFailure
   privateRpcProof?: true
+  readAuthorityProof?: true
   holdSerialize?: true
   invalidWorkspacePath?: true
   recoverFromHostId?: string
@@ -919,6 +933,12 @@ class ProcessClient implements SplitProcessClient {
     }
   }
 
+  async hangupBusiness(): Promise<{ pid: number; birth: string; signal: 'SIGHUP' }> {
+    return await this.#scene.clientRequest(this.clientId, 'SIGNAL_PROCESS_CLIENT', { signal: 'SIGHUP' }) as {
+      pid: number; birth: string; signal: 'SIGHUP'
+    }
+  }
+
   async loseTerminalOwner(): Promise<SplitProcessClientTerminal> {
     const payload = await this.#scene.request('PROCESS_CLIENT_TERMINAL_LOSS', { clientId: this.clientId }, 120_000)
     this.#closed = true
@@ -931,6 +951,12 @@ class ProcessClient implements SplitProcessClient {
       ownerExit: payload.ownerExit ?? null,
     }
     return payload.terminal as SplitProcessClientTerminal
+  }
+
+  async readAuthority(request: ProcessReadAuthorityRequest): Promise<{ nonce: string; op: string }> {
+    return await this.#scene.clientRequest(this.clientId, 'PROCESS_CLIENT_READ_AUTHORITY', { request }) as {
+      nonce: string; op: string
+    }
   }
 
   releaseHmrHold(): void {
@@ -1671,6 +1697,7 @@ class ProcessScene implements SplitProcessScene {
       ...(options.startupStop === undefined ? {} : { startupStop: options.startupStop }),
       ...(options.expectedFailure === undefined ? {} : { expectedFailure: options.expectedFailure }),
       ...(options.privateRpcProof === undefined ? {} : { privateRpcProof: options.privateRpcProof }),
+      ...(options.readAuthorityProof === undefined ? {} : { readAuthorityProof: options.readAuthorityProof }),
       ...(options.holdSerialize === undefined ? {} : { holdSerialize: options.holdSerialize }),
       ...(options.invalidWorkspacePath === undefined ? {} : { invalidWorkspacePath: options.invalidWorkspacePath }),
       ...(options.recoverFromHostId === undefined ? {} : { recoverFromHostId: options.recoverFromHostId }),
@@ -2196,6 +2223,20 @@ class ProcessScene implements SplitProcessScene {
     const errors: Error[] = []
     for (const client of [...this.#clients].reverse()) {
       if (client.closed) continue
+      if (client.terminalKind === 'business-hangup' || client.terminalKind === 'host-replacement-refusal') {
+        // These modes have no normal `/exit` path: only their real terminal may
+        // be closed with the declared contract. An unqualified one stays owned
+        // by the Supervisor's FINALIZE compensation.
+        const state = await client.state().catch(() => undefined)
+        if (state?.exited === true) {
+          try {
+            await client.close()
+          } catch (error) {
+            errors.push(asError(error))
+          }
+        }
+        continue
+      }
       try {
         await client.exitGracefully()
       } catch (error) {

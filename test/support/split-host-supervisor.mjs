@@ -202,15 +202,20 @@ const PROCESS_PTY_OWNER = fileURLToPath(new URL('./split-process-pty-owner.mjs',
 const PROCESS_HOST_SCENARIOS = new Set([
   'long-turn', 'job', 'question', 'approval-allow', 'approval-reject', 'foreground-tool',
   'child', 'unowned-job', 'goal-armed', 'goal-round', 'maintenance', 'schedule',
+  'plan-review', 'team-board',
 ])
 const PROCESS_HOST_CRASH_SIGNALS = new Set(['SIGHUP', 'SIGKILL'])
 const PROCESS_CLIENT_HMR_MODES = new Set(['replace', 'mount-failure', 'hold'])
-const PROCESS_CLIENT_TERMINAL_MODES = new Set(['normal', 'sigint', 'hmr-failure', 'terminal-owner-loss', 'business-kill'])
-const PROCESS_CLIENT_SIGNALS = new Set(['SIGUSR1', 'SIGUSR2', 'SIGINT', 'SIGTERM', 'SIGKILL'])
+const PROCESS_CLIENT_TERMINAL_MODES = new Set([
+  'normal', 'sigint', 'hmr-failure', 'terminal-owner-loss', 'business-kill',
+  'business-hangup', 'host-replacement-refusal',
+])
+const PROCESS_CLIENT_SIGNALS = new Set(['SIGUSR1', 'SIGUSR2', 'SIGINT', 'SIGTERM', 'SIGKILL', 'SIGHUP'])
 const PROCESS_STARTUP_STOP_STAGES = new Set(['domain', 'surface', 'loader-gate', 'before-start'])
 const PROCESS_PEER_MODES = new Set(['peer-stale-question', 'peer-stale-approval'])
 let EXPECTED_PACKAGE_NAME
 let hostStatusSequence = 0
+let processReadAuthoritySequence = 0
 /** The ONE native managed-service bridge state, or undefined for default/pilot scenes. */
 let nativeRuntime
 /** The one-shot native cleanup of this run (idempotent across FINALIZE/disconnect). */
@@ -1845,11 +1850,16 @@ function publicProcessClientFacts(handle) {
     startupStop: handle.startupStop ?? null,
     expectedFailure: handle.expectedFailure ?? null,
     privateRpcProof: handle.privateRpcProof === true,
+    readAuthorityProof: handle.readAuthorityProof === true,
     holdSerialize: handle.holdSerialize === true,
     serializeBarrierPath: handle.serializeBarrierPath ?? null,
     invalidWorkspacePath: handle.invalidWorkspacePath === true,
     workspaceIntentPath: handle.workspaceIntentPath ?? null,
     businessKillSent: handle.businessKillSent === true,
+    businessHangupSent: handle.businessHangupSent === true,
+    replacementRefusalFacts: handle.replacementRefusalFacts ?? null,
+    readAuthorityNonce: handle.readAuthorityNonce ?? null,
+    readAuthorityOp: handle.readAuthorityOp ?? null,
     ownerPid: handle.owner?.pid ?? null,
     ownerBirth: handle.owner?.birth ?? null,
     ownerExit: handle.owner?.exit ?? null,
@@ -5600,6 +5610,81 @@ async function waitForProcessIdentityTerminal(identity, reason, timeoutMs = 10_0
   }
 }
 
+function assertHostReplacementRefusal(handle, reason) {
+  let facts = handle.replacementRefusalFacts
+  if (facts === undefined) {
+    // CLOSE-time observation: the successor must be a live authenticated
+    // instance in the same scope. FINALIZE later validates the SAME recorded
+    // facts; it must not demand that the successor still be live after the
+    // test stopped it through its own owner.
+    const predecessor = hosts.find(value => value.hostId === handle.hostId)
+    const successor = activeHost
+    if (predecessor === undefined || successor === undefined || predecessor === successor) {
+      throw new Error(`${reason}: ${handle.label} has no recorded predecessor and live successor Host pair`)
+    }
+    if (predecessor.finished !== true || predecessor.terminal?.outcome !== 'business-crash'
+      || predecessor.terminal?.signal !== 'SIGKILL') {
+      throw new Error(`${reason}: the predecessor Host was not finished as a SIGKILL business crash`)
+    }
+    if (successor.exited || successor.ready === undefined || successor.hostId === predecessor.hostId
+      || successor.ready.localHost?.instanceId === predecessor.ready?.localHost?.instanceId) {
+      throw new Error(`${reason}: the successor Host is not a different authenticated live instance`)
+    }
+    assertHostIdentityMatchesKernel(successor.ready.localHost, successor.child.pid, `${reason} successor Host`)
+    if (!pidAlive(successor.child.pid) || !processGroupAlive(hostPgid(successor))) {
+      throw new Error(`${reason}: the successor Host child/group is not live`)
+    }
+    if (successor.ready.localHost?.scopeId !== predecessor.ready?.localHost?.scopeId) {
+      throw new Error(`${reason}: the successor Host is not in the same scope`)
+    }
+    facts = {
+      predecessorHostId: predecessor.hostId,
+      predecessorInstanceId: predecessor.ready?.localHost?.instanceId,
+      predecessorTerminal: predecessor.terminal,
+      successorHostId: successor.hostId,
+      successorInstanceId: successor.ready.localHost.instanceId,
+      successorScopeId: successor.ready.localHost.scopeId,
+    }
+    handle.replacementRefusalFacts = facts
+  }
+  const records = readOfficialClientRecords(handle.recordFile, handle.label)
+  const failures = records.filter(record => record?.m4a0 === 'failure' && record.code === 'HOST_IDENTITY_MISMATCH')
+  if (failures.length !== 1) throw new Error(`${reason}: ${handle.label} does not have exactly one HOST_IDENTITY_MISMATCH failure`)
+  const failure = failures[0]
+  const cleanups = records.filter(record => record?.m4a0 === 'shutdown-stage' && record.phase === 'cleanup-complete')
+  // A replacement refusal is a truthful Client failure: cleanup must settle
+  // with zero errors, but the cleanup record retains failure=true.
+  if (cleanups.length !== 1 || cleanups[0].failure !== true || cleanups[0].errors !== 0) {
+    throw new Error(`${reason}: ${handle.label} has no unique clean shutdown cleanup-complete record after the refusal`)
+  }
+  if (records.some(record => record?.m4a0 === 'cleanup-failure')) {
+    throw new Error(`${reason}: ${handle.label} recorded a cleanup failure`)
+  }
+  const closedRecords = records.filter(record => record?.m4b2s === 'client-closed')
+  if (closedRecords.length !== 1) throw new Error(`${reason}: ${handle.label} has no unique final owner inventory`)
+  const closed = closedRecords[0]
+  if (closed.sessionOpen !== false || closed.surfaceMounted !== false || closed.openSessionId !== undefined) {
+    throw new Error(`${reason}: ${handle.label} final inventory still owns a Session or surface`)
+  }
+  for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+    if (closed.owners?.[owner] !== 0) {
+      throw new Error(`${reason}: ${handle.label} left ${owner} owner alive after the refusal`)
+    }
+  }
+  const failureIndex = records.indexOf(failure)
+  if (records.slice(failureIndex + 1).some(record => record?.m4b2s === 'surface-status'
+    && (record.sessionOpen === true || record.surfaceMounted === true))) {
+    throw new Error(`${reason}: ${handle.label} kept a Session or surface mounted after the refusal`)
+  }
+  if (records.some(record => record?.host?.instanceId === facts.successorInstanceId)) {
+    throw new Error(`${reason}: ${handle.label} recorded the successor Host identity`)
+  }
+  if (records.some(record => record?.m4b2s === 'surface-status' && record.transport === 'connected'
+    && record.generationId !== undefined && record.host?.instanceId === facts.successorInstanceId)) {
+    throw new Error(`${reason}: ${handle.label} adopted a generation of the successor Host`)
+  }
+}
+
 /**
  * The common terminal-resource proof of one process Client: its exact native
  * session is gone and every captured shell/business identity is gone or a
@@ -5633,6 +5718,24 @@ function assertProcessClientTerminalContract(handle, reason) {
     if (!nativeSignal && !wrapperExit) {
       throw new Error(`${reason}: ${handle.label} terminal ${JSON.stringify(terminal)} is neither native SIGKILL nor raw wrapper exit 137`)
     }
+    return
+  }
+  if (handle.terminalMode === 'business-hangup') {
+    if (handle.businessHangupSent !== true) {
+      throw new Error(`${reason}: ${handle.label} has no successful business SIGHUP dispatch`)
+    }
+    const nativeSignal = terminal.code === null && terminal.signal === 'SIGHUP'
+    const wrapperExit = terminal.code === 129 && terminal.signal === null
+    if (!nativeSignal && !wrapperExit) {
+      throw new Error(`${reason}: ${handle.label} terminal ${JSON.stringify(terminal)} is neither native SIGHUP nor raw wrapper exit 129`)
+    }
+    return
+  }
+  if (handle.terminalMode === 'host-replacement-refusal') {
+    if (terminal.code !== 1 || terminal.signal !== null) {
+      throw new Error(`${reason}: ${handle.label} refusal terminal ${JSON.stringify(terminal)} is not code 1 with no signal`)
+    }
+    assertHostReplacementRefusal(handle, reason)
     return
   }
   const expected = handle.terminalMode === 'sigint'
@@ -6096,6 +6199,7 @@ async function handleStartProcessClient(message) {
   const startupStop = message.startupStop
   const expectedFailure = message.expectedFailure
   const privateRpcProof = message.privateRpcProof === true
+  const readAuthorityProof = message.readAuthorityProof === true
   const holdSerialize = message.holdSerialize === true
   const invalidWorkspacePath = message.invalidWorkspacePath === true
   const recoverFromHostId = message.recoverFromHostId
@@ -6118,9 +6222,12 @@ async function handleStartProcessClient(message) {
     && (hmr !== undefined || dropPromptAck || terminalMode !== 'normal' || recoverFromHostId !== undefined || attachRecoveredHostId !== undefined)) {
     throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT pre-ready failure/stop excludes HMR, ACK drop, terminal modes and recovery')
   }
+  if (message.readAuthorityProof !== undefined && message.readAuthorityProof !== true) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT readAuthorityProof may only be true when set')
+  }
   if ((startupStop !== undefined || expectedFailure !== undefined)
-    && (privateRpcProof || holdSerialize || invalidWorkspacePath)) {
-    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT pre-ready failure/stop excludes serializer and invalid-workspace probes')
+    && (privateRpcProof || readAuthorityProof || holdSerialize || invalidWorkspacePath)) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT pre-ready failure/stop excludes serializer and read probes')
   }
   if (holdSerialize && invalidWorkspacePath) {
     throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT cannot hold serialization and probe an invalid Workspace at once')
@@ -6151,16 +6258,27 @@ async function handleStartProcessClient(message) {
   }
   if (terminalMode === 'business-kill'
     && (hmr !== undefined || dropPromptAck || startupStop !== undefined || expectedFailure !== undefined
-      || privateRpcProof || holdSerialize || invalidWorkspacePath)) {
+      || privateRpcProof || readAuthorityProof || holdSerialize || invalidWorkspacePath)) {
     throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT business-kill excludes every other fault/probe mode')
   }
-  if ((privateRpcProof || holdSerialize || invalidWorkspacePath)
+  if ((terminalMode === 'business-hangup' || terminalMode === 'host-replacement-refusal')
+    && (hmr !== undefined || dropPromptAck || startupStop !== undefined || expectedFailure !== undefined
+      || privateRpcProof || readAuthorityProof || holdSerialize || invalidWorkspacePath)) {
+    throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT ${terminalMode} excludes every other fault/probe mode`)
+  }
+  if ((privateRpcProof || readAuthorityProof || holdSerialize || invalidWorkspacePath)
     && (hmr !== undefined || dropPromptAck || terminalMode !== 'normal'
       || startupStop !== undefined || expectedFailure !== undefined)) {
-    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT private/serializer/Workspace probes require the ordinary ready terminal path')
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT private/read/serializer/Workspace probes require the ordinary ready terminal path')
   }
-  if (privateRpcProof && holdSerialize) {
-    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT private RPC proof and serializer hold are mutually exclusive')
+  if ((privateRpcProof ? 1 : 0) + (readAuthorityProof ? 1 : 0) + (holdSerialize ? 1 : 0) > 1) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT private RPC, read authority and serializer probes are mutually exclusive')
+  }
+  if (readAuthorityProof && invalidWorkspacePath) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT read authority excludes invalid Workspace probes')
+  }
+  if (readAuthorityProof && (recoverFromHostId !== undefined || attachRecoveredHostId !== undefined)) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT read authority excludes recovery and attach')
   }
   if (hmr === 'hold' && terminalMode !== 'normal') {
     throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT HMR hold requires the normal terminal contract')
@@ -6245,6 +6363,9 @@ async function handleStartProcessClient(message) {
     if (host.ready.localHost?.scopeId !== processScope?.scopeId) {
       throw new Error('START_PROCESS_CLIENT: the ready Host is not this Scene scope')
     }
+    if (terminalMode === 'host-replacement-refusal' && host.crashSignal !== 'SIGKILL') {
+      throw new Error('START_PROCESS_CLIENT: host-replacement-refusal requires a declared SIGKILL predecessor')
+    }
   }
   const domainAbsence = expectedFailure === 'client-domain-module-absent'
   if (domainAbsence && processInstallationMutation?.fault !== expectedFailure) {
@@ -6271,6 +6392,7 @@ async function handleStartProcessClient(message) {
   const startupBarrier = startupStop === undefined ? undefined : join(clientDir, `startup-${startupStop}.barrier`)
   const serializeBarrierPath = holdSerialize ? join(clientDir, 'serialize-hold.barrier') : undefined
   const workspaceIntentPath = invalidWorkspacePath ? join(clientDir, 'invalid-workspace') : undefined
+  const readAuthorityRequestPath = readAuthorityProof ? join(clientDir, 'read-authority-request.json') : undefined
   for (const barrier of [holdBarrier, startupBarrier, serializeBarrierPath, workspaceIntentPath]) {
     if (barrier !== undefined && existsSync(barrier)) {
       throw new Error(`START_PROCESS_CLIENT: the Supervisor-allocated barrier already exists: ${barrier}`)
@@ -6301,11 +6423,17 @@ async function handleStartProcessClient(message) {
     startupBarrier,
     expectedFailure,
     privateRpcProof,
+    readAuthorityProof,
+    readAuthorityRequestPath,
+    readAuthorityNonce: undefined,
+    readAuthorityOp: undefined,
     holdSerialize,
     serializeBarrierPath,
     invalidWorkspacePath,
     workspaceIntentPath,
     businessKillSent: false,
+    businessHangupSent: false,
+    replacementRefusalFacts: undefined,
     holdBarrier,
     recoverFromHostId,
     attachRecoveredHostId,
@@ -6419,6 +6547,7 @@ async function handleStartProcessClient(message) {
     ...(startupStop === 'loader-gate' ? { SPLIT_PROCESS_CLIENT_HOLD_STARTUP_GATE: startupBarrier } : {}),
     ...(startupStop === 'before-start' ? { SPLIT_PROCESS_CLIENT_HOLD_BEFORE_START: startupBarrier } : {}),
     ...(privateRpcProof ? { SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF: '1' } : {}),
+    ...(readAuthorityProof ? { SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: readAuthorityRequestPath } : {}),
     ...(holdSerialize ? { SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE: serializeBarrierPath } : {}),
     ...(invalidWorkspacePath ? { SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH: workspaceIntentPath } : {}),
   }
@@ -6435,9 +6564,9 @@ async function handleStartProcessClient(message) {
       opened = { session: ownerRun.sessionId, shell_pid: ownerRun.shellPid }
     } else {
       opened = await withProcessNativeOperation('client-run', clientId, () => handle.terminal.run(
-        terminalMode === 'business-kill' ? '/bin/sh' : process.execPath,
-        terminalMode === 'business-kill'
-          ? ['-c', '"$@"; status=$?; exit "$status"', 'split-process-business-kill', process.execPath, facts.entries.client]
+        terminalMode === 'business-kill' || terminalMode === 'business-hangup' ? '/bin/sh' : process.execPath,
+        terminalMode === 'business-kill' || terminalMode === 'business-hangup'
+          ? ['-c', '"$@"; status=$?; exit "$status"', `split-process-${terminalMode}`, process.execPath, facts.entries.client]
           : [facts.entries.client],
         { cwd, cols, rows, waitReady: false, env },
       ))
@@ -6719,6 +6848,7 @@ async function handleStartProcessClient(message) {
     startupStop: handle.startupStop ?? null,
     expectedFailure: handle.expectedFailure ?? null,
     privateRpcProof: handle.privateRpcProof === true,
+    readAuthorityProof: handle.readAuthorityProof === true,
     holdSerialize: handle.holdSerialize === true,
     serializeBarrierPath: handle.serializeBarrierPath ?? null,
     invalidWorkspacePath: handle.invalidWorkspacePath === true,
@@ -6836,8 +6966,8 @@ async function handleProcessClientState(message) {
   }
   const state = await withProcessNativeOperation('client-state', handle.clientId, () => handle.terminal.state())
   const openSessions = new Set(await openTuiSessions())
-  const signalOnlyExit = handle.terminalMode === 'business-kill'
-    && state.exited === null && state.exit_signal === 'SIGKILL'
+  const signalOnlyExit = handle.terminalMode === 'business-kill' && state.exited === null && state.exit_signal === 'SIGKILL'
+    || handle.terminalMode === 'business-hangup' && state.exited === null && state.exit_signal === 'SIGHUP'
   if ((state.exited !== null || signalOnlyExit) && !handle.exited) {
     handle.exited = true
     handle.exitResult = { code: state.exited, signal: state.exit_signal ?? null }
@@ -6864,6 +6994,131 @@ async function handleProcessClientState(message) {
   }
 }
 
+const READ_AUTHORITY_TERMINALS = {
+  read: ['facts', 'failed'],
+  activity: ['activity-result', 'failed'],
+  workspaces: ['workspaces-ended', 'workspaces-failed', 'failed'],
+  'answer-continued': ['continued-answer', 'failed'],
+}
+const READ_AUTHORITY_WINDOWS = {
+  activity: { warm: 3_000, cold: 4_000 },
+  workspaces: {
+    'peer-baseline': { mode: 'single-generation', windowMs: 15_000, maxFrames: 1 },
+    stream: { mode: 'single-generation', windowMs: 90_000, maxFrames: 32 },
+    recovering: { mode: 'recovering', windowMs: 120_000, maxFrames: 64 },
+  },
+}
+
+function assertPriorReadAuthoritySettled(handle) {
+  if (handle.readAuthorityNonce === undefined) return
+  const terminal = READ_AUTHORITY_TERMINALS[handle.readAuthorityOp]
+  const records = readOfficialClientRecords(handle.recordFile, handle.label)
+  const settled = records.some(record => record?.m4b2s === 'qualification'
+    && record.op === 'read-authority-proof' && record.nonce === handle.readAuthorityNonce
+    && terminal.includes(record.phase))
+  if (!settled) {
+    throw new Error(`PROCESS_CLIENT_READ_AUTHORITY: ${handle.label} still has an unsettled ${handle.readAuthorityOp} request`)
+  }
+}
+
+function assertObservedContinuedPair(handle, sessionId, callId) {
+  const records = readOfficialClientRecords(handle.recordFile, handle.label)
+  const observed = records.some(record => record?.m4b2s === 'qualification'
+    && record.op === 'read-authority-proof' && record.phase === 'facts'
+    && Array.isArray(record.facts) && record.facts.some(fact => fact?.sessionId === sessionId
+      && Array.isArray(fact.continuedQuestionCallIds) && fact.continuedQuestionCallIds.includes(callId)))
+  if (!observed) {
+    throw new Error('INPUT_UNQUALIFIED: answer-continued requires a Session/callId already observed by this Client')
+  }
+}
+
+/**
+ * The ONE declared read-authority input: typed, bounded values become a
+ * private request file in this Client's Supervisor-owned directory, then one
+ * SIGUSR2 reaches the exact live business PID. No Worker path, env, PID or
+ * generic RPC is accepted.
+ */
+function handleProcessClientReadAuthority(message) {
+  requireProcessScene('PROCESS_CLIENT_READ_AUTHORITY')
+  assertLifecycleOpen('PROCESS_CLIENT_READ_AUTHORITY')
+  const handle = processClientById(message.clientId, 'PROCESS_CLIENT_READ_AUTHORITY')
+  if (handle.terminalMode !== 'normal' || handle.readAuthorityRequestPath === undefined || handle.closed) {
+    throw new Error('PROCESS_CLIENT_READ_AUTHORITY: the Client does not declare the ordinary read-authority contract')
+  }
+  const request = message.request
+  if (request === null || typeof request !== 'object' || Array.isArray(request)) {
+    throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_READ_AUTHORITY requires a typed request object')
+  }
+  const op = request.op
+  if (typeof op !== 'string' || !Object.hasOwn(READ_AUTHORITY_TERMINALS, op)) {
+    throw new Error(`INPUT_UNQUALIFIED: PROCESS_CLIENT_READ_AUTHORITY unknown op ${JSON.stringify(op)}`)
+  }
+  const allowedFields = {
+    read: ['op'],
+    activity: ['op', 'window'],
+    workspaces: ['op', 'window'],
+    'answer-continued': ['op', 'sessionId', 'callId'],
+  }
+  const unexpected = Object.keys(request).filter(key => !allowedFields[op].includes(key))
+  if (unexpected.length > 0) {
+    throw new Error(`INPUT_UNQUALIFIED: PROCESS_CLIENT_READ_AUTHORITY ${op} rejects fields ${unexpected.join(', ')}`)
+  }
+  let payload
+  if (op === 'read') {
+    payload = { op }
+  } else if (op === 'activity') {
+    if (!Object.hasOwn(READ_AUTHORITY_WINDOWS.activity, request.window)) {
+      throw new Error('INPUT_UNQUALIFIED: activity window must be warm or cold')
+    }
+    const windowMs = READ_AUTHORITY_WINDOWS.activity[request.window]
+    payload = { op, windowMs }
+  } else if (op === 'workspaces') {
+    if (!Object.hasOwn(READ_AUTHORITY_WINDOWS.workspaces, request.window)) {
+      throw new Error('INPUT_UNQUALIFIED: workspaces window is not declared')
+    }
+    const window = READ_AUTHORITY_WINDOWS.workspaces[request.window]
+    payload = { op, ...window }
+  } else {
+    const { sessionId, callId } = request
+    if (typeof sessionId !== 'string' || sessionId === '' || sessionId.length > 200
+      || typeof callId !== 'string' || callId === '' || callId.length > 200) {
+      throw new Error('INPUT_UNQUALIFIED: answer-continued requires a bounded sessionId and callId')
+    }
+    assertObservedContinuedPair(handle, sessionId, callId)
+    payload = {
+      op,
+      sessionId,
+      callId,
+      answers: { answers: [{ id: 'c1-question', selected: ['Proceed'] }] },
+    }
+  }
+  assertPriorReadAuthoritySettled(handle)
+  const business = handle.businessIdentities[0]
+  assertProcessClientBusinessLive(handle, business, 'PROCESS_CLIENT_READ_AUTHORITY')
+  assertProcessClientActiveHost(handle, 'PROCESS_CLIENT_READ_AUTHORITY')
+  if (handle.exited || processNativeOperations.size > 0) {
+    throw new Error('PROCESS_CLIENT_READ_AUTHORITY: the Client is not in its live idle lifecycle')
+  }
+  const nonce = `${handle.clientId}-read-${String(++processReadAuthoritySequence)}`
+  writeFileSync(handle.readAuthorityRequestPath, JSON.stringify({ nonce, ...payload }), { mode: 0o600 })
+  try {
+    process.kill(business.identity.pid, 'SIGUSR2')
+  } catch (error) {
+    throw new Error(`PROCESS_CLIENT_READ_AUTHORITY: the read probe dispatch failed (${String(error?.code ?? 'unknown')})`)
+  }
+  handle.readAuthorityNonce = nonce
+  handle.readAuthorityOp = op
+  appendNote('process-client-read-authority-dispatched', {
+    clientId: handle.clientId,
+    nonce,
+    op,
+    pid: business.identity.pid,
+    birth: business.birth,
+  })
+  writeReceipt({})
+  return { clientId: handle.clientId, nonce, op }
+}
+
 async function handleSignalProcessClient(message) {
   requireProcessScene('SIGNAL_PROCESS_CLIENT')
   assertLifecycleOpen('SIGNAL_PROCESS_CLIENT')
@@ -6882,6 +7137,9 @@ async function handleSignalProcessClient(message) {
   if (signal === 'SIGKILL') {
     if (handle.terminalMode !== 'business-kill') throw new Error('SIGNAL_PROCESS_CLIENT: SIGKILL requires the declared business-kill terminal')
     if (handle.businessKillSent === true) throw new Error('SIGNAL_PROCESS_CLIENT: the business SIGKILL was already sent')
+  } else if (signal === 'SIGHUP') {
+    if (handle.terminalMode !== 'business-hangup') throw new Error('SIGNAL_PROCESS_CLIENT: SIGHUP requires the declared business-hangup terminal')
+    if (handle.businessHangupSent === true) throw new Error('SIGNAL_PROCESS_CLIENT: the business SIGHUP was already sent')
   } else if (signal === 'SIGUSR1') {
     if (handle.terminalMode !== 'normal') throw new Error('SIGNAL_PROCESS_CLIENT: SIGUSR1 requires the ordinary terminal contract')
     if (handle.signalIntents.includes('SIGUSR1')) throw new Error('SIGNAL_PROCESS_CLIENT: SIGUSR1 was already sent')
@@ -6901,28 +7159,30 @@ async function handleSignalProcessClient(message) {
     if (handle.signalIntents.includes('SIGTERM')) throw new Error('SIGNAL_PROCESS_CLIENT: SIGTERM was already sent')
   }
   const business = handle.businessIdentities[0]
-  if (signal === 'SIGKILL') {
+  if (signal === 'SIGKILL' || signal === 'SIGHUP') {
     // This is the destructive business boundary: every proof is synchronous and
-    // the final exact-PID kill has no await between its fence and signal effect.
-    assertProcessClientBusinessLive(handle, business, 'SIGNAL_PROCESS_CLIENT business-kill')
-    const host = assertProcessClientActiveHost(handle, 'SIGNAL_PROCESS_CLIENT business-kill')
+    // the final exact-PID signal has no await between its fence and effect.
+    assertProcessClientBusinessLive(handle, business, `SIGNAL_PROCESS_CLIENT business ${signal}`)
+    const host = assertProcessClientActiveHost(handle, `SIGNAL_PROCESS_CLIENT business ${signal}`)
     if (host.ready.localHost.hostPid !== handle.readyHost.hostPid
       || host.ready.localHost.instanceId !== handle.readyHost.instanceId) {
-      throw new Error('SIGNAL_PROCESS_CLIENT: the business-kill Host identity changed')
+      throw new Error(`SIGNAL_PROCESS_CLIENT: the business ${signal} Host identity changed`)
     }
     if (handle.exited || processNativeOperations.size > 0) {
-      throw new Error('SIGNAL_PROCESS_CLIENT: the business-kill Client is not in its live idle lifecycle')
+      throw new Error(`SIGNAL_PROCESS_CLIENT: the business ${signal} Client is not in its live idle lifecycle`)
     }
     try {
-      process.kill(business.identity.pid, 'SIGKILL')
+      process.kill(business.identity.pid, signal)
     } catch (error) {
-      throw new Error(`SIGNAL_PROCESS_CLIENT: business SIGKILL failed (${String(error?.code ?? 'unknown')})`)
+      throw new Error(`SIGNAL_PROCESS_CLIENT: business ${signal} failed (${String(error?.code ?? 'unknown')})`)
     }
-    handle.businessKillSent = true
+    if (signal === 'SIGKILL') handle.businessKillSent = true
+    else handle.businessHangupSent = true
     handle.signalIntents.push(signal)
-    appendNote('process-client-business-kill-sent', {
+    appendNote(signal === 'SIGKILL' ? 'process-client-business-kill-sent' : 'process-client-business-hangup-sent', {
       clientId: handle.clientId, pid: business.identity.pid, birth: business.birth,
       hostPid: host.child.pid, hostInstanceId: host.ready.localHost.instanceId,
+      signal,
     })
     writeReceipt({})
     syncProcessClientsReceipt()
@@ -7103,15 +7363,22 @@ async function handleCloseProcessClient(message) {
     let failure
     let exit
     try {
+      const admittedSignal = handle.terminalMode === 'business-kill' ? 'SIGKILL'
+        : handle.terminalMode === 'business-hangup' ? 'SIGHUP' : undefined
       exit = await withProcessNativeOperation('client-close', handle.clientId,
         () => waitForTerminalExit(handle.terminal, handle.label, 120_000,
-          handle.terminalMode === 'business-kill' ? { allowSignalOnly: true } : {}))
+          admittedSignal === undefined ? {} : { allowSignalOnly: admittedSignal }))
       if (handle.terminalMode === 'business-kill') {
         if (!((exit.code === null && exit.signal === 'SIGKILL') || (exit.code === 137 && exit.signal === null))) {
           throw new Error(`CLOSE_PROCESS_CLIENT: ${handle.label} business-kill exit ${JSON.stringify(exit)} is not native SIGKILL or raw wrapper 137`)
         }
+      } else if (handle.terminalMode === 'business-hangup') {
+        if (!((exit.code === null && exit.signal === 'SIGHUP') || (exit.code === 129 && exit.signal === null))) {
+          throw new Error(`CLOSE_PROCESS_CLIENT: ${handle.label} business-hangup exit ${JSON.stringify(exit)} is not native SIGHUP or raw wrapper 129`)
+        }
       } else {
-        const expected = handle.terminalMode === 'sigint' ? 130 : handle.terminalMode === 'hmr-failure' ? 1 : 0
+        const expected = handle.terminalMode === 'sigint' ? 130
+          : handle.terminalMode === 'hmr-failure' || handle.terminalMode === 'host-replacement-refusal' ? 1 : 0
         if (exit.code !== expected || exit.signal !== null) {
           throw new Error(`CLOSE_PROCESS_CLIENT: ${handle.label} exited ${JSON.stringify(exit)}; the declared ${handle.terminalMode} path requires code ${String(expected)} and no signal`)
         }
@@ -7124,8 +7391,8 @@ async function handleCloseProcessClient(message) {
       }
       handle.verifiedTerminal = { kind: 'native', code: exit.code, signal: exit.signal }
       assertProcessClientTerminalContract(handle, 'CLOSE_PROCESS_CLIENT')
-      if (handle.terminalMode === 'business-kill') {
-        assertProcessClientActiveHost(handle, 'CLOSE_PROCESS_CLIENT business-kill')
+      if (handle.terminalMode === 'business-kill' || handle.terminalMode === 'business-hangup') {
+        assertProcessClientActiveHost(handle, `CLOSE_PROCESS_CLIENT ${handle.terminalMode}`)
       }
     } catch (error) {
       failure = error
@@ -13625,6 +13892,11 @@ async function dispatch(message) {
       }
       case 'START_PROCESS_CLIENT': {
         const payload = await handleStartProcessClient(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'PROCESS_CLIENT_READ_AUTHORITY': {
+        const payload = handleProcessClientReadAuthority(message)
         if (requestId !== undefined) reply(requestId, payload)
         break
       }
