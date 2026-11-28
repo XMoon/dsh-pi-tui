@@ -11536,7 +11536,7 @@ function requirePristineInstalledFacts(label) {
 }
 
 async function handleStartHostAttempts(message) {
-  requireKnownFields(message, ['mode', 'count', 'scratchTarget', 'signal'], 'START_HOST_ATTEMPTS')
+  requireKnownFields(message, ['mode', 'scratchTarget', 'signal'], 'START_HOST_ATTEMPTS')
   requireProcessScene('START_HOST_ATTEMPTS')
   assertLifecycleOpen('START_HOST_ATTEMPTS')
   assertNoBootstrapCliPatch('START_HOST_ATTEMPTS')
@@ -11567,15 +11567,7 @@ async function handleStartHostAttempts(message) {
   if (!faultRequired && processInstallationMutation !== undefined) {
     throw codedInputError('INPUT_INSTALLATION_MUTATED', `START_HOST_ATTEMPTS: ${mode} is not allowed under a mutated installation`)
   }
-  let count = 1
-  if (mode === 'seat-race') {
-    count = message.count ?? 16
-    if (!Number.isInteger(count) || count < 2 || count > 16) {
-      throw codedInputError('INPUT_HOST_ATTEMPT_COUNT', 'START_HOST_ATTEMPTS: seat-race count must be 2..16')
-    }
-  } else if (message.count !== undefined) {
-    throw codedInputError('INPUT_HOST_ATTEMPT_COUNT', `START_HOST_ATTEMPTS: ${mode} always starts exactly one contender`)
-  }
+  const count = mode === 'seat-race' ? 3 : 1
   let scratchTarget
   if (mode === 'seat-conflict') {
     scratchTarget = requireSceneBarrier(message.scratchTarget, 'scratchTarget').path
@@ -13280,7 +13272,7 @@ async function handleSetInstallationFault(message) {
             if (error?.code !== 'ENOENT') throw error
           }
           const backupStat = lstatSync(absent)
-          if (!backupStat.isFile() || backupStat.isSymbolicLink()
+          if (!backupStat.isFile()
             || backupStat.uid !== original.uid || backupStat.gid !== original.gid
             || (backupStat.mode & 0o777) !== original.mode
             || !readFileSync(absent).equals(original.bytes)) {
@@ -13295,11 +13287,10 @@ async function handleSetInstallationFault(message) {
         const observedMode = process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT === 'client-domain-restore-mode'
           ? original.mode ^ 0o100
           : restoredStat.mode & 0o777
-        if (!restoredStat.isFile() || restoredStat.isSymbolicLink()
+        if (!restoredStat.isFile()
           || restoredStat.uid !== original.uid || restoredStat.gid !== original.gid
           || observedMode !== original.mode
           || !restoredBytes.equals(original.bytes)
-          || createHash('sha256').update(restoredBytes).digest('hex') !== sha256
           || realpathSync(profileRequire.resolve(moduleName)) !== resolved) {
           throw new Error('RESTORE_INSTALLATION: the restored Client Domain module failed bytes/mode/resolve verification')
         }

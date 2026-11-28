@@ -8,6 +8,7 @@ import { expect, test } from 'vitest'
 import { readOfficialClientRecords } from '../../../support/split-process-client.ts'
 import {
   createSplitProcessScene,
+  keepAndDisconnect,
   type SessionEvent,
   type SplitProcessClient,
   type SplitProcessHostHandle,
@@ -256,39 +257,6 @@ function expectOneUser(
   expect(userText(matches[0]), `${label}: exact occurrence text`).toBe(text)
   expect(matches[0]?.data?.source?.kind, `${label}: occurrence is not human-authored`).toBe('user')
   expect(matches[0]?.data?.source, `${label}: occurrence provenance changed`).toEqual(source)
-}
-
-async function keepAndDisconnect(client: SplitProcessClient, label: string): Promise<void> {
-  await client.press('Ctrl+U')
-  await client.submit('/exit')
-  const deadline = Date.now() + 60_000
-  let choiceTaken = false
-  for (;;) {
-    const state = await client.state().catch(() => undefined)
-    if (state !== undefined && state.exited) break
-    if (!choiceTaken) {
-      const frame = await client.text().catch(() => '')
-      if (frame.includes('Disconnect from dsh-pi-tui') && frame.includes('> Keep working and disconnect')) {
-        await client.press('Enter')
-        choiceTaken = true
-      }
-    }
-    if (Date.now() >= deadline) {
-      const frame = await client.text().catch(() => '')
-      throw new Error(`${label}: did not exit after /exit; frame=${JSON.stringify(frame.slice(-2000))}`)
-    }
-    await sleep(50)
-  }
-  const exit = await client.waitForExit()
-  expect(exit, `${label}: native Keep exit`).toMatchObject({ code: 0, signal: null })
-  const closed = await client.close()
-  expect(closed, `${label}: Supervisor Keep close`).toMatchObject({ code: 0, signal: null })
-  expect(client.closed, `${label}: Supervisor close settlement`).toBe(true)
-  const inventory = clientRecords(client).filter(record => record.m4b2s === 'client-closed').at(-1)
-  expect(inventory, `${label}: official close inventory`).toBeDefined()
-  for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
-    expect(inventory?.owners?.[owner], `${label}: ${owner} owner remains`).toBe(0)
-  }
 }
 
 async function expectHostIdentity(scene: SplitProcessScene, host: SplitProcessHostHandle, label: string): Promise<void> {

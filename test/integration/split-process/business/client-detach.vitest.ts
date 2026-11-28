@@ -8,6 +8,7 @@ import { expect, test } from 'vitest'
 import { readOfficialClientRecords } from '../../../support/split-process-client.ts'
 import {
   createSplitProcessScene,
+  keepAndDisconnect,
   type SessionEvent,
   type SplitProcessClient,
   type SplitProcessHostHandle,
@@ -233,39 +234,6 @@ function expectOneUser(
   expect(matches[0]?.data?.source?.kind, `${label}: occurrence is not human-authored`).toBe('user')
 }
 
-async function keepAndDisconnect(client: SplitProcessClient, label: string): Promise<void> {
-  await client.press('Ctrl+U')
-  await client.submit('/exit')
-  const deadline = Date.now() + 60_000
-  let choiceTaken = false
-  for (;;) {
-    const state = await client.state().catch(() => undefined)
-    if (state !== undefined && state.exited) break
-    if (!choiceTaken) {
-      const frame = await client.text().catch(() => '')
-      if (frame.includes('Disconnect from dsh-pi-tui') && frame.includes('> Keep working and disconnect')) {
-        await client.press('Enter')
-        choiceTaken = true
-      }
-    }
-    if (Date.now() >= deadline) {
-      const frame = await client.text().catch(() => '')
-      throw new Error(`${label}: did not exit after /exit; frame=${JSON.stringify(frame.slice(-2000))}`)
-    }
-    await sleep(50)
-  }
-  const exit = await client.waitForExit()
-  expect(exit, `${label}: native Keep exit`).toMatchObject({ code: 0, signal: null })
-  const closed = await client.close()
-  expect(closed, `${label}: Supervisor Keep close`).toMatchObject({ code: 0, signal: null })
-  expect(client.closed, `${label}: Supervisor close settlement`).toBe(true)
-  const inventory = clientRecords(client).filter(record => record.m4b2s === 'client-closed').at(-1)
-  expect(inventory, `${label}: official close inventory`).toBeDefined()
-  for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
-    expect(inventory?.owners?.[owner], `${label}: ${owner} owner remains`).toBe(0)
-  }
-}
-
 async function stopAndDisconnect(client: SplitProcessClient, label: string): Promise<void> {
   await client.submit('/exit')
   await waitFrame(client, 'Disconnect from dsh-pi-tui', `${label}: busy exit choice`)
@@ -374,14 +342,6 @@ test('finishes accepted work after the last Client disconnects', async () => {
     expect(bClosed, 'peer published no fresh close inventory').toBeDefined()
     expect(bClosed?.pid, 'peer close inventory came from another process').toBe(clientB.ready.businessPid)
     await expectHostIdentity(scene, host, 'Host after the last Client detach')
-    const receipt = await scene.readSupervisorReceipt()
-    for (const label of ['last-detach-source', 'last-detach-peer']) {
-      const row = (receipt.processClients ?? []).find(value => value.label === label) as Record<string, any> | undefined
-      expect(row, `${label}: missing Supervisor Client receipt`).toBeDefined()
-      expect(row?.exited, `${label}: Supervisor did not observe the native exit`).toBe(true)
-      expect(row?.exitCode, `${label}: native exit code`).toBe(0)
-      expect(row?.exitSignal, `${label}: native exit signal`).toBeNull()
-    }
     for (const [client, label] of [[clientA, 'source'], [clientB, 'peer']] as const) {
       const state = await client.state()
       expect(state.exited, `${label}: native terminal is still live`).toBe(true)

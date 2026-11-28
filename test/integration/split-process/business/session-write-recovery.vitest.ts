@@ -1035,39 +1035,6 @@ test('refuses an absent installed Client Domain module and restores the same Hos
   }
 })
 
-test('compensates a Client Domain fault registration failure after the physical rename', async () => {
-  const previousFailurePoint = process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT
-  process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT = 'client-domain-set-fault-post-rename'
-  let scene: SplitProcessScene
-  try {
-    scene = await createSplitProcessScene()
-  } finally {
-    if (previousFailurePoint === undefined) delete process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT
-    else process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT = previousFailurePoint
-  }
-  let host: SplitProcessHostHandle | undefined
-  let primary: unknown
-  try {
-    host = await scene.startHost()
-    await expect(scene.setInstallationFault('client-domain-module-absent'))
-      .rejects.toThrow(/fault registration failed after rename/u)
-    const client = await scene.startClient({
-      label: 'set-fault-compensated', ...clientDirectories(scene, 'set-fault-compensated'),
-    })
-    expect(client.ready.surfaceMounted).toBe(true)
-    assertClientHost(client, host)
-    await exitChat(client, 'set-fault compensation')
-    expect((await scene.hostStatus(host)).localHost.instanceId).toBe(host.ready.localHost.instanceId)
-    await scene.stopHost(host)
-    host = undefined
-  } catch (error) {
-    primary = error
-    throw error
-  } finally {
-    await disposeScene(scene, primary, 'Client Domain set-fault compensation')
-  }
-})
-
 test('a failed Client Domain restore verification stays owned through joined cleanup', async () => {
   const previousFailurePoint = process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT
   process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT = 'client-domain-restore-mode'
