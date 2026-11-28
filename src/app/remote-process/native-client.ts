@@ -65,7 +65,12 @@ import {
   inspectInstalledProfileScope,
   readInstalledDshVersion,
 } from './local-scope.ts'
-import { guardNativeContinuedGeneration } from './native-client-continued.ts'
+import {
+  createNativeContinuedQuestionReceiver,
+  type NativeContinuedGenerationDelivery,
+  type NativeContinuedQuestionCall,
+  type NativeContinuedQuestionReceiver,
+} from './native-client-continued.ts'
 import { completeNativeClientRealm, reserveNativeClientRealm } from './native-client-realm.ts'
 import { nativePromptWriteFailure, nativeWriteFailure } from './native-client-write-result.ts'
 
@@ -2461,25 +2466,13 @@ function createNativeInteractionReceivers(
   const owned: Array<() => void> = []
   const changed = (): void => { if (!disposed) state.notifyStatus() }
   const liveQuestionCalls = new Set<string>()
-  const projectionByHandle = new Map<OwnedNativeSession, { value: unknown; release: () => void }>()
-  interface ContinuedDelivery {
-    readonly sessionId: string
-    readonly binding: object
-    readonly callId: string
-    readonly generation: Generation
-    readonly controller: AbortController
-    settled: boolean
-  }
-  const continuedByCall = new Map<string, ContinuedDelivery>()
-
-  const continuedKey = (sessionId: string, callId: string): string => `${sessionId}\u0000${callId}`
   const currentBindingHandle = (sessionId: string, binding: object): OwnedNativeSession | undefined =>
     [...(state.handlesBySession.get(sessionId) ?? [])]
       .find(handle => !handle.isClosed && handle.bindingIdentity() === binding && handle.isCurrentBinding())
 
   const deliverContinued = async (
-    delivery: ContinuedDelivery,
-    call: NativeUserQuestionProjection['active'][number],
+    delivery: NativeContinuedGenerationDelivery,
+    call: NativeContinuedQuestionCall,
     onQuestion: NonNullable<NativeAttachOptions['onQuestion']>,
   ): Promise<void> => {
     const lifetime = AbortSignal.any([delivery.controller.signal, state.lifetime.signal])
@@ -2487,7 +2480,7 @@ function createNativeInteractionReceivers(
       sessionId: delivery.sessionId,
       callId: call.callId,
       timed: true,
-      questions: call.questions,
+      questions: call.questions as readonly NativeQuestionItem[],
       signal: lifetime,
     }), lifetime)
     if (disposed || state.closed || lifetime.aborted
@@ -2495,7 +2488,6 @@ function createNativeInteractionReceivers(
       || currentBindingHandle(delivery.sessionId, delivery.binding) === undefined) {
       throw nativeError('NATIVE_INTERACTION_STALE', 'the continued Question answer is no longer current')
     }
-    delivery.settled = true
     const result = await state.remote.userQuestions.answer(delivery.sessionId as SessionId, call.callId as ToolCallId, {
       answers: officialQuestionAnswers(answer),
     })
@@ -2507,105 +2499,44 @@ function createNativeInteractionReceivers(
     }
   }
 
-  const offerContinued = (
-    sessionId: string,
-    binding: object,
-    call: NativeUserQuestionProjection['active'][number],
-  ): void => {
-    if (disposed || state.closed || options.onQuestion === undefined || call.state !== 'continued') return
-    const key = continuedKey(sessionId, call.callId)
-    const existing = continuedByCall.get(key)
-    if (existing !== undefined || liveQuestionCalls.has(call.callId)) return
-    const generation = currentGeneration(state)
-    if (generation === undefined || currentBindingHandle(sessionId, binding) === undefined) return
-    const delivery: ContinuedDelivery = {
-      sessionId,
-      binding,
-      callId: call.callId,
-      generation,
-      controller: new AbortController(),
-      settled: false,
-    }
-    continuedByCall.set(key, delivery)
-    pending += 1
-    changed()
-    const operation = deliverContinued(delivery, call, options.onQuestion).finally(() => {
-      pending -= 1
-      changed()
+  let continued: NativeContinuedQuestionReceiver | undefined
+  if (options.onQuestion !== undefined) {
+    const onQuestion = options.onQuestion
+    continued = createNativeContinuedQuestionReceiver({
+      generation: state.generation,
+      handles: state.handles,
+      handlesBySession: state.handlesBySession,
+      handleListeners: state.handleListeners,
+      isClosed: () => state.closed,
+      parseProjection: userQuestionsOf,
+      onInvalidProjection: error => {
+        state.diag.error('native-client: continued Question projection was unusable', { error: safeErrorMessage(error) })
+      },
+      onOffer: (sessionId, binding, call) => {
+        if (liveQuestionCalls.has(call.callId)) return undefined
+        const delivery: NativeContinuedGenerationDelivery = {
+          sessionId,
+          binding,
+          callId: call.callId,
+          generation: currentGeneration(state),
+          controller: new AbortController(),
+        }
+        pending += 1
+        changed()
+        const operation = deliverContinued(delivery, call, onQuestion).finally(() => {
+          pending -= 1
+          changed()
+        })
+        trackClientOperation(state, operation)
+        runDetached('native-client: continued Question delivery', () => operation, {
+          diag: state.diag,
+          sessionId: () => sessionId,
+        })
+        return delivery
+      },
     })
-    trackClientOperation(state, operation)
-    runDetached('native-client: continued Question delivery', () => operation, {
-      diag: state.diag,
-      sessionId: () => sessionId,
-    })
+    owned.push(() => continued?.dispose())
   }
-
-  const reconcileProjection = (sessionId: string, binding: object, value: unknown): void => {
-    if (disposed || state.closed || options.onQuestion === undefined || value === undefined) return
-    let projection: NativeUserQuestionProjection
-    try {
-      projection = userQuestionsOf(value)
-    } catch (error) {
-      state.diag.error('native-client: continued Question projection was unusable', { error: safeErrorMessage(error) })
-      return
-    }
-    for (const call of projection.active) offerContinued(sessionId, binding, call)
-  }
-
-  const revokeInvalidContinued = (): void => {
-    for (const [key, delivery] of continuedByCall) {
-      const current = currentBindingHandle(delivery.sessionId, delivery.binding)
-      if (state.closed || disposed || !Object.is(delivery.generation, currentGeneration(state)) || current === undefined) {
-        delivery.controller.abort(new Error('native-client: continued Question ownership revoked'))
-        continuedByCall.delete(key)
-      }
-    }
-  }
-
-  const watchHandle = (handle: OwnedNativeSession): void => {
-    if (projectionByHandle.has(handle)) return
-    const entry = { value: undefined as unknown, release: () => {} }
-    projectionByHandle.set(handle, entry)
-    entry.release = handle.observeUserQuestions(value => {
-      entry.value = value
-      if (!handle.isClosed) reconcileProjection(handle.sessionId, handle.bindingIdentity(), value)
-    })
-  }
-
-  const reconcileAllContinued = (): void => {
-    revokeInvalidContinued()
-    for (const [handle, entry] of projectionByHandle) {
-      if (!handle.isClosed) reconcileProjection(handle.sessionId, handle.bindingIdentity(), entry.value)
-    }
-  }
-
-  owned.push(guardNativeContinuedGeneration(
-    state.generation,
-    continuedByCall,
-    delivery => !state.closed && !disposed
-      && Object.is(delivery.generation, currentGeneration(state))
-      && currentBindingHandle(delivery.sessionId, delivery.binding) !== undefined,
-    reconcileAllContinued,
-  ))
-
-  const syncHandles = (): void => {
-    for (const [handle, entry] of projectionByHandle) {
-      if (!handle.isClosed) continue
-      entry.release()
-      projectionByHandle.delete(handle)
-    }
-    for (const handle of state.handles) watchHandle(handle)
-    reconcileAllContinued()
-  }
-  state.handleListeners.add(syncHandles)
-  owned.push(() => {
-    state.handleListeners.delete(syncHandles)
-    for (const entry of projectionByHandle.values()) entry.release()
-    projectionByHandle.clear()
-    for (const delivery of continuedByCall.values()) delivery.controller.abort(new Error('native-client: interaction receivers disposed'))
-    continuedByCall.clear()
-  })
-  syncHandles()
 
   const waitForHandle = async (
     sessionId: string,
@@ -2698,7 +2629,7 @@ function createNativeInteractionReceivers(
       liveQuestionCalls.delete(callId)
       pending -= 1
       changed()
-      reconcileAllContinued()
+      continued?.reconcile()
     }
   }))
 

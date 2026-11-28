@@ -32,7 +32,7 @@ import type {
   NativeSessionSummary,
 } from '../../src/app/remote-process/native-client.ts'
 import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '../../src/app/remote-process/native-client.ts'
-import { guardNativeContinuedGeneration } from '../../src/app/remote-process/native-client-continued.ts'
+import { createNativeContinuedQuestionReceiver } from '../../src/app/remote-process/native-client-continued.ts'
 import { completeNativeClientRealm, reserveNativeClientRealm } from '../../src/app/remote-process/native-client-realm.ts'
 import { nativePromptWriteFailure, nativeWriteFailure } from '../../src/app/remote-process/native-client-write-result.ts'
 import { classifyRemoteWriteFailure } from '../../src/runtime/remote/write-failure.ts'
@@ -229,32 +229,63 @@ test('service-reported cancellation after dispatch stays unknown with the prompt
   })
 })
 
-test('continued Question generation rollover revokes stale callbacks before re-offer', () => {
-  let listener: (() => void) | undefined
+test('production continued receiver revokes stale callbacks before one re-offer', () => {
+  let generation: object | undefined = { id: 1 }
+  const generationListeners = new Set<() => void>()
   const source = {
-    subscribe(next: () => void): () => void {
-      listener = next
-      return () => { listener = undefined }
+    getSnapshot: () => generation,
+    subscribe(listener: () => void): () => void {
+      generationListeners.add(listener)
+      return () => { generationListeners.delete(listener) }
     },
   }
-  const staleController = new AbortController()
-  const currentController = new AbortController()
-  const deliveries = new Map([
-    ['stale', { sessionId: 'session', callId: 'stale', generation: { id: 1 }, controller: staleController }],
-    ['current', { sessionId: 'session', callId: 'current', generation: { id: 2 }, controller: currentController }],
-  ])
-  let reoffers = 0
-  const dispose = guardNativeContinuedGeneration(source, deliveries,
-    delivery => delivery.callId === 'current',
-    () => { reoffers += 1 })
-  listener?.()
-  assert.equal(staleController.signal.aborted, true)
-  assert.equal(currentController.signal.aborted, false)
-  assert.equal(deliveries.has('stale'), false)
-  assert.equal(deliveries.has('current'), true)
-  assert.equal(reoffers, 1)
-  dispose()
-  assert.equal(listener, undefined)
+  const binding = {}
+  const projection = {
+    active: [{ callId: 'call-1', questions: [{ id: 'q1', question: 'continue?' }], state: 'continued' as const }],
+    settled: [],
+  }
+  let projectionListener: ((value: unknown) => void) | undefined
+  const handle = {
+    sessionId: 'session-1',
+    isClosed: false,
+    bindingIdentity: () => binding,
+    isCurrentBinding: () => true,
+    observeUserQuestions(listener: (value: unknown) => void): () => void {
+      projectionListener = listener
+      listener(projection)
+      return () => { projectionListener = undefined }
+    },
+  }
+  const handles = new Set([handle])
+  const handlesBySession = new Map([['session-1', handles]])
+  const handleListeners = new Set<() => void>()
+  const offers: Array<{ readonly controller: AbortController; readonly generation: object | undefined }> = []
+  const receiver = createNativeContinuedQuestionReceiver({
+    generation: source,
+    handles,
+    handlesBySession,
+    handleListeners,
+    isClosed: () => false,
+    parseProjection: value => value as typeof projection,
+    onInvalidProjection: error => { throw error },
+    onOffer: (sessionId, offeredBinding, call) => {
+      const controller = new AbortController()
+      offers.push({ controller, generation: source.getSnapshot() })
+      return { sessionId, binding: offeredBinding, callId: call.callId, generation: source.getSnapshot(), controller }
+    },
+  })
+  assert.equal(offers.length, 1)
+  generation = { id: 2 }
+  for (const listener of [...generationListeners]) listener()
+  assert.equal(offers[0]?.controller.signal.aborted, true)
+  assert.equal(offers.length, 2)
+  assert.equal(offers[1]?.controller.signal.aborted, false)
+  projectionListener?.(projection)
+  assert.equal(offers.length, 2)
+  receiver.dispose()
+  assert.equal(generationListeners.size, 0)
+  assert.equal(handleListeners.size, 0)
+  assert.equal(offers[1]?.controller.signal.aborted, true)
 })
 
 test('separate module instances share the same Node-realm reservation', async () => {
