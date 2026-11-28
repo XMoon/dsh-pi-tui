@@ -12,7 +12,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http'
 import type { Socket } from 'node:net'
 import { join } from 'node:path'
@@ -22,6 +22,7 @@ import {
   inspectInstalledProfileScope,
   LOCAL_PROTOCOL,
   LocalScopeError,
+  materializeBuild,
   type LocalScope,
 } from '../../src/app/remote-process/local-scope.ts'
 import type { DaemonControlProfile } from '../../src/app/remote-process/local-daemon-control.ts'
@@ -65,7 +66,7 @@ function fixture(t: TestContext): Fixture {
     packageRoot,
     dshVersion: DSH_VERSION,
   }
-  const scope = inspectInstalledProfileScope({ dshHome: home, profileDir, packageRoot, dshVersion: DSH_VERSION })
+  const scope = materializeBuild(inspectInstalledProfileScope({ dshHome: home, profileDir, packageRoot, dshVersion: DSH_VERSION }), packageRoot)
   return { profile, scope }
 }
 
@@ -199,8 +200,9 @@ function assertSingleLine(text: string): void {
 
 // ── status (pure read through the existing strict observer) ────────────────
 
-test('status prints exactly one legal state and keeps the authenticated Cookie in memory', async (t) => {
+test('status reaches the authenticated handler with a broken noncritical payload', async (t) => {
   const fx = fixture(t)
+  symlinkSync(join(fx.profile.home, 'missing-payload.mjs'), join(fx.profile.packageRoot, 'dist', 'broken.mjs'))
   const server = await startServer(t, statusReply(UUID, 'disabled'))
   const result = await run(fx, recordOf(fx.scope, server.origin), 'status')
   assert.deepEqual(result, { code: 0, stdout: 'acp=disabled\n', stderr: '' })

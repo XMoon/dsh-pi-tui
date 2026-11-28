@@ -103,8 +103,13 @@ export interface InstalledProfileFacts {
   readonly dshVersion: string
 }
 
-/** The one B1 scope shared by the Host and every Client of this profile. */
-export interface LocalScope {
+/**
+ * The stable identity of one locally installed Profile scope. This is the only
+ * input needed to find the private run directory, kernel seats and the live
+ * Host's unauthenticated registry candidate. It deliberately carries no build
+ * fingerprint: diagnostics that only need identity must not walk `dist`.
+ */
+export interface LocalScopeIdentity {
   /** sha256 over UID + canonical profile directory. */
   readonly scopeId: string
   /**
@@ -122,15 +127,19 @@ export interface LocalScope {
   readonly hostSocketName?: string
   /** Linux abstract qualification-only Client seat name (absent on Windows). */
   readonly clientSeatSocketName?: string
+  /** Installed bundle version from the package manifest. */
+  readonly bundleVersion: string
+  /** Installed DSH runtime version. */
+  readonly dshVersion: string
+}
+
+/** A scope whose installed build fingerprint has been strictly materialized. */
+export interface LocalScope extends LocalScopeIdentity {
   /**
    * Installed-build fingerprint described below. The Host publishes and the
    * authenticated identity echoes it; Client admission does not compare it.
    */
   readonly buildId: string
-  /** Installed bundle version from the package manifest. */
-  readonly bundleVersion: string
-  /** Installed DSH runtime version. */
-  readonly dshVersion: string
 }
 
 /** One held process seat; closing it releases the kernel claim. */
@@ -721,7 +730,7 @@ function canonicalWin32Directory(pathValue: string, label: string): string {
 }
 
 /** The read-only Win32 scope: SID + canonical profile path, fixed hash domain. */
-function inspectWin32ProfileScope(facts: InstalledProfileFacts): LocalScope {
+function inspectWin32ProfileScope(facts: InstalledProfileFacts): LocalScopeIdentity {
   const dshHome = canonicalWin32Directory(facts.dshHome, 'DSH home')
   const profileRealpath = canonicalWin32Directory(facts.profileDir, 'profile directory')
   const sid = win32CurrentTokenSid()
@@ -737,7 +746,6 @@ function inspectWin32ProfileScope(facts: InstalledProfileFacts): LocalScope {
     dshHome,
     profileRealpath,
     dir: join(dshHome, RUN_ROOT_NAME, SCOPE_ROOT_NAME, scopeId),
-    buildId: computeBuildId(facts.packageRoot, facts.dshVersion),
     bundleVersion,
     dshVersion: facts.dshVersion,
   })
@@ -768,7 +776,7 @@ function ensureWin32ScopeDirectory(dshHome: string, scopeId: string): string {
  * It is the single scope-id authority; `scopeFromInstalledProfile()` composes
  * the exact same computation with the one directory-creation step.
  */
-export function inspectInstalledProfileScope(facts: InstalledProfileFacts): LocalScope {
+export function inspectInstalledProfileScope(facts: InstalledProfileFacts): LocalScopeIdentity {
   if (process.platform === 'win32') return inspectWin32ProfileScope(facts)
   const uid = assertSupportedPosixScopePlatform()
   const dshHome = process.platform === 'darwin'
@@ -792,27 +800,45 @@ export function inspectInstalledProfileScope(facts: InstalledProfileFacts): Loca
     dir: join(dshHome, RUN_ROOT_NAME, SCOPE_ROOT_NAME, scopeId),
     hostSocketName: `${HOST_SEAT_PREFIX}${scopeId.slice(0, 40)}`,
     clientSeatSocketName: `${CLIENT_SEAT_PREFIX}${scopeId.slice(0, 40)}`,
-    buildId: computeBuildId(facts.packageRoot, facts.dshVersion),
     bundleVersion,
     dshVersion: facts.dshVersion,
   })
 }
 
 /**
- * Build the one scope for an installed profile AND create/prove its private
- * 0700 run directory, before any process seat or Host Context exists. The
- * scope identity comes from the same read-only computation above; only the run
- * directory creation is added here, so Host admission and stdout/qualification
- * shapes stay unchanged.
+ * Strictly materialize the current installed build for one previously resolved
+ * scope identity. Callers that publish a Host, start a process or render a new
+ * service definition must call this explicitly; a failed walk cannot be hidden
+ * by a placeholder or replaced by a version/mtime.
  */
-export function scopeFromInstalledProfile(facts: InstalledProfileFacts): LocalScope {
-  const inspected = inspectInstalledProfileScope(facts)
+export function materializeBuild(identity: LocalScopeIdentity, packageRoot: string): LocalScope {
+  return Object.freeze({ ...identity, buildId: computeBuildId(packageRoot, identity.dshVersion) })
+}
+
+/**
+ * Create/prove the private run directory of an ALREADY materialized full scope.
+ * A command that obtained a strict build once must be able to reuse that exact
+ * observation instead of walking `dist` a second time.
+ */
+export function ensureInstalledProfileScopeDirectory(scope: LocalScope): LocalScope {
   if (process.platform === 'win32') {
-    return Object.freeze({ ...inspected, dir: ensureWin32ScopeDirectory(inspected.dshHome, inspected.scopeId) })
+    return Object.freeze({ ...scope, dir: ensureWin32ScopeDirectory(scope.dshHome, scope.scopeId) })
   }
   const uid = assertSupportedPosixScopePlatform()
-  const dir = ensureScopeDirectory(inspected.dshHome, inspected.scopeId, uid)
-  return Object.freeze({ ...inspected, dir })
+  const dir = ensureScopeDirectory(scope.dshHome, scope.scopeId, uid)
+  return Object.freeze({ ...scope, dir })
+}
+
+/**
+ * Build the one scope for an installed profile AND create/prove its private
+ * 0700 run directory, before any process seat or Host Context exists. The
+ * scope identity comes from the same read-only computation above; only the
+ * strict build materialization and directory creation are added here, so Host
+ * admission and stdout/qualification shapes stay unchanged. A build failure
+ * happens before any directory creation.
+ */
+export function scopeFromInstalledProfile(facts: InstalledProfileFacts): LocalScope {
+  return ensureInstalledProfileScopeDirectory(materializeBuild(inspectInstalledProfileScope(facts), facts.packageRoot))
 }
 
 /**
@@ -967,7 +993,7 @@ export interface ProfileKernelSeatOptions {
 }
 
 export async function bindProfileKernelSeat(
-  scope: LocalScope,
+  scope: LocalScopeIdentity,
   kind: ProcessSeatKind,
   conflictCode: ProcessSeatConflictCode,
   options: ProfileKernelSeatOptions = {},

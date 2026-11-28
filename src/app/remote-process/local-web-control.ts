@@ -35,7 +35,7 @@ import {
   type LocalInstanceRecord,
   type VerifiedLocalHost,
 } from './local-discovery.ts'
-import { inspectInstalledProfileScope, type LocalScope } from './local-scope.ts'
+import { inspectInstalledProfileScope, type LocalScopeIdentity } from './local-scope.ts'
 import {
   LOCAL_WEB_CONTROL_MAX_RESPONSE_BYTES,
   LOCAL_WEB_CONTROL_ROUTE,
@@ -89,9 +89,9 @@ class WebControlError extends Error {
 /** Injectable OS/discovery seams; production omits every one of them. */
 export interface LocalWebControlDeps {
   readonly platform?: NodeJS.Platform
-  readonly readRecord?: (scope: LocalScope) => LocalInstanceRecord | undefined
+  readonly readRecord?: (scope: LocalScopeIdentity) => LocalInstanceRecord | undefined
   readonly inspectProcess?: (record: LocalInstanceRecord) => 'alive' | 'dead'
-  readonly authenticate?: (record: LocalInstanceRecord, scope: LocalScope, signal?: AbortSignal) => Promise<VerifiedLocalHost>
+  readonly authenticate?: (record: LocalInstanceRecord, scope: LocalScopeIdentity, signal?: AbortSignal) => Promise<VerifiedLocalHost>
   /** Fresh kernel-identity recheck seam; production reads the platform kernel. */
   readonly assertKernelIdentity?: (record: LocalInstanceRecord) => void
   readonly fetch?: typeof fetch
@@ -134,7 +134,7 @@ function formatWebControlError(error: WebControlError): string {
  * record) may claim HOST_NOT_RUNNING. A replaced instance is an identity
  * refusal; every unprovable case stays WEB_CLI_UNAVAILABLE.
  */
-function readRequestFailure(verified: VerifiedLocalHost, scope: LocalScope, deps: LocalWebControlDeps): WebControlError {
+function readRequestFailure(verified: VerifiedLocalHost, scope: LocalScopeIdentity, deps: LocalWebControlDeps): WebControlError {
   try {
     const readRecord = deps.readRecord ?? readLocalRecord
     const inspect = deps.inspectProcess ?? inspectHostProcess
@@ -275,7 +275,7 @@ async function callWebControl(
 function assertReplyBelongsToAuthenticatedHost(
   verified: VerifiedLocalHost,
   reply: { readonly instanceId: string },
-  scope: LocalScope,
+  scope: LocalScopeIdentity,
   deps: LocalWebControlDeps,
 ): void {
   if (reply.instanceId !== verified.identity.instanceId) {

@@ -47,13 +47,16 @@ import {
   bindProcessSeat,
   bindProfileKernelSeat,
   darwinHostProfileSeatDir,
+  ensureInstalledProfileScopeDirectory,
   inspectInstalledProfileScope,
   LocalScopeError,
+  materializeBuild,
   readLinuxStarttime,
-  scopeFromInstalledProfile,
   type LocalScope,
+  type LocalScopeIdentity,
 } from './local-scope.ts'
 import {
+  collectLaunchdProfileFacts,
   collectUnitFacts,
   inspectOwnedProfileUnit,
   installProfileHostUnit,
@@ -79,6 +82,7 @@ import {
   uninstallLaunchdUnit,
   type LaunchdAdapterDeps,
   type LaunchdLoadedService,
+  type LaunchdProfileFacts,
   type LaunchdServiceObservation,
   type LaunchdUnitFacts,
   type LaunchctlRunner,
@@ -232,9 +236,9 @@ export interface DaemonControlDeps {
   /** Explicit unit directory seam for structural tests; production uses the account home. */
   readonly unitDir?: string
   readonly systemctl?: SystemctlRunner
-  readonly readRecord?: (scope: LocalScope) => LocalInstanceRecord | undefined
+  readonly readRecord?: (scope: LocalScopeIdentity) => LocalInstanceRecord | undefined
   readonly inspectProcess?: (record: LocalInstanceRecord) => 'alive' | 'dead'
-  readonly authenticate?: (record: LocalInstanceRecord, scope: LocalScope) => Promise<VerifiedLocalHost>
+  readonly authenticate?: (record: LocalInstanceRecord, scope: LocalScopeIdentity) => Promise<VerifiedLocalHost>
   readonly ensureHost?: (options: EnsureLocalHostOptions) => Promise<VerifiedLocalHost>
   readonly kill?: (pid: number, signal: NodeJS.Signals) => void
   readonly readStarttime?: (pid: number) => string | undefined
@@ -264,7 +268,7 @@ export interface DaemonControlDeps {
 
 /** One internal snapshot shared by the read-only status and the pre-flight checks. */
 interface Snapshot {
-  readonly scope: LocalScope
+  readonly scope: LocalScopeIdentity
   /** The installed-unit fact: the ONLY admission for manager IO. */
   readonly unit: OwnedProfileUnit | undefined
   /** `not-checked` when no unit exists, so no manager query was issued. */
@@ -280,7 +284,7 @@ interface Snapshot {
   /** The installed launchd plist fact (Darwin only); the ONLY launchd-IO admission. */
   readonly launchdUnit: OwnedLaunchdUnit | undefined
   readonly launchdService: LaunchdServiceObservation | undefined
-  readonly launchdFacts: LaunchdUnitFacts | undefined
+  readonly launchdFacts: LaunchdProfileFacts | undefined
   readonly launchdInspectionFailure: DaemonControlError | undefined
   readonly launchdQueryFailure: DaemonControlError | undefined
   readonly record: LocalInstanceRecord | undefined
@@ -364,7 +368,7 @@ function uidOf(deps: DaemonControlDeps): number {
 }
 
 /** Compute the read-only scope; no directory is created. */
-function inspectScope(profile: DaemonControlProfile, deps: DaemonControlDeps): LocalScope {
+function inspectScope(profile: DaemonControlProfile, deps: DaemonControlDeps): LocalScopeIdentity {
   const platform = platformOf(deps)
   if (platform !== 'linux' && platform !== 'darwin' && platform !== 'win32') {
     throw new DaemonControlError('UNSUPPORTED_PLATFORM', 'this daemon command requires Linux, macOS or Windows')
@@ -409,7 +413,12 @@ function launchdDepsOf(deps: DaemonControlDeps): LaunchdAdapterDeps {
 }
 
 /** Collect the validated launchd facts for one installed profile. */
-function launchdFactsOf(scope: LocalScope, profile: DaemonControlProfile): LaunchdUnitFacts {
+function launchdFactsOf(scope: LocalScopeIdentity, profile: DaemonControlProfile): LaunchdProfileFacts {
+  return collectLaunchdProfileFacts(scope, profile.name, profile.installAnchor)
+}
+
+/** The strict facts needed only by fresh render/migration paths. */
+function strictLaunchdFactsOf(scope: LocalScope, profile: DaemonControlProfile): LaunchdUnitFacts {
   const facts = collectUnitFacts({
     scope,
     hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
@@ -434,15 +443,19 @@ function launchdUnitState(state: string): DaemonUnitState {
 }
 
 /** The read-only migration preflight for an explicit Darwin CLI start/restart. */
-function inspectDarwinLaunchdMigration(snapshot: Snapshot, deps: DaemonControlDeps):
+function inspectDarwinLaunchdMigration(
+  snapshot: Snapshot,
+  deps: DaemonControlDeps,
+  facts: LaunchdUnitFacts,
+):
   | { readonly kind: 'no-op'; readonly reason: 'user-managed' | 'current' }
   | { readonly kind: 'migrate'; readonly namedEntry: string } {
-  const { launchdUnit, launchdFacts } = snapshot
-  if (launchdUnit === undefined || launchdFacts === undefined) {
+  const { launchdUnit } = snapshot
+  if (launchdUnit === undefined) {
     throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd plist facts are unavailable; refusing an unverified migration')
   }
   try {
-    return prepareOwnedLaunchdForCurrentInstall(launchdFacts, launchdUnit, launchdDepsOf(deps), 'inspect').plan
+    return prepareOwnedLaunchdForCurrentInstall(facts, launchdUnit, launchdDepsOf(deps), 'inspect').plan
   } catch (error) {
     throw toDaemonControlError(error)
   }
@@ -453,13 +466,17 @@ function inspectDarwinLaunchdMigration(snapshot: Snapshot, deps: DaemonControlDe
  * identity and the loaded job have been proven gone. Only an explicit CLI
  * start/restart reaches here; an ordinary TUI cold start never does.
  */
-function applyDarwinLaunchdMigration(snapshot: Snapshot, deps: DaemonControlDeps): OwnedLaunchdUnit | undefined {
-  const { launchdUnit, launchdFacts } = snapshot
-  if (launchdUnit === undefined || launchdFacts === undefined) {
+function applyDarwinLaunchdMigration(
+  snapshot: Snapshot,
+  deps: DaemonControlDeps,
+  facts: LaunchdUnitFacts,
+): OwnedLaunchdUnit | undefined {
+  const { launchdUnit } = snapshot
+  if (launchdUnit === undefined) {
     throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd plist facts are unavailable; refusing an unverified migration')
   }
   try {
-    return prepareOwnedLaunchdForCurrentInstall(launchdFacts, launchdUnit, launchdDepsOf(deps), 'apply').unit
+    return prepareOwnedLaunchdForCurrentInstall(facts, launchdUnit, launchdDepsOf(deps), 'apply').unit
   } catch (error) {
     throw afterCommittedAction(toDaemonControlError(error), 'launchd plist migration')
   }
@@ -476,7 +493,7 @@ function applyDarwinLaunchdMigration(snapshot: Snapshot, deps: DaemonControlDeps
  * even after a unit-identity refusal, so `status` can report a real ready Host
  * beside a foreign unit while still exiting nonzero.
  */
-async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDeps, scope: LocalScope): Promise<Snapshot> {
+async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDeps, scope: LocalScopeIdentity): Promise<Snapshot> {
   const platform = platformOf(deps)
   let unit: OwnedProfileUnit | undefined
   let unitState: DaemonUnitState = 'not-found'
@@ -488,7 +505,7 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
   let unitQueryFailure: DaemonControlError | undefined
   let launchdUnit: OwnedLaunchdUnit | undefined
   let launchdService: LaunchdServiceObservation | undefined
-  let launchdFacts: LaunchdUnitFacts | undefined
+  let launchdFacts: LaunchdProfileFacts | undefined
   let launchdInspectionFailure: DaemonControlError | undefined
   let launchdQueryFailure: DaemonControlError | undefined
   if (platform === 'linux') {
@@ -601,7 +618,8 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
     let compatibilityFailure: DaemonControlError | undefined
     try {
       assertClientHostCompatible(record, scope)
-      compatibility = record.buildId === scope.buildId ? 'compatible' : 'other-build'
+      // The current-build comparison is a diagnostic projection, never a
+      // readiness gate. `readSnapshot` deliberately does not compute it.
     } catch (error) {
       host = 'incompatible'
       compatibility = 'incompatible'
@@ -745,14 +763,6 @@ async function readSnapshot(profile: DaemonControlProfile, deps: DaemonControlDe
     }
   }
   if (failure !== undefined && host === 'stopped') host = 'unknown'
-  if (failure === undefined && authenticated !== undefined && record !== undefined) {
-    compatibility = record.buildId === scope.buildId ? 'compatible' : 'other-build'
-  } else if (failure === undefined && unit !== undefined && unitState !== 'not-found'
-    && unit.installBuild !== scope.buildId) {
-    compatibility = 'other-build'
-  } else if (failure === undefined && launchdUnit !== undefined && launchdUnit.installBuild !== scope.buildId) {
-    compatibility = 'other-build'
-  }
   if ((unitQueryFailure !== undefined || launchdQueryFailure !== undefined) && compatibility === 'none') compatibility = 'unknown'
   return {
     scope,
@@ -810,6 +820,55 @@ export function formatDaemonStatus(status: DaemonControlStatus): string {
   return `${lines.join('\n')}\n`
 }
 
+const BUILD_FINGERPRINT_WARNING =
+  'dsh-pi-tui daemon: warning: installed build fingerprint unavailable; compatibility is unknown\n'
+
+/**
+ * Compute the current-build comparison only for a status projection that has a
+ * real comparison target. A hash-only failure is a bounded diagnostic: it never
+ * changes the core Host/manager verdict or exit code and never leaks its message.
+ */
+function projectedStatus(
+  snapshot: Snapshot,
+  profile: DaemonControlProfile,
+  extras: Partial<DaemonControlStatus> = {},
+): { readonly status: DaemonControlStatus; readonly warning: string } {
+  const status: DaemonControlStatus = { ...snapshot.status, ...extras }
+  if (snapshot.failure !== undefined || status.compatibility === 'incompatible' || status.compatibility === 'unknown') {
+    return { status, warning: '' }
+  }
+  const target = status.host === 'ready' && snapshot.record !== undefined
+    ? snapshot.record.buildId
+    : snapshot.unit !== undefined && snapshot.unitState !== 'not-found'
+      ? snapshot.unit.installBuild
+      : snapshot.launchdUnit?.installBuild
+  if (target === undefined) return { status, warning: '' }
+  try {
+    const current = materializeBuild(snapshot.scope, profile.packageRoot).buildId
+    return { status: { ...status, compatibility: target === current ? 'compatible' : 'other-build' }, warning: '' }
+  } catch {
+    return { status: { ...status, compatibility: 'unknown' }, warning: BUILD_FINGERPRINT_WARNING }
+  }
+}
+
+/** Format one projected status result without making the diagnostic hash a gate. */
+function statusResult(
+  snapshot: Snapshot,
+  profile: DaemonControlProfile,
+  extras: Partial<DaemonControlStatus> = {},
+  options: { readonly includeFailure?: boolean; readonly extraStderr?: string } = {},
+): DaemonControlResult {
+  const { status, warning } = projectedStatus(snapshot, profile, extras)
+  const failure = options.includeFailure === false || snapshot.failure === undefined
+    ? ''
+    : formatDaemonControlError(snapshot.failure)
+  return {
+    code: snapshot.exitCode,
+    stdout: formatDaemonStatus(status),
+    stderr: `${failure}${warning}${options.extraStderr ?? ''}`,
+  }
+}
+
 /**
  * Acquire the ONE profile-scoped admin seat for a mutating verb. The seat is
  * held for exactly the lifetime of THIS command's operation: two concurrently
@@ -820,7 +879,7 @@ export function formatDaemonStatus(status: DaemonControlStatus): string {
  * of OS operations — a command that dies with the process releases the seat,
  * and the next command re-reads the real systemd/Host state.
  */
-async function withAdminSeat<T>(scope: LocalScope, deps: DaemonControlDeps, operation: () => Promise<T>): Promise<T> {
+async function withAdminSeat<T>(scope: LocalScopeIdentity, deps: DaemonControlDeps, operation: () => Promise<T>): Promise<T> {
   let seat
   try {
     if (platformOf(deps) === 'linux') {
@@ -1284,7 +1343,7 @@ export type AcpStdioTarget =
  * single safe `key=value` line or it is omitted: a malformed path is never
  * sanitized into a fake connectable address.
  */
-function acpSocketPathOf(scope: LocalScope, deps: DaemonControlDeps): string | undefined {
+function acpSocketPathOf(scope: LocalScopeIdentity, deps: DaemonControlDeps): string | undefined {
   const platform = platformOf(deps)
   if (platform === 'win32') return acpPipeAddress(scope.scopeId)
   const path = platform === 'darwin'
@@ -1353,9 +1412,8 @@ export async function readAcpStdioTarget(
 async function runStatus(profile: DaemonControlProfile, deps: DaemonControlDeps): Promise<DaemonControlResult> {
   const scope = inspectScope(profile, deps)
   const snapshot = await readSnapshot(profile, deps, scope)
-  const stderr = snapshot.failure === undefined ? '' : formatDaemonControlError(snapshot.failure)
   const acp = await observeAcpFacts(snapshot, deps)
-  return { code: snapshot.exitCode, stdout: formatDaemonStatus({ ...snapshot.status, ...acp }), stderr }
+  return statusResult(snapshot, profile, acp)
 }
 
 /** The `start` handler. */
@@ -1371,18 +1429,25 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
     // still refuses the start.
     if (pre.status.host === 'ready') {
       if (pre.failure !== undefined && pre.failure.code !== 'MANAGER_OR_OS_FAILURE') throw pre.failure
-      return { code: 0, stdout: formatDaemonStatus(pre.status), stderr: '' }
+      return statusResult(pre, profile, {}, { includeFailure: false })
     }
     if (pre.failure !== undefined) throw pre.failure
     if (pre.status.host !== 'stopped' && pre.status.host !== 'starting') throw refuseHostState(pre.status)
+    // A cold start strictly materializes the current build ONCE before any
+    // manager stop, plist patch, directory creation or Host spawn. This is the
+    // command-local build supplier; a warm reuse above never reaches it.
+    const strictScope = materializeBuild(inspected, profile.packageRoot)
+    const strictLaunchdFacts = platformOf(deps) === 'darwin'
+      ? strictLaunchdFactsOf(strictScope, profile)
+      : undefined
     // Darwin explicit cold start: the ONLY place an old PRODUCT-GENERATED
     // plist fragment may be migrated outside a restart. The preflight is
     // read-only; a loaded running job with no authenticated Host is never
     // booted out, and a genuinely idle loaded definition is removed with the
     // proven `bootout` path BEFORE the file is patched. An ordinary TUI cold
     // start never reaches this path.
-    if (platformOf(deps) === 'darwin' && pre.launchdUnit !== undefined) {
-      const plan = inspectDarwinLaunchdMigration(pre, deps)
+    if (platformOf(deps) === 'darwin' && pre.launchdUnit !== undefined && strictLaunchdFacts !== undefined) {
+      const plan = inspectDarwinLaunchdMigration(pre, deps, strictLaunchdFacts)
       if (plan.kind === 'migrate') {
         if (pre.launchdService?.kind === 'unknown') {
           throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the launchd job state is not recognizable; refusing to migrate the profile plist')
@@ -1394,21 +1459,16 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
         assertNotAborted(deps.signal)
         if (pre.launchdService?.kind === 'loaded') {
           // Prove the cached definition is gone before patching the file.
-          await stopLaunchdService(pre.launchdFacts as LaunchdUnitFacts, pre.launchdUnit, launchdDepsOf(deps))
+          await stopLaunchdService(pre.launchdFacts as LaunchdProfileFacts, pre.launchdUnit, launchdDepsOf(deps))
         }
-        applyDarwinLaunchdMigration(pre, deps)
+        applyDarwinLaunchdMigration(pre, deps, strictLaunchdFacts)
       }
     }
     // The long read-only snapshot above may have taken seconds. Shutdown that
     // arrived during it must be observed BEFORE creating the run directory or
     // committing any Host start.
     assertNotAborted(deps.signal)
-    const scope = scopeFromInstalledProfile({
-      dshHome: profile.home,
-      profileDir: profile.dir,
-      packageRoot: profile.packageRoot,
-      dshVersion: profile.dshVersion,
-    })
+    const scope = ensureInstalledProfileScopeDirectory(strictScope)
     assertNotAborted(deps.signal)
     const managerDeps = managerDepsOf(deps)
     // An installed Profile unit is adopted for the CURRENT install only while it
@@ -1420,7 +1480,7 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
     if (pre.unit !== undefined && unitStopped) {
       try {
         await prepareOwnedProfileUnitForCurrentInstall({
-          scope: inspected,
+          scope: strictScope,
           profile: profile.name,
           hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
           mode: 'apply',
@@ -1449,7 +1509,7 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
       const post = await readSnapshot(profile, deps, scope)
       if (post.failure !== undefined) throw post.failure
       if (post.status.host !== 'ready') throw refuseHostState(post.status)
-      return { code: 0, stdout: formatDaemonStatus(post.status), stderr: '' }
+      return statusResult(post, profile)
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'Host start')
     }
@@ -1468,7 +1528,7 @@ async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): 
       const post = await readSnapshot(profile, deps, inspected)
       if (post.failure !== undefined) throw post.failure
       if (post.status.host !== 'stopped') throw refuseHostState(post.status)
-      return { code: 0, stdout: formatDaemonStatus(post.status), stderr: RUNNING_WORK_NOTICE }
+      return statusResult(post, profile, {}, { extraStderr: RUNNING_WORK_NOTICE })
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'Host stop')
     }
@@ -1506,13 +1566,19 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
       && !serviceFailureRecovery && !verifiedUnitRestart && !verifiedLaunchdRestart) throw refuseHostState(pre.status)
     const oldInstance = pre.record?.instanceId
     const managerDeps = managerDepsOf(deps)
+    // Restart needs the CURRENT build strictly before its first destructive
+    // stop: every migration preflight below is derived from this one observation.
+    const strictScope = materializeBuild(inspected, profile.packageRoot)
+    const strictLaunchdFacts = platformOf(deps) === 'darwin'
+      ? strictLaunchdFactsOf(strictScope, profile)
+      : undefined
     // Linux: read-only preflight BEFORE any stop: a recognized generated entry
     // that cannot be safely rewritten fails here, with the old Host still
     // running. A user-custom command is a no-op and never blocks the restart.
     if (platformOf(deps) === 'linux' && pre.unit !== undefined) {
       try {
         await prepareOwnedProfileUnitForCurrentInstall({
-          scope: inspected,
+          scope: strictScope,
           profile: profile.name,
           hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
           mode: 'inspect',
@@ -1525,31 +1591,26 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
     // fragment after the old Host and loaded job are proven gone. A loaded
     // idle job is reloaded from the current on-disk user definition before
     // the new start (see startLaunchdService).
-    const launchdMigration = platformOf(deps) === 'darwin' && pre.launchdUnit !== undefined
-      ? inspectDarwinLaunchdMigration(pre, deps)
+    const launchdMigration = platformOf(deps) === 'darwin' && pre.launchdUnit !== undefined && strictLaunchdFacts !== undefined
+      ? inspectDarwinLaunchdMigration(pre, deps, strictLaunchdFacts)
       : undefined
     assertNotAborted(deps.signal)
     await stopFromSnapshot(pre, deps)
     // The old Host kernel identity and the loaded job are proven gone here;
     // only now may the bounded generated-field migration touch the plist.
-    if (launchdMigration?.kind === 'migrate') {
+    if (launchdMigration?.kind === 'migrate' && strictLaunchdFacts !== undefined) {
       assertNotAborted(deps.signal)
-      applyDarwinLaunchdMigration(pre, deps)
+      applyDarwinLaunchdMigration(pre, deps, strictLaunchdFacts)
     }
     try {
       assertNotAborted(deps.signal)
-      const scope = scopeFromInstalledProfile({
-        dshHome: profile.home,
-        profileDir: profile.dir,
-        packageRoot: profile.packageRoot,
-        dshVersion: profile.dshVersion,
-      })
+      const scope = ensureInstalledProfileScopeDirectory(strictScope)
       assertNotAborted(deps.signal)
       // Only after the old kernel Host is proven gone: rewrite the one
       // recognized generated field pair and re-verify the manager source.
       if (platformOf(deps) === 'linux' && pre.unit !== undefined) {
         await prepareOwnedProfileUnitForCurrentInstall({
-          scope: inspected,
+          scope: strictScope,
           profile: profile.name,
           hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
           mode: 'apply',
@@ -1582,13 +1643,14 @@ async function runRestart(profile: DaemonControlProfile, deps: DaemonControlDeps
       // compatible build. The restart itself succeeded, but the output must
       // never claim the installed code was adopted: report the truthful
       // diagnostic on stderr.
-      const buildNotice = platformOf(deps) === 'darwin' && post.status.compatibility === 'other-build'
+      const { status: postStatus, warning } = projectedStatus(post, profile)
+      const buildNotice = platformOf(deps) === 'darwin' && postStatus.compatibility === 'other-build'
         ? 'dsh-pi-tui daemon: warning: Host restarted, but the running build differs from the installed profile; inspect the custom LaunchAgent ProgramArguments\n'
         : ''
       return {
         code: 0,
-        stdout: `previous=${oldInstance === undefined ? 'none' : oldInstance.slice(0, 8)}\n${formatDaemonStatus(post.status)}`,
-        stderr: `${RUNNING_WORK_NOTICE}${buildNotice}`,
+        stdout: `previous=${oldInstance === undefined ? 'none' : oldInstance.slice(0, 8)}\n${formatDaemonStatus(postStatus)}`,
+        stderr: `${RUNNING_WORK_NOTICE}${buildNotice}${warning}`,
       }
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'Host restart')
@@ -1615,6 +1677,9 @@ async function runInstall(profile: DaemonControlProfile, deps: DaemonControlDeps
           hostEntryPath: join(profile.packageRoot, 'dist', 'local-host.mjs'),
           dshAnchor: profile.installAnchor,
           profile: profile.name,
+          // Evaluated only when installProfileHostUnit decides a fresh file is
+          // needed; an owned historical unit is reused without any dist walk.
+          strictScope: () => materializeBuild(inspected, profile.packageRoot),
         },
         managerDepsOf(deps),
       )
@@ -1639,7 +1704,7 @@ async function runInstall(profile: DaemonControlProfile, deps: DaemonControlDeps
         && (!post.processAlive || post.record === undefined || post.record.instanceId !== pre.record.instanceId)) {
         throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the running Host instance changed during the unit install')
       }
-      return { code: 0, stdout: formatDaemonStatus(post.status), stderr: '' }
+      return statusResult(post, profile)
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'profile unit install')
     }
@@ -1658,7 +1723,7 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
     // authentication health: it never needs to control the Host.
     if (pre.unitInspectionFailure !== undefined) throw pre.unitInspectionFailure
     if (pre.unit === undefined) {
-      return { code: 0, stdout: formatDaemonStatus(pre.status), stderr: '' }
+      return statusResult(pre, profile)
     }
     if (pre.failure !== undefined && !verifiedUnitManagementAdmitted(pre)) throw pre.failure
     if (pre.userManager !== 'available') {
@@ -1704,7 +1769,7 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
       if (existsSync(pre.unit.filePath)) {
         throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the profile unit could not be confirmed removed')
       }
-      return { code: 0, stdout: formatDaemonStatus(post.status), stderr: running ? RUNNING_WORK_NOTICE : '' }
+      return statusResult(post, profile, {}, { extraStderr: running ? RUNNING_WORK_NOTICE : '' })
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'profile unit removal')
     }
@@ -1724,7 +1789,10 @@ async function runDarwinInstall(profile: DaemonControlProfile, deps: DaemonContr
     assertNotAborted(deps.signal)
     try {
       const facts = pre.launchdFacts ?? launchdFactsOf(inspected, profile)
-      await installLaunchdUnit(facts, launchdDepsOf(deps))
+      await installLaunchdUnit(facts, launchdDepsOf(deps), () => strictLaunchdFactsOf(
+        materializeBuild(inspected, profile.packageRoot),
+        profile,
+      ))
     } catch (error) {
       throw toDaemonControlError(error)
     }
@@ -1739,7 +1807,7 @@ async function runDarwinInstall(profile: DaemonControlProfile, deps: DaemonContr
         && (!post.processAlive || post.record === undefined || post.record.instanceId !== pre.record.instanceId)) {
         throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the running Host instance changed during the plist install')
       }
-      return { code: 0, stdout: formatDaemonStatus(post.status), stderr: '' }
+      return statusResult(post, profile)
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'launchd plist install')
     }
@@ -1755,7 +1823,7 @@ async function runDarwinUninstall(profile: DaemonControlProfile, deps: DaemonCon
     // A named plist is the ONLY uninstall target. With no owned plist this is
     // an idempotent no-op and no launchctl call is made.
     if (pre.launchdUnit === undefined) {
-      return { code: 0, stdout: formatDaemonStatus(pre.status), stderr: '' }
+      return statusResult(pre, profile)
     }
     if (pre.launchdQueryFailure !== undefined) throw pre.launchdQueryFailure
     if (pre.launchdFacts === undefined) {
@@ -1802,7 +1870,7 @@ async function runDarwinUninstall(profile: DaemonControlProfile, deps: DaemonCon
       if (post.launchdUnit !== undefined) {
         throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the profile LaunchAgent could not be confirmed removed')
       }
-      return { code: 0, stdout: formatDaemonStatus(post.status), stderr: running ? RUNNING_WORK_NOTICE : '' }
+      return statusResult(post, profile, {}, { extraStderr: running ? RUNNING_WORK_NOTICE : '' })
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'launchd plist removal')
     }
@@ -1957,7 +2025,7 @@ export function sanitizeLogText(text: string): string {
  * fails closed instead of guessing a file.
  */
 async function runDarwinLogs(
-  scope: LocalScope,
+  scope: LocalScopeIdentity,
   intent: DaemonControlIntent,
   deps: DaemonControlDeps,
   snapshot: Snapshot,

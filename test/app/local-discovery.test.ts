@@ -30,6 +30,7 @@ import {
   inspectInstalledProfileScope,
   LocalScopeError,
   LOCAL_PROTOCOL,
+  materializeBuild,
   parseProcessStat,
   parseProcessStatStarttime,
   processSeatPath,
@@ -291,6 +292,37 @@ test('read-only scope inspection creates no run directory and preserves the offi
     assert.equal(scope.dir, inspected.dir)
     assert.equal(lstatSync(scope.dir).mode & 0o777, 0o700)
     assert.equal(existsSync(scope.dir), true)
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('read-only identity survives a dangling payload link while strict build materialization refuses before directory creation', t => {
+  const value = fixture(t)
+  try {
+    symlinkSync(join(value.root, 'missing-target.mjs'), join(value.packageRoot, 'dist', 'broken.mjs'))
+    const identity = inspectInstalledProfileScope({
+      dshHome: value.home,
+      profileDir: value.profile,
+      packageRoot: value.packageRoot,
+      dshVersion: '0.2.1-rc.4',
+    })
+    assert.match(identity.scopeId, /^[0-9a-f]{64}$/u)
+    assert.equal(existsSync(join(value.home, 'run')), false)
+    assert.throws(
+      () => materializeBuild(identity, value.packageRoot),
+      error => error instanceof LocalScopeError && error.code === 'SCOPE_DIRECTORY_UNSAFE',
+    )
+    assert.throws(
+      () => scopeFromInstalledProfile({
+        dshHome: value.home,
+        profileDir: value.profile,
+        packageRoot: value.packageRoot,
+        dshVersion: '0.2.1-rc.4',
+      }),
+      error => error instanceof LocalScopeError && error.code === 'SCOPE_DIRECTORY_UNSAFE',
+    )
+    assert.equal(existsSync(join(value.home, 'run')), false, 'strict failure must not create the run directory')
   } finally {
     cleanup(value.root)
   }
