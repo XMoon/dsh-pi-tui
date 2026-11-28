@@ -552,6 +552,17 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   const withNavigation = <T>(intent: NavigationIntent, task: () => Promise<T> | T): Promise<T> =>
     runNavigationGate(() => runNavigationTransition(intent, task))
 
+  /** The ONE first-owner publication body shared by ordinary first-session
+   *  creation and actual-id explicit New. The caller owns the later C-shape
+   *  quiesce/bump/init ordering. */
+  const publishFirstOwner = (childOwner: SessionOwnerRef, sessionId: string): string | undefined => {
+    core.setCurrentOwner(childOwner, sessionId)
+    deps.surface.bindInputRecallScope(sessionId)
+    deps.surface.beginInputHistoryScope(sessionId)
+    deps.surface.retireStaleHistorySeat()
+    return deps.owners.completionIdentity(childOwner)
+  }
+
   /**
    * Run one ordinary session transition/switch: quiesce (only when the backend
    * owns the replaced owner's Host lifecycle) the old owner, run the caller's
@@ -656,7 +667,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           }
           // Map the NEW owner ONCE. For actual-id New this happens only after
           // the original operation still owns the captured scope/lifetime.
-          const nextOwner = deps.owners.fromHandle(nextHandle)
+          const nextOwner = deps.owners.fromHandle(next as SessionHandle)
           if (nextOwner === undefined) throw new Error('transition published a handle without an owned Session generation')
           if (actualId && !commitCurrent()) {
             if (nextOwner === oldOwner) {
@@ -695,16 +706,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
             if (actualId) opening = deps.surface.beginOpening(nextSessionId)
             if (actualId && oldOwner === undefined) {
               publishFirstSessionOwner({
-                publishOwner: () => {
-                  core.setCurrentOwner(nextOwner, nextSessionId)
-                  transitionCommitted = true
-                  deps.surface.bindInputRecallScope(nextSessionId)
-                  deps.surface.beginInputHistoryScope(nextSessionId)
-                  deps.surface.retireStaleHistorySeat()
-                  return deps.owners.completionIdentity(nextOwner)
-                },
+                publishOwner: () => publishFirstOwner(nextOwner, nextSessionId),
                 setCompletionOwner: deps.surface.setCompletionOwner,
               }, nextHandle)
+              transitionCommitted = true
               core.bumpGeneration()
               return
             }
@@ -800,6 +805,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               // retirement: the committed child stands, never a rollback
               // and never a skipped OLD release. The recalls were already
               // settled committed by the commit section.
+              transitionCommitted = true
               deps.diag.error('transition commit seam failed after publication (child committed)', {
                 to: committedSessionId,
                 error: safeErrorMessage(error),
@@ -1677,24 +1683,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     const childOwner = deps.owners.fromHandle(handle)
     if (childOwner === undefined) throw new Error('first-session create published a handle without an owned Session generation')
     return runFirstSessionCommit({
-      publishOwner: () => {
-        core.setCurrentOwner(childOwner, deps.owners.sessionId(childOwner))
-        deps.surface.bindInputRecallScope(deps.owners.sessionId(childOwner))
-        // The editor-recall scope follows the same synchronous publication:
-        // the deferred first session's hydration reseeds ↕ recall afterwards,
-        // and the sessionless submission that CREATED it was accepted in the
-        // sessionless pool BEFORE this create — the seam ADOPTS those pending
-        // entries instead of clearing them, because their row is written under
-        // THIS Session and can therefore not be in the snapshot yet.
-        deps.surface.beginInputHistoryScope(deps.owners.sessionId(childOwner))
-        // Phase 3B / B3-B: the first published Session kills a sessionless
-        // History seat even though no id string moved (the capture's
-        // subject-undefined branch fails the moment an owner exists). The
-        // generation bump below would also catch it; retiring here keeps the
-        // commit's own first frame clean.
-        deps.surface.retireStaleHistorySeat()
-        return deps.owners.completionIdentity(childOwner)
-      },
+      publishOwner: () => publishFirstOwner(childOwner, deps.owners.sessionId(childOwner)),
       setCompletionOwner: deps.surface.setCompletionOwner,
       bumpGeneration: core.bumpGeneration,
       quiesceChild: async () => {
