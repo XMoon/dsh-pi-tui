@@ -344,6 +344,22 @@ test('reads another Session without retaining it or admitting its Question', asy
         clientId: clientA.clientId, request: { op: 'workspaces', window: inheritedWindow },
       })).rejects.toThrow(/workspaces window/u)
     }
+    const ordinaryRecords = clientB.readRecords().length
+    await expect(clientB.readAuthority({ op: 'read' })).rejects.toThrow(/does not declare the ordinary read-authority contract/u)
+    expect(clientB.readRecords().slice(ordinaryRecords).some(record => record.op === 'read-authority-proof'),
+      'an undeclared Client published a read probe record').toBe(false)
+    await expect(scene.startClient({
+      label: 'read-invalid-workspace', ...clientDirectories(scene, 'read-invalid-workspace'),
+      readAuthorityProof: true, invalidWorkspacePath: true,
+    })).rejects.toThrow(/read authority excludes invalid Workspace/u)
+    await expect(scene.startClient({
+      label: 'read-recovery', ...clientDirectories(scene, 'read-recovery'),
+      readAuthorityProof: true, recoverFromHostId: 'missing-host',
+    })).rejects.toThrow(/read authority excludes recovery and attach/u)
+    await expect(scene.startClient({
+      label: 'read-attach', ...clientDirectories(scene, 'read-attach'),
+      readAuthorityProof: true, attachRecoveredHostId: 'missing-client',
+    })).rejects.toThrow(/read authority excludes recovery and attach/u)
     const read = await readFacts(clientA, 'A reads the pending Session from Y')
     expect(read.openSessionId, 'A was no longer on Y').toBe(sessionY)
     expect(read.sessionOpen, 'A had no open Session').toBe(true)

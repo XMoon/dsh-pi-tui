@@ -5663,6 +5663,9 @@ function assertHostReplacementRefusal(handle, reason) {
   const closedRecords = records.filter(record => record?.m4b2s === 'client-closed')
   if (closedRecords.length !== 1) throw new Error(`${reason}: ${handle.label} has no unique final owner inventory`)
   const closed = closedRecords[0]
+  if (closed.sessionOpen !== false || closed.surfaceMounted !== false || closed.openSessionId !== undefined) {
+    throw new Error(`${reason}: ${handle.label} final inventory still owns a Session or surface`)
+  }
   for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
     if (closed.owners?.[owner] !== 0) {
       throw new Error(`${reason}: ${handle.label} left ${owner} owner alive after the refusal`)
