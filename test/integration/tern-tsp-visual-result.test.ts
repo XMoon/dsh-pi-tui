@@ -19,6 +19,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { createDirectTspFixture, waitFor } from '../support/direct-tsp-fixture.ts'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import type { TspWireFrame } from '../support/tsp-terminal-fixture.ts'
+import { openSingleCompactWork } from '../support/tsp-picker-wire.ts'
 import { chartContentBlocks, chartFactFromArgs } from '../../src/domain/visual/chart.ts'
 import { svgContentBlocks, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -190,6 +191,7 @@ test('a chart result is painted as a native chart and exact text over the real w
     }
     const fact = chartFactFromArgs(args)
     await appendTool(fixture, 'call-chart-1', 'dsh_pi_tui_chart', args, chartContentBlocks(fact))
+    await openSingleCompactWork(fixture.pane, waitFor)
     await waitFor('the Direct chart Tool node to materialize before disclosure', () =>
       wireNodes(fixture.pane.frames()).some(node => node.k === 'tool'), 30_000)
     expandToolCards(fixture)
@@ -213,6 +215,7 @@ test('a chart result is painted as a native chart and exact text over the real w
 test('an SVG result is sent as the ONE native blob and painted with its description', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
+    tuiConfig: { displayPreset: 'full' },
     deltas: ['PRD', '-SVG'],
     startup: { sessionId: SESSION_ID },
     persistedBlankSessions: [{ id: SESSION_ID }],
@@ -247,6 +250,7 @@ test('an SVG result is sent as the ONE native blob and painted with its descript
 test('a blocked/error SVG result never sends a blob and keeps the readable text', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
+    tuiConfig: { displayPreset: 'full' },
     deltas: ['PRD', '-SVG-BLOCKED'],
     startup: { sessionId: SESSION_ID },
     persistedBlankSessions: [{ id: SESSION_ID }],
@@ -282,6 +286,7 @@ function digestOf(source: string): string {
 test('a reused callId across turns cannot lend a credential to another SVG row', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
+    tuiConfig: { displayPreset: 'full' },
     deltas: ['PRD', '-SVG-REUSE-REDACTED'],
     startup: { sessionId: SESSION_ID },
     persistedBlankSessions: [{ id: SESSION_ID }],
@@ -321,6 +326,7 @@ test('a reused callId across turns cannot lend a credential to another SVG row',
 test('two reused-callId SVG rows each paint their own digest blob', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
+    tuiConfig: { displayPreset: 'full' },
     deltas: ['PRD', '-SVG-REUSE-TWO'],
     startup: { sessionId: SESSION_ID },
     persistedBlankSessions: [{ id: SESSION_ID }],
@@ -450,6 +456,7 @@ test('the TSP mapper keeps a failed publication’s readable reason', () => {
 test('an SVG source using the new static paint attributes is blob-admitted over the same wire', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
+    tuiConfig: { displayPreset: 'full' },
     deltas: ['PRD', '-SVG-4B'],
     startup: { sessionId: SESSION_ID },
     persistedBlankSessions: [{ id: SESSION_ID }],

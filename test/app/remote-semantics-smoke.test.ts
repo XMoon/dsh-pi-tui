@@ -1575,6 +1575,10 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
     const tuiSettings = config.tuiSettings
     assert.ok(tuiSettings !== undefined, 'the settings section is served over the wire')
 
+    assert.equal(tuiSettings.get().displayPreset, 'compact', 'the fresh Host serves the new default')
+    // This standalone workspace fixture does not run the runner's startup
+    // resolution; align its runtime with the real persisted preference.
+    fixture.app.setDisplayPreset('compact')
     await fixture.open()
     await fixture.selectCategory('Conversation')
     await fixture.key('\r') // L0 -> L1
@@ -1582,16 +1586,16 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
     const initialChoice = fixture.view().replace(/\s+/gu, ' ')
     assert.match(initialChoice, /Transcript display/)
     assert.match(initialChoice, /Choose value/)
-    assert.match(initialChoice, /Value full/)
-    assert.match(initialChoice, /Persisted full/)
+    assert.match(initialChoice, /Value compact/)
+    assert.match(initialChoice, /Persisted compact/)
     assert.match(initialChoice, /Client runtime · optional TUI preference/)
-    assert.match(initialChoice, /> full/)
+    assert.match(initialChoice, /> compact/)
     await fixture.key('\x1b[6~') // PgDn scrolls facts only
     const scrolledChoice = fixture.view().replace(/\s+/gu, ' ')
     assert.match(scrolledChoice, /persistence/, 'the wrapped Scope continuation is readable')
-    assert.match(scrolledChoice, /> full/, 'scrolling facts leaves the candidate unchanged')
-    await fixture.key('\x1b[B') // full -> compact, still only a preview
-    assert.match(fixture.view(), /> compact/)
+    assert.match(scrolledChoice, /> compact/, 'scrolling facts leaves the candidate unchanged')
+    await fixture.key('\x1b[A') // compact -> full, still only a preview
+    assert.match(fixture.view(), /> full/)
     await fixture.key('\r') // explicit confirm
     await fixture.settleUntil(/Status\s+Verified/, 'the display-preset write')
 
@@ -1611,13 +1615,13 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
       return descriptor?.value
     }
     const descriptor = hostDescriptor()
-    assert.equal(descriptor?.value?.displayPreset, 'compact', 'the Host authority carries the new preset')
+    assert.equal(descriptor?.value?.displayPreset, 'full', 'the Host authority carries the new preset')
     // The USER layer owns exactly the written field — the whole document was not
     // pinned by the merge (W-11 through the real Host).
     const user = descriptor?.user as Record<string, unknown> | undefined
-    assert.equal(user?.displayPreset, 'compact', 'and only that field reached the USER layer')
+    assert.equal(user?.displayPreset, 'full', 'and only that field reached the USER layer')
     assert.equal(user?.theme, undefined, 'no other field was pinned')
-    assert.equal(tuiSettings.get().displayPreset, 'compact', 'and the authoritative Remote re-read agrees')
+    assert.equal(tuiSettings.get().displayPreset, 'full', 'and the authoritative Remote re-read agrees')
     assert.equal(config.configReadiness(), 'ready', 'the mirror stayed current through the write')
 
     // ── the SAME chain must also REFUSE over the real wire, and must never attribute a
@@ -1651,21 +1655,22 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
       if (failRefresh) throw new Error('settings read unavailable (injected)')
       return originalDescribe.apply(this, args)
     }
-    /** Reopen the choice and step ONE candidate down (the display candidates are the
+    /** Reopen the choice and move from Full to Focus (the display candidates are the
      *  fixed `full, compact, focus` vocabulary and the choice starts on the persisted
      *  one), then confirm and wait for the settlement the write must reach. */
-    const chooseNextPreset = async (expected: RegExp, label: string): Promise<void> => {
+    const chooseFocusPreset = async (expected: RegExp, label: string): Promise<void> => {
       await fixture.key('\r')
       assert.match(fixture.view().replace(/\s+/gu, ' '), /Choose value/)
-      await fixture.key('\x1b[B')
-      assert.match(fixture.view(), /> focus/, `the highlighted candidate is the next preset:\n${fixture.view()}`)
+      await fixture.key('\x1b[B') // full -> compact
+      await fixture.key('\x1b[B') // compact -> focus
+      assert.match(fixture.view(), /> focus/, `the highlighted candidate is Focus:\n${fixture.view()}`)
       await fixture.key('\r')
       await fixture.settleUntil(expected, label)
     }
     try {
       // A refused official mutate is a REFUSAL: the UI says so and the Host is intact.
       failMutate = true
-      await chooseNextPreset(/Status\s+Not saved/, 'the refused display-preset write')
+      await chooseFocusPreset(/Status\s+Not saved/, 'the refused display-preset write')
       const refusedFrame = fixture.view().replace(/\s+/gu, ' ')
       // The details column interleaves its own labels between the sentence
       // fragments, so assert the three facts independently instead of one
@@ -1677,7 +1682,7 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
       ]) {
         assert.ok(refusedFrame.includes(fragment), `a refused write must report "${fragment}":\n${fixture.view()}`)
       }
-      assert.equal(hostDescriptor()?.value?.displayPreset, 'compact', 'the refused write never reached the Host')
+      assert.equal(hostDescriptor()?.value?.displayPreset, 'full', 'the refused write never reached the Host')
 
       // A rejected write whose authoritative readback cannot complete must never be
       // called `Not saved`, and must never be called `Verified`: the official service
@@ -1688,7 +1693,7 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
       // requested value, which proves the value is in place but never that THIS request
       // was accepted, so the outcome is `Outcome unknown`. The Host state and that
       // classification are asserted TOGETHER.
-      await chooseNextPreset(/Status\s+Outcome unknown/, 'the write whose readback could not complete')
+      await chooseFocusPreset(/Status\s+Outcome unknown/, 'the write whose readback could not complete')
       const hostAfter = hostDescriptorUnpatched()
       const unverifiedFrame = fixture.view().replace(/\s+/gu, ' ')
       assert.equal(hostAfter?.displayPreset, 'focus', 'the Host authority really committed the write')

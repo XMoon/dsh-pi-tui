@@ -122,6 +122,7 @@ test('a tool result image is read through the REAL Direct attachment service and
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
+    tuiConfig: { displayPreset: 'full' },
     deltas: ['DIRECT', '-IMAGE', '-OK'],
     startup: { sessionId: SESSION_ID },
     persistedBlankSessions: [{ id: SESSION_ID }],
@@ -194,6 +195,7 @@ test('an attachment the REAL service cannot read is refused and never painted', 
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
+    tuiConfig: { displayPreset: 'full' },
     deltas: ['DIRECT', '-IMAGE', '-DENIED'],
     startup: { sessionId: SESSION_ID },
     persistedBlankSessions: [{ id: SESSION_ID }],
@@ -327,6 +329,7 @@ test('PI_IMAGE_PROTOCOL=none keeps the real Direct attachment chain at zero blob
   const previous = process.env.PI_IMAGE_PROTOCOL
   process.env.PI_IMAGE_PROTOCOL = 'none'
   const fixture = await createDirectTspFixture(life, {
+    tuiConfig: { displayPreset: 'full' },
     deltas: ['DIRECT', '-IMAGE', '-DISABLED'],
     startup: { sessionId: SESSION_ID },
     persistedBlankSessions: [{ id: SESSION_ID }],

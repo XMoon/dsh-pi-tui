@@ -1217,6 +1217,9 @@ test('runner search: sanitized Thinking bodies exclude title and hint from seman
   ]
   const fixture = await mountSearchRunner(t, 1, [], 'i', events)
   const { app, vt } = fixture
+  // The assertion targets individual Thinking headers and their own hints.
+  app.setDisplayPreset('full')
+  await fixture.settleRender()
   app.startTranscriptSearch()
   await fixture.settleRender()
   typeQuery(fixture, 'i')

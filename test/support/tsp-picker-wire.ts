@@ -39,6 +39,35 @@ export function surfaceNodes(pane: TspPane, sf: string): WireNode[] {
   return foldWireNodes(surfaceFrames(pane, sf))
 }
 
+/**
+ * Open the single Activity in a one-Work transcript scenario through the
+ * current inline surface's actual node, never through renderer-local state.
+ */
+export async function openSingleCompactWork(
+  pane: TspPane,
+  waitFor: (label: string, predicate: () => boolean, timeoutMs: number) => Promise<void>,
+): Promise<void> {
+  const inline = (): string | undefined => pane.openSurfaces().find(surface => surface.mode === 'inline')?.id
+  const works = (sf: string): WireNode[] => surfaceNodes(pane, sf).filter(node =>
+    node.k === 'section' && node.id.includes('-work-'))
+  await waitFor('the Compact Activity to materialize', () => {
+    const sf = inline()
+    return sf !== undefined && works(sf).length > 0
+  }, 30_000)
+  const sf = inline()
+  assert.ok(sf !== undefined, 'the inline surface is still mounted')
+  const activities = works(sf)
+  assert.equal(activities.length, 1, 'this fixture owns exactly one Activity')
+  const work = activities[0]!
+  assert.equal(work.p.collapsible, true)
+  assert.equal(work.p.collapsed, true, 'the default Compact Activity starts collapsed')
+  assert.equal(surfaceNodes(pane, sf).some(node => node.k === 'tool'), false,
+    'the collapsed Activity does not build its hidden Tool node')
+  pane.event({ ev: 'toggle', sf, id: work.id, collapsed: false, raw: {} })
+  await waitFor('the exact Activity to open', () =>
+    inline() === sf && surfaceNodes(pane, sf).some(node => node.id === work.id && node.p.collapsed === false), 30_000)
+}
+
 /** Every live text value of ONE surface (plain text and spans), in node order. */
 export function surfaceTexts(pane: TspPane, sf: string): string[] {
   const out: string[] = []

@@ -1984,6 +1984,10 @@ test('an edit tool card renders from RAW durable call/result facts (no Host pres
   session.append('turn/end', { turn: 4, reason: { kind: 'completed' } })
 
   const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
+  const app = await waitForApp(fixture)
+  assert.ok(app instanceof TuiApp)
+  // This case verifies individual card bodies, not Work disclosure.
+  app.setDisplayPreset('full')
   // The transcript renders (the proven baseline) …
   // The transcript renders (the proven baseline) …
   await waitFor('the seeded conversation rendered', () =>
@@ -2946,6 +2950,9 @@ test('LIVE: a mounted Remote surface renders the tool call as it executes on the
 
   const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host, productionSerializer: true })
   const app = await waitForApp(fixture)
+  assert.ok(app instanceof TuiApp)
+  // Observe individual live and settled cards rather than the Work preview.
+  app.setDisplayPreset('full')
   const editor = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void; getDraft(): string }
   const eventsOf = (): Array<{ type: string; data: unknown }> => (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
     snapshotEvents(): Array<{ type: string; data: unknown }>

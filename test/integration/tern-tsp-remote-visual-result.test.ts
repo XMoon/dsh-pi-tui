@@ -16,6 +16,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { mountRemotePresentationHost, mountRemoteRunner } from '../app/runner-remote-presentation.test.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
 import type { TspWireFrame } from '../support/tsp-terminal-fixture.ts'
+import { openSingleCompactWork } from '../support/tsp-picker-wire.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { chartContentBlocks, chartFactFromArgs } from '../../src/domain/visual/chart.ts'
 import { svgContentBlocks, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
@@ -132,6 +133,7 @@ test('a Remote chart result crosses the wire and paints the same ordered values'
       series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
     }
     await appendTool(await sessionOf(host), 'remote-chart-1', 'dsh_pi_tui_chart', args, chartContentBlocks(chartFactFromArgs(args)))
+    await openSingleCompactWork(pane, waitFor)
     await waitFor('the Remote chart Tool node to materialize before disclosure', () =>
       wireNodes(pane.frames()).some(node => node.k === 'tool'), 30_000)
     expandToolCards({ pane })
@@ -159,6 +161,7 @@ test('a Remote SVG result authorizes the same source digest and paints one blob'
     const args = { title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }
     const expectedBlobId = createHash('sha256').update(Buffer.from(SVG_SOURCE, 'utf8')).digest('hex')
     appendTool(await sessionOf(host), 'remote-svg-1', 'dsh_pi_tui_svg', args, svgContentBlocks(svgFactFromArgs(args)))
+    await openSingleCompactWork(pane, waitFor)
     await waitFor('the Remote SVG tool card is projected', () =>
       wireNodes(pane.frames()).some(node => node.k === 'tool'), 30_000)
     assert.deepEqual(pane.blobIds(), [], 'a collapsed Remote SVG card sends no blob')

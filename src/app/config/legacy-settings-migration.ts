@@ -17,8 +17,8 @@
  *   (the runtime parsers own validation), while the caller keeps the original
  *   sources untouched.
  * - `focusMode` exists here ONLY as a legacy input: it converges into
- *   `displayPreset` (canonical valid → copy, else focusMode 'on' → focus,
- *   else full) and is never carried as a canonical field.
+ *   `displayPreset` (canonical valid → copy, invalid canonical string → full,
+ *   else focusMode 'on' → focus, else full) and is never carried as a canonical field.
  *
  * @module @xmoon76/dsh-pi-tui/app/config/legacy-settings-migration
  */
@@ -196,16 +196,15 @@ export function legacyPreferenceValues(
     }
     values[field] = value
   }
-  // The display convergence runs only when the legacy document carried a
-  // display opinion: a valid canonical value is copied verbatim, an invalid
-  // one converges through the legacy focusMode rule, and a section with
-  // neither field leaves the schema default ('full') unpinned.
+  // A legacy display opinion keeps its historical mapping, including malformed
+  // fields that normalize to absence. A section with neither field leaves the
+  // product default unpinned.
   if (section.displayPreset !== undefined || section.focusMode !== undefined) {
     const display = resolveDisplayPreset({
       displayPreset: typeof section.displayPreset === 'string' ? section.displayPreset : undefined,
       focusMode: typeof section.focusMode === 'string' ? section.focusMode : undefined,
     } satisfies PersistedDisplayInput)
-    values.displayPreset = display.preset
+    values.displayPreset = display.source === 'default' ? 'full' : display.preset
   }
   return values
 }

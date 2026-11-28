@@ -107,6 +107,8 @@ test('the canonical row is ACTIVE with a hidden auto page and the complete 21-fi
   assert.equal(typeof descriptor.revision, 'number', 'the official revision fence is real')
   assert.equal(Object.keys(descriptor.value ?? {}).length, 19,
     'the effective projection carries the 19 always-defaulted fields (two raw fields stay absent)')
+  assert.equal((descriptor.value as { displayPreset?: string }).displayPreset, 'compact',
+    'the real default profile resolves to Compact')
   assert.deepEqual(descriptor.user, {}, 'the default profile owns no USER override')
   assert.deepEqual(formFields(descriptor.schema), [
     'theme', 'iconStyle', 'footer', 'footerFallbackMode', 'footerLayout',
@@ -151,6 +153,7 @@ test('the Direct adapter writes the canonical row through path-scoped revision-f
     (plane.ctx as unknown as { piTuiPreferences: TuiConfigRefs }).piTuiPreferences,
     settingsOf(plane.ctx),
   )
+  assert.equal(adapter.get().displayPreset, 'compact', 'Direct reads the product default')
   await adapter.replace({ ...adapter.get(), terminalProgress: 'off' })
   const after = descriptorOf(plane.ctx)
   assert.equal((after?.user as { terminalProgress?: string }).terminalProgress, 'off',

@@ -125,7 +125,7 @@ const TUI_DEFAULTS = {
   busyEnter: 'queue',
   localShellSandbox: 'bypass',
   homeEndKeys: 'input',
-  displayPreset: 'full',
+  displayPreset: 'compact',
   progressUpdates: 'milestones',
   // The real Host descriptor always carries the schema default, so the remote
   // fixture must too (an absent field would look like a change to pin).
@@ -1606,6 +1606,24 @@ test('raw settings fields round-trip verbatim and an unrelated write never touch
   assert.deepEqual(after.footerCustomItems, footerCustomItems)
   assert.deepEqual(after.footerCommand, footerCommand)
   assert.deepEqual(after.footerLayout, VALID_LAYOUT)
+})
+
+test('Remote display defaults to Compact without overriding explicit or malformed preferences', async () => {
+  const { displayPreset: _omitted, ...withoutDisplay } = TUI_DEFAULTS
+  for (const [value, expected] of [
+    [withoutDisplay, 'compact'],
+    ...['full', 'compact', 'focus', 'garbage'].map(displayPreset => [
+      { ...withoutDisplay, displayPreset }, displayPreset,
+    ] as const),
+    [{ ...withoutDisplay, displayPreset: null }, 'full'],
+  ] as const) {
+    const { port, state } = createBackend(current => {
+      current.namespaces.set(TUI_NS, { ns: TUI_NS, value, revision: 1 })
+    })
+    await port.describe()
+    assert.equal(port.tuiSettings?.get().displayPreset, expected)
+    assert.equal(state.mutateCalls.length, 0, 'a read does not pin the default')
+  }
 })
 
 test('terminalProgress keeps Direct/Remote parity: missing resolves dual and the persisted value reads back', async () => {

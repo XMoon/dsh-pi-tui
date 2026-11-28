@@ -19,9 +19,10 @@
 
 import z from '@deepseek-ai/schemastery'
 import type { Volatile } from '@deepseek-ai/cordis'
+import { DEFAULT_DISPLAY_PRESET } from '../../domain/display/preset.ts'
 
 /** The 20 durable TUI preferences every backend shares. The names are the
- * persisted profile keys; the schema keeps the historical defaults, validators
+ * persisted profile keys; the schema defines the defaults, validators
  * and shapes. */
 export const PREFERENCE_FIELDS: Readonly<Record<string, z>> = {
   /** Theme values: auto | dark | light | custom:<name>. */
@@ -88,7 +89,7 @@ export const PREFERENCE_FIELDS: Readonly<Record<string, z>> = {
    * within the input, 'viewport' keeps Home/End scrolling. */
   homeEndKeys: z.string().default('input').volatile(),
   /** Canonical transcript display preset (focus | compact | full). */
-  displayPreset: z.string().default('full').volatile(),
+  displayPreset: z.string().default(DEFAULT_DISPLAY_PRESET).volatile(),
   /** Mid-turn progress-update cadence (off | milestones | frequent). */
   progressUpdates: z.string().default('milestones').volatile(),
   /** Git attribution guidance mode (off | product | product-model). */
