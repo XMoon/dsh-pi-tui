@@ -26,12 +26,13 @@ import {
   type AltScreenSearchSegment,
   type Component,
   type Focusable,
+  type KeyId,
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 import { highlightSearchLines } from '../components/transcript/search-presentation.ts'
 import { formatKeyId, JOB_SEARCH_LOCAL_KEYS } from '../keybindings/hints.ts'
-import { ACTION_BAR_SEPARATOR } from '../presentation/action-bar.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { paintActionSpan, type ActionInkRole } from '../presentation/action-ink.ts'
 import { color } from '../theme/runtime.ts'
 
@@ -72,6 +73,7 @@ export interface JobSearchRowHitTarget {
 export interface JobOutputSearchOptions {
   readonly onMouse?: (event: TuiMouseEvent) => TuiMouseEventResult | undefined
   readonly findHint?: () => string
+  readonly isLocalKeyPreempted?: (key: KeyId) => boolean
 }
 
 /** One retained-window RENDER epoch: the rendered Output rows, the query's
@@ -181,6 +183,7 @@ class JobOutputSearchRow implements Component, Focusable {
   private readonly visible: (width: number) => boolean
   private readonly onMouse?: (event: TuiMouseEvent) => TuiMouseEventResult | undefined
   private readonly findHint?: () => string
+  private readonly isLocalKeyPreempted?: (key: KeyId) => boolean
   private focusedValue = false
   private hitTargets: readonly JobSearchRowHitTarget[] = []
 
@@ -193,6 +196,7 @@ class JobOutputSearchRow implements Component, Focusable {
     this.visible = visible
     this.onMouse = options?.onMouse
     this.findHint = options?.findHint
+    this.isLocalKeyPreempted = options?.isLocalKeyPreempted
   }
 
   get focused(): boolean {
@@ -227,18 +231,16 @@ class JobOutputSearchRow implements Component, Focusable {
     const countRendered = countText === '' ? '' : color.textDim(` ${countText} `)
     const countWidth = visibleWidth(countRendered)
 
-    type Candidate = {
+    interface Candidate extends ActionBarSegment {
       readonly action: JobSearchRowAction
-      text: string
-      readonly short?: string
       readonly role: ActionInkRole
-      readonly priority: number
     }
     const candidates: Candidate[] = []
     if (mode === 'edit') {
+      const commitPreempted = this.isLocalKeyPreempted?.(JOB_SEARCH_LOCAL_KEYS.commit) ?? false
       candidates.push({
         action: 'search-commit',
-        text: `Search [${formatKeyId(JOB_SEARCH_LOCAL_KEYS.commit)}]`,
+        text: commitPreempted ? 'Search' : `Search [${formatKeyId(JOB_SEARCH_LOCAL_KEYS.commit)}]`,
         role: 'primary',
         priority: 3,
       })
@@ -263,26 +265,11 @@ class JobOutputSearchRow implements Component, Focusable {
     const minInputWidth = Math.min(width, width >= 30 ? 16 : 10)
     const leadingGap = countWidth === 0 ? 1 : 0
     const actionBudget = width - minInputWidth - countWidth - leadingGap
-    const sepWidth = visibleWidth(ACTION_BAR_SEPARATOR)
-    const surviving = candidates.map(item => ({ ...item }))
-    const measureList = (items: readonly Candidate[]): number =>
-      items.reduce((sum, item) => sum + visibleWidth(item.text), 0)
-      + Math.max(0, items.length - 1) * sepWidth
+    const layout = actionBudget > 0 && candidates.length > 0
+      ? layoutActionBarRow(candidates, actionBudget)
+      : { text: '', spans: [], truncated: true }
 
-    while (surviving.length > 0 && measureList(surviving) > actionBudget) {
-      const shortenable = surviving.find(item => item.short !== undefined && item.text !== item.short)
-      if (shortenable !== undefined) {
-        shortenable.text = shortenable.short!
-        continue
-      }
-      let lowest = 0
-      for (let index = 1; index < surviving.length; index += 1) {
-        if (surviving[index]!.priority < surviving[lowest]!.priority) lowest = index
-      }
-      surviving.splice(lowest, 1)
-    }
-
-    if (surviving.length === 0) {
+    if (layout.truncated || layout.spans.length === 0) {
       this.hitTargets = []
       const inputWidth = Math.max(1, width - countWidth)
       const inputLine = this.search.renderInput(inputWidth)
@@ -291,27 +278,25 @@ class JobOutputSearchRow implements Component, Focusable {
       return [truncateToWidth(line, width, '…', true)]
     }
 
-    const actionsWidth = measureList(surviving)
+    const actionsWidth = layout.spans.at(-1)!.endCol
     const rightWidth = countWidth + leadingGap + actionsWidth
     const inputWidth = Math.max(1, width - rightWidth)
     const inputLine = this.search.renderInput(inputWidth)
     const padding = ' '.repeat(Math.max(0, inputWidth - visibleWidth(inputLine)))
     const actionsStartCol = inputWidth + countWidth + leadingGap
     const targets: JobSearchRowHitTarget[] = []
-    let col = actionsStartCol
     const paintedActions: string[] = []
-    for (const item of surviving) {
-      const itemWidth = visibleWidth(item.text)
+    for (const span of layout.spans) {
+      const source = candidates[span.inputIndex]!
       targets.push({
-        action: item.action,
+        action: source.action,
         row: 0,
-        startCol: col,
-        endCol: col + itemWidth,
+        startCol: actionsStartCol + span.startCol,
+        endCol: actionsStartCol + span.endCol,
         mode,
         query,
       })
-      paintedActions.push(paintActionSpan(item.text, item.role))
-      col += itemWidth + sepWidth
+      paintedActions.push(paintActionSpan(span.text, source.role))
     }
     const line = `${inputLine}${padding}${countRendered}${' '.repeat(leadingGap)}${paintedActions.join(color.textMuted(ACTION_BAR_SEPARATOR))}`
     if (visibleWidth(line) > width) {

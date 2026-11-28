@@ -602,42 +602,28 @@ class JobInspectorHeader implements Component {
     if (searchActive || headingWidth >= width) {
       return { line: truncateToWidth(paintedHeading, width, '…', false), spans: [] }
     }
-    type ActionItem = {
+    interface ActionItem extends ActionBarSegment {
       readonly action: 'copy-command-all' | 'open-command' | 'toggle-preview'
-      readonly text: string
-      readonly priority: number
     }
     const candidates: ActionItem[] = [
       { action: 'copy-command-all', text: PREVIEW_COPY_COMMAND, priority: 1 },
       { action: 'open-command', text: this.expandLabel(), priority: collapsed ? 2 : 3 },
       { action: 'toggle-preview', text: this.togglePreviewLabel(collapsed), priority: collapsed ? 3 : 2 },
     ]
-    const sepWidth = visibleWidth(ACTION_BAR_SEPARATOR)
     const budget = width - headingWidth - 1
-    const surviving = [...candidates]
-    const measure = (items: readonly ActionItem[]): number =>
-      items.reduce((sum, item) => sum + visibleWidth(item.text), 0)
-      + Math.max(0, items.length - 1) * sepWidth
-    while (surviving.length > 0 && measure(surviving) > budget) {
-      let lowest = 0
-      for (let index = 1; index < surviving.length; index += 1) {
-        if (surviving[index]!.priority < surviving[lowest]!.priority) lowest = index
-      }
-      surviving.splice(lowest, 1)
-    }
-    if (surviving.length === 0) {
+    const layout = budget > 0 ? layoutActionBarRow(candidates, budget) : { text: '', spans: [], truncated: true }
+    if (layout.truncated || layout.spans.length === 0) {
       return { line: paintedHeading, spans: [] }
     }
-    const actionsWidth = measure(surviving)
+    const actionsWidth = layout.spans.at(-1)!.endCol
     const gap = width - headingWidth - actionsWidth
-    let col = headingWidth + gap
+    const baseCol = headingWidth + gap
     const spans: { readonly action: 'copy-command-all' | 'open-command' | 'toggle-preview'; readonly startCol: number; readonly endCol: number }[] = []
     const paintedActions: string[] = []
-    for (const item of surviving) {
-      const itemWidth = visibleWidth(item.text)
-      spans.push({ action: item.action, startCol: col, endCol: col + itemWidth })
-      paintedActions.push(color.primary(item.text))
-      col += itemWidth + sepWidth
+    for (const span of layout.spans) {
+      const source = candidates[span.inputIndex]!
+      spans.push({ action: source.action, startCol: baseCol + span.startCol, endCol: baseCol + span.endCol })
+      paintedActions.push(color.primary(span.text))
     }
     return {
       line: `${paintedHeading}${' '.repeat(gap)}${paintedActions.join(color.textMuted(ACTION_BAR_SEPARATOR))}`,
@@ -927,9 +913,6 @@ interface JobOutputStatusFacts {
   /** Whether the frame actually shows a body row: a browsing hint or a
    *  viewport position is never advertised for a body that is not painted. */
   readonly bodyVisible: boolean
-  /** Whether `Tab` can switch the page away from the current one (on the Output
-   *  page: whether the shell Command page exists at all). */
-  readonly canSwitchPage: boolean
   /** Whether `C` can copy a non-empty retained Output this frame. */
   readonly canCopyOutput: boolean
 }
@@ -975,16 +958,19 @@ interface JobBarSegment extends ActionBarSegment {
 class JobInspectorActionBar implements Component {
   private readonly canStop: () => boolean
   private readonly facts: (width: number) => JobOutputStatusFacts | (JobCommandStatusFacts & { readonly command: true })
+  private readonly isLocalKeyPreempted: (key: KeyId) => boolean
   private readonly onMouse: (event: TuiMouseEvent) => TuiMouseEventResult | undefined
   private hitTargets: readonly JobBarHitTarget[] = []
 
   constructor(
     canStop: () => boolean,
     facts: (width: number) => JobOutputStatusFacts | (JobCommandStatusFacts & { readonly command: true }),
+    isLocalKeyPreempted: (key: KeyId) => boolean,
     onMouse: (event: TuiMouseEvent) => TuiMouseEventResult | undefined,
   ) {
     this.canStop = canStop
     this.facts = facts
+    this.isLocalKeyPreempted = isLocalKeyPreempted
     this.onMouse = onMouse
   }
 
@@ -1072,7 +1058,8 @@ class JobInspectorActionBar implements Component {
       segments.push({ text: facts.follow ? 'Follow on' : 'Follow paused', priority: 5 })
     }
     if (!facts.follow && !facts.searchEditing) {
-      segments.push({ text: RESUME_FOLLOW, priority: 5.5, action: 'resume-follow', role: 'primary' })
+      const resumeText = this.isLocalKeyPreempted('end') ? 'Resume' : RESUME_FOLLOW
+      segments.push({ text: resumeText, priority: 5.5, action: 'resume-follow', role: 'primary' })
     }
     if (facts.gap) segments.push({ text: '[GAP]', priority: 4 })
     if (!facts.readingFacts) {
@@ -1190,6 +1177,8 @@ interface JobChromeFrame {
   readonly scrollTop: number
   /** The Command page's viewport position at the press. */
   readonly commandScrollTop: number
+  /** The semantic state identity that was ACTUALLY painted into this frame. */
+  readonly semanticKey: string
 }
 
 type JobChromeOwner = 'header' | 'search' | 'facts' | 'notice' | 'bar'
@@ -1244,6 +1233,7 @@ export class JobInspectorPanel extends VStack {
     width: number
     view: JobInspectorView
     positionViewportHeight: number
+    renderedSemanticKey: string
   }
   /** The ONE anchor/selection baseline: the retained window that was actually
    *  DRAWN last (source text, width and rendered rows), plus the proven row
@@ -1260,7 +1250,7 @@ export class JobInspectorPanel extends VStack {
   private paintedBarTargets: readonly JobBarHitTarget[] = []
   /** The pinned Action Bar instance (the SAME child mounted in the layout). */
   private readonly actionBar: JobInspectorActionBar
-  /** The geometry of the LAST PAINTED frame (live terminal grant + real boxes). */
+  /** The geometry and semantic identity of the LAST PAINTED frame. */
   private paintedChromeFrame: JobChromeFrame = {
     rows: -1,
     columns: -1,
@@ -1269,13 +1259,10 @@ export class JobInspectorPanel extends VStack {
     bar: undefined,
     scrollTop: 0,
     commandScrollTop: 0,
+    semanticKey: '',
   }
   /** The ONE press-time target of the LAST chrome gesture. */
   private pressed: JobPressedGesture | undefined
-  /** Whether a chrome-origin press currently owns the captured pointer gesture.
-   *  Non-chrome-origin drags/releases (e.g. Output body native selection) see
-   *  `false` and fall through unhandled to the fork's native selection path. */
-  private chromeCaptureActive = false
   private disposed = false
 
   constructor(initial: JobInspectorState, intents: JobInspectorPanelIntents) {
@@ -1294,6 +1281,7 @@ export class JobInspectorPanel extends VStack {
       width: number
       view: JobInspectorView
       positionViewportHeight: number
+      renderedSemanticKey: string
     } = {
       plan: planChrome({
         width: 0,
@@ -1309,6 +1297,7 @@ export class JobInspectorPanel extends VStack {
       width: 0,
       view,
       positionViewportHeight: -1,
+      renderedSemanticKey: '',
     }
     const plan = (width: number): JobInspectorChromePlan => {
       const activeSearchMode = readState.view === 'command'
@@ -1331,6 +1320,7 @@ export class JobInspectorPanel extends VStack {
       })
       chrome.plan = next
       chrome.width = width
+      chrome.renderedSemanticKey = holders.panel?.semanticKey() ?? ''
       return next
     }
     const header = new JobInspectorHeader(
@@ -1349,7 +1339,7 @@ export class JobInspectorPanel extends VStack {
       body,
       (width) => readState.view === 'output' && plan(width).searchRows === 1,
       'Find Output: ',
-      { onMouse: onChromeMouse('search'), findHint: intents.findHint },
+      { onMouse: onChromeMouse('search'), findHint: intents.findHint, isLocalKeyPreempted },
     )
     const scrollView = new JobOutputScrollView(new JobOutputBody(search), {
       follow: 'end',
@@ -1363,6 +1353,7 @@ export class JobInspectorPanel extends VStack {
       searchRowVisible: (width) => readState.view === 'command' && plan(width).searchRows === 1,
       onSearchMouse: onChromeMouse('search'),
       findHint: intents.findHint,
+      isLocalKeyPreempted,
     })
     holders.commandReader = commandReader
     // The ONE gesture-boundary notification: any EFFECTIVE viewport move on
@@ -1407,10 +1398,9 @@ export class JobInspectorPanel extends VStack {
         position: positionFacts(search, scrollView, width),
         readingFacts: factsRowShown,
         ...grants,
-        canSwitchPage: commandEligible(chrome.view),
         canCopyOutput: chrome.view.phase === 'observed' && chrome.view.retainedText !== '',
       }
-    }, onChromeMouse('bar'))
+    }, isLocalKeyPreempted, onChromeMouse('bar'))
     super([
       { component: header, shrink: 0 },
       { component: search.row, shrink: 0, visible: () => readState.view === 'output' },
@@ -1501,7 +1491,8 @@ export class JobInspectorPanel extends VStack {
   /** The layout frame is committed and painted: consume the ONE pending search
    *  reveal of the CURRENT page against the real geometry, leave a search whose
    *  SearchRow this frame could no longer show, and commit the chrome hit maps
-   *  the user can actually click. Never mutates the layout from `render()`. */
+   *  and semantic identity the user can actually click. Never mutates the layout
+   *  from `render()`. */
   onFramePainted(): void {
     if (this.disposed) return
     const headerBox = clonePaintedBox(this.intents.paintedBox(this.header))
@@ -1521,12 +1512,10 @@ export class JobInspectorPanel extends VStack {
       bar: barBox,
       scrollTop: this.scrollView.scrollTop,
       commandScrollTop: this.commandReader.scroll.scrollTop,
+      semanticKey: this.chrome.renderedSemanticKey,
     }
-    if (this.pressed !== undefined) {
-      if (this.pressed.chrome.scrollTop !== this.scrollView.scrollTop
-        || this.pressed.chrome.commandScrollTop !== this.commandReader.scroll.scrollTop) {
-        this.pressed = undefined
-      }
+    if (this.pressed !== undefined && !this.chromeFrameCurrent(this.pressed.chrome)) {
+      this.pressed = undefined
     }
 
     if (this.readState.view === 'command') {
@@ -1726,22 +1715,28 @@ export class JobInspectorPanel extends VStack {
       bar: clonePaintedBox(frame.bar),
       scrollTop: frame.scrollTop,
       commandScrollTop: frame.commandScrollTop,
+      semanticKey: frame.semanticKey,
     }
   }
 
-  /** Whether the gesture's painted frame is still the LIVE one. */
+  /** Whether the gesture's painted frame is still the LIVE one (geometry + semantic identity). */
   private chromeFrameCurrent(chrome: JobChromeFrame): boolean {
+    if (chrome.semanticKey === '' || this.semanticKey() !== chrome.semanticKey) return false
     if (this.intents.rows() !== chrome.rows || this.intents.columns() !== chrome.columns) return false
     if (this.scrollView.scrollTop !== chrome.scrollTop) return false
     if (this.commandReader.scroll.scrollTop !== chrome.commandScrollTop) return false
     const live = this.paintedChromeFrame
+    if (live.semanticKey !== chrome.semanticKey) return false
     if (live.rows !== chrome.rows || live.columns !== chrome.columns) return false
     return samePaintedBox(live.header, chrome.header)
       && samePaintedBox(live.search, chrome.search)
       && samePaintedBox(live.bar, chrome.bar)
   }
 
-  /** The exact semantic state identity a chrome press was recorded against. */
+  /** The exact semantic state identity a chrome frame was painted against.
+   *  Benign Output log appends (non-empty → non-empty) preserve the same key so
+   *  a live gesture is never needlessly broken; any state change that alters
+   *  action admission or command source changes the key immediately. */
   private semanticKey(): string {
     const search = this.readState.view === 'command' ? this.commandReader.search : this.search
     return [
@@ -1749,6 +1744,8 @@ export class JobInspectorPanel extends VStack {
       this.chrome.view.kind,
       this.chrome.view.phase,
       this.chrome.view.label,
+      this.chrome.view.retainedText !== '' ? '1' : '0',
+      this.scrollView.isFollowRequested ? '1' : '0',
       commandEligible(this.chrome.view) ? '1' : '0',
       this.readState.view,
       this.readState.previewCollapsed ? '1' : '0',
@@ -1761,10 +1758,14 @@ export class JobInspectorPanel extends VStack {
    * The ONE chrome pointer handler shared by all fixed chrome components
    * (Header, SearchRow, ReadingFactsRow, NoticeRow, ActionBar):
    * - wheel over chrome is always consumed (never bubbles into routeWheel);
-   * - left press captures the gesture (even on inert chrome, preventing native
-   *   word-copy on buttons/labels) without requesting fork focus;
-   * - non-chrome-origin drag/release returns undefined so Output native
-   *   selection drag/release completes untouched;
+   * - left press captures the gesture (even on inert/stale chrome, preventing
+   *   native word-copy on buttons/labels) without requesting fork focus, and
+   *   registers a pending action only when the LAST PAINTED frame's semantic
+   *   identity and geometry match the LIVE state;
+   * - drag retires any pending chrome action and returns undefined; release
+   *   returns undefined (the fork handles captured press/drag/release and
+   *   synthesizes click, while non-chrome-origin drags fall through to native
+   *   Output selection);
    * - only a same-cell synthetic `click` with `clickCount === 1` and matching
    *   painted frame + semantic identity executes the semantic intent.
    */
@@ -1775,40 +1776,38 @@ export class JobInspectorPanel extends VStack {
     if (event.type === 'press') {
       if (event.button !== 'left') return undefined
       this.pressed = undefined
-      this.chromeCaptureActive = true
       const chrome = this.chromeFrame()
-      const semanticKey = this.semanticKey()
-      if (owner === 'header') {
-        const target = this.headerTargetAt(event.screenX, event.screenY)
-        if (target !== undefined) this.pressed = { owner: 'header', target, semanticKey, chrome }
-      } else if (owner === 'search') {
-        const target = this.searchTargetAt(event.screenX, event.screenY)
-        if (target !== undefined) this.pressed = { owner: 'search', target, semanticKey, chrome }
-      } else if (owner === 'bar') {
-        const hit = this.barTargetAt(event.screenX, event.screenY)
-        if (hit !== undefined) {
-          this.pressed = {
-            owner: 'bar',
-            target: hit.target,
-            row: hit.row,
-            startCol: hit.startCol,
-            endCol: hit.endCol,
-            semanticKey,
-            chrome,
+      if (this.chromeFrameCurrent(chrome)) {
+        const semanticKey = chrome.semanticKey
+        if (owner === 'header') {
+          const target = this.headerTargetAt(event.screenX, event.screenY)
+          if (target !== undefined) this.pressed = { owner: 'header', target, semanticKey, chrome }
+        } else if (owner === 'search') {
+          const target = this.searchTargetAt(event.screenX, event.screenY)
+          if (target !== undefined) this.pressed = { owner: 'search', target, semanticKey, chrome }
+        } else if (owner === 'bar') {
+          const hit = this.barTargetAt(event.screenX, event.screenY)
+          if (hit !== undefined) {
+            this.pressed = {
+              owner: 'bar',
+              target: hit.target,
+              row: hit.row,
+              startCol: hit.startCol,
+              endCol: hit.endCol,
+              semanticKey,
+              chrome,
+            }
           }
         }
       }
       return { handled: true, capture: true, render: false }
     }
     if (event.type === 'drag') {
-      if (!this.chromeCaptureActive) return undefined
       this.pressed = undefined
-      return { handled: true, capture: true, render: false }
+      return undefined
     }
     if (event.type === 'release') {
-      if (!this.chromeCaptureActive) return undefined
-      this.chromeCaptureActive = false
-      return { handled: true, render: false }
+      return undefined
     }
     if (event.type === 'click') {
       const pressed = this.pressed
@@ -1884,7 +1883,6 @@ export class JobInspectorPanel extends VStack {
   onTerminalBlur(): void {
     if (this.disposed) return
     this.pressed = undefined
-    this.chromeCaptureActive = false
     if (this.commandReader.cancelSelection()) this.intents.requestRender()
   }
 
@@ -1893,7 +1891,6 @@ export class JobInspectorPanel extends VStack {
     if (this.disposed) return
     this.disposed = true
     this.pressed = undefined
-    this.chromeCaptureActive = false
     this.commandReader.dispose()
     super.dispose()
   }

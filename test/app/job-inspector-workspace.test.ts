@@ -508,24 +508,22 @@ test('a Job bar gesture is revoked when the terminal resizes before the next pai
   const col = rawView(vt)[barRow]!.indexOf('Back')
   assert.ok(col >= 0, `the bar paints its Back affordance:\n${view(vt)}`)
 
-  // A resize between press and release revokes the gesture: the old physical
-  // cells must never replay the previous Esc outcome.
+  // A resize between press and release BEFORE the next paint revokes the
+  // gesture: the old physical cells must never replay the previous Esc outcome.
   vt.sendInput(`\x1b[<0;${col + 1};${barRow + 1}M`)
   vt.resize(80, 20)
-  await vt.waitForRender()
   vt.sendInput(`\x1b[<0;${col + 1};${barRow + 1}m`)
   await vt.waitForRender()
-  assert.match(view(vt), /Job · job-a · bash/, 'a row resize revokes the bar gesture')
+  assert.match(view(vt), /Job · job-a · bash/, 'a before-next-paint row resize revokes the bar gesture')
 
-  // The same fence covers a width-only change.
+  // The same fence covers a before-next-paint width-only change.
   const row20 = rawView(vt).length - 1
   const col20 = rawView(vt)[row20]!.indexOf('Back')
   vt.sendInput(`\x1b[<0;${col20 + 1};${row20 + 1}M`)
   vt.resize(100, 20)
-  await vt.waitForRender()
   vt.sendInput(`\x1b[<0;${col20 + 1};${row20 + 1}m`)
   await vt.waitForRender()
-  assert.match(view(vt), /Job · job-a · bash/, 'a width change revokes the bar gesture')
+  assert.match(view(vt), /Job · job-a · bash/, 'a before-next-paint width change revokes the bar gesture')
 
   // Positive control: on an UNCHANGED frame the same cells act exactly once.
   const finalRow = rawView(vt).length - 1

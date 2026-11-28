@@ -27,6 +27,7 @@ import {
   MouseRegion,
   ScrollView,
   type Component,
+  type KeyId,
   type ScrollViewScrollToOptions,
   type TuiMouseEvent,
   type TuiMouseEventResult,
@@ -74,6 +75,8 @@ export interface JobCommandReaderIntents {
   readonly onSearchMouse?: (event: TuiMouseEvent) => TuiMouseEventResult | undefined
   /** Optional live Find hint formatter for the SearchRow's Edit action. */
   readonly findHint?: () => string
+  /** Optional live preemption predicate for fixed SearchRow key badges. */
+  readonly isLocalKeyPreempted?: (key: KeyId) => boolean
 }
 
 /** The reader's own paint face: the document rows with the Command search
@@ -175,6 +178,7 @@ export class JobCommandReader {
       {
         ...(intents.onSearchMouse === undefined ? {} : { onMouse: intents.onSearchMouse }),
         ...(intents.findHint === undefined ? {} : { findHint: intents.findHint }),
+        ...(intents.isLocalKeyPreempted === undefined ? {} : { isLocalKeyPreempted: intents.isLocalKeyPreempted }),
       },
     )
     // The Command viewport never follows: `Home`/`End`, the wheel and the

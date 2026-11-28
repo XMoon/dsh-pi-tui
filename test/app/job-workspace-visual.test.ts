@@ -1482,7 +1482,28 @@ test('JUX-03/04/07/08: complete 120x40 pointer journey, chrome wheel isolation, 
   release(harness.vt, previewDragTarget, 5)
   await flush(6)
   assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'dragging from Output into preview never opens Command')
-  assert.ok(harness.copied.every(text => text !== label), 'dragging from Output into preview never copies Command')
+  assert.equal(harness.copied.length, 1, 'Output-origin drag into preview still copies the clamped Output selection')
+  assert.match(harness.copied[0]!, /log-row-/, 'copied text comes from the Output body selection')
+  assert.notEqual(harness.copied[0], label, 'dragging from Output into preview never copies Command')
+
+  // 6b. R948-01: a NEW press+release on old A's Copy Command span after observation updates to B
+  //     but BEFORE the next frame paints must be refused (never copy B); once B paints, clicking copies B.
+  harness.copied.length = 0
+  const staleCopyRow = bodyRow(harness.vt, 'Copy Command')
+  const staleCopyCol = cellIndexOf(harness.vt, staleCopyRow, 'Copy Command') + 2
+  const updatedLabel = 'echo "command-B-updated"\necho "command-B-line2"'
+  harness.observation.latest()!.emit({ label: updatedLabel, text: grown })
+  press(harness.vt, staleCopyRow, staleCopyCol)
+  release(harness.vt, staleCopyRow, staleCopyCol)
+  await flush(6)
+  assert.deepEqual(harness.copied, [], 'a new press on an unpainted stale frame must never copy the newer command B')
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /command-B-updated/, 'the updated command B is now painted')
+  const freshCopyRow = bodyRow(harness.vt, 'Copy Command')
+  const freshCopyCol = cellIndexOf(harness.vt, freshCopyRow, 'Copy Command') + 3
+  await click(harness.vt, freshCopyRow, freshCopyCol)
+  await flush(6)
+  assert.deepEqual(harness.copied, [updatedLabel], 'once B is painted, clicking Copy Command copies B')
 
   // 7. Copy Output [C] copies exact retained snapshot; Stop hint click is inert (keyboard-only).
   harness.copied.length = 0

@@ -1710,6 +1710,67 @@ test('JUX-05: F2 is reserved from direct/leader Find, and Exit/leader preemption
   vt.sendInput(`\x1b[<0;${hideCol + 1};${headerRow + 1}m`)
   await vt.waitForRender()
   assert.match(rawView(vt)[headerRow]!, /Show/, 'mouse Hide still works when F2 is preempted')
+
+  // (3) R948-02: active leader prefix on `end` preempts `Resume [End]` badge,
+  //     consumes End without resuming follow, while mouse `Resume` still resumes.
+  const longOut = Array.from({ length: 80 }, (_, i) => `row-${String(i).padStart(2, '0')}`).join('\n')
+  harness.observation.latest()!.emit({ label: 'echo alpha\necho beta', text: longOut })
+  await vt.waitForRender()
+  const bodyIdx = rawView(vt).findIndex(line => line.includes('row-79'))
+  vt.sendInput(`\x1b[<64;10;${bodyIdx + 1}M`)
+  await vt.waitForRender()
+  assert.match(view(vt), /Resume \[End\]/, 'paused Output normally advertises Resume [End]')
+
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'end',
+    bindings: { 'app.transcript.search.view': '<leader>f', 'app.transcript.search': false },
+  }))
+  await vt.waitForRender()
+  const barRowIdx = rawView(vt).length - 1
+  const endBarLine = rawView(vt)[barRowIdx]!
+  assert.ok(!endBarLine.includes('Resume [End]'), `preempted End omits [End] badge:\n${endBarLine}`)
+  assert.match(endBarLine, /\bResume\b/, 'unbadged Resume button remains visible')
+  vt.sendInput('\x1b[F') // End -> arms leader prefix instead of resuming follow
+  await vt.waitForRender()
+  assert.match(view(vt), /Follow paused/, 'leader=end consumes End without resuming Follow')
+  vt.sendInput('\x1b') // cancel armed leader prefix
+  await vt.waitForRender()
+  const resumeCol = rawView(vt)[barRowIdx]!.indexOf('Resume')
+  vt.sendInput(`\x1b[<0;${resumeCol + 2};${barRowIdx + 1}M`)
+  vt.sendInput(`\x1b[<0;${resumeCol + 2};${barRowIdx + 1}m`)
+  await vt.waitForRender()
+  assert.match(view(vt), /Follow on/, 'mouse Resume still resumes Follow when End is preempted')
+
+  // (4) R948-02: when submit is remapped off Enter, active leader prefix on
+  //     `enter` preempts `Search [Enter]` badge and consumes Enter without
+  //     committing Find EDIT, while mouse `Search` still commits.
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'enter',
+    bindings: {
+      'app.input.submit': 'ctrl+s',
+      'app.transcript.search.view': '<leader>f',
+      'app.transcript.search': false,
+    },
+  }))
+  await vt.waitForRender()
+  vt.sendInput('/')
+  await vt.waitForRender()
+  vt.sendInput('row-10')
+  await vt.waitForRender()
+  const searchRowIdx = rawView(vt).findIndex(line => line.includes('Find Output:'))
+  const searchRowLine = rawView(vt)[searchRowIdx]!
+  assert.ok(!searchRowLine.includes('Search [Enter]'), `preempted Enter omits [Enter] badge:\n${searchRowLine}`)
+  assert.match(searchRowLine, /\bSearch\b/, 'unbadged Search button remains visible')
+  vt.sendInput('\r') // Enter -> arms leader prefix instead of committing search
+  await vt.waitForRender()
+  assert.ok(!rawView(vt)[searchRowIdx]!.includes('Next [N]'), 'leader=enter consumes Enter without committing Find')
+  vt.sendInput('\x1b') // cancel armed leader prefix
+  await vt.waitForRender()
+  const searchBtnCol = rawView(vt)[searchRowIdx]!.lastIndexOf('Search')
+  vt.sendInput(`\x1b[<0;${searchBtnCol + 2};${searchRowIdx + 1}M`)
+  vt.sendInput(`\x1b[<0;${searchBtnCol + 2};${searchRowIdx + 1}m`)
+  await vt.waitForRender()
+  assert.match(rawView(vt)[searchRowIdx]!, /Next \[N\]/, 'mouse Search still commits Find EDIT when Enter is preempted')
   app.stop()
 })
 
