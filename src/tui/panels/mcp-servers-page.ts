@@ -2260,8 +2260,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (!this.focused || this.region !== 'detail') return { lines: [...lines, ...facts.diagnostics], actions: [] }
     // The body group carries every legal business verb exactly once; the
     // physical bar keeps only the primary alias and Back.
-    const barSuppliesRefresh = this.detailBarSegments(snapshot)
-      .some(segment => segment.action === 'refresh')
+    // The bar predicate must use the SAME width-resolved layout the physical
+    // bar paints: a dropped segment supplies nothing, so the body fallback must
+    // remain. A candidate-only check would suppress Refresh at narrow widths.
+    const barSuppliesRefresh = paintBar(
+      this.detailBarSegments(snapshot), this.currentBarWidth, true,
+    ).spans.some(span => span.action === 'refresh')
     const body = this.detailActionSegments(snapshot)
       .filter(segment => segment.action !== undefined && segment.action !== 'back'
         && !(barSuppliesRefresh && segment.action === 'refresh'))

@@ -515,6 +515,45 @@ test('a short real MCP Detail admits a secondary verb only after its complete la
   assert.deepEqual(h.settingsMutateCalls, [])
 })
 
+test('a narrow Detail keeps the body Refresh fallback when the actual bar drops it', async () => {
+  const h = setup({ columns: 100, rows: 40 })
+  await openMcpPage(h)
+  // Select the retained gamma row; its only legal action is Refresh + Back.
+  await press(h.vt, '\x1b[B')
+  await press(h.vt, '\x1b[B')
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  const normal = h.view()
+  assert.equal((normal.match(/Refresh \[R\]/gu) ?? []).length, 1,
+    `the normal bar already supplies Refresh, so the body does not duplicate it:\n${normal}`)
+  const subscriptions = h.manager.watchSubscriptions
+
+  // The real 20-column bar cannot paint Refresh + Back + separator; the
+  // physical Refresh segment drops whole while the body fallback remains.
+  h.vt.resize(20, 40)
+  await frames(h.vt, 4)
+  await flushOwnedTurns()
+  const narrowLines = h.view().split('\n')
+  assert.doesNotMatch(narrowLines.at(-1)!, /Refresh \[R\]/u, 'the narrow physical bar drops the whole Refresh segment')
+  assert.match(narrowLines.at(-1)!, /Back \[Esc\]/u, 'Back remains the real escape')
+  for (let step = 0; step < 20 && !/Refresh \[R\]/u.test(h.view().split('\n').slice(0, -1).join('\n')); step += 1) {
+    await press(h.vt, '\x1b[6~')
+    await frames(h.vt, 1)
+    await flushOwnedTurns()
+  }
+  assert.match(h.view().split('\n').slice(0, -1).join('\n'), /Refresh \[R\]/u,
+    'the complete body fallback is reachable by the existing scroll')
+  await press(h.vt, 'r')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  assert.equal(h.manager.watchSubscriptions, subscriptions + 1,
+    'the painted body fallback reaches the existing refresh/watch sink once')
+  assert.deepEqual(h.manager.probes, [])
+  assert.deepEqual(h.manager.restarts, [])
+  assert.deepEqual(h.settingsMutateCalls, [])
+})
+
 test('closing and reopening the page leaves ONE active watch and starts a new one', async () => {
   const h = setup()
   await openMcpPage(h)
