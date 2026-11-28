@@ -851,7 +851,13 @@ Startup resolves canonical data before the first agent composition or TUI frame:
    value and is never rewritten;
 2. an invalid canonical value resolves to Full and is canonicalized;
 3. when canonical data is absent, legacy `focusMode: on` maps to Focus;
-4. every other absent-canonical legacy value maps to Full.
+4. every other supplied legacy `focusMode` value maps to Full;
+5. when neither field supplies a preference, the product default is Compact.
+
+A legacy document with a malformed display field retains its historical
+migration semantics rather than being treated as a fresh profile. The
+configuration schema, Remote missing-field fallback and runtime resolver share
+`DEFAULT_DISPLAY_PRESET`.
 
 A required canonicalization write is detached and best-effort. It writes only
 `displayPreset`, preserves unrelated settings and user footer definitions, and
