@@ -56,6 +56,8 @@ import type {
   WorkspaceNewConversationCapture,
 } from '../session-lifecycle-port.ts'
 import { WorkspaceSelectionError } from '../session-lifecycle-port.ts'
+import { createDiag } from '../process/diagnostics.ts'
+import { runDetached } from '../process/tasks.ts'
 import type { OperationOwnership } from '../write-outcome.ts'
 import { GATEWAY_PRE_INVOCATION_CODES } from '../write-outcome.ts'
 import type {
@@ -295,6 +297,7 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
   private readonly generation: RemoteConnectionGenerationSource
   private readonly workspace: RemoteWorkspaceNamespaceLike
   private readonly sessionList: RemoteSessionListSourceLike
+  private readonly diag = createDiag()
   private readonly workspaceNewProofs = new WeakMap<WorkspaceNewConversationCapture, WorkspaceNewConversationProof>()
 
   constructor(
@@ -615,9 +618,11 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
         },
       }
     }
-    if (candidateId !== undefined && candidateId !== id && ownership() === 'current') {
-      void this.sessions.refreshProjections(candidateId).catch((reason: unknown) => {
-        console.warn('declined blank Session projection reload failed:', reason)
+    const namedCandidate = candidateId
+    if (namedCandidate !== undefined && namedCandidate !== id && ownership() === 'current') {
+      runDetached('declined blank Session projection reload', () => this.sessions.refreshProjections(namedCandidate), {
+        diag: this.diag,
+        sessionId: () => namedCandidate,
       })
     }
     const handle: SessionHandle = { session: { id } }
