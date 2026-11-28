@@ -132,19 +132,12 @@ filesystem for it.
 
 ## Modules
 
-| File | Responsibility |
-|---|---|
-| `src/domain/catalog/surface.ts` | Neutral frozen snapshot DTOs and the `commandSummaryOf` descriptor→summary projection (shared by the Direct Host read and the Client registry) |
-| `src/domain/catalog/skill.ts` | Neutral human-skill vocabulary and the official `isUserInvocableSkill` policy guard |
-| `src/runtime/direct/surface-catalog.ts` | Direct effective read: `readSurfaceCatalog(agent, signal, ctx)`, scoped-override derivation, `listGlobalCommands`, structural command-service faces |
-| `src/runtime/direct/skill-catalog.ts` | The single narrow seam to DSH services: structural `SkillRegistryLike`/`AgentPresetsLike`, `readHumanSkillCatalog()`, `resolveColdSkillTarget()`, `resolveLiveSkillTarget()` |
-| `src/app/direct/initial-catalog.ts` | Pre-mount resolution: resume prefetch or the cold standing-scope skill read, with one-shot degradation notices |
-| `src/runtime/catalog-port.ts` | Semantic catalog port + `StandingSkillRead` beside `SkillCatalogCapability` |
-| `src/app/command/catalog-refresh.ts` | `CatalogRefreshCoordinator` (epoch + abort + latest-only commit; target transitions; same-target retention; standing degradation notices; dispose cancellation) and `CoalescingRefreshGate` |
-| `src/app/host/features/skills.ts` | Host-owned standing read (official Workspace registry + preset lease + `ctx.skills.snapshot`, metadata-only projection) and the private invalidation stream |
-| `src/runtime/remote/pi-tui-skills-contract.ts` | Strict private wire contract for `piTuiSkills/standing` and `piTuiSkills/watchInvalidations` (single shared descriptor truth) |
-| `src/tui/interaction/autocomplete/skill-reference.ts` | Pure Client-local inline skill-reference grammar (`extractInlineSkillPrefix`, `applyInlineSkillReference`): no Context/Agent/Session/registry/Remote access |
-| `src/tui/interaction/autocomplete/provider.ts` | `MentionProvider` inline skill source: prompt-mode routing, fuzzy candidates from the detached `HumanSkillSummary[]`, strict snapshot fence, catalog-guarded apply |
+The [catalog port](../../src/runtime/catalog-port.ts) defines the semantic
+boundary; the [refresh coordinator](../../src/app/command/catalog-refresh.ts)
+owns refresh lifetime and commit admission. The [Host skill feature](../../src/app/host/features/skills.ts)
+owns standing reads and invalidation. Inline suggestions remain Client-local
+projections of the detached human-invocable catalog; applying a suggestion
+must recheck its catalog authority, not resolve a new Host scope.
 
 ## Skill catalog consumers
 
@@ -298,8 +291,10 @@ The final write/clear happens only inside the workspace after an explicit
 confirm. The DeepSeek Account authorization flow (`deepseek-account-platform/
 default`) is excluded from the generic provider flows and is never cleared
 through `credentials.deleteRecord`; the Account page owns its sign-in and
-sign-out. Remote cannot enumerate records: state the limitation instead of
-reporting an empty store.
+sign-out. Remote record enumeration and deletion use the
+[Host credential-record authority](./host-client.md#stored-credential-records-over-the-split-wire).
+A backend without that capability reports unavailable, not an empty store;
+a failed read of a supported capability remains a failure.
 
 Authority: `src/domain/catalog/provider.ts` (`providerOptionsFor`,
 `credentialOptionsFor`, `classifyCredentialArg`, `deriveKeyRef`,
@@ -310,9 +305,9 @@ Settings pages. Host business authority remains in
 [host-client.md](./host-client.md).
 
 Must-not: re-derive a typed env name, keep a command-level picker/question/
-output-viewer branch, claim stored records were cleaned, present a
-provider-native sign-in as available, or offer the Account flow as a generic
-provider credential.
+output-viewer branch, claim stored records were cleaned, offer provider-native
+sign-in without a current [Host authorization roster](./host-client.md#provider-native-authorization-over-the-split-wire),
+or offer the Account flow as a generic provider credential.
 
 ## Invariants (never break)
 

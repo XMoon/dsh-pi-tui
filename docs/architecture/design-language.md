@@ -113,26 +113,11 @@ D14 in full:
 
 ### 2.1 Why
 
-The family already agrees on **architecture**: a fullscreen workspace is a
-layout root with one compact header, one body, one pinned bottom bar, and no
-border box (`Frame` is for overlays only — `src/tui/components/frame.ts`).
-Both workspaces already compute their whole chrome from one per-frame plan.
-
-The problem is not too much decoration. The measured problem is that the family
-has **two competing "active" devices and no shared ink ladder**:
-
-- Settings marks the focused pane with `[TITLE]` painted `borderFocus`
-  (`settings-workspace-panel.ts:760`), whose hex `#E8A838` **is** the `warning`
-  token. Ordinary focus therefore reads as an amber warning.
-- The Job workspace marks the active tab with `[Output]` painted
-  `textStrong(…, 'primary')` (`job-inspector-panel.ts:433`) — a different device
-  and a different colour for the same semantic.
-- The editors of the two surfaces picked different inks for the same role:
-  Settings brands itself with `primary` (`:514`); Job brands itself with
-  `textStrong` (`:572`). Detail field labels are `textDim`, while the detail
-  *values* are left unpainted and render in the terminal's default foreground —
-  so a custom or light palette's `text` token is ignored there, and the
-  `Status` field renders "Verified" and "Not saved" in exactly the same colour.
+Fullscreen workspaces own their per-frame layout: one compact header, body
+and pinned bottom bar; `Frame` is for overlays. Competing active signals,
+warning ink for ordinary focus, action ink for identity, and unpainted derived
+values obscure semantic hierarchy and can bypass custom or light palettes.
+The goal is consistent roles, not less decoration for its own sake.
 
 A "quiet" goal is not checkable. So the direction is stated as two rules that
 can be reviewed against a frame:
@@ -195,21 +180,13 @@ can be reviewed against a frame:
 | 16 | Placeholder / empty state | `textDim`, and `error` for the word of a *failed* one | no | `No matching commands`, `Model catalog unavailable: …`, `Waiting for retained output…` |
 | 17 | Notice | `textMuted` (info) / `error` (error) | no | `ℹ Copy sent`, `✗ Copy failed` |
 
-Corrections this table makes to the current code:
+Role application rules:
 
-- **Identity is `textStrong`, never `primary`** (`SETTINGS` moves
-  `primary` → `textStrong`). `primary` then means exactly one thing —
-  *active or actionable* — instead of also meaning *brand*.
+- **Identity is `textStrong`, never `primary`.** `primary` means
+  *active or actionable*, not brand.
 - **The cursor glyph is `primary`, the selected row's text is bold
-  `textStrong`.** Today the workspaces paint the cursor in the *same* ink as the
-  row it marks (`> Appearance`, both `textStrong`), so the cursor disappears
-  into the row. The theme objects already split the two roles
-  (`settingsListTheme.cursor = color.primary('›')`,
-  `selectListTheme.selectedPrefix = color.primary`,
-  `selectListTheme.selectedText = chalk.bold`); roles 6+8 adopt that split.
-  The Host `SearchablePicker` consumes the same split through
-  `selectListTheme.selectedPrefix` and paints `> ` with it, so its cursor is
-  `primary` and width-safe.
+  `textStrong`.** Keep these roles distinct, including the Host
+  `SearchablePicker`'s width-safe `> ` cursor.
 - **`borderFocus` is not an ordinary-focus colour.** It is the attention /
   approval colour (palette comment: "approval panel"; the reference study found
   Kimi's token of the same name carries the same comment). Ordinary focus and
@@ -226,7 +203,7 @@ Corrections this table makes to the current code:
   `Runtime` are derived and must be painted; the Job log body is raw and must
   stay unpainted. **The raw record stays the content authority and the
   exact-copy source; the terminal-bound presentation is a disposable projection
-  that may remove untrusted controls** (see `terminal-output-safety.md`). A raw
+  that may remove untrusted controls** (see [terminal-output.md](./terminal-output.md)). A raw
   job log can therefore render with whitelisted SGR while the copied bytes stay
   byte-exact.
 - **Secondary facts are one layer below their group's primary content**, not all
@@ -235,7 +212,6 @@ Corrections this table makes to the current code:
   `Issue` values are `textDim`.
 - **A status word carries its semantic token.** `Verified` → `success`,
   `Not saved` → `error`, `Outcome unknown` → `warning`, `Saving…` → `textDim`.
-  Today all four are the same colour.
 - **A status token is only painted when the state is not the calm default.**
   `Ready` is `textMuted` (normal), `Stale` is `warning`, `Unavailable` is
   `error`; `Completed` is `textDim` (normal), `Running` is `primary`.
@@ -689,12 +665,9 @@ anchor, without inventing a fourth meaning for `primary`.
   (§13).
 - **A surface-local key that is deliberately NOT rebindable derives both its
   handler and its hint from one local constant.** The Settings workspace's
-  `r refresh` and `c copy fact`/`C copy all` are such keys: they are read by raw character
-  comparison today (`settings-workspace-panel.ts:1185-1186`) and there is no
-  corresponding `APP_KEYBINDINGS` action. A future implementation must introduce ONE local
-  table used by both the handler and the hint — not a new rebindable action
-  (that is a keybinding-contract change, not a visual one) and not two copies of
-  the letter. If these keys are ever made rebindable, that lands with the
+  `r refresh` and `c copy fact`/`C copy all` are such keys. Use their existing
+  shared local definitions for both handler and hint, not a new rebindable
+  action (a keybinding-contract change, not a visual one) or duplicate literals. If these keys are ever made rebindable, that lands with the
   keybinding contract and the hint then switches to `componentKeymap`.
 - An affordance with a key renders `Verb [Key]` (`Copy All [C]`); a
   **direct action with no key renders `Verb`** (`Retry save` — click-only); an
@@ -768,10 +741,8 @@ An explicitly frozen state-dependent Esc ladder is the narrowly scoped exception
 
 The bar acts in this order: **compact a segment that declares a `short` form
 first, then drop whole segments by ascending priority**, and only truncate as the
-last resort with one segment left. `renderActionBarRow`
-(`src/tui/presentation/action-bar.ts`, moved verbatim out of the Job panel) is the
-reference implementation; the Settings bar (which today truncates mid-hint —
-`Esc back | ↑↓/Pg keys scroll | Enter change…` at 44 columns) adopts it. `Esc`
+last resort with one segment left. The shared [action-bar layout](../../src/tui/presentation/action-bar.ts) is the
+reference implementation for Job and Settings. `Esc`
 carries the highest priority in every surface, so moving it to the tail does not
 make it droppable.
 
@@ -916,12 +887,10 @@ Use these; do not build a parallel owner.
 manager, a generic multi-layer component tree, a whole-repo regex gate for
 chrome (see §11.3).
 
-**The only extraction this contract authorizes** is the action-bar row layout: the Job
-`ActionBarSegment` + `renderActionBarRow` pair already implements §7.2 and the
-Settings bar needs exactly it. Extracting it to
-`src/tui/presentation/action-bar.ts` (pure, stateless, no palette capture) is
-justified by two real consumers. Do not extract anything else until a second
-real consumer exists.
+**The authorized shared layout** is the action-bar row layout in
+[`action-bar.ts`](../../src/tui/presentation/action-bar.ts): pure, stateless,
+without palette capture, shared by Job and Settings. Do not extract anything
+else until a second real consumer exists.
 
 ## 11. Anti-degradation governance
 
@@ -970,15 +939,6 @@ Copy into every PR that changes a visible surface:
 [ ] before/after frames from the real VirtualTerminal included, plus a real
     terminal check per docs/guides/tmux-testing.md. Unrun items are marked NOT_RUN.
 ```
-
-The **interaction coverage authority** for the two mouse checklist items is
-[overlay-focus.md](./overlay-focus.md#7-regression-checklist-for-future-changes):
-this checklist is an entry point, not a new source of pointer permissions.
-Keyboard-only and inert action hints remain legitimate only where the owning
-product contract says so; a new action does not inherit mouse behavior merely
-because it is painted as a hint. The pointer check is `NOT_APPLICABLE` for
-non-interactive changes, Regular/Main application mouse routes and TSP-native
-surfaces (which have their own pointer/key review).
 
 The **interaction coverage authority** for the two mouse checklist items is
 [overlay-focus.md](./overlay-focus.md#7-regression-checklist-for-future-changes):
