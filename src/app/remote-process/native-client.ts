@@ -70,7 +70,7 @@ import {
   type NativeContinuedDeliveryReservation,
   type NativeContinuedQuestionReceiver,
 } from './native-client-continued.ts'
-import { nativeJobFrameIsDeliverable } from './native-client-job-observation.ts'
+import { abortable } from './native-client-operations.ts'
 import { completeNativeClientRealm, reserveNativeClientRealm } from './native-client-realm.ts'
 import { nativePromptWriteFailure, nativeWriteFailure } from './native-client-write-result.ts'
 
@@ -896,22 +896,6 @@ function currentGeneration(state: NativeClientState): Generation {
   return state.transport.connection.generation.getSnapshot()
 }
 
-function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason)
-  return new Promise<T>((resolve, reject) => {
-    const abort = (): void => {
-      cleanup()
-      reject(signal.reason)
-    }
-    const cleanup = (): void => signal.removeEventListener('abort', abort)
-    signal.addEventListener('abort', abort, { once: true })
-    operation.then(
-      value => { cleanup(); resolve(value) },
-      error => { cleanup(); reject(error) },
-    )
-  })
-}
-
 function trackClientOperation<T>(state: NativeClientState, operation: Promise<T>): Promise<T> {
   state.operations.add(operation)
   observeSettled(operation, () => { state.operations.delete(operation) })
@@ -1661,7 +1645,6 @@ class OwnedNativeSession implements NativeSession {
   observeOfficialQuestionFacts(listener: () => void): () => void {
     const questions = this.binding.session.projections.faceOf('userQuestions')
     const inbox = this.binding.session.projections.faceOf('inbox')
-    listener()
     const offQuestions = questions.subscribe(listener)
     const offInbox = inbox.subscribe(listener)
     return () => { offQuestions(); offInbox() }
@@ -2313,31 +2296,39 @@ class OwnedNativeSession implements NativeSession {
       listener(unavailableResult('NATIVE_JOBS_UNAVAILABLE', 'The official Job stream authority is unavailable.'))
       return () => {}
     }
-    const openerBySignal = new WeakMap<AbortSignal, Generation>()
+    let released = false
+    let openedGeneration: Generation
+    let release: () => void
+    const publish = (result: NativeResult<readonly NativeJob[]>): void => {
+      if (released || this.closed || this.state.closed) return
+      try {
+        listener(result)
+      } catch (error) {
+        this.state.diag.error('native-client: Job listener failed', { error: safeErrorMessage(error) })
+        release()
+      }
+    }
     const stream = this.state.remote.$stream<JobListFrame>({
       name: 'native-client: Job roster observation',
       open: signal => {
-        const openedGeneration = currentGeneration(this.state)
-        if (openedGeneration === undefined || this.state.sessions.binding(this.sessionId as SessionId) !== this.binding) {
-          throw nativeError('NATIVE_DISCONNECTED', 'The owned Session binding is not current for a Job roster open.')
+        openedGeneration = currentGeneration(this.state)
+        if (openedGeneration === undefined) {
+          throw new carrierError('native-client: the Job roster open is waiting for an authenticated generation')
         }
-        openerBySignal.set(signal, openedGeneration)
+        if (this.state.sessions.binding(this.sessionId as SessionId) !== this.binding) {
+          throw nativeError('NATIVE_BINDING_STALE', 'The owned Session binding is not current for a Job roster open.')
+        }
         return this.state.remote.job.list({ sessionId: this.sessionId as SessionId }, signal)
       },
       ended: accepted => accepted
         ? new carrierError('native-client: the Job roster stream ended after an accepted frame')
         : new Error('native-client: the Job roster stream ended before its opening frame'),
-      carrierFailed: () => {
-        if (!released && !this.closed && !this.state.closed) listener(staleResult())
-      },
+      carrierFailed: () => { publish(staleResult()) },
     })
-    let released = false
     const offGeneration = this.state.generation.subscribe(() => {
-      if (released || this.closed || this.state.closed) return
-      listener(staleResult())
-      stream.restart()
+      publish(staleResult())
     })
-    const release = (): void => {
+    release = (): void => {
       if (released) return
       released = true
       offGeneration()
@@ -2355,47 +2346,35 @@ class OwnedNativeSession implements NativeSession {
       try {
         for await (const item of stream) {
           if (released || this.closed || this.state.closed) return
-          const openedGeneration = openerBySignal.get(item.signal)
-          const bindingCurrent = this.state.sessions.binding(this.sessionId as SessionId) === this.binding
-          if (!nativeJobFrameIsDeliverable({
-            openerGeneration: openedGeneration,
-            currentGeneration: currentGeneration(this.state),
-            openerSignalAborted: item.signal.aborted,
-            bindingCurrent,
-          })) {
-            listener(staleResult())
-            if (!bindingCurrent) {
-              release()
-              return
-            }
+          const current = currentGeneration(this.state)
+          if (this.state.sessions.binding(this.sessionId as SessionId) !== this.binding) {
+            publish(staleResult())
+            release()
+            return
+          }
+          if (current === undefined || item.signal.aborted) {
+            publish(staleResult())
+            continue
+          }
+          if (!Object.is(openedGeneration, current)) {
+            publish(staleResult())
             stream.restart()
             continue
           }
-          if (item.value.type !== 'rows') {
-            item.accept()
-            continue
-          }
+          if (item.value.type !== 'rows') continue
           let value: readonly NativeJob[]
           try {
             value = item.value.jobs.map(jobOf)
           } catch {
-            listener(unavailableResult('NATIVE_INVALID_RESPONSE', 'The official Job roster row is unusable.'))
+            publish(unavailableResult('NATIVE_INVALID_RESPONSE', 'The official Job roster row is unusable.'))
             release()
             return
           }
           item.accept()
-          try {
-            listener({ kind: 'ok', value })
-          } catch (error) {
-            this.state.diag.error('native-client: Job listener failed', { error: safeErrorMessage(error) })
-            release()
-            return
-          }
+          publish({ kind: 'ok', value })
         }
       } catch (error) {
-        if (!released && !this.closed && !this.state.closed) {
-          listener(unavailableResult(remoteFailureCode(error) ?? 'NATIVE_JOBS_UNAVAILABLE', 'The official Job roster stream is unavailable.'))
-        }
+        publish(unavailableResult(remoteFailureCode(error) ?? 'NATIVE_JOBS_UNAVAILABLE', 'The official Job roster stream is unavailable.'))
       } finally {
         release()
       }
@@ -2595,25 +2574,17 @@ function createNativeInteractionReceivers(
       },
       onOffer: (reservation, callId, questions) => {
         if (liveQuestionCalls.has(callId) || !continuedFencesValid(reservation)) return false
-        // Own the operation before notify; re-prove the fences before the
-        // external callback so a synchronous reentrant close cannot start it.
-        const owner = Promise.withResolvers<void>()
-        state.operations.add(owner.promise)
-        observeSettled(owner.promise, () => { state.operations.delete(owner.promise) })
+        // Own the one operation before notify. deliverContinued re-proves the
+        // fences before the external callback, so reentrant close cannot start it.
+        const operation = Promise.resolve()
+          .then(() => deliverContinued(reservation, callId, questions, onQuestion))
+          .finally(() => {
+            pending -= 1
+            changed()
+          })
+        trackClientOperation(state, operation)
         pending += 1
         changed()
-        if (!continuedFencesValid(reservation)) {
-          owner.resolve()
-          pending -= 1
-          changed()
-          return true
-        }
-        const operation = deliverContinued(reservation, callId, questions, onQuestion).finally(() => {
-          owner.resolve()
-          pending -= 1
-          changed()
-        })
-        trackClientOperation(state, operation)
         runDetached('native-client: continued Question delivery', () => operation, {
           diag: state.diag,
           sessionId: () => reservation.sessionId,

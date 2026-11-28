@@ -481,7 +481,10 @@ test('qualifies the installed Native Client business and interaction paths', { t
         const effortModel = catalog.models.groups.flatMap(group => group.models).find(model => model.id === 'c1')
         expect(effortModel?.reasoning?.defaultEffort).toBe('low')
         expect(effortModel?.reasoning?.efforts.map(effort => effort.id)).toContain('high')
-        committed(await configured.session.selectModel({ provider: 'c1-qualification', model: 'c1' }), 'selectModel default effort')
+        const lowEffortSelection = committed(await configured.session.selectModel({
+          provider: 'c1-qualification', model: 'c1', reasoningEffort: 'low',
+        }), 'selectModel with low effort')
+        expect(lowEffortSelection.reasoningEffort).toBe('low')
         const effortSelection = committed(await configured.session.selectModel({
           provider: 'c1-qualification', model: 'c1', reasoningEffort: 'high',
         }), 'selectModel with effort')
@@ -1116,6 +1119,57 @@ test('qualifies the installed Native Client business and interaction paths', { t
         await reopenedSibling.close()
         await reopened.close()
         pass('question-pending-continued', { sessionId: created.sessionId, callId, request, recovered, continuedOffers, reply, duplicate, expired })
+      } finally {
+        await first?.close()
+        await second?.close()
+        await scene.stopHost(host)
+      }
+    }
+
+    // Native continued callback -> official answer RPC -> durable reply and successful turn.
+    {
+      const host = await scene.startHost({ scenario: 'question', timedQuestion: true })
+      let first: NativeClient | undefined
+      let second: NativeClient | undefined
+      try {
+        let answeredCallId: string | undefined
+        first = await attach(scene, host, { onQuestion: async request => {
+          answeredCallId = request.callId
+          return await new Promise(resolve => {
+            const answer = (): void => resolve({ answers: [{ id: 'c1-question', selected: ['Proceed'] }] })
+            if (request.signal?.aborted === true) answer()
+            else request.signal?.addEventListener('abort', answer, { once: true })
+          })
+        } })
+        const { sessionId } = await createSession(scene, first, 'question-native-answer')
+        const prompt = accepted(await first.openSession(sessionId).then(result => ok(result, 'question handle').prompt({
+          content: [{ type: 'text', text: 'native timed answer' }],
+        })), 'native timed answer prompt')
+        const call = await scene.waitForSessionEvent(sessionId, 0,
+          event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
+          'native answer tool/call')
+        await fixtureHelpers.waitForC1WorkEvent(host.workloadRoot!,
+          event => event.kind === 'question-failed' && event.sessionId === sessionId,
+          'native answer timed foreground end')
+        await fixtureHelpers.waitForC1WorkEvent(host.workloadRoot!,
+          event => event.kind === 'question-projection' && event.callId === call.data?.callId
+            && event.active?.some((item: Record<string, any>) => item.callId === call.data?.callId && item.state === 'continued'),
+          'native answer continued projection')
+        await first.close()
+        first = undefined
+        second = await attach(scene, host, { onQuestion: async () => ({ answers: [{ id: 'c1-question', selected: ['Proceed'] }] }) })
+        ok(await second.openSession(sessionId), 'native answer reopen')
+        await waitFor('native continued answer settlement', () => ok(second!.status(), 'native answer status').pendingInteractions,
+          pending => pending === 0)
+        writeFileSync(host.timedAfterBarrierPath!, 'release\n', { mode: 0o600, flag: 'wx' })
+        const reply = await scene.waitForSessionEvent(sessionId, 0,
+          event => event.type === 'user/message' && event.data?.source?.kind === 'user-question-reply',
+          'native answered durable reply')
+        expect(reply.data?.source?.callId).toBe(answeredCallId)
+        const terminal = await waitForPromptTerminal(scene, sessionId, prompt.requestId, 'native answered turn')
+        expect(durableEvents(scene, sessionId).find(event => event.type === 'turn/end'
+          && Number(event.data?.turn) === terminal.turn)?.data).toMatchObject({ reason: { kind: 'completed' } })
+        pass('question-native-answer-positive', { sessionId, answeredCallId, reply, terminal })
       } finally {
         await first?.close()
         await second?.close()

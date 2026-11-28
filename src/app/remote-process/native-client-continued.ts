@@ -114,6 +114,9 @@ export function createNativeContinuedQuestionReceiver(
 
   const watchHandle = (handle: NativeContinuedQuestionHandle): void => {
     if (watched.has(handle)) return
+    // Claim ownership before subscribing: an initial notification can re-enter
+    // handle sync through a public close and must not double-register faces.
+    watched.set(handle, () => {})
     watched.set(handle, handle.observeOfficialQuestionFacts(() => { reconcileHandle(handle) }))
   }
 

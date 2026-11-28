@@ -33,7 +33,7 @@ import type {
 } from '../../src/app/remote-process/native-client.ts'
 import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '../../src/app/remote-process/native-client.ts'
 import { createNativeContinuedQuestionReceiver } from '../../src/app/remote-process/native-client-continued.ts'
-import { nativeJobFrameIsDeliverable } from '../../src/app/remote-process/native-client-job-observation.ts'
+import { abortable } from '../../src/app/remote-process/native-client-operations.ts'
 import { completeNativeClientRealm, reserveNativeClientRealm } from '../../src/app/remote-process/native-client-realm.ts'
 import { nativePromptWriteFailure, nativeWriteFailure } from '../../src/app/remote-process/native-client-write-result.ts'
 import { classifyRemoteWriteFailure } from '../../src/runtime/remote/write-failure.ts'
@@ -230,6 +230,14 @@ test('service-reported cancellation after dispatch stays unknown with the prompt
   })
 })
 
+test('abortable observes an already-started callback before rejecting', async () => {
+  const controller = new AbortController()
+  controller.abort(new Error('closed'))
+  const callback = Promise.reject(new Error('callback rejection'))
+  await assert.rejects(abortable(callback, controller.signal), /closed/u)
+  await new Promise(resolve => setTimeout(resolve, 0))
+})
+
 test('production continued receiver follows both official fact faces', () => {
   const generation = { id: 1 }
   const generationListeners = new Set<() => void>()
@@ -332,35 +340,6 @@ test('continued receiver reserves delivery before a reentrant close', () => {
   continued = true
   notifyFacts?.()
   assert.equal(offeredController?.signal.aborted, true)
-})
-
-test('Job frames require their physical opener generation', () => {
-  const opener = { id: 1 }
-  const successor = { id: 2 }
-  assert.equal(nativeJobFrameIsDeliverable({
-    openerGeneration: opener,
-    currentGeneration: opener,
-    openerSignalAborted: false,
-    bindingCurrent: true,
-  }), true)
-  assert.equal(nativeJobFrameIsDeliverable({
-    openerGeneration: opener,
-    currentGeneration: successor,
-    openerSignalAborted: false,
-    bindingCurrent: true,
-  }), false)
-  assert.equal(nativeJobFrameIsDeliverable({
-    openerGeneration: opener,
-    currentGeneration: opener,
-    openerSignalAborted: true,
-    bindingCurrent: true,
-  }), false)
-  assert.equal(nativeJobFrameIsDeliverable({
-    openerGeneration: opener,
-    currentGeneration: opener,
-    openerSignalAborted: false,
-    bindingCurrent: false,
-  }), false)
 })
 
 test('separate module instances share the same Node-realm reservation', async () => {
