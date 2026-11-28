@@ -495,7 +495,23 @@ test('removes its owned scratch on a forced exit before profile boot', async () 
     expect(terminal.outcome).toBe('early-exit')
     expect(terminal.exit).toEqual({ code: 1, signal: null })
     const records = await scene.entryRecords(attempt)
-    expect(records).toEqual([])
+    // A POSIX Host writes its PATH bootstrap diagnostic before the forced exit;
+    // it is not a boot, readiness or lifecycle-completion record. Accept zero or
+    // exactly one such diagnostic for THIS attempt and keep the raw records.
+    const bootEnvironmentRecords = records.filter(record => record.m4a0 === 'host-environment')
+    expect(records).toEqual(bootEnvironmentRecords)
+    expect(bootEnvironmentRecords.length).toBeLessThanOrEqual(1)
+    for (const record of bootEnvironmentRecords) {
+      expect(record).toMatchObject({
+        m4a0: 'host-environment',
+        processRole: 'host',
+        pid: attempt.pid,
+        mode: expect.any(String),
+        addedPathCount: expect.any(Number),
+        skippedInvalidCount: expect.any(Number),
+        skippedInaccessibleCount: expect.any(Number),
+      })
+    }
     expect(existsSync(join(scene.scopeDir, 'instance.json'))).toBe(false)
     expect(scopeScratchSet(scene.installation.dshHome, scene.scope.scopeId)).toEqual(before)
     expect(await scene.sessionIds()).toEqual([...sessionsBefore])

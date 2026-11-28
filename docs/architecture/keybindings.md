@@ -360,9 +360,9 @@ is the pointer equivalent of the same action.
 
 ## User configuration
 
-The `tui-app` plugin's profile-owned Config, field `keybindings` — a
-whole-value volatile raw field (the old `dsh-pi-tui` settings namespace is only
-a legacy-migration input). The parser in
+The canonical profile-owned `pi-tui-preferences` Config, field `keybindings` —
+a whole-value volatile raw field (the old `tui-app` and `dsh-pi-tui` settings
+namespaces are only legacy-migration inputs). The parser in
 `src/tui/keybindings/config.ts` remains the only validation authority:
 
 ```yaml

@@ -456,15 +456,14 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   model. Both execute in the Host environment; the execution adapter itself
   never writes Session state.
 - `bypass`/`sandbox` are Host execution policies, not machine locality.
-  `localShellSandbox` defaults to `bypass`. Direct persists it in the `tui-app`
-  settings document; in split-process mode the Host-only profile disables
-  `tui-app`, so the `pi-tui-host-runtime` Loader row uses the same Config
-  schema as the settings owner and the Remote ConfigPort reads and writes that
-  Host descriptor. The Host validates the Client's requested policy against its
-  live setting before preparation and again before spawn; a stale or mismatched
-  request fails closed. Sandbox mode never falls back to bypass; the accepted
-  enforcement of each Host dialect is owned by the ONE-SHOT execution bullet
-  below.
+  `localShellSandbox` defaults to `bypass`. Direct and the split-process Host
+  read and write the canonical profile-owned `pi-tui-preferences` row, which is
+  the sole Config/settings authority for this preference; the retired `tui-app`
+  document is not a runtime owner. The Host validates the Client's requested
+  policy against its live setting before preparation and again before spawn; a
+  stale or mismatched request fails closed. Sandbox mode never falls back to
+  bypass; the accepted enforcement of each Host dialect is owned by the ONE-SHOT
+  execution bullet below.
 - One run is a Host-owned ONE-SHOT execution on Direct and Remote alike: a
   POSIX Host spawns the raw `['bash', '-c', command]` through the official
   `ctx.subprocess.spawn` seam; a Windows Direct Host spawns the exact live
