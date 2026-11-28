@@ -69,6 +69,7 @@ function geometry(columns: number, rows: number, chromeRows = 2): HistorySeatGeo
  *  injection and a hold gate for one async request. */
 class FakeReadPort implements HistorySearchReadPort {
   readonly searchCalls: HistorySearchRequest[] = []
+  readonly settledSearches: HistorySearchRequest[] = []
   readonly readCalls: HistoryReadTextRequest[] = []
   items: HistorySearchItem[] = []
   pageSize = 2
@@ -96,28 +97,32 @@ class FakeReadPort implements HistorySearchReadPort {
 
   async search(request: HistorySearchRequest, signal: AbortSignal): Promise<HistorySearchResponse> {
     this.searchCalls.push(request)
-    if (this.holdSearch) {
-      this.holdSearch = false
-      await new Promise<void>((resolve) => { this.pendingSearch = resolve })
-    }
-    if (signal.aborted) throw new DOMException('aborted', 'AbortError')
-    if (this.loadingSearches > 0) {
-      this.loadingSearches -= 1
-      return { kind: 'loading' }
-    }
-    if (this.failures > 0) {
-      this.failures -= 1
-      throw new RemoteHistorySearchFailedError(undefined, 'host search unavailable')
-    }
-    const scripted = this.responses.shift()
-    if (scripted !== undefined) return scripted
-    const offset = request.cursor === undefined ? 0 : Number(request.cursor.slice('cursor-'.length))
-    const next = offset + this.pageSize
-    return {
-      kind: 'ready',
-      generation: this.generation,
-      items: this.items.slice(offset, next),
-      nextCursor: next < this.items.length ? `cursor-${String(next)}` : null,
+    try {
+      if (this.holdSearch) {
+        this.holdSearch = false
+        await new Promise<void>((resolve) => { this.pendingSearch = resolve })
+      }
+      if (signal.aborted) throw new DOMException('aborted', 'AbortError')
+      if (this.loadingSearches > 0) {
+        this.loadingSearches -= 1
+        return { kind: 'loading' }
+      }
+      if (this.failures > 0) {
+        this.failures -= 1
+        throw new RemoteHistorySearchFailedError(undefined, 'host search unavailable')
+      }
+      const scripted = this.responses.shift()
+      if (scripted !== undefined) return scripted
+      const offset = request.cursor === undefined ? 0 : Number(request.cursor.slice('cursor-'.length))
+      const next = offset + this.pageSize
+      return {
+        kind: 'ready',
+        generation: this.generation,
+        items: this.items.slice(offset, next),
+        nextCursor: next < this.items.length ? `cursor-${String(next)}` : null,
+      }
+    } finally {
+      this.settledSearches.push(request)
     }
   }
 
@@ -322,13 +327,14 @@ function paintedListLabels(lines: readonly string[]): string[] {
 
 // ── first page + More append ────────────────────────────────────────────────
 
-test('first page then More appends every older row once and keeps the selected identity', async () => {
+test('selecting the loaded tail requests one page, appends in order and clamps when exhausted', async () => {
   const harness = makeHarness({
     items: [
       { id: 'a', preview: 'alpha prompt', text: 'alpha prompt' },
       { id: 'b', preview: 'beta prompt', text: 'beta prompt' },
       { id: 'c', preview: 'gamma prompt', text: 'gamma prompt' },
       { id: 'd', preview: 'delta prompt', text: 'delta prompt' },
+      { id: 'e', preview: 'epsilon prompt', text: 'epsilon prompt' },
     ],
     defaultScope: 'all',
   })
@@ -336,43 +342,139 @@ test('first page then More appends every older row once and keeps the selected i
   panel.start()
   await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 2 shown')), 'the first page')
 
-  // The panel asked the seat for the default scope/query once; the seat owns
-  // the exact request (limit 25) and the page.
   assert.equal(port.searchCalls.length, 1)
   assert.deepEqual(port.searchCalls[0], { scope: 'all', query: '', limit: 25 })
 
-  // Down moves to the last LOADED row; a second Down asks for the next page
-  // instead of wrapping.
+  port.holdSearch = true
   panel.handleInput('\x1b[B')
-  assert.equal(panel.selected()?.id, 'ses_a\u0000b')
-  // Down still WRAPS on the loaded tail; only PgDn asks for More.
-  panel.handleInput('\x1b[B')
-  assert.equal(panel.selected()?.id, 'ses_a\u0000a', 'Down wraps to the first row')
-  panel.handleInput('\x1b[B')
-  assert.equal(panel.selected()?.id, 'ses_a\u0000b')
-  // Wait for the selected row's exact body to become the CURRENT painted frame:
-  // the More admission re-checks the last-painted generation.
-  await renderUntil(
-    panel,
-    120,
-    lines => lines.some(line => line.includes('Preview') && line.includes('Alt+C copy')),
-    'the exact body for the selected row',
-  )
-  panel.handleInput('\x1b[6~')
-  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 4 shown')), 'the appended page')
-
-  assert.equal(port.searchCalls.length, 2)
+  assert.equal(panel.selected()?.id, 'ses_a\u0000b', 'the first Down selects the loaded tail')
+  assert.equal(port.searchCalls.length, 2, 'the first Down requests the next page once')
+  const pending = await renderUntil(panel, 120, lines => lines.some(line => line.includes('Loading more…')), 'the tail request')
   assert.equal(port.searchCalls[1]?.cursor, 'cursor-2')
+  assert.ok(pending.some(line => line.startsWith('> ') && line.includes('beta prompt')))
+
+  panel.handleInput('\x1b[B')
+  panel.handleInput('\x1b[6~')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000b', 'pending navigation keeps the selected row')
+  assert.equal(port.searchCalls.length, 2, 'pending navigation queues no second request')
+
+  port.releaseSearch()
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 4 shown')), 'the appended page')
   assert.equal(panel.selected()?.id, 'ses_a\u0000b', 'More keeps the selected identity')
-  const labels = paintedListLabels(plain(panel.render(120)))
-  for (const label of ['alpha prompt', 'beta prompt', 'gamma prompt', 'delta prompt']) {
+  assert.equal(port.searchCalls.length, 2)
+
+  panel.handleInput('\x1b[B')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000c')
+  assert.equal(port.searchCalls.length, 2, 'moving inside the appended page requests no More')
+  port.holdSearch = true
+  panel.handleInput('\x1b[B')
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Loading more…')), 'the second tail request')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000d')
+  assert.equal(port.searchCalls.length, 3)
+  assert.equal(port.searchCalls[2]?.cursor, 'cursor-4')
+
+  port.releaseSearch()
+  const exhausted = await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 5 shown')), 'the exhausted page')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000d', 'the second append keeps its selected identity')
+  const labels = paintedListLabels(exhausted)
+  for (const label of ['alpha prompt', 'beta prompt', 'gamma prompt', 'delta prompt', 'epsilon prompt']) {
     assert.equal(labels.filter(entry => entry.includes(label)).length, 1, `${label} appears exactly once: ${labels.join(' | ')}`)
   }
-  assert.ok(plain(panel.render(120)).some(line => line.startsWith('> ') && line.includes('beta prompt')),
-    'the selected row stays painted')
-  assert.equal(seat.view().hasMore, false, 'the exhausted page paints no More')
-  assert.ok(!plain(panel.render(120)).some(line => line.includes('More · PgDn')),
-    'More disappears on the last page')
+
+  panel.handleInput('\x1b[B')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000e', 'Down enters the first row of the appended page')
+  assert.equal(port.searchCalls.length, 3, 'moving to the appended row requests no More')
+  panel.handleInput('\x1b[B')
+  panel.handleInput('\x1b[6~')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000e', 'exhausted Down and PageDown stay at the real tail')
+  assert.equal(port.searchCalls.length, 3, 'an exhausted list starts no request')
+  assert.equal(seat.view().hasMore, false)
+  assert.ok(!exhausted.some(line => line.includes('More · PgDn')), 'More disappears on the last page')
+})
+
+test('PageDown that crosses visible rows requests More when it first reaches the loaded tail', async () => {
+  const harness = makeHarness({
+    items: ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map(id => ({ id, preview: `${id} prompt`, text: `${id} prompt` })),
+    defaultScope: 'all',
+  })
+  const { panel, port } = harness
+  port.pageSize = 5
+  panel.start()
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 5 shown')), 'the first page')
+
+  port.holdSearch = true
+  panel.handleInput('\x1b[6~')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000e', 'PageDown selects the loaded tail')
+  assert.equal(port.searchCalls.length, 2, 'the first tail arrival requests one page')
+  assert.equal(port.searchCalls[1]?.cursor, 'cursor-5')
+  panel.handleInput('\x1b[6~')
+  assert.equal(port.searchCalls.length, 2, 'repeated PageDown while pending starts no second page')
+
+  port.releaseSearch()
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 7 shown')), 'the appended page')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000e')
+})
+
+test('an upward wrap that changes the selection to the tail requests More, but a no-move upward input does not', async () => {
+  const wrapped = makeHarness({
+    items: [
+      { id: 'a', preview: 'alpha prompt', text: 'alpha prompt' },
+      { id: 'b', preview: 'beta prompt', text: 'beta prompt' },
+      { id: 'c', preview: 'gamma prompt', text: 'gamma prompt' },
+    ],
+    defaultScope: 'all',
+  })
+  wrapped.panel.start()
+  await renderUntil(wrapped.panel, 120, lines => lines.some(line => line.includes('Results · 2 shown')), 'the first page')
+  wrapped.port.holdSearch = true
+  wrapped.panel.handleInput('\x1b[A')
+  assert.equal(wrapped.panel.selected()?.id, 'ses_a\u0000b', 'Up wraps to the loaded tail')
+  assert.equal(wrapped.port.searchCalls.length, 2, 'a real upward selection at the tail requests More')
+  wrapped.port.releaseSearch()
+  await renderUntil(wrapped.panel, 120, lines => lines.some(line => line.includes('Results · 3 shown')), 'the appended page')
+
+  const single = makeHarness({
+    items: [
+      { id: 'a', preview: 'alpha prompt', text: 'alpha prompt' },
+      { id: 'b', preview: 'beta prompt', text: 'beta prompt' },
+    ],
+    defaultScope: 'all',
+    rows: 10,
+  })
+  single.port.pageSize = 1
+  single.panel.start()
+  await renderUntil(single.panel, 120,
+    lines => lines.some(line => line.includes('alpha prompt')) && lines.some(line => line.includes('More · PgDn')),
+    'the single loaded row')
+  assert.equal(single.port.searchCalls.length, 1, 'initial automatic selection requests no More')
+  single.panel.handleInput('\x1b[A')
+  assert.equal(single.panel.selected()?.id, 'ses_a\u0000a')
+  assert.equal(single.port.searchCalls.length, 1, 'a no-move upward input requests no More')
+  single.port.holdSearch = true
+  single.panel.handleInput('\x1b[B')
+  assert.equal(single.port.searchCalls.length, 2, 'an explicit Down on the single loaded tail requests More')
+  single.port.releaseSearch()
+  await renderUntil(single.panel, 120, () => single.seat.view().rows.length === 2, 'the appended row')
+  assert.equal(single.seat.view().rows.length, 2)
+})
+
+test('reaching the visible viewport bottom before the loaded tail requests no More', async () => {
+  const harness = makeHarness({
+    items: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'].map(id => ({ id, preview: `${id} prompt`, text: `${id} prompt` })),
+    defaultScope: 'all',
+    rows: 10,
+  })
+  const { panel, port, seat } = harness
+  port.pageSize = 8
+  panel.start()
+  const first = await renderUntil(panel, 120,
+    lines => lines.some(line => line.includes('a prompt')) && lines.some(line => line.includes('More · PgDn')),
+    'the first page')
+  assert.equal(paintedListLabels(first).filter(line => line.includes('prompt')).length, 1, 'the short viewport paints one result row')
+  panel.handleInput('\x1b[B')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000b', 'Down reaches the visible bottom')
+  assert.notEqual(panel.selected()?.id, seat.view().rows.at(-1)?.id, 'the visible bottom is not the loaded tail')
+  assert.equal(port.searchCalls.length, 1, 'the visible bottom requests no More')
 })
 
 test('the painted More button loads the next page through the same seat action', async () => {
@@ -662,13 +764,12 @@ test('a More-loading seat disables actions; a stale More click and repeated Page
   })
   const { panel, port, seat } = harness
   panel.start()
-  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 2 shown')), 'the first page')
-  panel.handleInput('\x1b[B') // select the last loaded row
   await renderUntil(
     panel,
     120,
-    lines => lines.some(line => line.includes('Preview') && line.includes('Copy All [Alt+C]')),
-    'the exact body of the last loaded row',
+    lines => lines.some(line => line.includes('Results · 2 shown'))
+      && lines.some(line => line.includes('Preview') && line.includes('Copy All [Alt+C]')),
+    'the exact body of the non-tail selected row',
   )
   port.holdSearch = true
 
@@ -701,8 +802,8 @@ test('a More-loading seat disables actions; a stale More click and repeated Page
   port.releaseSearch()
   const appended = await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 4 shown')), 'the appended page')
   assert.equal(port.searchCalls.length, 2, 'the released page appended once')
-  assert.equal(panel.selected()?.id, 'ses_a\u0000b', 'More preserves the selection through the in-flight state')
-  assert.ok(appended.some(line => line.startsWith('> ') && line.includes('beta prompt')))
+  assert.equal(panel.selected()?.id, 'ses_a\u0000a', 'More preserves the selection through the in-flight state')
+  assert.ok(appended.some(line => line.startsWith('> ') && line.includes('alpha prompt')))
   assert.equal(new Set(paintedListLabels(appended)).size, 4, `no duplicate/lost rows: ${paintedListLabels(appended).join(' | ')}`)
 })
 
@@ -797,6 +898,38 @@ test('a host predicate that turns stale refuses actions without closing the pane
 })
 
 // ── exact-body failure ──────────────────────────────────────────────────────
+
+test('Down at a failed tail continues without a hidden body retry, while an explicit result press reselects it', async () => {
+  const harness = makeHarness({
+    items: [
+      { id: 'a', preview: 'alpha prompt', text: 'alpha prompt' },
+      { id: 'b', preview: 'beta prompt', text: 'beta prompt' },
+    ],
+    defaultScope: 'all',
+    pointerEnabled: () => true,
+  })
+  const { panel, port } = harness
+  port.pageSize = 1
+  port.failReads = 2
+  panel.start()
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('History text failed')), 'the failed selected body')
+  assert.equal(port.readCalls.length, 1)
+
+  port.holdSearch = true
+  panel.handleInput('\x1b[B')
+  assert.equal(port.searchCalls.length, 2, 'Down at the failed tail requests More')
+  assert.equal(port.readCalls.length, 1, 'Down does not become an implicit body Retry')
+  port.releaseSearch()
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 2 shown')), 'the appended page')
+
+  const frame = plain(panel.render(120))
+  const alphaRow = frame.findIndex(line => line.includes('alpha prompt'))
+  assert.ok(alphaRow >= 0)
+  panel.handleMouse(pointer('press', 5, alphaRow, 120, frame.length))
+  panel.handleMouse(pointer('click', 5, alphaRow, 120, frame.length))
+  await renderUntil(panel, 120, () => port.readCalls.length === 2, 'the explicit body reselection')
+  assert.equal(port.searchCalls.length, 2, 'pressing the selected non-tail row starts no More')
+})
 
 test('a failed exact-text read keeps the bounded preview and offers Retry', async () => {
   const exactText = 'verified text after retry'
@@ -897,6 +1030,84 @@ test('a first cold partial paints progress, keeps the selected body and clears o
   const callsAtReady = port.searchCalls.length
   await new Promise(resolve => setTimeout(resolve, 80))
   assert.equal(port.searchCalls.length, callsAtReady, 'ready stops the warmup refresh')
+})
+
+test('a partial tail stays inert until a ready refresh, then the next downward intent requests More', async () => {
+  const harness = makeHarness({
+    items: [
+      { id: 'a', preview: 'alpha prompt', text: 'alpha prompt' },
+      { id: 'b', preview: 'beta prompt', text: 'beta prompt' },
+      { id: 'c', preview: 'gamma prompt', text: 'gamma prompt' },
+      { id: 'd', preview: 'delta prompt', text: 'delta prompt' },
+    ],
+    defaultScope: 'all',
+  })
+  const { panel, port } = harness
+  const a = item('a', 'alpha prompt', 'alpha prompt')
+  const b = item('b', 'beta prompt', 'beta prompt')
+  port.generation = 'g1'
+  port.responses.push({ kind: 'partial', items: [a, b], progress: { settled: 1, total: 3 } })
+  port.responses.push({ kind: 'ready', generation: 'g1', items: [a, b], nextCursor: 'cursor-2' })
+  panel.start()
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Indexing 1/3')), 'the partial page')
+  panel.handleInput('\x1b[B')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000b')
+  assert.equal(port.searchCalls.length, 1, 'a partial tail has no continuation to request')
+
+  const ready = await renderUntil(panel, 120,
+    lines => lines.some(line => line.includes('Results · 2 shown')) && lines.some(line => line.includes('More · PgDn')),
+    'the ready page with a continuation')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000b', 'the ready refresh retains the selected tail')
+  assert.equal(port.searchCalls.length, 2, 'the ready refresh does not chain another page')
+  assert.ok(ready.some(line => line.startsWith('> ') && line.includes('beta prompt')))
+
+  port.holdSearch = true
+  panel.handleInput('\x1b[B')
+  assert.equal(port.searchCalls.length, 3, 'the next explicit Down requests the ready continuation')
+  assert.equal(port.searchCalls[2]?.cursor, 'cursor-2')
+  port.releaseSearch()
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 4 shown')), 'the appended page')
+})
+
+test('a query change retires an automatic More request and its late settlement cannot pollute the new chain', async () => {
+  const harness = makeHarness({
+    items: ['a', 'b', 'c', 'd'].map(id => ({ id, preview: `${id} prompt`, text: `${id} prompt` })),
+    defaultScope: 'all',
+  })
+  const { panel, port, seat } = harness
+  panel.start()
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 2 shown')), 'the first page')
+  port.holdSearch = true
+  panel.handleInput('\x1b[B')
+  assert.equal(port.searchCalls.length, 2, 'the tail selection starts the held More request')
+
+  panel.handleInput('x')
+  port.seed(
+    ['x', 'y', 'z', 'w'].map(id => item(id, `${id === 'x' ? 'xi' : id} prompt`, `${id} prompt`)),
+    new Map(['x', 'y', 'z', 'w'].map(id => [`ses_a\u0000${id}`, `${id} prompt`])),
+  )
+  await renderUntil(panel, 120,
+    lines => lines.some(line => line.includes('xi prompt')) && lines.some(line => line.includes('y prompt')),
+    'the replacement query page')
+  assert.equal(port.searchCalls.length, 3, 'the query starts one fresh first page')
+  assert.equal(seat.view().query, 'x')
+  assert.deepEqual(seat.view().rows.map(row => row.messageId), ['x', 'y'])
+
+  port.releaseSearch()
+  const deadline = Date.now() + 3_000
+  while (port.settledSearches.length < 3) {
+    if (Date.now() > deadline) assert.fail('the retired More request never settled')
+    await new Promise<void>(resolve => setTimeout(resolve, 2))
+  }
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(seat.view().rows.map(row => row.messageId), ['x', 'y'], 'the late old page cannot append into the new query')
+  assert.equal(port.searchCalls.length, 3, 'the retired request starts no recovery or chained page')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000x')
+
+  panel.handleInput('\x1b[B')
+  await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 4 shown')), 'the new chain continuation')
+  assert.deepEqual(seat.view().rows.map(row => row.messageId), ['x', 'y', 'z', 'w'])
+  assert.equal(port.searchCalls.length, 4, 'only the new explicit tail intent requests More')
 })
 
 test('an automatic Remote refresh cannot be acted on through its old painted frame', async () => {

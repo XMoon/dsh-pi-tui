@@ -503,12 +503,19 @@ Client's JSONL files are neither read nor written.
   the Server owns the ordering, the Client never re-ranks. Rows whose event-time
   directory is unknown are absent from `Directory`, never guessed from the
   open-time cwd.
-- **Paging.** One page is at most 25 rows. `More` is explicit (the button; the
-  PiTui `PgDn` key at the loaded tail, the TSP `↓` key at the loaded tail), reads
-  at most one further page, keeps the
-  current rows/selection/scroll while in flight and appends only a
-  same-generation continuation. A query/scope replacement and a non-ready
-  append clear the prior rows, selection, body and cursor; a stale continuation
+- **Paging.** One page is at most 25 rows. `More` reads at most one further
+  page, keeps the current rows/selection/scroll while in flight and appends only
+  a same-generation continuation. In PiTui, the first explicit user navigation
+  to the actual loaded tail — result-list arrows/`PgDn`, a result-row press or
+  a results-wheel step — requests that page when a ready continuation exists;
+  another downward intent at the tail does the same, while an exhausted list
+  clamps there instead of wrapping. The painted Footer `More` action remains
+  available before the tail. Initial selection, partial/ready refresh, append,
+  repaint, resize and park/resume never start `More` by themselves, and one
+  user intent never queues a second request. The TSP renderer keeps its
+  existing explicit `More`/`↓`-at-tail behavior; the Direct panel keeps its
+  first-window-only behavior. A query/scope replacement and a non-ready append
+  clear the prior rows, selection, body and cursor; a stale continuation
   discards the chain and may perform at most ONE automatic fresh first-page
   search under a NEW query revision; a second non-ready answer surfaces
   `Retry`, which always restarts at the first page. While a `More` request is
