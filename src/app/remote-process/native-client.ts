@@ -11,7 +11,10 @@ import {
   readLocalRecord,
 } from './local-discovery.ts'
 import { awaitLocalTransportReady, installLocalTransport } from './local-transport.ts'
+import { reserveNativeClientRealm } from './native-client-realm.ts'
 import { createDiag } from '../../runtime/process/diagnostics.ts'
+
+export const NATIVE_CLIENT_API_VERSION = 1 as const
 
 export interface NativeAttachOptions {
   readonly dshAnchor: string
@@ -339,7 +342,10 @@ function normalizeResult<T>(result: any): NativeResult<T> {
 
 export async function attachNativeClient(options: NativeAttachOptions): Promise<NativeClient> {
   options.signal?.throwIfAborted()
-  const dshAnchor = realpathSync(requireNonEmpty(options.dshAnchor, 'dshAnchor'))
+  const releaseRealm = reserveNativeClientRealm()
+  let cleanupStarted = false
+  try {
+    const dshAnchor = realpathSync(requireNonEmpty(options.dshAnchor, 'dshAnchor'))
   const packageRoot = realpathSync(requireNonEmpty(options.packageRoot, 'packageRoot'))
   const profile = requireNonEmpty(options.profile, 'profile')
   const hostModules = await loadOfficialClientHost(dshAnchor)
@@ -382,22 +388,28 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
   let fatalError: unknown
 
   const cleanup = async (reason: Error): Promise<void> => {
-    const cleanupErrors: unknown[] = []
-    for (const reference of references.values()) reference.release()
-    references.clear()
-    for (const release of jobWatchers) release()
-    jobWatchers.clear()
-    try { interactions?.dispose() } catch (error) { cleanupErrors.push(error) }
-    try { await installedTransport?.dispose() } catch (error) { cleanupErrors.push(error) }
-    try { await prerequisites?.dispose() } catch (error) { cleanupErrors.push(error) }
-    try { await mountedDomains?.dispose() } catch (error) { cleanupErrors.push(error) }
-    gate?.cancel(reason)
-    try { await loaderFiber?.dispose() } catch (error) { cleanupErrors.push(error) }
-    try { await context.fiber.dispose() } catch (error) { cleanupErrors.push(error) }
-    diag.dispose()
-    if (cleanupErrors.length > 0) {
-      for (const error of cleanupErrors) (reason as Error & { cause?: unknown }).cause ??= error
-      throw reason
+    if (cleanupStarted) return
+    cleanupStarted = true
+    try {
+      const cleanupErrors: unknown[] = []
+      for (const reference of references.values()) reference.release()
+      references.clear()
+      for (const release of jobWatchers) release()
+      jobWatchers.clear()
+      try { interactions?.dispose() } catch (error) { cleanupErrors.push(error) }
+      try { await installedTransport?.dispose() } catch (error) { cleanupErrors.push(error) }
+      try { await prerequisites?.dispose() } catch (error) { cleanupErrors.push(error) }
+      try { await mountedDomains?.dispose() } catch (error) { cleanupErrors.push(error) }
+      gate?.cancel(reason)
+      try { await loaderFiber?.dispose() } catch (error) { cleanupErrors.push(error) }
+      try { await context.fiber.dispose() } catch (error) { cleanupErrors.push(error) }
+      diag.dispose()
+      if (cleanupErrors.length > 0) {
+        for (const error of cleanupErrors) (reason as Error & { cause?: unknown }).cause ??= error
+        throw reason
+      }
+    } finally {
+      releaseRealm()
     }
   }
 
@@ -638,6 +650,10 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
     return client
   } catch (error) {
     await cleanup(error instanceof Error ? error : new Error(String(error)))
+    throw error
+  }
+  } catch (error) {
+    if (!cleanupStarted) releaseRealm()
     throw error
   }
 }

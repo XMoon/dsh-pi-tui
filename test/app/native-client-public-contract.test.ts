@@ -14,7 +14,8 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { NativeAttachOptions, NativeClient } from '../../src/app/remote-process/native-client.ts'
-import { attachNativeClient } from '../../src/app/remote-process/native-client.ts'
+import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '../../src/app/remote-process/native-client.ts'
+import { reserveNativeClientRealm } from '../../src/app/remote-process/native-client-realm.ts'
 
 const packageRoot = join(import.meta.dirname, '..', '..')
 
@@ -38,8 +39,22 @@ test('package.json publishes one typed native-client subpath', () => {
   assert.equal(entry.default, './dist/native-client.mjs')
 })
 
-test('the headless entry exports the attach factory as a function', () => {
+test('the headless entry exports the frozen API version and attach factory', () => {
+  assert.equal(NATIVE_CLIENT_API_VERSION, 1)
   assert.equal(typeof attachNativeClient, 'function')
   assert.ok(_attachOptionsShape)
   assert.ok(_clientShape)
+})
+
+test('one Node realm rejects a concurrent composition and releases only its own reservation', () => {
+  const release = reserveNativeClientRealm()
+  assert.throws(() => reserveNativeClientRealm(), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, 'NATIVE_CLIENT_REALM_BUSY')
+    return true
+  })
+  release()
+  const releaseAfterFailure = reserveNativeClientRealm()
+  releaseAfterFailure()
+  const releaseAfterClose = reserveNativeClientRealm()
+  releaseAfterClose()
 })
