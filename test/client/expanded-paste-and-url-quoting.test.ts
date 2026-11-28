@@ -104,10 +104,10 @@ test('a partially-applied suspend (stop throws mid-way) is rolled back to a runn
   app.stop()
 })
 
-test('openerFor carries hostile Windows URLs only as Base64 data through PowerShell EncodedCommand', () => {
+test('openerFor carries hostile Windows URLs only as Base64 data through system PowerShell EncodedCommand', () => {
   const hostile = 'https://example.com/?a=1&b=%26&c="quoted"'
-  const { command, args } = openerFor(hostile, 'win32')
-  assert.equal(command, 'powershell.exe')
+  const { command, args } = openerFor(hostile, 'win32', 'D:\\AltRoot')
+  assert.equal(command, 'D:\\AltRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
   assert.deepEqual(args.slice(0, 4), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand'])
   assert.equal(args.length, 5)
   assert.match(args[4]!, /^[A-Za-z0-9+/]+={0,2}$/u, 'the EncodedCommand payload must be Base64-only')
@@ -118,6 +118,8 @@ test('openerFor carries hostile Windows URLs only as Base64 data through PowerSh
   assert.ok(!script.includes(hostile), 'the raw URL must not become PowerShell source')
   assert.ok(!script.includes('&'), 'query metacharacters must not enter the fixed script')
   assert.ok(script.endsWith('Start-Process -FilePath $url -ErrorAction Stop'), 'the fixed script must request the default handler and fail truthfully')
+  assert.throws(() => openerFor(hostile, 'win32', ''), /system root is unavailable/u)
+  assert.throws(() => openerFor(hostile, 'win32', 'D:AltRoot'), /system root is unavailable/u)
 })
 
 test('openerFor passes the URL through on unix platforms', () => {

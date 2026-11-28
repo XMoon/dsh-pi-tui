@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
+import { win32 } from 'node:path'
 
 /**
  * Open one external URL with the platform opener (fullscreen OSC 8 link
@@ -23,8 +24,8 @@ export function openExternalUrl(rawUrl: string): void {
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return
 
-  const { command, args } = openerFor(url.href, process.platform)
   try {
+    const { command, args } = openerFor(url.href, process.platform)
     const child = spawn(command, args, { stdio: 'ignore', detached: true })
     child.on('error', () => {})
     child.unref()
@@ -38,12 +39,15 @@ export function openExternalUrl(rawUrl: string): void {
  * fixed PowerShell script, then carries that script as an EncodedCommand. The
  * raw URL never enters cmd, a PowerShell source string or any log/diagnostic.
  */
-export function openerFor(href: string, platform: string = process.platform): { command: string; args: string[] } {
+export function openerFor(href: string, platform: string = process.platform, systemRoot = process.env.SystemRoot): { command: string; args: string[] } {
   if (platform === 'win32') {
+    if (systemRoot === undefined || !/^[A-Za-z]:[\\/]/u.test(systemRoot)) {
+      throw new Error('Windows system root is unavailable')
+    }
     const urlData = Buffer.from(href, 'utf8').toString('base64')
     const script = `$url = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${urlData}'))\r\nStart-Process -FilePath $url -ErrorAction Stop`
     return {
-      command: 'powershell.exe',
+      command: win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
       args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
     }
   }

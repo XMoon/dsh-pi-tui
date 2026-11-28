@@ -322,10 +322,10 @@ function assertAuthenticatedWebUrl(raw: string, origin: string): string {
  * spawn error or immediate non-zero exit is a real failure.
  */
 async function launchBrowser(url: string, deps: LocalWebControlDeps): Promise<void> {
-  const { command, args } = openerFor(url, platformOf(deps))
   const spawnImpl = deps.spawn ?? spawn
   let child: ChildProcess
   try {
+    const { command, args } = openerFor(url, platformOf(deps))
     child = spawnImpl(command, args, { shell: false, stdio: 'ignore', detached: true })
   } catch (error) {
     throw new WebControlError('BROWSER_LAUNCH_UNAVAILABLE', 'the local browser opener could not be started', error)
