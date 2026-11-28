@@ -18,6 +18,7 @@
 
 ### 改进
 
+- **默认 Transcript 展示改为 Compact**：未配置展示偏好的 Profile 默认折叠过程细节，保留对话与工作摘要；已明确设置的 Full / Compact / Focus 不变，旧 Focus 配置迁移与 `/focus off` 兼容语义不变。
 - **Subagent Viewer 历史浏览更稳定**：Daemon 模式下，子代理查看器在已无更早历史可加载时，于历史顶部继续向上滚动不会强制收起手动展开的 Activity 或 Thought；真实加载更早历史仍由官方窗口更新驱动，Direct 模式不变。
 - **Computer Use 设置改为分组概览 + 应用工作台**：`/settings → Tools → Computer Use` 现在在同一 Detail 内按 Availability → Permissions → Authorization → Application access → Help 连续展示真实事实，短屏优先保留 Bundle/Host、首个缺失权限与对应的 Request 动作（`44×8` 也能完成）；点击行只选中，`Enter`/右方向键或显式 Open 才挂载页面，选中行不会产生任何 CUA 查询。`Manage applications` 打开同一租约内的应用工作台：按 `Always allowed` / `Refused` 分组的本地 List/Detail，点击行只选中，显式打开后才出现 `Revoke access…` / `Allow asking again…`，并且必须风险与精确目标同屏完整可见才能确认；取消/确认后回到同一实例，rail Back 也不会销毁页面或重新读取。`Set PTC default` 改为使用已捕获的 Host 设置权威与精确 revision 的一次守卫写入：替换的 Host/设置权威或变化的 revision 会在写入前被拒绝且从不改写，只有同权威的新读回读取到 `ptc` 才显示已确认。读取中的 Back 不再被阻塞，已接受的动作会立即显示 `Waiting…` 并拒绝第二次动作，旧帧上的键盘/点击不会再触发任何写入；结果未知时必须先 Refresh 读取新的权威状态，才允许下一次写入，明确不支持的 Host 不再提供任何 CUA 写入。应用工作台会在当前投影内保留读取回执与官方回读、提供同一份可滚动的 Help，单栏授权只发布真正画出的区域，滚轮跟随指针所在区域；没有 body 的极短帧只保留安全的 Back/Waiting/Cancel 条。守卫预设在真正派发前还会复证页面完整的 CUA 捕获资格，排在其他设置写入之后也不会用过期观察落盘；应用工作台会在当前投影内优先显示带原目标安全身份的回执，滚轮按实际行数滚动指针所在区域，未确认结果需显式 Refresh 后才恢复写入。
 
