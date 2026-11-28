@@ -45,6 +45,7 @@
  */
 
 import { getPath, providerOptionsFor, providerProfileProjectionOf, type ProviderCatalogEntry, type ProviderOption } from '../../domain/catalog/provider.ts'
+import { DEFAULT_DISPLAY_PRESET } from '../../domain/display/preset.ts'
 import {
   resolveTrustedFooterCommand,
   resolveUserCommandItemActivationIds,
@@ -935,7 +936,7 @@ const TUI_SETTINGS_DEFAULTS: {
   busyEnter: 'queue',
   localShellSandbox: 'bypass',
   homeEndKeys: 'input',
-  displayPreset: 'full',
+  displayPreset: DEFAULT_DISPLAY_PRESET,
   progressUpdates: 'milestones',
   gitAttribution: 'off',
   responseStyle: 'default',
@@ -995,7 +996,11 @@ function tuiSettingsDocOf(section: unknown): TuiSettingsDoc {
     progressUpdates: stringOr(record.progressUpdates, TUI_SETTINGS_DEFAULTS.progressUpdates),
     gitAttribution: stringOr(record.gitAttribution, TUI_SETTINGS_DEFAULTS.gitAttribution),
     responseStyle: stringOr(record.responseStyle, TUI_SETTINGS_DEFAULTS.responseStyle),
-    displayPreset: stringOr(record.displayPreset, TUI_SETTINGS_DEFAULTS.displayPreset),
+    // Missing is the product default; a malformed supplied value retains the
+    // historical Full fallback. Valid strings reach the canonical resolver.
+    displayPreset: record.displayPreset === undefined
+      ? TUI_SETTINGS_DEFAULTS.displayPreset
+      : stringOr(record.displayPreset, 'full'),
     notificationMode: stringOr(record.notificationMode, TUI_SETTINGS_DEFAULTS.notificationMode),
     notificationMethod: stringOr(record.notificationMethod, TUI_SETTINGS_DEFAULTS.notificationMethod),
     terminalProgress: stringOr(record.terminalProgress, TUI_SETTINGS_DEFAULTS.terminalProgress),
