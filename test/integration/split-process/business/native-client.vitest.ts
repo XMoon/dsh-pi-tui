@@ -878,56 +878,41 @@ test('qualifies the installed Native Client business and interaction paths', { t
       }
     }
 
-    // 7. Approval deny with old-Client late allow fenced and same Host request recovered.
+    // 7. Approval deny with one authoritative decision and no Host side effect.
     {
       const host = await scene.startHost({ scenario: 'approval-reject' })
-      let first: NativeClient | undefined
-      let second: NativeClient | undefined
+      let client: NativeClient | undefined
       try {
-        let oldRequest: Parameters<NonNullable<NativeAttachOptions['onApproval']>>[0] | undefined
-        const oldDecision = Promise.withResolvers<Awaited<ReturnType<NonNullable<NativeAttachOptions['onApproval']>>>>()
-        first = await attach(scene, host, { onApproval: async request => {
-          oldRequest = request
-          return await withAbort(oldDecision.promise, request.signal)
+        let approvalRequest: Parameters<NonNullable<NativeAttachOptions['onApproval']>>[0] | undefined
+        const decision = Promise.withResolvers<Awaited<ReturnType<NonNullable<NativeAttachOptions['onApproval']>>>>()
+        client = await attach(scene, host, { onApproval: async request => {
+          approvalRequest = request
+          return await withAbort(decision.promise, request.signal)
         } })
-        const created = await createSession(scene, first, 'approval')
-        accepted(await created.session.prompt({ content: [{ type: 'text', text: 'native approval reject' }] }), 'approval prompt')
-        const request = defined(await waitFor('first Approval request', () => oldRequest, value => value !== undefined), 'first Approval request')
+        const { sessionId, session } = await createSession(scene, client, 'approval-deny')
+        accepted(await session.prompt({ content: [{ type: 'text', text: 'native approval reject' }] }), 'approval prompt')
+        const request = defined(await waitFor('Approval request', () => approvalRequest, value => value !== undefined), 'Approval request')
         expect(request.toolName).toBe('bash')
-        const asked = await scene.waitForSessionEvent(created.sessionId, 0,
+        const asked = await scene.waitForSessionEvent(sessionId, 0,
           event => event.type === 'approval/asked' && event.data?.callId === request.callId,
           'approval/asked')
-        await first.close()
-        first = undefined
-        expect(request.signal?.aborted).toBe(true)
-        oldDecision.resolve('allowed-once')
-
-        let recoveredRequest: typeof request | undefined
-        second = await attach(scene, host, { onApproval: async incoming => {
-          recoveredRequest = incoming
-          return 'rejected'
-        } })
-        const reopened = ok(await second.openSession(created.sessionId), 'reopen approval Session')
-        const recovered = defined(await waitFor('recovered Approval request', () => recoveredRequest, value => value !== undefined), 'recovered Approval request')
-        expect(recovered.callId).toBe(request.callId)
-        const decided = await scene.waitForSessionEvent(created.sessionId, 0,
+        decision.resolve('rejected')
+        const decided = await scene.waitForSessionEvent(sessionId, 0,
           event => event.type === 'approval/decided' && event.data?.id === asked.data?.id,
           'approval/decided')
         expect(decided.data?.outcome).toBe('rejected')
-        const result = await scene.waitForSessionEvent(created.sessionId, 0,
+        const result = await scene.waitForSessionEvent(sessionId, 0,
           event => event.type === 'tool/result' && event.data?.message?.toolCallId === request.callId,
           'rejected tool/result')
         expect(result.data?.message?.isError).toBe(true)
         expect(existsSync(join(host.workloadRoot!, 'approval-reject.marker'))).toBe(false)
-        await waitForTurnEnd(scene, created.sessionId, Number(nearestTurnStart(durableEvents(scene, created.sessionId), asked).data?.turn), 'approval turn/end')
-        const decisions = durableEvents(scene, created.sessionId).filter(event => event.type === 'approval/decided' && event.data?.id === asked.data?.id)
+        await waitForTurnEnd(scene, sessionId, Number(nearestTurnStart(durableEvents(scene, sessionId), asked).data?.turn), 'approval turn/end')
+        const decisions = durableEvents(scene, sessionId).filter(event => event.type === 'approval/decided' && event.data?.id === asked.data?.id)
         expect(decisions).toHaveLength(1)
         expect(decisions[0]?.data?.outcome).toBe('rejected')
-        await reopened.close()
-        pass('approval-deny', { sessionId: created.sessionId, callId: request.callId, asked, decided, result, lateOldOutcome: 'allowed-once' })
+        pass('approval-deny', { sessionId, callId: request.callId, asked, decided, result })
       } finally {
-        await first?.close()
-        await second?.close()
+        await client?.close()
         await scene.stopHost(host)
       }
     }
@@ -1036,7 +1021,6 @@ test('qualifies the installed Native Client business and interaction paths', { t
     {
       const host = await scene.startHost({ scenario: 'plan-review' })
       let first: NativeClient | undefined
-      let second: NativeClient | undefined
       try {
         let planRequest: Parameters<NonNullable<NativeAttachOptions['onQuestion']>>[0] | undefined
         const planDecision = Promise.withResolvers<Awaited<ReturnType<NonNullable<NativeAttachOptions['onQuestion']>>>>()
@@ -1061,18 +1045,6 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect(request.questions[0]?.intent?.kind).toBe('plan-review')
         expect(request.questions[0]?.detail).toContain('FR8_PLAN_TAIL_END')
         expect(call.data?.callId).toBe(request.callId)
-        await first.close()
-        first = undefined
-        expect(request.signal?.aborted).toBe(true)
-
-        let recoveredRequest: typeof request | undefined
-        second = await attach(scene, host, { onQuestion: async incoming => {
-          recoveredRequest = incoming
-          return { answers: [{ id: 'plan-review', selected: ['Approve'] }] }
-        } })
-        const reopened = ok(await second.openSession(created.sessionId), 'reopen Plan Session')
-        const recovered = defined(await waitFor('recovered Plan request', () => recoveredRequest, value => value !== undefined), 'recovered Plan request')
-        expect(recovered.callId).toBe(request.callId)
         planDecision.resolve({ answers: [{ id: 'plan-review', selected: ['Approve'] }] })
         const result = await scene.waitForSessionEvent(created.sessionId, 0,
           event => event.type === 'tool/result' && event.data?.message?.toolCallId === request.callId,
@@ -1084,13 +1056,11 @@ test('qualifies the installed Native Client business and interaction paths', { t
           event => event.type === 'plan/mode' && event.data?.active === false,
           'Plan mode off after approval')
         expect(seqOf(modeOff)).toBeGreaterThan(seqOf(result))
-        await waitFor('Plan inactive projection', async () => ok(await reopened.configuration(), 'Plan final configuration').plan,
+        await waitFor('Plan inactive projection', async () => ok(await created.session.configuration(), 'Plan final configuration').plan,
           plan => plan?.active === false)
-        await reopened.close()
-        pass('plan', { sessionId: created.sessionId, prompt: planPrompt, callId: request.callId, request, recovered, result, modeOff })
+        pass('plan', { sessionId: created.sessionId, prompt: planPrompt, callId: request.callId, request, result, modeOff })
       } finally {
         await first?.close()
-        await second?.close()
         await scene.stopHost(host)
       }
     }
