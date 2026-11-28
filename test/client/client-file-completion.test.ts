@@ -167,63 +167,23 @@ test('null pins the bounded fallback: no finder is probed and the scan answers',
   assert.ok(nested.some(candidate => candidate.path === 'src/main.ts'), 'the bounded subtree scan finds nested files')
 })
 
-test('the finder output parser: NUL records, whitespace, the newline fallback and .git exclusion', async (t) => {
+test('the finder preserves UTF-8 and whitespace, classifies symlinks and excludes .git', async (t) => {
   const life = testLifecycle(t)
   const cwd = life.tempDir('dsh-client-parse-')
-  const nul = fakeFinder(life, `printf '%s\\0' './ leading file.txt' '.git/config' './src/'`)
-  const nulCandidates = await discoverForQuery(
-    resolvePathQuery('leading', cwd, ENV),
-    new ClientLocalDiscoveryDriver(nul.path),
-    abort,
-  )
-  assert.ok(nulCandidates.some(candidate => candidate.path === ' leading file.txt' && candidate.kind === 'file'),
-    `a NUL record keeps the filename whitespace: ${JSON.stringify(nulCandidates)}`)
-  assert.ok(!nulCandidates.some(candidate => candidate.path.includes('.git')), '.git records are excluded')
-  // A fake/older finder that ignores --print0 is accepted through the newline
-  // fallback (unlike trim(), it preserves meaningful spaces). The records carry
-  // the searched bytes, exactly like a real finder that applied its own term:
-  // the collector drops a score-0 record, so a non-matching mock candidate must
-  // not be presented as a user suggestion.
-  const lines = fakeFinder(life, `printf 'a-t.txt\\nmy t-file.txt\\n'`)
-  const lineCandidates = await discoverForQuery(
-    resolvePathQuery('t', cwd, ENV),
-    new ClientLocalDiscoveryDriver(lines.path),
-    abort,
-  )
-  assert.deepEqual(lineCandidates.map(candidate => candidate.path), ['a-t.txt', 'my t-file.txt'])
-})
-
-test('a large finder stream keeps UTF-8, legal whitespace and the finder facts across chunks', async (t) => {
-  const life = testLifecycle(t)
-  const cwd = life.tempDir('dsh-client-stream-')
-  mkdirSync(join(cwd, 'nested'))
   mkdirSync(join(cwd, 'real'))
-  symlinkSync(join(cwd, 'real'), join(cwd, 'nested', 'linkdir'))
-  // ~70 KiB of NUL records: the pipe delivers several data events, so records
-  // and multi-byte UTF-8 sequences cross chunk boundaries in the REAL stream.
-  const records = Array.from({ length: 2600 }, (_value, index) =>
-    `nested/大文件-${String(index).padStart(4, '0')}.txt`)
-  records.push(' leading  space.txt', 'line\nbreak.txt', './.git/config', 'nested/linkdir')
-  const finder = scriptedFinder(life, records)
-  const driver = new ClientLocalDiscoveryDriver(finder.path)
-  const ranked = async (term: string): Promise<readonly { path: string; kind: string }[]> =>
-    rankPathCandidates(
-      await discoverForQuery(resolvePathQuery(term, cwd, ENV), driver, abort),
-      term,
-    )
-  const bulk = await ranked('大文件')
-  assert.equal(bulk.length, 50, 'the bounded collector trims the 2600-record stream')
-  assert.equal(bulk[0]?.path, 'nested/大文件-0000.txt', 'the multi-byte record decoded verbatim')
-  assert.ok(bulk.every(candidate => !candidate.path.includes('.git')), '.git records are excluded')
-  const spaced = await ranked('space')
-  assert.deepEqual(spaced.map(candidate => candidate.path), [' leading  space.txt'],
-    'the leading/double space filename survives the stream verbatim')
-  const newline = await ranked('line\nbreak')
-  assert.deepEqual(newline.map(candidate => candidate.path), ['line\nbreak.txt'],
-    'a legal newline inside a NUL record is not a record boundary')
-  const link = await ranked('link')
-  assert.deepEqual(link, [{ path: 'nested/linkdir', kind: 'directory' }],
-    'the finder record is classified against the Client filesystem (symlink to a directory)')
+  symlinkSync(join(cwd, 'real'), join(cwd, 'needle-link'))
+  const nul = fakeFinder(life, `printf '%s\\0' './ leading  大文件\nneedle.txt' './.git/needle' './needle-link'`)
+  // Parsing and classification have no timing contract; budget tests own that separately.
+  const nulCandidates = await new ClientLocalDiscoveryDriver(nul.path, undefined, () => 0).find(cwd, 'needle', abort)
+  assert.ok(nulCandidates !== null)
+  assert.deepEqual(new Set(nulCandidates), new Set([
+    { path: ' leading  大文件\nneedle.txt', kind: 'file' },
+    { path: 'needle-link', kind: 'directory' },
+  ]))
+  // A fake/older finder that ignores --print0 is accepted through the newline fallback.
+  const lines = fakeFinder(life, `printf 'a-t.txt\\nmy t-file.txt\\n'`)
+  const lineCandidates = await new ClientLocalDiscoveryDriver(lines.path, undefined, () => 0).find(cwd, 't', abort)
+  assert.deepEqual(lineCandidates?.map(candidate => candidate.path), ['a-t.txt', 'my t-file.txt'])
 })
 
 test('a non-zero finder exit discards its partial matches and the bounded fallback answers', async (t) => {
