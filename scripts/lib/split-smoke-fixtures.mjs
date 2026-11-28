@@ -147,11 +147,22 @@ export function writeC1WorkFixture(profileDir, workDir, options = {}) {
     writeFileSync(scopedMcpServerPath, readFileSync(join(SCRIPT_DIR, '..', 'fixtures', 'scoped-mcp-b0-server.mjs')), { mode: 0o600 })
     chmodSync(scopedMcpServerPath, 0o600)
   }
+  let historyExtraPath
+  if (options.historyExtra === true) {
+    historyExtraPath = join(profileDir, 'host-history-search-extra.mjs')
+    writeFileSync(historyExtraPath, readFileSync(join(SCRIPT_DIR, '..', 'fixtures', 'host-history-search-extra.mjs')), { mode: 0o600 })
+    chmodSync(historyExtraPath, 0o600)
+  }
   const rows = [
     '- insert:',
     '    - id: split-process-host-work',
     `      name: '${pathToFileURL(fixturePath).href}'`,
     `      inject: [llm, tools, jobs, subagents, agents, typertGateway, connection, skills${options.shellPolicyPatches === true ? ', settings' : ''}${options.fileProbe === true || options.imageProbe === true ? ', attachments' : ''}${options.imageProbe === true ? ', agentDefaultModel' : ''}${options.markdownProbe === true ? ', workingDirectory' : ''}${options.webSettingsProbe === true ? ', settings, credentials' : ''}${options.mcpManagerProbe === true ? ', mcpManager' : ''}]`,
+    ...(historyExtraPath === undefined ? [] : [
+      '    - id: host-history-search-extra',
+      `      name: '${pathToFileURL(historyExtraPath).href}'`,
+      '      inject: [agents, workingDirectory, sessionController]',
+    ]),
     // The default agent route is normally forced to the offline fixture. A case
     // that must exercise the OFFICIAL writable `agent-default-model` profile
     // entry (the sessionless default-model save) sets `keepBaseDefaultModel` so

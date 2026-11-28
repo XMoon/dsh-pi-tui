@@ -42,6 +42,8 @@ interface SplitProcessProfileModule {
 }
 
 interface SessionEvent {
+  seq?: number
+  time?: number
   type?: string
   data?: Record<string, any>
 }
@@ -99,6 +101,9 @@ export type ProcessHostScenario =
   | 'foreground-tool' | 'child' | 'unowned-job' | 'goal-armed' | 'goal-round'
   | 'maintenance' | 'schedule' | 'plan-review' | 'team-board' | 'acp-po4a'
   | 'native-skill' | 'command-cancel'
+  | 'shell-execution' | 'shell-sandbox' | 'shell-lifecycle'
+  | 'client-file-upload' | 'host-command-attachments'
+  | 'history-search' | 'history-queue'
 
 /** A bounded read-authority operation: the Supervisor owns the concrete wire values. */
 export type ProcessReadAuthorityRequest =
@@ -111,6 +116,37 @@ export type ProcessReadAuthorityRequest =
       readonly interruption?: 'caller' | 'carrier'
     }
   | { readonly op: 'answer-continued'; readonly sessionId: string; readonly callId: string }
+  | {
+      readonly op: 'history-search'
+      readonly scope: 'all'
+      readonly query: string
+      readonly limit: 1 | 25
+      readonly cursor?: string
+    }
+  | {
+      readonly op: 'history-search'
+      readonly scope: 'session'
+      readonly sessionId: string
+      readonly query: string
+      readonly limit: 1 | 25
+      readonly cursor?: string
+    }
+  | {
+      readonly op: 'history-search'
+      readonly scope: 'directory'
+      readonly target: 'first' | 'second' | 'other'
+      readonly query: string
+      readonly limit: 1 | 25
+      readonly cursor?: string
+    }
+  | {
+      readonly op: 'history-read-text'
+      readonly sessionId: string
+      readonly messageId: string
+      readonly contentSha256: string
+      readonly offset: number
+    }
+  | { readonly op: 'history-session-recall'; readonly sessionId: string }
 
 export interface StartProcessHostOptions {
   scenario?: ProcessHostScenario
@@ -256,6 +292,7 @@ export interface SplitProcessClient {
   readonly closed: boolean
   readonly exit: { code: number | null; signal: string | null } | null
   type(text: string): Promise<void>
+  paste(text: string): Promise<void>
   press(...keys: string[]): Promise<void>
   submit(text?: string): Promise<void>
   text(): Promise<string>
@@ -994,6 +1031,10 @@ class ProcessClient implements SplitProcessClient {
 
   async type(text: string): Promise<void> {
     await this.#scene.clientRequest(this.clientId, 'PROCESS_CLIENT_INPUT', { input: { type: 'type', text } })
+  }
+
+  async paste(text: string): Promise<void> {
+    await this.#scene.clientRequest(this.clientId, 'PROCESS_CLIENT_INPUT', { input: { type: 'paste', text } })
   }
 
   async press(...keys: string[]): Promise<void> {
