@@ -647,10 +647,11 @@ The bounded read-authority probe (`readAuthority`) also supports a fixed
 `fixture` target, settling on `directory-browse`, `directory-browse-rejected`,
 or correlated `failed` without accepting raw Worker paths. Where a native
 negative (such as an unreadable directory or refused Workspace proposal) cannot
-expose an internal RPC count in the PTY dropdown, the PTY lane proves the
-visible non-fallback outcome over a latency-anchored observation window while
-lower-level Host/Remote contract tests own the `unavailable`-vs-empty and
-zero-dispatch boundaries.
+expose an internal RPC count in the PTY dropdown, the PTY lane records only a
+bounded sampled observation of the visible non-fallback state; decisive native
+negative settlement is `NOT_VERIFIED` because no current query completion seam
+is available. Lower-level Host/Remote contract tests own the
+`unavailable`-vs-empty and zero-dispatch boundaries.
 
 The project carries two distinct kinds of evidence. The PTY anchors drive the
 real terminal surface; the non-PTY installed-entry qualification drives the
