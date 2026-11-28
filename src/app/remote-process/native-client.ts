@@ -28,7 +28,7 @@ import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { MountedRemoteClientDomains, MountedRemoteClientDomainPrerequisites } from '../remote/client-runtime.ts'
-import type { InstalledLocalClientTransport, LocalClientTransport } from './local-transport.ts'
+import type { InstalledLocalClientTransport, LocalClientTransport, LocalTransportStatus } from './local-transport.ts'
 import type { LocalInstanceRecord } from './local-discovery.ts'
 import type { PiTuiSessionPolicyNamespace } from '../../runtime/remote/pi-tui-session-policy-contract.ts'
 import type { RemoteConnectionGenerationSource } from '../../runtime/remote/session-reader-remote.ts'
@@ -229,7 +229,7 @@ export interface NativeAttachOptions {
 }
 
 export interface NativeClientStatus {
-  readonly transport: 'connecting' | 'connected' | 'disconnected'
+  readonly transport: 'connecting' | 'connected' | 'disconnected' | 'closed'
   readonly generationId?: number
   readonly activeWrappers: number
   readonly liveSockets: number
@@ -692,6 +692,8 @@ interface NativeClientState {
   readonly lifetime: AbortController
   readonly operations: Set<Promise<unknown>>
   closed: boolean
+  closeFailed: boolean
+  terminalStatus?: LocalTransportStatus
   fatalError: unknown
   notifyStatus(): void
   notifyHandles(): void
@@ -1863,13 +1865,10 @@ class OwnedNativeSession implements NativeSession {
             throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'prompt parts must be objects')
           }
           switch (part.type) {
-            case 'text': {
+            case 'text':
               if (typeof part.text !== 'string') throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'text prompt part must contain text')
-              text += part.text
-              content.push({ type: 'text', text: part.text })
               break
-            }
-            case 'image': {
+            case 'image':
               if (!(part.bytes instanceof Uint8Array)) throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'attachment bytes must be Uint8Array')
               if (part.mediaType !== 'image/png' && part.mediaType !== 'image/jpeg'
                 && part.mediaType !== 'image/webp' && part.mediaType !== 'image/gif') {
@@ -1878,6 +1877,22 @@ class OwnedNativeSession implements NativeSession {
               if (part.name !== undefined && typeof part.name !== 'string') {
                 throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'image name must be a string')
               }
+              break
+            case 'file':
+              if (!(part.bytes instanceof Uint8Array)) throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'attachment bytes must be Uint8Array')
+              requireNonEmpty(part.name, 'file name')
+              break
+            default:
+              throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'prompt part type is invalid')
+          }
+        }
+        for (const part of input.content) {
+          switch (part.type) {
+            case 'text':
+              text += part.text
+              content.push({ type: 'text', text: part.text })
+              break
+            case 'image':
               content.push({
                 type: 'image',
                 mediaType: part.mediaType,
@@ -1886,10 +1901,7 @@ class OwnedNativeSession implements NativeSession {
               })
               echoAttachments.push({ type: 'image', value: { previewUrl: '', ...part.name === undefined ? {} : { name: part.name } } })
               break
-            }
             case 'file': {
-              if (!(part.bytes instanceof Uint8Array)) throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'attachment bytes must be Uint8Array')
-              requireNonEmpty(part.name, 'file name')
               const uploaded = await this.state.uploader.upload(this.sessionId, {
                 name: part.name,
                 byteLength: part.bytes.byteLength,
@@ -1905,8 +1917,6 @@ class OwnedNativeSession implements NativeSession {
               } })
               break
             }
-            default:
-              throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'prompt part type is invalid')
           }
         }
       } catch (error) {
@@ -2710,6 +2720,9 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
       }
       try { interactions?.dispose() } catch (error) { errors.push(error) }
       try { await installedTransport?.dispose() } catch (error) { errors.push(error) }
+      if (installedTransport !== undefined && state !== undefined) {
+        try { state.terminalStatus = installedTransport.status() } catch (error) { errors.push(error) }
+      }
       try { await prerequisites?.dispose() } catch (error) { errors.push(error) }
       try { await mountedDomains?.dispose() } catch (error) { errors.push(error) }
       gate?.cancel(reason)
@@ -2717,6 +2730,7 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
       try { await context?.fiber.dispose() } catch (error) { errors.push(error) }
       diag?.dispose()
       if (errors.length > 0) {
+        if (state !== undefined) state.closeFailed = true
         for (const error of errors) mergeCause(reason, error)
         ;(reason as Error & { cleanupFailed?: boolean }).cleanupFailed = true
         throw reason
@@ -2746,7 +2760,7 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
     }
     const record = readLocalRecord(scope)
     if (record === undefined) throw nativeError('NATIVE_CLIENT_HOST_UNAVAILABLE', 'the target Host is not running')
-    if (inspectHostProcess(record) !== 'alive') throw nativeError('NATIVE_CLIENT_HOST_UNAVAILABLE', 'the target Host process is not alive')
+    if (inspectHostProcess(record) !== 'alive') throw nativeError('NATIVE_CLIENT_HOST_STALE', 'the target Host process is not alive')
     if (options.expectedInstanceId !== undefined && record.instanceId !== options.expectedInstanceId) {
       throw nativeError('NATIVE_CLIENT_INSTANCE_MISMATCH', 'the target Host instance does not match expectedInstanceId')
     }
@@ -2808,7 +2822,21 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
     const statusSubscriptions: Array<() => void> = []
     const notifyHandles = (): void => { for (const listener of [...handleListeners]) listener() }
     const status = (): NativeResult<NativeClientStatus> => {
-      if (state?.closed === true) return closedResult()
+      if (state?.closed === true) {
+        if (state.closeFailed || state.terminalStatus === undefined) return closedResult()
+        const current = state.terminalStatus
+        return {
+          kind: 'ok',
+          value: {
+            transport: 'closed',
+            activeWrappers: current.activeWrappers,
+            liveSockets: current.liveSockets,
+            pendingInteractions: 0,
+            interactionIdentityGaps: interactions?.identityGaps ?? 0,
+            identity,
+          },
+        }
+      }
       if (state?.fatalError !== undefined) {
         return unavailableResult('NATIVE_CLIENT_FATAL', 'The authenticated Native Client transport failed.')
       }
@@ -2849,6 +2877,7 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
       lifetime: new AbortController(),
       operations: new Set(),
       closed: false,
+      closeFailed: false,
       fatalError: undefined,
       notifyStatus,
       notifyHandles,
@@ -2872,7 +2901,7 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
       status,
       subscribeStatus: listener => {
         if (activeState.closed) {
-          try { listener(closedResult()) } catch (error) { nativeDiag.error('native-client: status listener failed', { error: safeErrorMessage(error) }) }
+          try { listener(status()) } catch (error) { nativeDiag.error('native-client: status listener failed', { error: safeErrorMessage(error) }) }
           return () => {}
         }
         statusListeners.add(listener)

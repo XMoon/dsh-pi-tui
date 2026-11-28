@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
@@ -49,6 +49,12 @@ mkdirSync(evidenceDir, { recursive: true, mode: 0o700 })
 
 function digest(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
+}
+
+function countFiles(root: string): number {
+  return existsSync(root)
+    ? readdirSync(root, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile()).length
+    : 0
 }
 
 function textOf(content: unknown): string {
@@ -347,20 +353,39 @@ test('qualifies the installed Native Client business and interaction paths', { t
       let first: NativeClient | undefined
       let second: NativeClient | undefined
       try {
+        const recordPath = join(scene.scopeDir, 'instance.json')
+        const originalRecord = readFileSync(recordPath, 'utf8')
+        try {
+          const stale = JSON.parse(originalRecord)
+          stale.hostPid = process.pid
+          if (stale.hostKernelIdentity !== undefined) stale.hostKernelIdentity.pid = process.pid
+          writeFileSync(recordPath, JSON.stringify(stale), { mode: 0o600 })
+          await expect(attachNativeClient({
+            dshAnchor: scene.installation.anchor,
+            profile: 'pi-tui',
+            expectedScopeId: scene.scope.scopeId,
+          })).rejects.toMatchObject({ code: 'NATIVE_CLIENT_HOST_STALE' })
+        } finally {
+          writeFileSync(recordPath, originalRecord, { mode: 0o600 })
+        }
+        const launchPath = join(scene.scopeDir, 'launch.json')
+        const originalLaunch = readFileSync(launchPath, 'utf8')
+        try {
+          const invalidAuth = JSON.parse(originalLaunch)
+          invalidAuth.connectUrl = 'http://127.0.0.1:1/connect'
+          writeFileSync(launchPath, JSON.stringify(invalidAuth), { mode: 0o600 })
+          await expect(attachNativeClient({
+            dshAnchor: scene.installation.anchor,
+            profile: 'pi-tui',
+            expectedScopeId: scene.scope.scopeId,
+          })).rejects.toThrow()
+        } finally {
+          writeFileSync(launchPath, originalLaunch, { mode: 0o600 })
+        }
+        pass('pre-auth-host-negatives', { staleRegistry: true, invalidAuth: true })
         first = await attach(scene, host)
         const initial = ok(first.status(), 'initial status')
         const identity = statusIdentity(initial)
-        const startupAbort = new AbortController()
-        const cancelledAttach = attachNativeClient({
-          dshAnchor: scene.installation.anchor,
-          profile: 'pi-tui',
-          expectedScopeId: scene.scope.scopeId,
-          expectedInstanceId: host.ready.localHost.instanceId,
-          signal: startupAbort.signal,
-        })
-        startupAbort.abort(new Error('startup-cancel'))
-        await expect(cancelledAttach).rejects.toThrow()
-        expect(first.status().kind).toBe('ok')
         expect(identity.scopeId).toBe(scene.scope.scopeId)
         expect(identity.instanceId).toBe(host.ready.localHost.instanceId)
         expect(identity.hostPid).toBe(host.ready.localHost.hostPid)
@@ -406,6 +431,15 @@ test('qualifies the installed Native Client business and interaction paths', { t
         const beforeInvalidPrompt = durableEvents(scene, created.sessionId).length
         const invalidPrompt = await sibling.prompt({ content: [{ type: 'bogus', name: 'x.txt', bytes: new Uint8Array([1]) } as never] })
         expect(invalidPrompt.kind, `unknown prompt discriminator must fail before Host effects: ${resultSummary(invalidPrompt)}`).toBe('not-dispatched')
+        expect(durableEvents(scene, created.sessionId).length).toBe(beforeInvalidPrompt)
+        const attachmentsRoot = join(scene.installation.dshHome, 'attachments', 'v1', 'files')
+        const beforeMixedInvalid = countFiles(attachmentsRoot)
+        const mixedInvalid = await sibling.prompt({ content: [
+          { type: 'file', name: 'must-not-upload.txt', bytes: new Uint8Array([1]) },
+          { type: 'bogus', name: 'x.txt', bytes: new Uint8Array([1]) },
+        ] as never })
+        expect(mixedInvalid.kind, `mixed invalid prompt must fail before upload: ${resultSummary(mixedInvalid)}`).toBe('not-dispatched')
+        expect(countFiles(attachmentsRoot)).toBe(beforeMixedInvalid)
         expect(durableEvents(scene, created.sessionId).length).toBe(beforeInvalidPrompt)
         const prompt = accepted(await sibling.prompt({ content: [{ type: 'text', text: 'native foreground tool' }] }), 'foreground prompt')
         const toolCall = await scene.waitForSessionEvent(created.sessionId, 0,
@@ -456,8 +490,31 @@ test('qualifies the installed Native Client business and interaction paths', { t
         const beforeClose = ok(first.status(), 'status before close')
         expect(beforeClose.activeWrappers).toBeGreaterThan(0)
         expect(beforeClose.liveSockets).toBeGreaterThan(0)
-        await first.close()
-        expect(first.status().kind).toBe('closed')
+        const firstClose = first.close()
+        expect(first.close()).toBe(firstClose)
+        await firstClose
+        const terminalStatus = ok(first.status(), 'terminal status after close')
+        expect(terminalStatus.transport).toBe('closed')
+        expect(terminalStatus.activeWrappers).toBe(0)
+        expect(terminalStatus.liveSockets).toBe(0)
+        expect(terminalStatus.pendingInteractions).toBe(0)
+        const startupAbort = new AbortController()
+        const cancelledAttach = attachNativeClient({
+          dshAnchor: scene.installation.anchor,
+          profile: 'pi-tui',
+          expectedScopeId: scene.scope.scopeId,
+          expectedInstanceId: host.ready.localHost.instanceId,
+          signal: startupAbort.signal,
+        })
+        queueMicrotask(() => startupAbort.abort(new Error('startup-cancel')))
+        let startupCancel: { code?: string; message: string } | undefined
+        try {
+          await cancelledAttach
+        } catch (error) {
+          startupCancel = { code: (error as { code?: string }).code, message: error instanceof Error ? error.message : String(error) }
+        }
+        expect(startupCancel?.code).not.toBe('NATIVE_CLIENT_REALM_BUSY')
+        expect(startupCancel?.message).toContain('startup-cancel')
         const hostAfterClose = await scene.hostStatus(host)
         expect(hostAfterClose.localHost.instanceId).toBe(identity.instanceId)
         expect(hostAfterClose.localHost.hostPid).toBe(identity.hostPid)
@@ -478,6 +535,8 @@ test('qualifies the installed Native Client business and interaction paths', { t
           identity,
           generationId: reattached.generationId,
           beforeClose: { activeWrappers: beforeClose.activeWrappers, liveSockets: beforeClose.liveSockets },
+          terminalStatus,
+          startupCancel,
           hostAfterClose: { instanceId: hostAfterClose.localHost.instanceId, hostPid: hostAfterClose.localHost.hostPid },
           duplicateEntryRejected: true,
         })
