@@ -197,7 +197,16 @@ export async function runPromptSessionFocusTurnParity(context) {
     await assertHostIdentityKept(host, hostBefore, 'PP Host after A exit')
     clientB.send('pp-b-after-a-exit-step\r')
     await clientB.waitForScreen('pp-b-after-a-exit-step', 'PP B queued the post-exit step', 120_000)
+    const secondSteerStart = (hostSessionEvents(dshHome, sessionX) ?? []).length
     clientB.send('\x13')
+    // Releasing the held Turn before the steer SETTLES would let the next step
+    // become a later Turn after A's exit — a false Focus regression under lane
+    // load. Prove the occurrence joined the already-frozen Turn first.
+    await waitForHostSessionEventAfter(dshHome, sessionX, secondSteerStart,
+      event => event.type === 'agent/inbox/spliced'
+        && event.data?.target === 'next-step'
+        && (event.data.inserted ?? []).some(message => textOf(message) === 'pp-b-after-a-exit-step'),
+      'PP steered the post-exit step into the frozen Turn', 120_000)
     const secondTurnBoundary = (hostSessionEvents(dshHome, sessionX) ?? []).length
     writeFileSync(releaseBarrier, '', { mode: 0o600 })
     const frozenRows = await waitForRows(4, 'PP frozen post-exit step request')
