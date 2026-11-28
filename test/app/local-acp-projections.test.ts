@@ -392,7 +392,9 @@ test('the ACP absolute-path shape follows the Host OS local domain', () => {
   assert.equal(isAbsolutePath('/host/proj', 'darwin'), true)
   assert.equal(isAbsolutePath('C:\\host\\proj', 'win32'), true)
   assert.equal(isAbsolutePath('C:/host/proj', 'win32'), true)
-  for (const invalid of ['', 'proj', 'C:proj', '\\\\server\\share', '\\?\\C:\\x', 'C:\\bad\u0000path']) {
+  assert.equal(isAbsolutePath('\\\\server\\share\\proj', 'win32'), true)
+  assert.equal(isAbsolutePath('//server/share/proj', 'win32'), true)
+  for (const invalid of ['', 'proj', 'C:proj', '\\host\\proj', '\\\\?\\C:\\x', '\\\\.\\pipe\\x', 'C:\\bad\u0000path']) {
     assert.equal(isAbsolutePath(invalid, 'win32'), false, JSON.stringify(invalid))
   }
   assert.equal(isAbsolutePath('C:\\host', 'linux'), false, 'the POSIX shape never accepts a Windows drive path')

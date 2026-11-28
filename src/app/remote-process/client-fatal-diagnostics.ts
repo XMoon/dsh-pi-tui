@@ -36,13 +36,7 @@ import {
 import { join } from 'node:path'
 import { dshHome } from '../../runtime/process/diagnostics.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
-import {
-  ensureWin32PrivateDirectory,
-  isWin32LocalFixedNtfs,
-  win32FileAttributes,
-  win32PrivateDirectorySafe,
-  win32PrivateFileStatus,
-} from '../../runtime/native-process/win32.ts'
+import { ensureWin32PrivateDirectory, win32PrivateFileStatus } from '../../runtime/native-process/win32.ts'
 
 /** The existing lifecycle state a fatal is observed from. */
 export type ClientFatalPhase = 'pre-entry' | 'pre-context' | 'client-assembly' | 'client-runtime'
@@ -345,35 +339,26 @@ function prepareDiagnosticDirectory(env: NodeJS.ProcessEnv): string {
 }
 
 /**
- * Windows diagnostic directory: the official DSH home must be an ordinary
- * local fixed-NTFS directory and the shared `logs` parent a real directory
- * (never a reparse/junction). Its owner-chosen ACL is NEVER modified. Only the
- * product-owned `pi-tui-client` child is created/reused through the PR2
- * protected owner-only DACL helper; an unsafe existing child fails closed.
+ * Windows diagnostic directory: the user-chosen DSH home and shared `logs`
+ * directory are used as they are, including a legitimate junction/symlink that
+ * resolves to an ordinary directory. Their owner-chosen ACL is NEVER modified.
+ * Only the product-owned `pi-tui-client` child is created/reused with the
+ * protected owner-only DACL; an unsafe existing child fails closed.
  */
 function prepareWin32DiagnosticDirectory(env: NodeJS.ProcessEnv): string {
   const home = realpathSync(dshHome(env))
-  if (!isWin32LocalFixedNtfs(home)) throw new DiagnosticWriteRefusal('ENOTDIR')
   if (!statSync(home).isDirectory()) throw new DiagnosticWriteRefusal('ENOTDIR')
   const logs = join(home, 'logs')
-  let logsInfo: ReturnType<typeof lstatSync>
   try {
-    logsInfo = lstatSync(logs)
+    lstatSync(logs)
   } catch (error) {
     if (controlledErrno(error) !== 'ENOENT') throw error
     mkdirSync(logs)
-    logsInfo = lstatSync(logs)
   }
-  if (logsInfo.isSymbolicLink() || !logsInfo.isDirectory()) throw new DiagnosticWriteRefusal('ELOOP')
-  const attributes = win32FileAttributes(logs)
-  if (attributes === undefined || !attributes.directory || attributes.reparse) {
-    throw new DiagnosticWriteRefusal(attributes === undefined ? 'NATIVE_UNAVAILABLE' : 'ELOOP')
-  }
-  const directory = join(logs, 'pi-tui-client')
-  // Create with the protected owner-only DACL at creation, or reuse only an
-  // existing proven owner-only directory. Never chmod/ACL-tighten a shared dir.
+  const logsReal = realpathSync(logs)
+  if (!statSync(logsReal).isDirectory()) throw new DiagnosticWriteRefusal('ENOTDIR')
+  const directory = join(logsReal, 'pi-tui-client')
   ensureWin32PrivateDirectory(directory)
-  if (!win32PrivateDirectorySafe(directory)) throw new DiagnosticWriteRefusal('EPERM')
   return directory
 }
 

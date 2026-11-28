@@ -217,7 +217,7 @@ function createSurfaceRecordSink(): { emit: EntryRecordSink; close(): void } | u
     // isolated protected owner-only directory (the test harness creates it);
     // this product code never chmods/ACLs a foreign directory. The target is
     // an existing verified private regular file or an exclusively created new
-    // one, and its ACL is re-proved BEFORE any record byte is written.
+    // one whose inherited ACL is proved BEFORE any record byte is written.
     if (!win32PrivateDirectorySafe(directory)) {
       throw new Error('local client entry: the surface record directory is not a private owner-only directory')
     }
@@ -226,14 +226,21 @@ function createSurfaceRecordSink(): { emit: EntryRecordSink; close(): void } | u
       throw new Error('local client entry: the surface record file is not a private regular file')
     }
     let fd: number
+    let newlyCreated = false
     try {
       fd = openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_APPEND, 0o600)
+      newlyCreated = true
     } catch (error) {
       if (existing !== 'private' || (error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
       fd = openSync(target, constants.O_WRONLY | constants.O_APPEND, 0o600)
     }
     try {
-      if (!fstatSync(fd).isFile() || win32PrivateFileStatus(target) !== 'private') {
+      if (!fstatSync(fd).isFile()) {
+        throw new Error('local client entry: the surface record file must be a private regular file')
+      }
+      // An existing target was already proved private above; only a new file
+      // needs its inherited private boundary checked before the first record.
+      if (newlyCreated && win32PrivateFileStatus(target) !== 'private') {
         throw new Error('local client entry: the surface record file must be a private regular file')
       }
     } catch (error) {

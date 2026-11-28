@@ -40,8 +40,10 @@ profile path.
   0, is only a submitted request, never `Ready`.
 - **Windows is process-only, with kernel seats and a per-instance stop Event.**
   The Host and the short-lived management seat are `Global\` named mutexes
-  derived from the scope, created with a protected owner-only DACL; the same
-  canonical profile under another DSH home competes for the same Host seat.
+  derived from the scope, created with a protected owner-only DACL; an already
+  existing named object is adopted only after its owner and DACL are proved, and
+  the same canonical profile under another DSH home competes for the same Host
+  seat.
   `stop` opens the authenticated instance's exact process handle (token SID +
   creation FILETIME must match the registry), opens that instance's native stop
   Event, calls `SetEvent` once, and proves the original held handle terminal
@@ -415,8 +417,8 @@ state authority and the only mutation writer.
   stopped. On Windows an independent authenticated Host is stopped only through
   its exact per-instance native Event: the command opens the recorded PID with
   `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`, proves the same token SID
-  and creation FILETIME, verifies the instance Event's owner-only descriptor,
-  calls `SetEvent` once, and waits on the ORIGINAL held handle to become
+  and creation FILETIME, verifies the instance Event's existing-object private
+  boundary, calls `SetEvent` once, and waits on the ORIGINAL held handle to become
   terminal; it never sends SIGTERM, `taskkill` or `TerminateProcess`. A
   `gone`/`different`/`unknown` observation, a replaced registry instance, a
   missing Event or a different process identity is refused without a signal.
@@ -536,8 +538,10 @@ state authority and the only mutation writer.
   tail; with no plist, no live Host and no retained launchd stream, `host.log`
   is the only remaining source. On Windows the only source is the scope
   `host.log`; the file must be a non-reparse regular file with the product's
-  owner-only boundary, and a foreign/public/final-reparse file is an explicit
-  log-source failure rather than a guessed tail. A stale log from another process is
+  private boundary (current owner SID, present DACL and no ordinary-account
+  grant beyond the current SID/System/Administrators), and a
+  foreign/public/final-reparse file is an explicit log-source failure rather
+  than a guessed tail. A stale log from another process is
   never presented as the current record. Output is bounded and
   best-effort
   sanitized (ANSI/control sequences, token/cookie/Authorization and
@@ -550,7 +554,7 @@ state authority and the only mutation writer.
   `O_EXLOCK` seat file in the account-home seat chain beside the Host singleton
   (`seat-admin-<scopeId>.lock`), claimed through `bindDarwinKernelSeat`;
   Windows holds a separate purpose-derived `Global\` named mutex with the same
-  owner-only boundary as the Host seat. `status` and `logs` take no seat and
+  private boundary as the Host seat. `status` and `logs` take no seat and
   create no directory. The kernel releases the claim when the command exits, so
   there is no persistent lock file or second state machine. A second
   concurrent mutating command for the same Profile gets `DAEMON_CONTROL_BUSY`

@@ -58,18 +58,17 @@ async function resolvePwshHostShellModule(explicitAnchor?: string): Promise<Pwsh
   if (anchor === undefined) {
     throw new Error('the installed @deepseek-ai/dsh anchor is unavailable')
   }
-  // The install IDENTITY includes the installed DSH version: an in-place
-  // reinstall at the same path must not reuse an older module's constants.
-  const anchorVersion = readManifestObject(anchor)?.version
-  const identity = `${anchor}\u0000${typeof anchorVersion === 'string' ? anchorVersion : ''}`
-  const cached = loadedModules.get(identity)
+  // `installedDshAnchor` returns the canonical realpath of the installed DSH
+  // package. The immutable module constants are cached by that anchor; the
+  // live `pwshPath` getter is still read on every attempt.
+  const cached = loadedModules.get(anchor)
   if (cached !== undefined) return cached
   const loading = loadPwshHostShellModule(anchor)
-  loadedModules.set(identity, loading)
+  loadedModules.set(anchor, loading)
   try {
     return await loading
   } catch (error) {
-    loadedModules.delete(identity)
+    loadedModules.delete(anchor)
     throw error
   }
 }
@@ -80,7 +79,6 @@ async function loadPwshHostShellModule(anchor: string): Promise<PwshHostShellMod
     throw new Error('the DSH anchor is not an installed @deepseek-ai/dsh manifest')
   }
   assertDeclaredDependency(anchorManifest, '@deepseek-ai/dsh-pwsh-sandbox', '@deepseek-ai/dsh')
-  assertDeclaredDependency(anchorManifest, '@deepseek-ai/dsh-pwsh-local', '@deepseek-ai/dsh')
 
   const anchorRequire = createRequire(anchor)
   const sandboxManifestPath = realpathSync(anchorRequire.resolve('@deepseek-ai/dsh-pwsh-sandbox/package.json'))

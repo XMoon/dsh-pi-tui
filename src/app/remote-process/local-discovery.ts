@@ -1048,7 +1048,6 @@ function writePrivateJsonFile(path: string, value: unknown): void {
       throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} has a foreign or non-private existing target`)
     }
     let fd: number | undefined
-    let renamed = false
     try {
       fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
       if (win32PrivateFileStatus(temp) !== 'private') {
@@ -1059,16 +1058,9 @@ function writePrivateJsonFile(path: string, value: unknown): void {
       closeSync(fd)
       fd = undefined
       renameSync(temp, path)
-      renamed = true
-      if (win32PrivateFileStatus(path) !== 'private') {
-        throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} lost its private boundary`)
-      }
     } catch (error) {
       if (fd !== undefined) closeSync(fd)
       try { unlinkSync(temp) } catch { /* the temp file may not exist */ }
-      if (renamed) {
-        try { unlinkSync(path) } catch { /* the published file may already be gone */ }
-      }
       if (error instanceof LocalScopeError) throw error
       throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} could not be written atomically`, error)
     }

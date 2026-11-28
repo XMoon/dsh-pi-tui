@@ -17,11 +17,10 @@ export const ACP_PIPE_PREFIX = '\\\\.\\pipe\\dsh-pi-tui-acp-'
 const SCOPE_ID = /^[0-9a-f]{64}$/u
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u
 
-/** The canonical local Named Pipe address of one existing profile scope. */
+/** The canonical local Named Pipe address of one existing profile scope. The
+ * scope id comes from the internal canonical scope producer; external addresses
+ * are admitted only through {@link isAcpPipeAddress}. */
 export function acpPipeAddress(scopeId: string): string {
-  if (!SCOPE_ID.test(scopeId)) {
-    throw new Error('local acp: the canonical profile scope id is not a 64-character lowercase SHA-256 hex string')
-  }
   return `${ACP_PIPE_PREFIX}${scopeId}`
 }
 

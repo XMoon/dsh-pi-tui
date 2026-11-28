@@ -88,8 +88,9 @@ service manager in this contract.
 fails reports its own controlled line in the terminal and writes a private
 incident file at `$DSH_HOME/logs/pi-tui-client/startup-*.log` (`DSH_HOME`
 defaults to `~/.dsh`; `DSH_PI_TUI_LOG=off` suppresses the file). On Windows the
-product-owned incident directory/file carry a protected owner-only DACL and the
-shared `logs` parent is never chmodded or ACL-rewritten. `daemon logs` is not a
+product-owned incident directory/file carry a protected owner-only DACL; the
+shared `logs` parent may be a user-chosen junction/symlink to an ordinary
+directory and is never chmodded or ACL-rewritten. `daemon logs` is not a
 Client log entry. The incident file contains the real stack and private local
 details; review it before sharing.
 
