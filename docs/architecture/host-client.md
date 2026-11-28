@@ -98,16 +98,11 @@ Consequences that are part of the contract:
 
 ## Semantic ports and composition
 
-`Backend` is an assembly of narrow domain ports (`subagent`, `sessionReader`,
-`pendingInputReader`, `sessionWriter`, `sessionLifecycle`, `interaction`,
-`catalog`, `config`, `hostFile`, `sessionArchive`, `sessionMarkdown`,
-`hostCommand`, `pluginManager`, `jobObservation`, `hostUserShell`,
-`hostShellCompletion`, `deliveredFileRead`, `webAccess`, `cuaAccess`,
-`sessionWorkspaceFacts`, `schedule`), never a
-`TuiBackend` god object. A port exposes detached semantic facts, opaque identities/request ids,
-event surfaces (for example authorization: begin → attemptId → notice/prompt →
-respond/cancel) and semantic operations. It owns no Host database, state machine
-or transport.
+[`Backend`](../../src/runtime/backend.ts) assembles one narrow semantic port
+per domain, never a `TuiBackend` god object. The interface is the authority for
+the current port inventory. A port exposes detached semantic facts, opaque
+identities/request ids, event surfaces and semantic operations. It owns no Host
+database, state machine or transport.
 
 Host service resolution belongs to:
 
@@ -168,7 +163,7 @@ runner and does not compose through that facade:
   profile through `runProfile()` with the Host-only overlay; it does NOT enter
   `app/bootstrap.ts`. The overlay's single built-in
   `@xmoon76/dsh-pi-tui/host-runtime` row owns the package's ONE private Typert
-  contribution and its five business services. Base/profile-owned Host
+  contribution and private business services. Base/profile-owned Host
   services are reused, never remounted.
 - **Retired in-process carrier (test-only).** The former M3 in-process
   composition lives in `test/support/m3-inprocess/**`. It is not a real process
@@ -273,10 +268,8 @@ automatically discovers or starts the local Host, then completes the internal
 connect command, address or token input is required. Any other platform fails
 before writing runtime files with `B1_PLATFORM_UNSUPPORTED`. No PID file,
 `O_EXCL` marker, registry record or `hasLiveClient()` result may stand in for
-the kernel seat where one is required. Windows `daemon install`/`uninstall` are
-unsupported because no Windows service manager owns the Host; ACP ingress is
-available on Windows over the same profile-scoped local endpoint (see
-[host-acp.md](./host-acp.md)).
+the kernel seat where one is required. The ACP ingress contract is owned by
+[host-acp.md](./host-acp.md).
 
 - **Scope.** The official `resolveDshHome()` / `resolveProfileDir()` results
   canonicalized through `realpath` plus the current POSIX UID or Windows token
@@ -612,11 +605,11 @@ that Loader. The Host-only overlay disables the TUI surface rows, keeps the B1
 Connection and API-remotes rows, and adds exactly the official Session-serving
 rows plus ONE built-in `@xmoon76/dsh-pi-tui/host-runtime` row. That built-in row
 owns the package's ONE private Typert contribution and its private business
-services (`piTuiFileReferences`, `piTuiTerminalProgress`, `piTuiWebAccess`,
-`piTuiHostUserShell`, `piTuiSkills`, `piTuiAuthorization`,
-`piTuiCredentialRecords`, `piTuiSessionPolicy`); the feature modules are not
-independent Loader rows, configurable plugins or package subpaths. The row
-publishes `piTuiHostReady` only after every service binding is live.
+services. The actual registrations and binding assertions are owned by
+[the Host Runtime](../../src/app/host/pi-tui-host-runtime.ts), not a second
+inventory here. Its feature modules are not independent Loader rows,
+configurable plugins or package subpaths. The row publishes `piTuiHostReady`
+only after every required service binding is live.
 
 Host Workspace authority has exactly two owners, both official bundle rows with
 the stable ids the official web bundle uses: `workspace`
@@ -1043,10 +1036,11 @@ identity is published.
 
 ### Canonical TUI preferences and migration
 
-The 20 durable TUI preferences live in the ONE profile row
-`pi-tui-preferences` (package subpath `@xmoon76/dsh-pi-tui/preferences`), whose
-`.volatile()` Config is also the Settings namespace and whose `piTuiPreferences`
-Cordis service carries the live references. The row is a CONFIG-ONLY carrier:
+The durable TUI preferences live in the ONE profile row
+`pi-tui-preferences` (package subpath `@xmoon76/dsh-pi-tui/preferences`).
+[The canonical schema](../../src/app/config/schema.ts) defines the fields and
+defaults; its `.volatile()` Config is also the Settings namespace, and the
+`piTuiPreferences` Cordis service carries the live references. The row is a CONFIG-ONLY carrier:
 it starts no TUI, Agent, Session, Gateway, timer or watcher, it is not gated on
 `tuiStartup`, and it is disabled only in the daemon supervisor PID. Its
 auto-generated Settings page is hidden because that page would expose the
@@ -2677,13 +2671,14 @@ pnpm gate:boundary      scripts/client-boundary-gate.mjs + scripts/client-bounda
 pnpm gate:architecture  scripts/application-architecture-gate.mjs
 ```
 
-`client-boundary-gate.mjs` scans `src/**` for `ctx.get('<host service>')`,
-`ctx.<host service>` (optional chaining included) and exact
-`@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-session` imports (type-only counts),
-then compares `(file, pattern)` pairs against the frozen baseline. A new pattern
-in an already-allowlisted file is still new debt and fails. The baseline is
-updated only for a deliberate migration-phase relocation, with the coupling
-contract updated in the same PR.
+[The boundary gate](../../scripts/client-boundary-gate.mjs) and its
+[baseline](../../scripts/client-boundary-baseline.json) own the coupling
+inventory and enforcement. Type-only Host coupling counts. Any new
+`(file, pattern)` pair, including a new pattern in an already-allowlisted file,
+is new debt and fails. Baseline changes are allowed only for deliberate
+migration-phase relocations, never to absorb new debt. Changes to the durable
+coupling boundary require Owner adjudication and an update to this contract
+in the same PR.
 
 The architecture gate enforces the dependency direction (see
 [overview.md](./overview.md)) and the single sanctioned dynamic Remote edge.
