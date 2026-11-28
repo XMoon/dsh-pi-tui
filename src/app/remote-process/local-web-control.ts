@@ -96,7 +96,7 @@ export interface LocalWebControlDeps {
   readonly assertKernelIdentity?: (record: LocalInstanceRecord) => void
   readonly fetch?: typeof fetch
   readonly spawn?: typeof spawn
-  /** How long an accepted opener may run before `browser=requested` is reported. */
+  /** How long an accepted POSIX opener may run before `browser=requested` is reported. */
   readonly openerWaitMs?: number
   readonly signal?: AbortSignal
 }
@@ -323,10 +323,12 @@ function assertAuthenticatedWebUrl(raw: string, origin: string): string {
  */
 async function launchBrowser(url: string, deps: LocalWebControlDeps): Promise<void> {
   const spawnImpl = deps.spawn ?? spawn
+  const platform = platformOf(deps)
+  const detached = platform !== 'win32'
   let child: ChildProcess
   try {
-    const { command, args } = openerFor(url, platformOf(deps))
-    child = spawnImpl(command, args, { shell: false, stdio: 'ignore', detached: true })
+    const { command, args } = openerFor(url, platform)
+    child = spawnImpl(command, args, { shell: false, stdio: 'ignore', detached })
   } catch (error) {
     throw new WebControlError('BROWSER_LAUNCH_UNAVAILABLE', 'the local browser opener could not be started', error)
   }
@@ -347,17 +349,19 @@ async function launchBrowser(url: string, deps: LocalWebControlDeps): Promise<vo
     const onError = (): void => { finish('the local browser opener could not be started') }
     const onExit = (code: number | null, _signal: NodeJS.Signals | null): void => {
       // An opener that exits zero has done its job. A signal or non-zero exit
-      // that is already observable is a real launch failure.
+      // is a real launch failure; Windows waits for this outcome.
       if (code === 0) finish()
       else finish('the local browser opener exited with an error')
     }
     child.once('error', onError)
     child.once('exit', onExit)
     // The timer is only the abnormal "no spawn/error reported" fallback; a real
-    // spawn event cancels it and starts the short immediate-exit observation.
+    // spawn event cancels it. Only POSIX starts the short exit observation.
     spawnTimer = setTimeout(() => { finish('the local browser opener did not accept the request') }, 2_000)
     child.once('spawn', () => {
       if (spawnTimer !== undefined) clearTimeout(spawnTimer)
+      // Windows must keep the CLI alive until PowerShell finishes Start-Process.
+      if (!detached) return
       try { child.unref() } catch { /* already released */ }
       exitTimer = setTimeout(() => { finish() }, deps.openerWaitMs ?? 250)
     })
