@@ -306,6 +306,8 @@ interface ShellHarness {
   armEnsureGate(): void
   releaseEnsureGate(): void
   readonly executions: number
+  /** Terminal submit acknowledgements observed by the REAL shell owner. */
+  readonly ackReasons: string[]
   /** The REAL user-shell owner's in-flight read (the exit facts source). */
   readonly shellRunning: () => boolean
 }
@@ -324,6 +326,7 @@ function shellOk(stdout = ''): HostUserShellResult {
 function startShellHarness(composerOverride?: unknown): ShellHarness {
   let draft = ''
   const notices: string[] = []
+  const ackReasons: string[] = []
   const writes: { sessionId: string; message: unknown }[] = []
   const writeResolvers: ((outcome: WriteOutcome) => void)[] = []
   const shellResolvers: ((result: HostUserShellResult) => void)[] = []
@@ -458,7 +461,10 @@ function startShellHarness(composerOverride?: unknown): ShellHarness {
       },
     } as never,
     submission: {
-      settleAck: (reason, options) => { controller?.settleLocalSubmitAck(reason, options) },
+      settleAck: (reason, options) => {
+        ackReasons.push(reason)
+        controller?.settleLocalSubmitAck(reason, options)
+      },
       markDispatch: (sessionId) => { controller?.markDispatch(sessionId) },
     },
   })
@@ -584,6 +590,7 @@ function startShellHarness(composerOverride?: unknown): ShellHarness {
       ensureGate = undefined
     },
     get executions() { return executions },
+    ackReasons,
     shellRunning: () => shell.isRunning(),
   }
 }
@@ -646,6 +653,8 @@ test('!! paints its bounded output on the card and never writes the Session', as
   assert.match(harness.card()?.result ?? '', /\[exit 0\]/u, '!! keeps the real exit fact on its card')
   assert.equal(harness.controller.hasUnsettledClientWrite(), false,
     "the !! card's settlement is the terminal path")
+  assert.deepEqual(harness.ackReasons, ['shell run settled'],
+    'a successful !! settles the exact submit acknowledgement token once')
 })
 
 test('an unknown ! outcome writes no Session result and is never replayed', async () => {
@@ -661,6 +670,8 @@ test('an unknown ! outcome writes no Session result and is never replayed', asyn
   assert.match(harness.card()?.result ?? '', /do not retry automatically/u)
   assert.equal(harness.controller.hasUnsettledClientWrite(), false,
     'the unknown ! outcome still settles the gesture lifetime')
+  assert.deepEqual(harness.ackReasons, ['host user-shell outcome unknown — do not retry automatically'],
+    'the unknown outcome keeps its specific terminal reason without a generic settled acknowledgement')
 })
 
 test('an Alt+Up queue mutation keeps the write lifetime until its queue write settles', async () => {

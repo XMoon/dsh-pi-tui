@@ -179,10 +179,13 @@ export function writeC1WorkFixture(profileDir, workDir, options = {}) {
   const policyPatchPath = policy => {
     const path = join(workDir, `m6-f1-host-${policy}.patch.yml`)
     const policyRows = [...rows]
+    // F1 exercises the regular Ctrl+O owner for local Shell Cards. Fullscreen
+    // Compact intentionally makes those cards click-owned instead.
     policyRows.splice(-1, 0,
       '- id: pi-tui-preferences',
       '  config:',
       `    localShellSandbox: ${policy}`,
+      '    fullscreen: off',
     )
     policyRows.splice(-1, 0,
       '- id: split-process-host-work',
