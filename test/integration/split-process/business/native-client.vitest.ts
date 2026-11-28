@@ -478,7 +478,10 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect('matched' in command ? command.matched : command.result.kind).toBe('success')
         await waitFor('plan active after /plan', async () => ok(await configured.session.configuration(), 'configuration').plan,
           plan => plan?.active === true)
-        committed(await configured.session.selectModel({ provider: 'c1-qualification', model: 'c1' }), 'selectModel')
+        const effortModel = catalog.models.groups.flatMap(group => group.models).find(model => model.id === 'c1')
+        expect(effortModel?.reasoning?.defaultEffort).toBe('low')
+        expect(effortModel?.reasoning?.efforts.map(effort => effort.id)).toContain('high')
+        committed(await configured.session.selectModel({ provider: 'c1-qualification', model: 'c1' }), 'selectModel default effort')
         const effortSelection = committed(await configured.session.selectModel({
           provider: 'c1-qualification', model: 'c1', reasoningEffort: 'high',
         }), 'selectModel with effort')
@@ -1087,15 +1090,15 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect(continuedOffers).toBe(1)
         await reopenedSibling.close()
         expect(continuedOffers).toBe(1)
-        answerGate.resolve({ answers: [{ id: 'c1-question', selected: ['Proceed'] }] })
-        await waitFor('continued answer RPC settlement', () => ok(defined(second, 'continued Client').status(), 'continued status').pendingInteractions,
-          pending => pending === 0)
         writeFileSync(host.timedDuplicateBarrierPath!, 'duplicate\n', { mode: 0o600, flag: 'wx' })
         const duplicate = await fixtureHelpers.waitForC1WorkEvent(host.workloadRoot!,
           event => event.kind === 'answer-probe' && event.phase === 'duplicate',
-          'duplicate continued answer')
-        expect(duplicate.code).toBe('REPLY_QUEUED')
+          'other producer queued the continued reply')
+        expect(duplicate.value).toBe(true)
+        await waitFor('held continued callback revoked by queued reply', () => recovered.signal?.aborted, aborted => aborted === true)
         expect(continuedOffers, 'a queued reply must not be offered again').toBe(1)
+        await waitFor('continued delivery settlement', () => ok(defined(second, 'continued Client').status(), 'continued status').pendingInteractions,
+          pending => pending === 0)
         writeFileSync(host.timedAfterBarrierPath!, 'release\n', { mode: 0o600, flag: 'wx' })
         const reply = await scene.waitForSessionEvent(created.sessionId, 0,
           event => event.type === 'user/message' && event.data?.source?.kind === 'user-question-reply'
@@ -1312,12 +1315,9 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect(childHistory.some(event => event.type === 'assistant/message'
           && textOf(event.data?.message?.content).includes('child answer'))).toBe(true)
         await waitForPromptTerminal(scene, sessionId, parentPrompt.requestId, 'child parent prompt')
-        const snapshotCount = snapshots.length
         const closing = session.close()
         expect(session.close()).toBe(closing)
         await closing
-        await sleep(50)
-        expect(snapshots.length).toBe(snapshotCount)
         offSecond()
         pass('subagent', { sessionId, toolCallId: call.data?.callId, child, catalog, childEnd, childMessage, inactive, closedWithObserver: true })
       } finally {

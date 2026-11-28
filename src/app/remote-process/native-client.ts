@@ -68,9 +68,9 @@ import {
 import {
   createNativeContinuedQuestionReceiver,
   type NativeContinuedDeliveryReservation,
-  type NativeContinuedQuestionCall,
   type NativeContinuedQuestionReceiver,
 } from './native-client-continued.ts'
+import { nativeJobFrameIsDeliverable } from './native-client-job-observation.ts'
 import { completeNativeClientRealm, reserveNativeClientRealm } from './native-client-realm.ts'
 import { nativePromptWriteFailure, nativeWriteFailure } from './native-client-write-result.ts'
 
@@ -1654,10 +1654,17 @@ class OwnedNativeSession implements NativeSession {
   bindingIdentity(): object { return this.binding }
   isCurrentBinding(): boolean { return this.state.sessions.binding(this.sessionId as SessionId) === this.binding }
   lifetimeSignal(): AbortSignal { return this.lifetime.signal }
-  observeUserQuestions(listener: (value: unknown) => void): () => void {
-    const face = this.binding.session.projections.faceOf('userQuestions')
-    listener(face.getSnapshot())
-    return face.subscribe(() => listener(face.getSnapshot()))
+  continuedCalls(): readonly { readonly callId: string; readonly questions: unknown; readonly state: 'open' | 'continued' }[] {
+    return userQuestionsOf(this.projection('userQuestions')).active
+  }
+
+  observeOfficialQuestionFacts(listener: () => void): () => void {
+    const questions = this.binding.session.projections.faceOf('userQuestions')
+    const inbox = this.binding.session.projections.faceOf('inbox')
+    listener()
+    const offQuestions = questions.subscribe(listener)
+    const offInbox = inbox.subscribe(listener)
+    return () => { offQuestions(); offInbox() }
   }
 
   continuedEligible(callId: string): boolean {
@@ -2306,9 +2313,17 @@ class OwnedNativeSession implements NativeSession {
       listener(unavailableResult('NATIVE_JOBS_UNAVAILABLE', 'The official Job stream authority is unavailable.'))
       return () => {}
     }
+    const openerBySignal = new WeakMap<AbortSignal, Generation>()
     const stream = this.state.remote.$stream<JobListFrame>({
       name: 'native-client: Job roster observation',
-      open: signal => this.state.remote.job.list({ sessionId: this.sessionId as SessionId }, signal),
+      open: signal => {
+        const openedGeneration = currentGeneration(this.state)
+        if (openedGeneration === undefined || this.state.sessions.binding(this.sessionId as SessionId) !== this.binding) {
+          throw nativeError('NATIVE_DISCONNECTED', 'The owned Session binding is not current for a Job roster open.')
+        }
+        openerBySignal.set(signal, openedGeneration)
+        return this.state.remote.job.list({ sessionId: this.sessionId as SessionId }, signal)
+      },
       ended: accepted => accepted
         ? new carrierError('native-client: the Job roster stream ended after an accepted frame')
         : new Error('native-client: the Job roster stream ended before its opening frame'),
@@ -2317,9 +2332,15 @@ class OwnedNativeSession implements NativeSession {
       },
     })
     let released = false
+    const offGeneration = this.state.generation.subscribe(() => {
+      if (released || this.closed || this.state.closed) return
+      listener(staleResult())
+      stream.restart()
+    })
     const release = (): void => {
       if (released) return
       released = true
+      offGeneration()
       this.subscriptions.delete(release)
       const disposal = stream.dispose()
       this.operations.add(disposal)
@@ -2334,20 +2355,37 @@ class OwnedNativeSession implements NativeSession {
       try {
         for await (const item of stream) {
           if (released || this.closed || this.state.closed) return
-          const generation = currentGeneration(this.state)
-          if (generation === undefined || item.signal.aborted
-            || this.state.sessions.binding(this.sessionId as SessionId) !== this.binding) {
+          const openedGeneration = openerBySignal.get(item.signal)
+          const bindingCurrent = this.state.sessions.binding(this.sessionId as SessionId) === this.binding
+          if (!nativeJobFrameIsDeliverable({
+            openerGeneration: openedGeneration,
+            currentGeneration: currentGeneration(this.state),
+            openerSignalAborted: item.signal.aborted,
+            bindingCurrent,
+          })) {
             listener(staleResult())
+            if (!bindingCurrent) {
+              release()
+              return
+            }
+            stream.restart()
             continue
           }
           if (item.value.type !== 'rows') {
             item.accept()
             continue
           }
-          const rows = item.value.jobs
+          let value: readonly NativeJob[]
+          try {
+            value = item.value.jobs.map(jobOf)
+          } catch {
+            listener(unavailableResult('NATIVE_INVALID_RESPONSE', 'The official Job roster row is unusable.'))
+            release()
+            return
+          }
           item.accept()
           try {
-            listener({ kind: 'ok', value: rows.map(jobOf) })
+            listener({ kind: 'ok', value })
           } catch (error) {
             this.state.diag.error('native-client: Job listener failed', { error: safeErrorMessage(error) })
             release()
@@ -2358,6 +2396,8 @@ class OwnedNativeSession implements NativeSession {
         if (!released && !this.closed && !this.state.closed) {
           listener(unavailableResult(remoteFailureCode(error) ?? 'NATIVE_JOBS_UNAVAILABLE', 'The official Job roster stream is unavailable.'))
         }
+      } finally {
+        release()
       }
     }, {
       diag: this.state.diag,
@@ -2503,26 +2543,34 @@ function createNativeInteractionReceivers(
     [...(state.handlesBySession.get(sessionId) ?? [])]
       .find(handle => !handle.isClosed && handle.bindingIdentity() === binding && handle.isCurrentBinding())
 
+  const continuedFencesValid = (reservation: NativeContinuedDeliveryReservation): boolean => {
+    if (disposed || state.closed || reservation.controller.signal.aborted
+      || !Object.is(reservation.generation, currentGeneration(state))) return false
+    const handle = currentBindingHandle(reservation.sessionId, reservation.binding)
+    return handle !== undefined && handle.continuedEligible(reservation.callId)
+  }
+
   const deliverContinued = async (
     reservation: NativeContinuedDeliveryReservation,
-    call: NativeContinuedQuestionCall,
+    callId: string,
+    questions: unknown,
     onQuestion: NonNullable<NativeAttachOptions['onQuestion']>,
   ): Promise<void> => {
+    if (!continuedFencesValid(reservation)) {
+      throw nativeError('NATIVE_INTERACTION_STALE', 'the continued Question answer is no longer current')
+    }
     const lifetime = AbortSignal.any([reservation.controller.signal, state.lifetime.signal])
     const answer = await abortable(onQuestion({
       sessionId: reservation.sessionId,
-      callId: call.callId,
+      callId,
       timed: true,
-      questions: call.questions as readonly NativeQuestionItem[],
+      questions: questions as readonly NativeQuestionItem[],
       signal: lifetime,
     }), lifetime)
-    const handle = currentBindingHandle(reservation.sessionId, reservation.binding)
-    if (disposed || state.closed || lifetime.aborted
-      || !Object.is(reservation.generation, currentGeneration(state))
-      || handle === undefined || !handle.continuedEligible(call.callId)) {
+    if (!continuedFencesValid(reservation) || lifetime.aborted) {
       throw nativeError('NATIVE_INTERACTION_STALE', 'the continued Question answer is no longer current')
     }
-    const result = await state.remote.userQuestions.answer(reservation.sessionId as SessionId, call.callId as ToolCallId, {
+    const result = await state.remote.userQuestions.answer(reservation.sessionId as SessionId, callId as ToolCallId, {
       answers: officialQuestionAnswers(answer),
     })
     if (!result.ok) {
@@ -2542,22 +2590,30 @@ function createNativeInteractionReceivers(
       handlesBySession: state.handlesBySession,
       handleListeners: state.handleListeners,
       isClosed: () => state.closed,
-      parseProjection: userQuestionsOf,
       onInvalidProjection: error => {
         state.diag.error('native-client: continued Question projection was unusable', { error: safeErrorMessage(error) })
       },
-      onOffer: (reservation, call) => {
-        if (liveQuestionCalls.has(call.callId)) return false
-        // Register the owned operation before any callback can re-enter close.
-        const operation = Promise.resolve()
-          .then(() => deliverContinued(reservation, call, onQuestion))
-          .finally(() => {
-            pending -= 1
-            changed()
-          })
-        trackClientOperation(state, operation)
+      onOffer: (reservation, callId, questions) => {
+        if (liveQuestionCalls.has(callId) || !continuedFencesValid(reservation)) return false
+        // Own the operation before notify; re-prove the fences before the
+        // external callback so a synchronous reentrant close cannot start it.
+        const owner = Promise.withResolvers<void>()
+        state.operations.add(owner.promise)
+        observeSettled(owner.promise, () => { state.operations.delete(owner.promise) })
         pending += 1
         changed()
+        if (!continuedFencesValid(reservation)) {
+          owner.resolve()
+          pending -= 1
+          changed()
+          return true
+        }
+        const operation = deliverContinued(reservation, callId, questions, onQuestion).finally(() => {
+          owner.resolve()
+          pending -= 1
+          changed()
+        })
+        trackClientOperation(state, operation)
         runDetached('native-client: continued Question delivery', () => operation, {
           diag: state.diag,
           sessionId: () => reservation.sessionId,
@@ -2642,6 +2698,11 @@ function createNativeInteractionReceivers(
     try {
       const handle = await waitForHandle(sessionId, session, request.signal, captured)
       const lifetime = request.signal === undefined ? handle.lifetimeSignal() : AbortSignal.any([request.signal, handle.lifetimeSignal()])
+      if (disposed || state.closed || handle.isClosed || lifetime.aborted
+        || !Object.is(captured, currentGeneration(state))
+        || !handle.matchesSession(state.sessions.sessionOf(this))) {
+        throw nativeError('NATIVE_INTERACTION_STALE', 'the interaction answer is no longer current')
+      }
       const answer = await abortable(options.onQuestion({
         sessionId,
         callId,
@@ -2683,6 +2744,11 @@ function createNativeInteractionReceivers(
     try {
       const handle = await waitForHandle(sessionId, session, request.signal, captured)
       const lifetime = request.signal === undefined ? handle.lifetimeSignal() : AbortSignal.any([request.signal, handle.lifetimeSignal()])
+      if (disposed || state.closed || handle.isClosed || lifetime.aborted
+        || !Object.is(captured, currentGeneration(state))
+        || !handle.matchesSession(state.sessions.sessionOf(this))) {
+        throw nativeError('NATIVE_INTERACTION_STALE', 'the approval answer is no longer current')
+      }
       const outcome = await abortable(options.onApproval({
         sessionId,
         callId,

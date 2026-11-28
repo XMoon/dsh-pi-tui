@@ -9,18 +9,9 @@ export interface NativeContinuedQuestionHandle {
   readonly isClosed: boolean
   bindingIdentity(): object
   isCurrentBinding(): boolean
+  continuedCalls(): readonly { readonly callId: string; readonly questions: unknown; readonly state: 'open' | 'continued' }[]
   continuedEligible(callId: string): boolean
-  observeUserQuestions(listener: (value: unknown) => void): () => void
-}
-
-export interface NativeContinuedQuestionCall {
-  readonly callId: string
-  readonly questions: unknown
-  readonly state: 'open' | 'continued'
-}
-
-export interface NativeContinuedQuestionProjection {
-  readonly active: readonly NativeContinuedQuestionCall[]
+  observeOfficialQuestionFacts(listener: () => void): () => void
 }
 
 export interface NativeContinuedDeliveryReservation {
@@ -37,9 +28,8 @@ export interface NativeContinuedQuestionReceiverOptions {
   readonly handlesBySession: Map<string, Set<NativeContinuedQuestionHandle>>
   readonly handleListeners: Set<() => void>
   readonly isClosed: () => boolean
-  readonly parseProjection: (value: unknown) => NativeContinuedQuestionProjection
   readonly onInvalidProjection: (error: unknown) => void
-  readonly onOffer: (reservation: NativeContinuedDeliveryReservation, call: NativeContinuedQuestionCall) => boolean
+  readonly onOffer: (reservation: NativeContinuedDeliveryReservation, callId: string, questions: unknown) => boolean
 }
 
 export interface NativeContinuedQuestionReceiver {
@@ -48,9 +38,8 @@ export interface NativeContinuedQuestionReceiver {
 }
 
 /**
- * One exact-binding/native-callId owner. A projection event is the only
- * authority to offer; a generation or retention change revokes without
- * replaying a stale projection.
+ * One exact-binding/native-callId owner. Both official question and inbox
+ * faces are live inputs; revocation always precedes any new offer.
  */
 export function createNativeContinuedQuestionReceiver(
   options: NativeContinuedQuestionReceiverOptions,
@@ -66,59 +55,66 @@ export function createNativeContinuedQuestionReceiver(
   const revokeInvalid = (): void => {
     for (const [key, reservation] of deliveries) {
       const handle = currentBindingHandle(reservation.sessionId, reservation.binding)
-      if (!options.isClosed() && !disposed && handle !== undefined
+      const current = !options.isClosed() && !disposed && handle !== undefined
         && Object.is(reservation.generation, options.generation.getSnapshot())
-        && handle.continuedEligible(reservation.callId)) continue
-      reservation.controller.abort(new Error('native-client: continued Question ownership revoked'))
+        && handle.continuedEligible(reservation.callId)
+      // Remove ownership BEFORE aborting: a callback re-entry must not delete
+      // a successor reservation through this stale key.
+      if (current) continue
       deliveries.delete(key)
+      reservation.controller.abort(new Error('native-client: continued Question ownership revoked'))
     }
   }
 
   const offerContinued = (
-    sessionId: string,
-    binding: object,
-    call: NativeContinuedQuestionCall,
+    handle: NativeContinuedQuestionHandle,
+    callId: string,
+    questions: unknown,
   ): void => {
-    revokeInvalid()
-    if (disposed || options.isClosed() || call.state !== 'continued') return
-    const key = keyOf(sessionId, call.callId)
+    if (disposed || options.isClosed()) return
+    const binding = handle.bindingIdentity()
+    const key = keyOf(handle.sessionId, callId)
     if (deliveries.has(key)) return
     const generation = options.generation.getSnapshot()
-    const handle = currentBindingHandle(sessionId, binding)
-    if (generation === undefined || handle === undefined || !handle.continuedEligible(call.callId)) return
+    if (generation === undefined || !handle.continuedEligible(callId)) return
     const reservation: NativeContinuedDeliveryReservation = {
-      sessionId,
+      sessionId: handle.sessionId,
       binding,
-      callId: call.callId,
+      callId,
       generation,
       controller: new AbortController(),
     }
-    // Reserve before any owner callback can re-enter close/status.
     deliveries.set(key, reservation)
-    const started = options.onOffer(reservation, call)
+    const started = options.onOffer(reservation, callId, questions)
     if (!started || disposed) {
+      if (deliveries.get(key) === reservation) deliveries.delete(key)
       reservation.controller.abort(new Error('native-client: continued Question delivery was not started'))
-      deliveries.delete(key)
     }
   }
 
-  const reconcileProjection = (sessionId: string, binding: object, value: unknown): void => {
-    if (disposed || options.isClosed() || value === undefined) return
-    let projection: NativeContinuedQuestionProjection
+  const reconcileHandle = (handle: NativeContinuedQuestionHandle): void => {
+    if (disposed || options.isClosed() || handle.isClosed) return
+    revokeInvalid()
+    let calls: readonly { readonly callId: string; readonly questions: unknown; readonly state: 'open' | 'continued' }[]
     try {
-      projection = options.parseProjection(value)
+      calls = handle.continuedCalls()
     } catch (error) {
       options.onInvalidProjection(error)
       return
     }
-    for (const call of projection.active) offerContinued(sessionId, binding, call)
+    for (const call of calls) {
+      if (call.state === 'continued') offerContinued(handle, call.callId, call.questions)
+    }
+  }
+
+  const reconcileAll = (): void => {
+    revokeInvalid()
+    for (const handle of options.handles) reconcileHandle(handle)
   }
 
   const watchHandle = (handle: NativeContinuedQuestionHandle): void => {
     if (watched.has(handle)) return
-    watched.set(handle, handle.observeUserQuestions(value => {
-      if (!handle.isClosed) reconcileProjection(handle.sessionId, handle.bindingIdentity(), value)
-    }))
+    watched.set(handle, handle.observeOfficialQuestionFacts(() => { reconcileHandle(handle) }))
   }
 
   const syncHandles = (): void => {
@@ -128,7 +124,7 @@ export function createNativeContinuedQuestionReceiver(
       watched.delete(handle)
     }
     for (const handle of options.handles) watchHandle(handle)
-    revokeInvalid()
+    reconcileAll()
   }
 
   const offGeneration = options.generation.subscribe(() => { revokeInvalid() })
@@ -137,7 +133,7 @@ export function createNativeContinuedQuestionReceiver(
 
   return {
     reconcile(): void {
-      if (!disposed) revokeInvalid()
+      if (!disposed) reconcileAll()
     },
     dispose(): void {
       if (disposed) return

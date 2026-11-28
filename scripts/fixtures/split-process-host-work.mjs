@@ -1492,7 +1492,7 @@ class C1Model extends LlmAdapter {
       ? { reasoning: { efforts: [{ id: 'low', name: 'low' }, { id: 'high', name: 'high' }], defaultEffort: 'low' } }
       : {}
     const nativeReasoning = process.env.C1_NATIVE_REASONING_EFFORT === '1' && model === 'c1'
-      ? { reasoning: { efforts: [{ id: 'high', name: 'high' }], defaultEffort: 'high' } }
+      ? { reasoning: { efforts: [{ id: 'low', name: 'low' }, { id: 'high', name: 'high' }], defaultEffort: 'low' } }
       : {}
     return {
       provider,

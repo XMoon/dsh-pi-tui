@@ -741,6 +741,21 @@ function main() {
       if (installSucceeded) {
         const installed = join(probeDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
         check('installed package contains dist', existsSync(join(installed, 'dist', 'index.mjs')))
+        writeFileSync(join(probeDir, 'native-client-types.ts'), [
+          "import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '@xmoon76/dsh-pi-tui/native-client'",
+          'const version: 1 = NATIVE_CLIENT_API_VERSION',
+          'void attachNativeClient',
+          'void version',
+          '',
+        ].join('\n'))
+        const installedTsc = createRequire(import.meta.url).resolve('typescript/bin/tsc')
+        const installedTypes = spawnSync(process.execPath, [installedTsc, '--noEmit', '--strict',
+          '--target', 'ES2022', '--lib', 'ES2022,DOM', '--module', 'NodeNext', '--moduleResolution', 'NodeNext', 'native-client-types.ts'], {
+          cwd: probeDir,
+          encoding: 'utf8',
+        })
+        check('Native Client declarations typecheck strictly in the installed DSH graph',
+          installedTypes.status === 0, installedTypes.stdout.trim() || installedTypes.stderr.trim())
         for (const expected of DARWIN_PREBUILDS) {
           const installedNative = join(installed, darwinPrebuildPath(expected.arch))
           const sourceNative = join(PACKAGE_ROOT, 'packages', 'pi-tui', 'native', 'darwin', 'prebuilds',
