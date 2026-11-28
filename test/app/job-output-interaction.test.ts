@@ -1833,5 +1833,38 @@ test('JUX-06: Output SearchRow buttons drive EDIT/NAVIGATE/reveal and 0 matches 
   await paintedWhen(vt, frame => frame.includes('target-row-110'))
   assert.match(view(vt), /3\/3/, 'Prev [Shift+N] steps back to 3/3 and reveals target-row-110')
   assert.match(view(vt), /target-row-110/)
+
+  // R948-01 span ABA: A (2 matches) press Next -> B (0/0, Next vanishes) ->
+  // C (2 new matches, Next returns at the same span) -> release A must NOT step C;
+  // a fresh click on C then steps normally. Keep short 6-line snapshots so
+  // viewport scrollTop stays 0 across A -> B -> C.
+  const frameA = 'target-row-A1\nfiller-1\nfiller-2\ntarget-row-A2\nfiller-3\nfiller-4'
+  const frameB = 'nomatch-1\nnomatch-2\nnomatch-3\nnomatch-4\nnomatch-5\nnomatch-6'
+  const frameC = 'target-row-C1\nfiller-1\nfiller-2\ntarget-row-C2\nfiller-3\nfiller-4'
+  harness.observation.latest()!.emit({ text: frameA })
+  await paintedWhen(vt, frame => frame.includes('target-row-A1') && frame.includes('1/2'))
+  const abaRow = rawView(vt).findIndex(line => line.includes('Next [N]'))
+  const abaCol = rawView(vt)[abaRow]!.indexOf('Next [N]')
+  assert.ok(abaRow >= 0 && abaCol >= 0, 'frame A paints Next [N]')
+
+  // Press on A's Next [N].
+  vt.sendInput(`\x1b[<0;${abaCol + 2};${abaRow + 1}M`)
+  // B paints 0/0 and removes Next [N].
+  harness.observation.latest()!.emit({ text: frameB })
+  await paintedWhen(vt, frame => frame.includes('0/0 · No matches') && !frame.includes('Next [N]'))
+  // C paints 1/2 and restores Next [N] at the identical span.
+  harness.observation.latest()!.emit({ text: frameC })
+  await paintedWhen(vt, frame => frame.includes('target-row-C1') && frame.includes('1/2') && frame.includes('Next [N]'))
+  assert.equal(rawView(vt)[abaRow]!.indexOf('Next [N]'), abaCol, 'frame C restores Next [N] at the exact same span')
+  // Release old press from A: must NOT advance C from 1/2 to 2/2.
+  vt.sendInput(`\x1b[<0;${abaCol + 2};${abaRow + 1}m`)
+  await vt.waitForRender()
+  assert.match(rawView(vt)[abaRow]!, /1\/2/, 'releasing an A-frame press after B hid the span must not step C')
+
+  // Fresh click on C's Next [N] advances normally to 2/2.
+  vt.sendInput(`\x1b[<0;${abaCol + 3};${abaRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${abaCol + 3};${abaRow + 1}m`)
+  await paintedWhen(vt, frame => frame.includes('2/2'))
+  assert.match(rawView(vt)[abaRow]!, /2\/2/, 'a fresh click on C steps from 1/2 to 2/2')
   app.stop()
 })

@@ -1470,15 +1470,10 @@ export class JobInspectorPanel extends VStack {
     this.search.setSource(view.retainedText, searchable, selectionEviction)
     if (eligible) this.commandReader.setSource(view.label)
     else this.commandReader.clearSource()
-    // Revoke any pressed chrome gesture when Job identity, phase, Command
-    // source or eligibility changed; benign Output appends that leave geometry
-    // and viewport untouched keep an in-flight gesture alive.
-    if (previous.jobId !== view.jobId
-      || previous.kind !== view.kind
-      || previous.label !== view.label
-      || previous.phase !== view.phase
-      || previousEligible !== eligible
-      || nextView !== previousView) {
+    // Revoke any pressed chrome gesture when the live semantic identity diverged
+    // from the pressed frame; benign Output appends that leave geometry,
+    // viewport and painted target intact keep an in-flight gesture alive.
+    if (this.pressed !== undefined && this.pressed.chrome.semanticKey !== this.semanticKey()) {
       this.pressed = undefined
     }
     if (nextView !== previousView) {
@@ -1514,7 +1509,8 @@ export class JobInspectorPanel extends VStack {
       commandScrollTop: this.commandReader.scroll.scrollTop,
       semanticKey: this.chrome.renderedSemanticKey,
     }
-    if (this.pressed !== undefined && !this.chromeFrameCurrent(this.pressed.chrome)) {
+    if (this.pressed !== undefined
+      && (!this.chromeFrameCurrent(this.pressed.chrome) || !this.pressedTargetStillPainted(this.pressed))) {
       this.pressed = undefined
     }
 
@@ -1769,6 +1765,55 @@ export class JobInspectorPanel extends VStack {
    * - only a same-cell synthetic `click` with `clickCount === 1` and matching
    *   painted frame + semantic identity executes the semantic intent.
    */
+  /** Shared target-identity comparator used both at frame commit (to retire a
+   *  pressed gesture if its painted span vanished or moved between frames) and
+   *  at click admission. */
+  private sameHeaderTarget(candidate: JobHeaderHitTarget, expected: JobHeaderHitTarget): boolean {
+    return candidate.action === expected.action
+      && candidate.view === expected.view
+      && candidate.documentKey === expected.documentKey
+      && candidate.row === expected.row
+      && candidate.startCol === expected.startCol
+      && candidate.endCol === expected.endCol
+  }
+
+  private sameSearchTarget(candidate: JobSearchRowHitTarget, expected: JobSearchRowHitTarget): boolean {
+    return candidate.action === expected.action
+      && candidate.mode === expected.mode
+      && candidate.query === expected.query
+      && candidate.row === expected.row
+      && candidate.startCol === expected.startCol
+      && candidate.endCol === expected.endCol
+  }
+
+  private sameBarTarget(
+    candidate: { readonly target: JobBarHitTarget; readonly row: number; readonly startCol: number; readonly endCol: number },
+    expected: Extract<JobPressedGesture, { readonly owner: 'bar' }>,
+  ): boolean {
+    return candidate.target.action === expected.target.action
+      && candidate.target.escapeAction === expected.target.escapeAction
+      && candidate.row === expected.row
+      && candidate.startCol === expected.startCol
+      && candidate.endCol === expected.endCol
+  }
+
+  /** Whether the pressed target's exact painted span still exists in the latest
+   *  committed target map (prevents A → vanish → C span ABA revival). */
+  private pressedTargetStillPainted(pressed: JobPressedGesture): boolean {
+    if (pressed.owner === 'header') {
+      return this.paintedHeaderTargets.some(target => this.sameHeaderTarget(target, pressed.target))
+    }
+    if (pressed.owner === 'search') {
+      return this.paintedSearchTargets.some(target => this.sameSearchTarget(target, pressed.target))
+    }
+    const box = this.paintedChromeFrame.bar
+    if (box === undefined) return false
+    return this.paintedBarTargets.some(hit => this.sameBarTarget(
+      { target: hit, row: box.y, startCol: box.x + hit.startCol, endCol: box.x + hit.endCol },
+      pressed,
+    ))
+  }
+
   private handleChromeMouse(owner: JobChromeOwner, event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
     if (event.type === 'wheel') return { handled: true, render: false }
@@ -1819,13 +1864,7 @@ export class JobInspectorPanel extends VStack {
       }
       if (pressed.owner === 'header') {
         const target = this.headerTargetAt(event.screenX, event.screenY)
-        if (target === undefined) return { handled: true, render: false }
-        if (target.action !== pressed.target.action
-          || target.view !== pressed.target.view
-          || target.documentKey !== pressed.target.documentKey
-          || target.row !== pressed.target.row
-          || target.startCol !== pressed.target.startCol
-          || target.endCol !== pressed.target.endCol) {
+        if (target === undefined || !this.sameHeaderTarget(target, pressed.target)) {
           return { handled: true, render: false }
         }
         if (target.action === 'open-command') this.openCommand()
@@ -1836,25 +1875,14 @@ export class JobInspectorPanel extends VStack {
       }
       if (pressed.owner === 'search') {
         const target = this.searchTargetAt(event.screenX, event.screenY)
-        if (target === undefined) return { handled: true, render: false }
-        if (target.action !== pressed.target.action
-          || target.mode !== pressed.target.mode
-          || target.query !== pressed.target.query
-          || target.row !== pressed.target.row
-          || target.startCol !== pressed.target.startCol
-          || target.endCol !== pressed.target.endCol) {
+        if (target === undefined || !this.sameSearchTarget(target, pressed.target)) {
           return { handled: true, render: false }
         }
         this.dispatchSearchRowAction(target.action)
         return { handled: true, render: false }
       }
       const hit = this.barTargetAt(event.screenX, event.screenY)
-      if (hit === undefined) return { handled: true, render: false }
-      if (hit.target.action !== pressed.target.action
-        || hit.target.escapeAction !== pressed.target.escapeAction
-        || hit.row !== pressed.row
-        || hit.startCol !== pressed.startCol
-        || hit.endCol !== pressed.endCol) {
+      if (hit === undefined || !this.sameBarTarget(hit, pressed)) {
         return { handled: true, render: false }
       }
       this.dispatchBarAction(hit.target.action)
