@@ -24,7 +24,11 @@ the Host lifecycle, and `close()` releases only the Client-owned resources and
 an officially claimed connection. The current DSH host may leave an unclaimed
 lightweight Peer issued before a lost `/connect` response until Host shutdown;
 the public API must disclose that limitation and must not retry with an unknown
-Cookie or promise global Peer quiescence.
+Cookie or promise global Peer quiescence. Official model selection may perform
+its intrinsic best-effort default-model save, and official profile resolution
+may perform installation-owned normalization; PiTUI adds no compensating or
+unrelated global/profile writes. The public method/DTO contract is owned by the
+[Native Client guide](../guides/native-client.md).
 
 The current Host-coupling allowlist is
 `scripts/client-boundary-baseline.json`, enforced by

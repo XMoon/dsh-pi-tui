@@ -435,6 +435,15 @@ function recordPromptFacts(options) {
   const userMessageSources = (options.messages ?? [])
     .filter(message => message?.role === 'user')
     .map(message => message?.source?.kind ?? null)
+  const userImages = (options.messages ?? [])
+    .filter(message => message?.role === 'user')
+    .flatMap(message => Array.isArray(message.content) ? message.content : [])
+    .filter(part => part?.type === 'image')
+    .map(image => ({
+      attachmentId: image.attachment?.attachmentId,
+      mediaType: image.attachment?.mediaType,
+      bytes: image.attachment?.bytes,
+    }))
   const allText = [options.system, ...(options.messages ?? [])
     .map(message => message.content)]
     .map(textOf).join('\\n')
@@ -459,6 +468,7 @@ function recordPromptFacts(options) {
     userText: textOf(userText).slice(-400),
     userTexts,
     userMessageSources,
+    userImages,
     responseSection: systemText.includes('# Response style:'),
     gitSection: systemText.includes('# Git attribution'),
   }) + '\n', { mode: 0o600 })
@@ -3018,7 +3028,9 @@ export async function apply(ctx) {
         const agent = ctx.agents.get(sessionId)
         if (agent === undefined) throw new Error('m4-c1-host-work: PO-4A image probe could not resolve the live Agent')
         const events = agent.session.snapshotEvents()
-        const message = [...events].reverse().find(event => event.type === 'user/message')?.data
+        const message = [...events].reverse().find(event => event.type === 'user/message'
+          && Array.isArray(event.data?.content)
+          && event.data.content.some(part => part?.type === 'image'))?.data
         const image = message?.content?.find(part => part?.type === 'image')
         if (image === undefined) return
         if (image.attachment === undefined) throw new Error('m4-c1-host-work: PO-4A image probe found no durable image reference')

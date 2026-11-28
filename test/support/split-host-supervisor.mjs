@@ -202,7 +202,7 @@ const PROCESS_PTY_OWNER = fileURLToPath(new URL('./split-process-pty-owner.mjs',
 const PROCESS_HOST_SCENARIOS = new Set([
   'long-turn', 'job', 'question', 'approval-allow', 'approval-reject', 'foreground-tool',
   'child', 'unowned-job', 'goal-armed', 'goal-round', 'maintenance', 'schedule',
-  'plan-review', 'team-board',
+  'plan-review', 'team-board', 'acp-po4a',
 ])
 const PROCESS_HOST_CRASH_SIGNALS = new Set(['SIGHUP', 'SIGKILL'])
 const PROCESS_CLIENT_HMR_MODES = new Set(['replace', 'mount-failure', 'hold'])
@@ -744,6 +744,7 @@ function publicHostFacts(handle) {
     unownedJobReleasePath: handle.unownedJobReleasePath ?? null,
     maintenanceReleasePath: handle.maintenanceReleasePath ?? null,
     scheduleDeletePath: handle.scheduleDeletePath ?? null,
+    imageProbePath: handle.imageProbePath ?? null,
     startedAt: handle.startedAt,
     starttime: handle.starttime,
     closedAt: handle.closedAt,
@@ -4793,6 +4794,7 @@ async function handleStartHost(message) {
   let unownedJobReleasePath
   let maintenanceReleasePath
   let scheduleDeletePath
+  let imageProbePath
   if (scene.kind === 'process') {
     scenario = message.scenario
     crashSignal = message.crashSignal
@@ -4828,6 +4830,19 @@ async function handleStartHost(message) {
     }
     if (message.questionEligibility === true && message.timedQuestion === true) {
       throw new Error('INPUT_UNQUALIFIED: START_HOST question eligibility and timed Question are separate fixed variants')
+    }
+    if (message.imageProbe !== undefined && message.imageProbe !== true) {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST imageProbe may only be true when set')
+    }
+    if (message.imageProbe === true && scenario !== 'acp-po4a') {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST imageProbe requires scenario acp-po4a')
+    }
+    if (message.imageSha256 !== undefined
+      && (typeof message.imageSha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(message.imageSha256))) {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST imageSha256 must be a lowercase SHA-256')
+    }
+    if (message.imageSha256 !== undefined && message.imageProbe !== true) {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST imageSha256 requires imageProbe')
     }
     // A next generation is allowed only after the previous one is provably
     // stopped: a finished qualification attempt with its declared terminal, or
@@ -4935,6 +4950,14 @@ async function handleStartHost(message) {
         env.C1_HOLD_AFTER_TIMED = timedAfterBarrierPath
         env.C1_ANSWER_PROBE_DUPLICATE = timedDuplicateBarrierPath
         env.C1_ANSWER_PROBE_EXPIRED = timedExpiredBarrierPath
+      }
+      if (message.imageProbe === true) {
+        const probeDir = join(workloadRoot, 'image-probe')
+        mkdirSync(probeDir, { recursive: true, mode: 0o700 })
+        imageProbePath = join(probeDir, 'image-probe.jsonl')
+        env.C1_PO4A_IMAGE_CAPABLE = '1'
+        env.C1_PO4A_IMAGE_PROBE_DIR = probeDir
+        if (message.imageSha256 !== undefined) env.C1_PO4A_EXPECTED_IMAGE_SHA256 = message.imageSha256
       }
       if (message.cancelAgent === true) {
         cancelAgentBarrierPath = join(workloadRoot, 'approval-cancel.release')
@@ -5051,6 +5074,7 @@ async function handleStartHost(message) {
     unownedJobReleasePath,
     maintenanceReleasePath,
     scheduleDeletePath,
+    imageProbePath,
     child,
     records,
     workRoot,
@@ -5205,6 +5229,7 @@ async function handleStartHost(message) {
     unownedJobReleasePath: handle.unownedJobReleasePath ?? null,
     maintenanceReleasePath: handle.maintenanceReleasePath ?? null,
     scheduleDeletePath: handle.scheduleDeletePath ?? null,
+    imageProbePath: handle.imageProbePath ?? null,
     buildId: handle.buildId,
     scopeId: expectedScopeId,
     pgid: hostPgid(handle),

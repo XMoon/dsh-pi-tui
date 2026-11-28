@@ -29,6 +29,8 @@ boundary, not a change to the global DSH floor or the Windows/TUI/ACP backend
 matrix. It requires the same installed DSH runtime family as the Daemon Client
 and keeps the package-root floor unchanged; a consumer must supply the exact
 installed DSH anchor and profile rather than resolving a second runtime copy.
+See the [Native Client guide](./native-client.md) for the qualified version,
+public API and official runtime limits.
 
 ## Semver window matching
 

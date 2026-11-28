@@ -97,7 +97,7 @@ export interface SplitProcessScopeFacts {
 export type ProcessHostScenario =
   | 'long-turn' | 'job' | 'question' | 'approval-allow' | 'approval-reject'
   | 'foreground-tool' | 'child' | 'unowned-job' | 'goal-armed' | 'goal-round'
-  | 'maintenance' | 'schedule' | 'plan-review' | 'team-board'
+  | 'maintenance' | 'schedule' | 'plan-review' | 'team-board' | 'acp-po4a'
 
 /** A bounded read-authority operation: the Supervisor owns the concrete wire values. */
 export type ProcessReadAuthorityRequest =
@@ -117,6 +117,8 @@ export interface StartProcessHostOptions {
   goalArmed?: true
   unownedJob?: true
   maintenance?: true
+  imageProbe?: true
+  imageSha256?: string
 }
 
 export interface SplitProcessHostHandle {
@@ -145,6 +147,7 @@ export interface SplitProcessHostHandle {
   readonly unownedJobReleasePath?: string | null
   readonly maintenanceReleasePath?: string | null
   readonly scheduleDeletePath?: string | null
+  readonly imageProbePath?: string | null
   exited: boolean
   exitResult?: { code: number | null; signal: NodeJS.Signals | null }
 }
@@ -1438,6 +1441,8 @@ class ProcessScene implements SplitProcessScene {
       ...(options.goalArmed === undefined ? {} : { goalArmed: options.goalArmed }),
       ...(options.unownedJob === undefined ? {} : { unownedJob: options.unownedJob }),
       ...(options.maintenance === undefined ? {} : { maintenance: options.maintenance }),
+      ...(options.imageProbe === undefined ? {} : { imageProbe: options.imageProbe }),
+      ...(options.imageSha256 === undefined ? {} : { imageSha256: options.imageSha256 }),
     }, 600_000)
     const host: SplitProcessHostHandle = {
       hostId: String(payload.hostId),
@@ -1465,6 +1470,7 @@ class ProcessScene implements SplitProcessScene {
       unownedJobReleasePath: payload.unownedJobReleasePath ?? null,
       maintenanceReleasePath: payload.maintenanceReleasePath ?? null,
       scheduleDeletePath: payload.scheduleDeletePath ?? null,
+      imageProbePath: payload.imageProbePath ?? null,
       exited: false,
     }
     return host
