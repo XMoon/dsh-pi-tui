@@ -2935,7 +2935,7 @@ test('explicit Remote New adopts the actual Host id and closes pre-retain and hy
   assert.equal(hostEventTexts(host, publishedId, 'user/message').filter(value => value.includes('next prompt on actual id')).length, 1)
 })
 
-test('a generation rollover after retain but before owner mapping releases the actual-id acquisition without adoption', async (t) => {
+test('a generation rollover inside the mapped-owner handoff releases the actual-id acquisition without adoption or stale notice', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'rbs-1-post-retain-rollover-preset'
   const oldId = 'rbs-1-post-retain-old'
@@ -2978,6 +2978,7 @@ test('a generation rollover after retain but before owner mapping releases the a
   life.defer(() => { owners.fromHandle = originalFromHandle })
   const generationBefore = connection.generation.getSnapshot()?.id
   const editor = mountedEditor(fixture)
+  const noticeBefore = editor.notifyTextForTest()
   armRollover = true
   editor.setDraft('/new')
   editor.submitDraft()
@@ -2992,6 +2993,10 @@ test('a generation rollover after retain but before owner mapping releases the a
   assert.equal(calls.retains.length, 1)
   assert.ok(sessions.binding(SessionId(oldId)) !== undefined, 'the prior exact owner remains the mounted Client owner')
   assert.ok(fixture.vt.getViewport().join('\n').includes('old owner remains after rollover'), 'no stale actual-id adoption replaces the visible owner')
+  await waitFor('the superseded /new command settles without a notice', () =>
+    editor.getDraft() === '' && editor.notifyTextForTest() === noticeBefore, 20_000)
+  assert.doesNotMatch(editor.notifyTextForTest(), /superseded|failed|Session ready|Session committed/u,
+    'a locally superseded actual-id commit must not surface a stale error or ownership claim')
 })
 
 test('a real raw Session-list response loss cannot authorize create from the ready Client snapshot', async (t) => {
@@ -5449,4 +5454,12 @@ test('M6 compatible cross-build: a startup Session Browser refusal keeps priorit
   } finally {
     await fixture.dispose()
   }
+})
+
+test('the bootstrap Remote readiness producers report non-ready hydrate and catalog outcomes', () => {
+  const source = readFileSync(fileURLToPath(new URL('../../src/app/bootstrap.ts', import.meta.url)), 'utf8')
+  assert.ok(source.includes("readiness?.notReady('remote live hydration was not committed')"),
+    'an uncommitted Remote hydrate must feed the operation-local readiness sink')
+  assert.ok(source.includes('readiness?.notReady(`catalog refresh ${outcome.kind}`)'),
+    'a non-applied Remote catalog outcome must feed the same operation-local readiness sink')
 })
