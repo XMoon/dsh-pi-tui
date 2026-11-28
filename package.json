@@ -71,6 +71,10 @@
       "types": "./dist/daemon-launcher.d.mts",
       "default": "./dist/daemon-launcher.mjs"
     },
+    "./native-client": {
+      "types": "./dist/native-client.d.mts",
+      "default": "./dist/native-client.mjs"
+    },
     "./acp-preferences": {
       "types": "./dist/acp-preferences.d.mts",
       "default": "./dist/acp-preferences.mjs"

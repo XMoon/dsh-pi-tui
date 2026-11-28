@@ -24,6 +24,14 @@ Runtime checks consume those files directly. Documentation must not become a
 second copy of the matrix: when a version changes, update the manifest/matrix
 and the tests that derive their expectations from them.
 
+The public `@xmoon76/dsh-pi-tui/native-client` entry is a Linux/macOS consumer
+boundary, not a change to the global DSH floor or the Windows/TUI/ACP backend
+matrix. It requires the same installed DSH runtime family as the Daemon Client
+and keeps the package-root floor unchanged; a consumer must supply the exact
+installed DSH anchor and profile rather than resolving a second runtime copy.
+See the [Native Client guide](./native-client.md) for the qualified version,
+public API and official runtime limits.
+
 ## Semver window matching
 
 DSH/TUI pairing is evaluated with npm/node-semver rules plus the official

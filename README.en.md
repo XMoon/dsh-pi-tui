@@ -48,6 +48,8 @@ dsh --profile pi-tui
 
 **Upgrade precaution:** Before changing the DSH Runtime, finish in-flight Turns/Jobs, stop the previous Host and back up Profiles, Sessions and required data. Cross-DSH schema downgrade in place is not guaranteed. Do not pair 0.5.8 with rc.2 or earlier. See the [compatibility guide](docs/guides/dsh-compatibility.md) for historical pairs and recovery.
 
+**Headless programmatic access:** On Linux and macOS, import `attachNativeClient` from `@xmoon76/dsh-pi-tui/native-client`. The caller supplies the installed DSH `package.json` anchor, profile name and optional target identity, and owns the Host lifecycle; `close()` releases only Client-owned resources and an officially claimed connection, never the Host. The current DSH may retain an unclaimed lightweight Peer until Host shutdown when a `/connect` response is lost; the public entry offers no unknown-Cookie retry and no global Peer reclamation guarantee. See the [Native Client guide](docs/guides/native-client.md) for signatures, result taxonomy and limits.
+
 ### Next / npm line (validation)
 
 The TUI `@next` channel and DSH `@alpha` channel are independent moving pointers. Verify their actual published versions and peer/engine ranges before combining them:

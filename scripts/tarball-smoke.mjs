@@ -48,6 +48,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -378,6 +379,41 @@ function main() {
       check('published bundle carries the internal Host/Client process entries',
         has('dist/local-client.mjs') && has('dist/local-host.mjs'),
         `local-client=${String(has('dist/local-client.mjs'))} local-host=${String(has('dist/local-host.mjs'))}`)
+      check('published bundle carries the typed Native Client entry',
+        has('dist/native-client.mjs') && has('dist/native-client.d.mts'))
+      // The headless entry is intentionally self-contained: a clean consumer
+      // can import and typecheck it without installing any DSH package.
+      const nativeConsumer = join(workDir, 'native-client-consumer')
+      const nativePackageLink = join(nativeConsumer, 'node_modules', '@xmoon76', 'dsh-pi-tui')
+      mkdirSync(join(nativeConsumer, 'node_modules', '@xmoon76'), { recursive: true })
+      symlinkSync(extracted, nativePackageLink, 'dir')
+      writeFileSync(join(nativeConsumer, 'package.json'), '{"type":"module"}\n')
+      writeFileSync(join(nativeConsumer, 'index.ts'), [
+        "import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '@xmoon76/dsh-pi-tui/native-client'",
+        'const version: 1 = NATIVE_CLIENT_API_VERSION',
+        'void attachNativeClient',
+        'void version',
+        '',
+      ].join('\n'))
+      const nativeImport = spawnSync(process.execPath, ['--input-type=module', '-e', [
+        "const m = await import('@xmoon76/dsh-pi-tui/native-client')",
+        "if (m.NATIVE_CLIENT_API_VERSION !== 1 || typeof m.attachNativeClient !== 'function') process.exit(1)",
+      ].join('\n')], {
+        cwd: nativeConsumer,
+        env: { ...process.env, NODE_PATH: '' },
+        encoding: 'utf8',
+      })
+      check('Native Client imports without any installed DSH package',
+        nativeImport.status === 0, nativeImport.stderr.trim())
+      const tscPath = createRequire(import.meta.url).resolve('typescript/bin/tsc')
+      const nativeTypes = spawnSync(process.execPath, [tscPath, '--noEmit', '--strict',
+        '--target', 'ES2022', '--lib', 'ES2022,DOM', '--module', 'NodeNext', '--moduleResolution', 'NodeNext', 'index.ts'], {
+        cwd: nativeConsumer,
+        env: { ...process.env, NODE_PATH: '' },
+        encoding: 'utf8',
+      })
+      check('Native Client declarations typecheck without any installed DSH package',
+        nativeTypes.status === 0, nativeTypes.stdout.trim() || nativeTypes.stderr.trim())
       // The Client platform Store closure must be REAL build output, not a
       // manifest promise: one reachable Client chunk carries the official Store
       // implementation and no dist module keeps a runtime external import of the
@@ -409,14 +445,29 @@ function main() {
       check('other DSH runtime packages remain external',
         externalDshImports > 0 && externalCordisImports > 0,
         `dsh=${String(externalDshImports)} cordis=${String(externalCordisImports)}`)
-      const clientEntryPath = join(extracted, 'dist', 'local-client.mjs')
-      if (existsSync(clientEntryPath)) {
-        const clientEntryText = readFileSync(clientEntryPath, 'utf8')
-        check('the Client entry reaches the bundled Store chunk',
-          storeChunks.length === 1 && clientEntryText.includes(`./${basename(storeChunks[0])}`), storeChunks[0] ?? '(none)')
-      } else {
-        checks.push('skip Client-entry Store reachability — synthetic fixture has no dist/local-client.mjs')
+      const relativeTargets = name => specifiersOf(readFileSync(join(extracted, name), 'utf8'))
+        .filter(specifier => specifier.startsWith('./'))
+        .map(specifier => `dist/${specifier.slice(2)}`)
+      const reachesStore = (entryName, storeName) => {
+        if (storeChunks.length !== 1 || !files.includes(entryName)) return false
+        const target = storeChunks[0]
+        const seen = new Set([entryName])
+        const queue = [entryName]
+        while (queue.length > 0) {
+          const current = queue.shift()
+          if (current === target) return true
+          for (const next of relativeTargets(current)) {
+            if (seen.has(next) || !files.includes(next)) continue
+            seen.add(next)
+            queue.push(next)
+          }
+        }
+        return false
       }
+      check('the Client entry reaches the bundled Store chunk',
+        reachesStore('dist/local-client.mjs'), storeChunks[0] ?? '(none)')
+      check('the native headless entry reaches the bundled Store chunk',
+        reachesStore('dist/native-client.mjs'), storeChunks[0] ?? '(none)')
     }
     check('exports entry dist/extension/unstable.mjs', has('dist/extension/unstable.mjs'))
     check('types dist/extension/advanced.d.mts', has('dist/extension/advanced.d.mts'))
@@ -614,7 +665,7 @@ function main() {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/preferences|app\/config\/schema|app\/host\/acp-preferences|app\/host\/features\/file-reference|app\/host\/features\/terminal-progress|app\/host\/performance-host|app\/host\/pi-tui-host-runtime|app\/host\/extension-config-carrier|app\/host\/visual-tools|app\/host\/web-preferences|app\/remote-process\/daemon-launcher|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/preferences|app\/config\/schema|app\/host\/acp-preferences|app\/host\/features\/file-reference|app\/host\/features\/terminal-progress|app\/host\/performance-host|app\/host\/pi-tui-host-runtime|app\/host\/extension-config-carrier|app\/host\/visual-tools|app\/host\/web-preferences|app\/remote-process\/daemon-launcher|app\/remote-process\/native-client|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }
@@ -690,6 +741,29 @@ function main() {
       if (installSucceeded) {
         const installed = join(probeDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
         check('installed package contains dist', existsSync(join(installed, 'dist', 'index.mjs')))
+        if (!fixture) {
+          const installedImport = spawnSync(process.execPath, ['--input-type=module', '-e', [
+            "const m = await import('@xmoon76/dsh-pi-tui/native-client')",
+            "if (m.NATIVE_CLIENT_API_VERSION !== 1 || typeof m.attachNativeClient !== 'function') process.exit(1)",
+          ].join('\n')], { cwd: probeDir, encoding: 'utf8' })
+          check('installed Native Client imports through its public subpath',
+            installedImport.status === 0, installedImport.stderr.trim())
+          writeFileSync(join(probeDir, 'native-client-types.mts'), [
+            "import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '@xmoon76/dsh-pi-tui/native-client'",
+            'const version: 1 = NATIVE_CLIENT_API_VERSION',
+            'void attachNativeClient',
+            'void version',
+            '',
+          ].join('\n'))
+          const installedTsc = createRequire(import.meta.url).resolve('typescript/bin/tsc')
+          const installedTypes = spawnSync(process.execPath, [installedTsc, '--noEmit', '--strict',
+            '--target', 'ES2022', '--lib', 'ES2022,DOM', '--module', 'NodeNext', '--moduleResolution', 'NodeNext', 'native-client-types.mts'], {
+            cwd: probeDir,
+            encoding: 'utf8',
+          })
+          check('Native Client declarations typecheck strictly in the installed DSH graph',
+            installedTypes.status === 0, installedTypes.stdout.trim() || installedTypes.stderr.trim())
+        }
         for (const expected of DARWIN_PREBUILDS) {
           const installedNative = join(installed, darwinPrebuildPath(expected.arch))
           const sourceNative = join(PACKAGE_ROOT, 'packages', 'pi-tui', 'native', 'darwin', 'prebuilds',

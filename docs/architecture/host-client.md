@@ -15,6 +15,21 @@ bin or Session surface: `daemon` is selected through the official startup
 configuration and preserves the same semantic Host/Client contract. The former in-process composition is retired from
 `src/**` into a test-only carrier and composes no production graph.
 
+`@xmoon76/dsh-pi-tui/native-client` is the public headless Client entry for
+same-user programmatic consumers on Linux and macOS. It uses the same installed
+DSH Client modules, authenticated transport, Store closure and Session/Writer
+authority as the Daemon TUI Client; it adds no Host RPC, no second composition
+root and no TUI/Surface state. `attachNativeClient` is attach-only: callers own
+the Host lifecycle, and `close()` releases only the Client-owned resources and
+an officially claimed connection. The current DSH host may leave an unclaimed
+lightweight Peer issued before a lost `/connect` response until Host shutdown;
+the public API must disclose that limitation and must not retry with an unknown
+Cookie or promise global Peer quiescence. Official model selection may perform
+its intrinsic best-effort default-model save, and official profile resolution
+may perform installation-owned normalization; PiTUI adds no compensating or
+unrelated global/profile writes. The public method/DTO contract is owned by the
+[Native Client guide](../guides/native-client.md).
+
 The current Host-coupling allowlist is
 `scripts/client-boundary-baseline.json`, enforced by
 `scripts/client-boundary-gate.mjs`. Do not recreate a hand-maintained

@@ -126,6 +126,7 @@ MANDATORY or BLOCKING.
 | `guides/footer.md` | users | `/footer` builtin items, styles, custom text/commands, extension items and troubleshooting |
 | `guides/dsh-compatibility.md` | users/contributors | Semver/prerelease matching method, manifest/matrix/mode authority, Session V2/V3 data handling, Source Mode validation |
 | `guides/daemon.md` | users | Local Linux/macOS daemon mode, backend selection, safe Host control and optional supervision |
+| `guides/native-client.md` | consumers | Typed headless Native Client entry, owned Session handles, result/currentness semantics and official runtime limits |
 | `guides/testing.md` | contributors | The test-tree ownership map, the new-test rules, the lane commands and the objective discovery guards |
 
 ## Source-of-truth boundaries

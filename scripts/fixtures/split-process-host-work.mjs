@@ -100,6 +100,8 @@ const SCENARIOS = new Set([
   // model stays inert and the fault provider is gated by C1_SKILLS_FAULT_DIR.
   'skills-standing',
   'skills-recovery',
+  'native-skill',
+  'command-cancel',
   // The PR2-B Host accepted-history lane only needs an ordinary text turn; it
   // must never reuse the Skills scenario's fault/profile semantics.
   'history-search',
@@ -435,6 +437,21 @@ function recordPromptFacts(options) {
   const userMessageSources = (options.messages ?? [])
     .filter(message => message?.role === 'user')
     .map(message => message?.source?.kind ?? null)
+  const userImages = (options.messages ?? [])
+    .filter(message => message?.role === 'user')
+    .flatMap(message => Array.isArray(message.content) ? message.content : [])
+    .filter(part => part?.type === 'image')
+    .map(image => ({
+      attachmentId: image.attachment?.attachmentId,
+      mediaType: image.attachment?.mediaType,
+      bytes: image.attachment?.bytes,
+    }))
+  const userFileHandles = (options.messages ?? [])
+    .filter(message => message?.role === 'user')
+    .flatMap(message => Array.isArray(message.content) ? message.content : [])
+    .filter(part => part?.type === 'text' && typeof part.text === 'string'
+      && part.text.includes(' bytes') && part.text.includes('sha256:'))
+    .map(part => part.text)
   const allText = [options.system, ...(options.messages ?? [])
     .map(message => message.content)]
     .map(textOf).join('\\n')
@@ -459,6 +476,8 @@ function recordPromptFacts(options) {
     userText: textOf(userText).slice(-400),
     userTexts,
     userMessageSources,
+    userImages,
+    userFileHandles,
     responseSection: systemText.includes('# Response style:'),
     gitSection: systemText.includes('# Git attribution'),
   }) + '\n', { mode: 0o600 })
@@ -1472,6 +1491,9 @@ class C1Model extends LlmAdapter {
     const modelS1Reasoning = process.env.C1_MODEL_S1_ROUTE === model
       ? { reasoning: { efforts: [{ id: 'low', name: 'low' }, { id: 'high', name: 'high' }], defaultEffort: 'low' } }
       : {}
+    const nativeReasoning = process.env.C1_NATIVE_REASONING_EFFORT === '1' && model === 'c1'
+      ? { reasoning: { efforts: [{ id: 'low', name: 'low' }, { id: 'high', name: 'high' }], defaultEffort: 'low' } }
+      : {}
     return {
       provider,
       id: model,
@@ -1479,6 +1501,7 @@ class C1Model extends LlmAdapter {
       ...modelSwitchContext,
       ...projectionRouteContext,
       ...modelS1Reasoning,
+      ...nativeReasoning,
       ...(po4a && model === 'c1' ? { inputModalities: ['text', 'image'] } : {}),
       ...(po4a && model === 'c1-text-only' ? { inputModalities: ['text'] } : {}),
     }
@@ -2162,6 +2185,30 @@ class C1Model extends LlmAdapter {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: `foreground answer ${token}` }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `foreground answer ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
+    if (this.scenario === 'native-skill') {
+      if (!this.toolIssued.has(sessionId)) {
+        this.toolIssued.add(sessionId)
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: {
+            type: 'tool-call',
+            id: `c1-skill-${sessionId}`,
+            name: 'skill',
+            arguments: JSON.stringify({ name: 'native-skill' }),
+          },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: `skill answer ${token}` }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `skill answer ${token}` } }
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }
@@ -3018,7 +3065,9 @@ export async function apply(ctx) {
         const agent = ctx.agents.get(sessionId)
         if (agent === undefined) throw new Error('m4-c1-host-work: PO-4A image probe could not resolve the live Agent')
         const events = agent.session.snapshotEvents()
-        const message = [...events].reverse().find(event => event.type === 'user/message')?.data
+        const message = [...events].reverse().find(event => event.type === 'user/message'
+          && Array.isArray(event.data?.content)
+          && event.data.content.some(part => part?.type === 'image'))?.data
         const image = message?.content?.find(part => part?.type === 'image')
         if (image === undefined) return
         if (image.attachment === undefined) throw new Error('m4-c1-host-work: PO-4A image probe found no durable image reference')
@@ -4440,6 +4489,22 @@ export async function apply(ctx) {
       timer.unref?.()
       ctx.effect(() => () => clearInterval(timer))
     }
+  }
+
+  if (scenario === 'command-cancel') {
+    const root = process.env.C1_COMMAND_CANCEL_ROOT
+    if (root === undefined || root === '') throw new Error('m4-c1-host-work: command-cancel requires C1_COMMAND_CANCEL_ROOT')
+    ctx.effect(() => ctx.commands.register({
+      name: 'native-cancel',
+      description: 'Hold one official command until the qualification barrier is released.',
+      input: { hint: '<task>' },
+      handler: async invocation => {
+        record('command-cancel-started', { sessionId: String(invocation.agent.id), commandId: String(invocation.commandId) })
+        await waitForBarrier(join(root, 'command.release'))
+        record('command-cancel-released', { sessionId: String(invocation.agent.id), commandId: String(invocation.commandId) })
+        return { kind: 'success', text: 'command completed after cancellation' }
+      },
+    }))
   }
 
   if (scenario === 'foreground-tool') {
