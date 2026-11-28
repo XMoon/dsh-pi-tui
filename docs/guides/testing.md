@@ -687,6 +687,30 @@ handle. A stale authenticated Peer result is derived by the Supervisor from that
 Peer's actual interaction/frame identity and sent once through the existing
 official result route.
 
+A declared read-authority probe is a bounded observation input, not a second
+reader: the Supervisor owns the per-Client request file and correlation nonce,
+accepts only typed operations with finite windows, and dispatches one `SIGUSR2`
+to the exact live business PID. A Worker never supplies a request path, raw
+JSON, PID, environment or generic signal for it, and a new operation is admitted
+only after the previous one reached its recorded terminal phase. A read result
+proves what the mounted official backend returned; retention, writes and answer
+admission need separate durable evidence. A correlated `failed` record is a
+settled probe outcome, not an in-flight request. A read-authority Client has a
+bounded canonical input capability: raw control bytes, slash construction through
+`type`, non-allowlisted keys and mixed-key `Enter` batches are rejected, and slash
+`submit` is limited to `/new`, `/resume` and `/exit`. This keeps the qualification
+mode from leaking into a replacement process.
+
+Destructive business probes use the same exact-PID/birth fence and one-shot
+admission as `SIGKILL`: a declared business `SIGHUP` may end as either a native
+signal or the wrapper's exit 129, but is never accepted as a normal client exit.
+A declared replacement-Host refusal is proved by the old Client's official
+identity-mismatch failure, clean shutdown inventory, native exit code 1 and a
+live authenticated successor Host in the same scope; an ordinary exit or forced
+kill is not that proof. Both modes remain owned by the Supervisor's close,
+reclaim and finalization path, and neither widens the generic signal or normal
+terminal contract.
+
 Two fixed external Worker-kill selectors cover the added lifecycle risks:
 `--case client-domain-absent` at `client-opened-before-ack`, and
 `--case stale-question-peer` at `qualification-client-spawned`. Each selector
