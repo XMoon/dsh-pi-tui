@@ -350,7 +350,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
     // A settled latch: the card must settle EXACTLY once — the first
     // authoritative event wins.
     let settled = false
-    const settle = (result: string, status: 'ok' | 'error', submitContext = true): void => {
+    const settle = (result: string, status: 'ok' | 'error', submitContext = true, settledAck = false): void => {
       if (deps.isCleanedUp() || settled) return
       settled = true
       card = deps.app().updateLocalMessage(card, {
@@ -373,6 +373,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
         shellTerminalAck('shell run aborted')
         settleWrite()
       }
+      if (settledAck) shellTerminalAck('shell run settled')
       if (includeInContext && submitContext && !localSignal.aborted) submitResult(result)
       else settleWrite()
     }
@@ -428,6 +429,8 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
       settle(
         formatHostUserShellResult(outcome.result, policy),
         outcome.result.exit.kind === 'exit' && outcome.result.exit.code === 0 ? 'ok' : 'error',
+        true,
+        !includeInContext,
       )
     }, {
       diag: deps.diag,
