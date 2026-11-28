@@ -415,9 +415,9 @@ export function writeClientFatalDiagnostic(
     let info = fstatSync(fd)
     if (!info.isFile()) throw new DiagnosticWriteRefusal('EPERM')
     if (process.platform === 'win32') {
-      // ACL before bytes: a new file must inherit the product directory's
-      // current-SID grant; the protected bit lives on the directory, not on the
-      // child file.
+      // ACL before bytes: a new file inherits its parent directory's ACL and
+      // must satisfy the shared private-file predicate; the file itself need not
+      // carry the protected bit.
       if (win32PrivateFileStatus(target) !== 'private') throw new DiagnosticWriteRefusal('EPERM')
     } else {
       const uid = typeof process.getuid === 'function' ? process.getuid() : undefined

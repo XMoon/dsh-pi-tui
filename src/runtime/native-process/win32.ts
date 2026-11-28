@@ -763,7 +763,9 @@ export function win32PrivateFileStatus(path: string): 'missing' | 'private' | 'u
 
 /** Create one directory with a protected owner-only DACL; an already existing
  * directory is reused only after its current owner SID, DACL and child-inherit
- * grants are proved. Created files inherit the SID grant without a protected bit. */
+ * grants are proved. Created files inherit the directory's ACL and are checked
+ * by the shared private-file predicate; the file itself need not carry the
+ * protected bit. */
 export function ensureWin32PrivateDirectory(path: string): void {
   const load = loadBridge()
   if (!load.ok) throw new Error(`native win32: ${load.code}`)

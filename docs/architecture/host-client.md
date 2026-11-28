@@ -274,9 +274,10 @@ available on Windows over the same profile-scoped local endpoint (see
   uses the account-home root described below. On Windows the official home and
   profile must resolve to a local fixed NTFS path; the drive prefix is
   canonicalized but the remaining filesystem case is preserved. Directories and
-  named objects THIS product creates receive protected owner-only DACLs; files it
-  creates inside that chain inherit the current-SID-only grant without needing
-  the protected bit. `scopeId` is
+  named objects THIS product creates receive protected owner-only DACLs; files
+  created inside a legitimate private directory inherit that directory's ACL and
+  are admitted by the shared existing-object predicate below. A new file need not
+  itself carry the protected bit. `scopeId` is
   sha256 over the fixed domain `dsh-pi-tui/local-scope/1`, the decimal UID and
   the canonical profile path on POSIX, and over
   `dsh-pi-tui/local-scope/win32/1`, the canonical token SID and the canonical
@@ -319,7 +320,8 @@ available on Windows over the same profile-scoped local endpoint (see
   process death is the only stale-seat recovery.
 - **Identity is authenticated, never registry-only.** The registry
   (`instance.json`; a newly written POSIX file is 0600, and a new Windows file
-  inherits the current-SID-only grant from the protected run directory) is an
+  inherits its parent directory's ACL and is admitted by the shared
+  existing-object predicate below) is an
   unauthenticated hint containing the scope, canonical profile path, `instanceId`,
   Host PID,
   loopback origin, the local protocol identity, installed bundle/DSH versions
@@ -380,21 +382,23 @@ available on Windows over the same profile-scoped local endpoint (see
   re-publishes both sides on the new operator.
 - **Secret boundary.** The launch token lives only in the Host process and its
   `launch.json` (a new POSIX file is written 0600 with an atomic
-  same-directory rename; a new Windows file inherits the current-SID-only grant
-  from the protected run directory); the Client keeps its own Cookie in memory
+  same-directory rename; a new Windows file inherits its parent directory's ACL
+  and is admitted by the shared existing-object predicate below); the Client
+  keeps its own Cookie in memory
   only. Neither token, Cookie nor `connectUrl` may appear in the registry,
   stdout/stderr, logs, argv or environment. New POSIX registry/launch files are
-  0600 and a new POSIX run directory is 0700; on Windows new files inherit that
-  current-SID-only grant, and an existing file is admitted by the shared
-  existing-object predicate below. An existing POSIX user-chosen owner or mode is
+  0600 and a new POSIX run directory is 0700; on Windows new files inherit their
+  parent directory's ACL and are admitted by the shared existing-object predicate
+  below. An existing POSIX user-chosen owner or mode is
   not a read policy and is never rewritten. The managed internal files still fail
   closed on a final-path symlink (`O_NOFOLLOW`), a non-regular file, an oversized
   record, a malformed schema, a registry/launch mismatch and any unauthenticated
   Host identity. On Windows the distinction is by object origin: a NEW directory
   or named object receives the protected self-only SDDL at creation; a NEW file
-  merely inherits the current SID's grant and need not carry the protected bit;
+  inherits its parent directory's ACL and need not carry the protected bit;
   a LEGITIMATE EXISTING product object is admitted by its current owner SID, a
-  present non-null DACL and no grant to another ordinary account. ACE count,
+  present non-null DACL and no grant to another ordinary account (LocalSystem and
+  BUILTIN Administrators remain allowed). ACE count,
   order, protected bit and explicit-vs-inherited representation are ordinary ACL
   representations, not a security boundary. A foreign/public grant, a
   null/missing DACL, a final reparse and an ACE this reader cannot interpret

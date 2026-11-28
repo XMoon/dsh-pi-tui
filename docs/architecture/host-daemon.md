@@ -537,13 +537,13 @@ state authority and the only mutation writer.
   neither. A live independent Host keeps the bounded/sanitized scope `host.log`
   tail; with no plist, no live Host and no retained launchd stream, `host.log`
   is the only remaining source. On Windows the only source is the scope
-  `host.log`; a newly created log inherits the current-SID-only grant from the
-  protected run directory, and an existing file is admitted with the product's
-  private boundary (current owner SID, present DACL and no ordinary-account
-  grant beyond the current SID/System/Administrators). ACE count, protected bit
-  and inherited/explicit form are not part of that boundary; a
-  foreign/public/final-reparse file is an explicit log-source failure rather
-  than a guessed tail. A stale log from another process is
+  `host.log`; a newly created log inherits its parent directory's ACL and is
+  admitted by the shared private-file predicate, while an existing file is
+  admitted with the product's private boundary (current owner SID, present DACL
+  and no ordinary-account grant beyond the current SID/System/Administrators).
+  ACE count, protected bit and inherited/explicit form are not part of that
+  boundary; a foreign/public/final-reparse file is an explicit log-source failure
+  rather than a guessed tail. A stale log from another process is
   never presented as the current record. Output is bounded and
   best-effort
   sanitized (ANSI/control sequences, token/cookie/Authorization and

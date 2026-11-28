@@ -745,7 +745,8 @@ function inspectWin32ProfileScope(facts: InstalledProfileFacts): LocalScope {
 
 /** Create the Win32 private run chain with protected owner-only DACLs on new
  * directories; existing directories are reused under the shared private-object
- * predicate, and files inside inherit the current-SID grant. */
+ * predicate, and files inside inherit the directory ACL and are admitted by the
+ * shared private-file predicate. */
 function ensureWin32ScopeDirectory(dshHome: string, scopeId: string): string {
   const dir = join(dshHome, RUN_ROOT_NAME, SCOPE_ROOT_NAME, scopeId)
   for (const path of [join(dshHome, RUN_ROOT_NAME), join(dshHome, RUN_ROOT_NAME, SCOPE_ROOT_NAME), dir]) {

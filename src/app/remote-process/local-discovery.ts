@@ -1040,8 +1040,9 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
 }
 
 /** Publish through an exclusively-created same-directory temp file: POSIX mode
- * 0600; on Windows a new file inherits the current-SID grant from the protected
- * run directory, while an existing target is admitted by the shared predicate. */
+ * 0600; on Windows a new file inherits its parent directory's ACL and must
+ * satisfy the shared private-file predicate; the file itself need not carry the
+ * protected bit. */
 function writePrivateJsonFile(path: string, value: unknown): void {
   const text = `${JSON.stringify(value)}\n`
   const temp = join(dirname(path), `.${basename(path)}.${String(process.pid)}.${randomUUID()}.tmp`)
