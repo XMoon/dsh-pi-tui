@@ -26,7 +26,7 @@ import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForCondition, waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
-const DEFAULT_PRESET = 'minimal'
+const PRESET_ORDER = ['standard', 'ptc', 'minimal', 'cordis']
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -77,11 +77,36 @@ async function openCatalog(client, label) {
   }, `${label} live Catalog hydrated`, 120_000)
 }
 
+async function selectPreset(client, target, label) {
+  for (const char of target) {
+    client.send(char)
+    await sleep(50)
+  }
+  await waitForCondition(async () => {
+    const frame = await frameText(client)
+    return frame.split('\n').some(line => line.includes('>') && line.includes(target))
+  }, `${label} target selection`, 60_000)
+}
+
 async function setDefault(client) {
   await openCatalog(client, 'UX-PR3 sync')
   await waitForScreenText(client, 'Use session', 'UX-PR3 sync live action label')
-  client.send(DEFAULT_PRESET)
-  await waitForScreenText(client, DEFAULT_PRESET, 'UX-PR3 sync filter')
+  const catalog = await frameText(client)
+  const catalogLines = catalog.split('\n')
+  const defaultIndex = catalogLines.findIndex(line => line.includes('[default]'))
+  const defaultContext = defaultIndex < 0
+    ? ''
+    : catalogLines.slice(Math.max(0, defaultIndex - 1), defaultIndex + 2).join(' ')
+  const currentDefault = /\(([^()]+)\)/u.exec(defaultContext)?.[1]
+  const target = PRESET_ORDER.find(candidate => candidate !== currentDefault)
+  assert(target !== undefined, 'UX-PR3 sync no non-default built-in preset is available')
+  await selectPreset(client, target, 'UX-PR3 sync')
+  const selected = await frameText(client)
+  assert(!selected.includes('Already the default'),
+    `UX-PR3 sync target ${target} is already the default: ${JSON.stringify({ currentDefault, defaultContext, selected: selected.slice(-2000) })}`)
+  const targetLine = selected.split('\n').find(line => line.includes('>') && line.includes(target))
+  assert(targetLine !== undefined && !targetLine.includes('[default]'),
+    'UX-PR3 sync target still carries the default badge')
   client.send('\t')
   await sleep(250)
   client.send('\t')
@@ -93,8 +118,9 @@ async function setDefault(client) {
   await waitForScreenGone(client, 'Agent presets', 'UX-PR3 sync default write')
   await waitForCondition(async () => {
     const frame = (await frameText(client)).replace(/\s+/gu, ' ')
-    return frame.includes('current blank session switched to minimal')
+    return frame.includes(`current blank session switched to ${target}`)
   }, 'UX-PR3 sync notice', 120_000)
+  return target
 }
 
 export async function runBlankSessionDefaultSync(context) {
@@ -121,7 +147,7 @@ export async function runBlankSessionDefaultSync(context) {
     assert(opened.sessionOpen === true, 'UX-PR3-SYNC /new did not open the blank Session')
     await a.waitForScreen('❯', 'UX-PR3-SYNC session composer', 60_000)
 
-    await setDefault(a)
+    const target = await setDefault(a)
     const after = await waitForSurfaceStatus(a,
       record => record.sessionOpen === true && record.openSessionId === opened.openSessionId,
       'UX-PR3-SYNC Session stays open after sync', 60_000)
@@ -130,8 +156,7 @@ export async function runBlankSessionDefaultSync(context) {
     // The reopened live Catalog reads the CURRENT relationship back from the
     // Host-authoritative Session fact (never from the closed panel's notice).
     await openCatalog(a, 'UX-PR3-SYNC current readback')
-    a.send(DEFAULT_PRESET)
-    await waitForScreenText(a, DEFAULT_PRESET, 'UX-PR3-SYNC current filter')
+    await selectPreset(a, target, 'UX-PR3-SYNC current')
     await waitForCondition(async () => (await frameText(a)).includes('[current]'),
       'UX-PR3-SYNC current preset readback', 60_000)
     await closeCatalog(a, 'UX-PR3-SYNC current Catalog')
@@ -145,8 +170,7 @@ export async function runBlankSessionDefaultSync(context) {
     const { client: b, ready: bReady } = await startC1Client('UX-PR3-SYNC client B', { HOME: homeB }, { cwd: workDir })
     assert(bReady.sessionOpen === false, 'UX-PR3-SYNC client B is not sessionless')
     await openCatalog(b, 'UX-PR3-SYNC restart readback')
-    b.send(DEFAULT_PRESET)
-    await waitForScreenText(b, DEFAULT_PRESET, 'UX-PR3-SYNC restarted filter')
+    await selectPreset(b, target, 'UX-PR3-SYNC restarted')
     await waitForCondition(async () => (await frameText(b)).includes('[default]'),
       'UX-PR3-SYNC restarted Host default readback', 60_000)
     await closeCatalog(b, 'UX-PR3-SYNC restarted Catalog')
@@ -155,9 +179,9 @@ export async function runBlankSessionDefaultSync(context) {
     context.trace?.('ux-pr3-blank-session-default-sync', {
       candidate: context.candidateSha256,
       blankSessionCreated: true,
-      configSaved: DEFAULT_PRESET,
+      configSaved: target,
       sessionSwitched: true,
-      statusReadback: 'minimal',
+      statusReadback: target,
       hostRestartPersisted: true,
     })
     return { status: 'PASS' }
