@@ -856,14 +856,14 @@ function statusResult(
   snapshot: Snapshot,
   profile: DaemonControlProfile,
   extras: Partial<DaemonControlStatus> = {},
-  options: { readonly includeFailure?: boolean; readonly extraStderr?: string } = {},
+  options: { readonly commandSuccess?: boolean; readonly extraStderr?: string } = {},
 ): DaemonControlResult {
   const { status, warning } = projectedStatus(snapshot, profile, extras)
-  const failure = options.includeFailure === false || snapshot.failure === undefined
+  const failure = options.commandSuccess === true || snapshot.failure === undefined
     ? ''
     : formatDaemonControlError(snapshot.failure)
   return {
-    code: snapshot.exitCode,
+    code: options.commandSuccess === true ? 0 : snapshot.exitCode,
     stdout: formatDaemonStatus(status),
     stderr: `${failure}${warning}${options.extraStderr ?? ''}`,
   }
@@ -1429,7 +1429,7 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
     // still refuses the start.
     if (pre.status.host === 'ready') {
       if (pre.failure !== undefined && pre.failure.code !== 'MANAGER_OR_OS_FAILURE') throw pre.failure
-      return statusResult(pre, profile, {}, { includeFailure: false })
+      return statusResult(pre, profile, {}, { commandSuccess: true })
     }
     if (pre.failure !== undefined) throw pre.failure
     if (pre.status.host !== 'stopped' && pre.status.host !== 'starting') throw refuseHostState(pre.status)
@@ -1509,7 +1509,7 @@ async function runStart(profile: DaemonControlProfile, deps: DaemonControlDeps):
       const post = await readSnapshot(profile, deps, scope)
       if (post.failure !== undefined) throw post.failure
       if (post.status.host !== 'ready') throw refuseHostState(post.status)
-      return statusResult(post, profile)
+      return statusResult(post, profile, {}, { commandSuccess: true })
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'Host start')
     }
@@ -1528,7 +1528,7 @@ async function runStop(profile: DaemonControlProfile, deps: DaemonControlDeps): 
       const post = await readSnapshot(profile, deps, inspected)
       if (post.failure !== undefined) throw post.failure
       if (post.status.host !== 'stopped') throw refuseHostState(post.status)
-      return statusResult(post, profile, {}, { extraStderr: RUNNING_WORK_NOTICE })
+      return statusResult(post, profile, {}, { commandSuccess: true, extraStderr: RUNNING_WORK_NOTICE })
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'Host stop')
     }
@@ -1704,7 +1704,7 @@ async function runInstall(profile: DaemonControlProfile, deps: DaemonControlDeps
         && (!post.processAlive || post.record === undefined || post.record.instanceId !== pre.record.instanceId)) {
         throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the running Host instance changed during the unit install')
       }
-      return statusResult(post, profile)
+      return statusResult(post, profile, {}, { commandSuccess: true })
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'profile unit install')
     }
@@ -1723,7 +1723,7 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
     // authentication health: it never needs to control the Host.
     if (pre.unitInspectionFailure !== undefined) throw pre.unitInspectionFailure
     if (pre.unit === undefined) {
-      return statusResult(pre, profile)
+      return statusResult(pre, profile, {}, { commandSuccess: true })
     }
     if (pre.failure !== undefined && !verifiedUnitManagementAdmitted(pre)) throw pre.failure
     if (pre.userManager !== 'available') {
@@ -1769,7 +1769,7 @@ async function runUninstall(profile: DaemonControlProfile, deps: DaemonControlDe
       if (existsSync(pre.unit.filePath)) {
         throw new DaemonControlError('MANAGER_OR_OS_FAILURE', 'the profile unit could not be confirmed removed')
       }
-      return statusResult(post, profile, {}, { extraStderr: running ? RUNNING_WORK_NOTICE : '' })
+      return statusResult(post, profile, {}, { commandSuccess: true, extraStderr: running ? RUNNING_WORK_NOTICE : '' })
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'profile unit removal')
     }
@@ -1807,7 +1807,7 @@ async function runDarwinInstall(profile: DaemonControlProfile, deps: DaemonContr
         && (!post.processAlive || post.record === undefined || post.record.instanceId !== pre.record.instanceId)) {
         throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the running Host instance changed during the plist install')
       }
-      return statusResult(post, profile)
+      return statusResult(post, profile, {}, { commandSuccess: true })
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'launchd plist install')
     }
@@ -1823,7 +1823,7 @@ async function runDarwinUninstall(profile: DaemonControlProfile, deps: DaemonCon
     // A named plist is the ONLY uninstall target. With no owned plist this is
     // an idempotent no-op and no launchctl call is made.
     if (pre.launchdUnit === undefined) {
-      return statusResult(pre, profile)
+      return statusResult(pre, profile, {}, { commandSuccess: true })
     }
     if (pre.launchdQueryFailure !== undefined) throw pre.launchdQueryFailure
     if (pre.launchdFacts === undefined) {
@@ -1870,7 +1870,7 @@ async function runDarwinUninstall(profile: DaemonControlProfile, deps: DaemonCon
       if (post.launchdUnit !== undefined) {
         throw new DaemonControlError('TRANSITION_UNCERTAIN', 'the profile LaunchAgent could not be confirmed removed')
       }
-      return statusResult(post, profile, {}, { extraStderr: running ? RUNNING_WORK_NOTICE : '' })
+      return statusResult(post, profile, {}, { commandSuccess: true, extraStderr: running ? RUNNING_WORK_NOTICE : '' })
     } catch (error) {
       throw afterCommittedAction(toDaemonControlError(error), 'launchd plist removal')
     }

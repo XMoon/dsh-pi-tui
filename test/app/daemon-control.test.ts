@@ -1895,6 +1895,25 @@ test('darwin install reuses an old-build owned plist byte-for-byte and never sto
     'install never starts or stops the job')
 })
 
+test('darwin install succeeds for the owned plist without inheriting an unrelated Host authentication failure', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  const facts = launchdFactsOf(fx)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  writeFileSync(launchdPlistPathOf(fx), renderLaunchdPlist(facts), { mode: 0o600 })
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: false })
+  const result = await runDaemonControl({ verb: 'install' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => { throw new Error('Host authentication failed') },
+  }))
+  assertCode(result, 0)
+  assert.equal(result.stderr, '', 'the successful plist command must not print the tolerated Host failure')
+  assert.match(result.stdout, /^host=unresponsive$/mu)
+  assert.match(result.stdout, /^instance=11111111$/mu)
+})
+
 test('darwin cold start migrates a loaded-but-idle old generated plist, then starts through launchd', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
   const fx = fixture(t)
   const facts = launchdFactsOf(fx)
@@ -3303,6 +3322,23 @@ test('install reuses a verified other-build unit and leaves the unit and running
   assert.equal(readFileSync(path, 'utf8'), content, 'a same-Profile other-build unit is byte-preserved by install')
   assert.equal(systemctl.calls.some(args => args.includes('daemon-reload')), false, 'an already loaded unit needs no reload')
   assert.match(result.stdout, /^instance=11111111$/mu, 'the running independent Host instance is unchanged')
+})
+
+test('install succeeds for the verified unit without inheriting an unrelated Host authentication failure', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'inactive', mainPid: 0 })
+  const result = await runDaemonControl({ verb: 'install' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => { throw new Error('Host authentication failed') },
+  }))
+  assertCode(result, 0)
+  assert.equal(result.stderr, '', 'the successful service-definition command must not print the tolerated Host failure')
+  assert.match(result.stdout, /^host=unresponsive$/mu)
+  assert.match(result.stdout, /^instance=11111111$/mu)
 })
 
 test('install refuses a foreign unit without overwriting it', { skip: process.platform !== 'linux' }, async t => {
