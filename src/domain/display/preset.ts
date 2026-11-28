@@ -16,6 +16,9 @@
 /** The complete display vocabulary. */
 export type DisplayPreset = 'focus' | 'compact' | 'full'
 
+/** The default when no display preference has been configured. */
+export const DEFAULT_DISPLAY_PRESET: DisplayPreset = 'compact'
+
 /** The shared mutable display authority passed between the runner, prompt and UI. */
 export interface DisplayState {
   preset: DisplayPreset
@@ -38,6 +41,7 @@ export type DisplayPresetResolutionSource =
   | 'legacy-focus'
   | 'legacy-full'
   | 'invalid-canonical'
+  | 'default'
 
 /** The resolved runtime preset and whether the canonical field needs writing. */
 export interface DisplayPresetResolution {
@@ -65,8 +69,9 @@ export function isFocusDisplayPreset(preset: DisplayPreset): boolean {
 
 /**
  * Resolve the canonical field before the legacy Focus field. Every recognized
- * preset (Compact included) is canonical as of PR3 and is never rewritten; an
- * unrecognized value falls back to Full.
+ * preset is canonical and is never rewritten; an unrecognized canonical value
+ * falls back to Full. An absent preference uses the product default, while a
+ * supplied legacy Focus value retains its historical mapping.
  */
 export function resolveDisplayPreset(input: PersistedDisplayInput): DisplayPresetResolution {
   if (input.displayPreset !== undefined) {
@@ -78,5 +83,8 @@ export function resolveDisplayPreset(input: PersistedDisplayInput): DisplayPrese
   if (input.focusMode === 'on') {
     return { preset: 'focus', canonicalize: true, source: 'legacy-focus' }
   }
-  return { preset: 'full', canonicalize: true, source: 'legacy-full' }
+  if (input.focusMode !== undefined) {
+    return { preset: 'full', canonicalize: true, source: 'legacy-full' }
+  }
+  return { preset: DEFAULT_DISPLAY_PRESET, canonicalize: true, source: 'default' }
 }
