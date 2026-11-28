@@ -688,8 +688,8 @@ Peer's actual interaction/frame identity and sent once through the existing
 official result route.
 
 Two fixed external Worker-kill selectors cover the added lifecycle risks:
-`--case p2a-client-domain-absent` at `client-opened-before-ack`, and
-`--case p2a-stale-question-peer` at `qualification-client-spawned`. Each selector
+`--case client-domain-absent` at `client-opened-before-ack`, and
+`--case stale-question-peer` at `qualification-client-spawned`. Each selector
 is bound to one exact business test and independently proves its live checkpoint
 before the single Worker kill. The former also proves exact module restoration;
 the latter proves the real Peer terminal. They reuse the existing
