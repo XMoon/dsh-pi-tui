@@ -846,6 +846,27 @@ and independently observe the original live target before compensation.
 A receipt that claims a signal attempt, loses the live target, or does not
 complete the compensation is not this negative control's pass.
 
+Additional reusable rules shared by the `split-process-business` and
+`split-process-optional` projects:
+
+- **Bounded bracketed paste (`client.paste(text)`):** accepts only non-empty
+  UTF-8 text (<= 64 KiB, no `ESC` or `NUL`). Workers receive no generic
+  raw-write API, and plain `type`/`Enter` is never a substitute for clipboard
+  paste.
+- **Native shell/sandbox prerequisites and Store readback:** Host workloads are
+  fixed allowlisted scenarios with Supervisor-derived directories and no Worker
+  path, env or raw-byte injection. Attachment proofs verify stored bytes via the
+  Host's official Attachment Store (`readFileStream` / `readImage`). Two-OS
+  shell/sandbox qualification requires a non-root user, real full POSIX sandbox
+  enforcement, and a canonical private 0700 run root outside the checkout and
+  outside OS temp (`TMPDIR`/`TMP`/`TEMP`) so the outside-workspace sibling
+  target is genuinely outside both the Session workspace and temp.
+- **History typed reads and `split-process-optional`:** history reads use typed
+  Supervisor-owned directory targets (never raw `cwd` or generic RPC).
+  `split-process-optional` is run separately from `split-process-business`; an
+  unrun optional lane is `NOT_VERIFIED`, and passing it does not retire legacy
+  cold-proof-hit or sentinel qualifications.
+
 This Project is not the release full lane. `smoke:split-process` and
 `smoke:macos-split` remain the separate distribution-boundary lanes described
 above.

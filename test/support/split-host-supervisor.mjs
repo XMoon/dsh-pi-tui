@@ -197,13 +197,28 @@ let readAuthenticatedIdentity
 let exchangeCookie
 let readJsonFile
 let processC1Work
+let processC1WorkKind
 const SUPERVISOR_DIR = fileURLToPath(new URL('.', import.meta.url))
 const PROCESS_PTY_OWNER = fileURLToPath(new URL('./split-process-pty-owner.mjs', import.meta.url))
 const PROCESS_HOST_SCENARIOS = new Set([
   'long-turn', 'job', 'question', 'approval-allow', 'approval-reject', 'foreground-tool',
   'child', 'unowned-job', 'goal-armed', 'goal-round', 'maintenance', 'schedule',
   'plan-review', 'team-board', 'acp-po4a', 'native-skill', 'command-cancel',
+  'shell-execution', 'shell-sandbox', 'shell-lifecycle',
+  'client-file-upload', 'host-command-attachments',
+  'history-search', 'history-queue',
 ])
+const PROCESS_DEDICATED_SCENARIOS = new Set([
+  'shell-execution', 'shell-sandbox', 'shell-lifecycle',
+  'client-file-upload', 'host-command-attachments',
+  'history-search', 'history-queue',
+])
+const PROCESS_HISTORY_SCENARIOS = new Set(['history-search', 'history-queue'])
+const HISTORY_DIRECTORY_TARGETS = {
+  first: 'history-cwd-first',
+  second: 'history-cwd-second',
+  other: 'history-cwd-other',
+}
 const PROCESS_HOST_CRASH_SIGNALS = new Set(['SIGHUP', 'SIGKILL'])
 const PROCESS_CLIENT_HMR_MODES = new Set(['replace', 'mount-failure', 'hold'])
 const PROCESS_CLIENT_TERMINAL_MODES = new Set([
@@ -4940,18 +4955,125 @@ async function handleStartHost(message) {
       env.WORKSPACE_COMPLETION_HOST = 'host-fixture'
       delete env.WORKSPACE_COMPLETION_CLIENT
     }
+    const earlierDedicated = hosts.some(previous => PROCESS_DEDICATED_SCENARIOS.has(previous.scenario))
+    if (hosts.length > 0 && (earlierDedicated || (scenario !== undefined && PROCESS_DEDICATED_SCENARIOS.has(scenario)))) {
+      const allowedCrossGen = hosts.length === 1 && (
+        (hosts[0].scenario === 'shell-execution' && scenario === 'shell-sandbox')
+        || (hosts[0].scenario === 'history-search' && scenario === 'history-queue')
+      )
+      if (!allowedCrossGen) {
+        throw new Error(`INPUT_UNQUALIFIED: START_HOST does not allow transitioning from ${String(hosts.at(-1)?.scenario)} to ${String(scenario)}`)
+      }
+    }
     if (scenario !== undefined) {
-      processC1Work = processC1Work ?? writeC1WorkFixture(scene.installation.profileDir, scene.workDir)
+      const fixtureKind = scenario === 'shell-execution' || scenario === 'shell-sandbox' || scenario === 'shell-lifecycle'
+        ? 'shell-policy'
+        : scenario === 'client-file-upload' || scenario === 'host-command-attachments'
+          ? 'file-probe'
+          : scenario === 'history-search' || scenario === 'history-queue'
+            ? 'history-extra'
+            : 'default'
+      if (processC1Work !== undefined && processC1WorkKind !== fixtureKind) {
+        throw new Error(`INPUT_UNQUALIFIED: START_HOST fixture options (${fixtureKind}) conflict with earlier Host workload (${String(processC1WorkKind)})`)
+      }
+      if (processC1Work === undefined) {
+        const fixtureOptions = fixtureKind === 'shell-policy'
+          ? { shellPolicyPatches: true }
+          : fixtureKind === 'file-probe'
+            ? { fileProbe: true }
+            : fixtureKind === 'history-extra'
+              ? { historyExtra: true }
+              : {}
+        processC1Work = writeC1WorkFixture(scene.installation.profileDir, scene.workDir, fixtureOptions)
+        processC1WorkKind = fixtureKind
+      }
       const workloadLabel = `${scenario}-${generationLabel}`
       workloadRoot = scenario === 'job'
         ? join(scene.installation.profileDir, `c1-job-${workloadLabel}`)
         : join(scene.workDir, `c1-workload-${workloadLabel}`)
       mkdirSync(workloadRoot, { recursive: true, mode: 0o700 })
       if (scenario === 'job') jobWorkRoot = workloadRoot
+      const c1Selector = scenario === 'shell-execution' || scenario === 'shell-sandbox' || scenario === 'shell-lifecycle'
+        ? 'f1-shell'
+        : scenario === 'client-file-upload'
+          ? 'f4-file'
+          : scenario === 'host-command-attachments'
+            ? 'command-file-receipt'
+            : scenario === 'history-queue'
+              ? 'long-turn'
+              : scenario
       env.SPLIT_PROCESS_EXTRA_PATCH = processC1Work.patchPath
-      env.C1_SCENARIO = scenario
+      env.C1_SCENARIO = c1Selector
       env.C1_WORK_ROOT = workloadRoot
-      if (scenario === 'long-turn') {
+      if (scenario === 'shell-execution' || scenario === 'shell-sandbox' || scenario === 'shell-lifecycle') {
+        const shellWorkspace = join(scene.workDir, 'shell-workspace')
+        mkdirSync(shellWorkspace, { recursive: true, mode: 0o700 })
+        const canonicalShellWorkspace = realpathSync(shellWorkspace)
+        if (scenario !== 'shell-sandbox') processC1Work.seedMigratedPreferences()
+        env.SPLIT_PROCESS_EXTRA_PATCH = scenario === 'shell-sandbox'
+          ? processC1Work.sandboxPatchPath
+          : processC1Work.bypassPatchPath
+        env.C1_F1_SESSION_ID = scenario === 'shell-execution'
+          ? 'shell-execution-session'
+          : scenario === 'shell-sandbox'
+            ? 'shell-sandbox-session'
+            : 'shell-lifecycle-source'
+        if (scenario === 'shell-lifecycle') {
+          env.C1_F1_OTHER_SESSION_ID = 'shell-lifecycle-target'
+        }
+        env.C1_F1_SESSION_CWD = canonicalShellWorkspace
+        env.C1_F1_SETTINGS_NAMESPACE = 'pi-tui-preferences'
+        if (scenario === 'shell-execution') {
+          const completionBin = join(workRoot, 'completion-bin')
+          mkdirSync(completionBin, { recursive: true, mode: 0o700 })
+          writeFileSync(
+            join(completionBin, 'workspace-command-host'),
+            '#!/bin/sh\nprintf "host-fixture-command\\n"\n',
+            { mode: 0o700, flag: 'wx' },
+          )
+          const basePath = env.PATH ?? process.env.PATH ?? '/usr/bin:/bin'
+          env.PATH = `${completionBin}:${basePath}`
+          env.WORKSPACE_COMPLETION_HOST = 'host-fixture'
+          delete env.WORKSPACE_COMPLETION_CLIENT
+        }
+      }
+      if (scenario === 'client-file-upload') {
+        const uploadWorkspace = join(scene.workDir, 'file-upload-workspace')
+        mkdirSync(uploadWorkspace, { recursive: true, mode: 0o700 })
+        const probeDir = join(workloadRoot, 'attachment-probe')
+        mkdirSync(probeDir, { recursive: true, mode: 0o700 })
+        const skillsDir = join(workloadRoot, 'skills')
+        const skillDir = join(skillsDir, 'file-attachment-skill')
+        mkdirSync(skillDir, { recursive: true, mode: 0o700 })
+        writeFileSync(join(skillDir, 'SKILL.md'), [
+          '---',
+          'name: file-attachment-skill',
+          'description: Host-discovered file attachment qualification skill',
+          'user-invocable: true',
+          '---',
+          '',
+          'HOST_FILE_ATTACHMENT_SKILL_BODY',
+          '',
+        ].join('\n'), { mode: 0o600 })
+        env.C1_F4_SESSION_ID = 'file-upload-session'
+        env.C1_F4_SESSION_CWD = realpathSync(uploadWorkspace)
+        env.C1_F4_PROBE_DIR = probeDir
+        env.DSH_BUNDLED_SKILL_DIR = skillsDir
+      }
+      if (scenario === 'host-command-attachments') {
+        const commandWorkspace = join(scene.workDir, 'command-attachments-workspace')
+        mkdirSync(commandWorkspace, { recursive: true, mode: 0o700 })
+        env.C1_CFR_SESSION_ID = 'command-attachments-session'
+        env.C1_CFR_SESSION_CWD = realpathSync(commandWorkspace)
+      }
+      if (scenario === 'history-search' || scenario === 'history-queue') {
+        for (const dirName of Object.values(HISTORY_DIRECTORY_TARGETS)) {
+          mkdirSync(join(scene.workDir, dirName), { recursive: true, mode: 0o700 })
+        }
+        env.HISTORY_SEARCH_EXTRA_PROOF = join(workloadRoot, 'history-events.jsonl')
+        env.HISTORY_SEARCH_CWD_TARGET = realpathSync(join(scene.workDir, HISTORY_DIRECTORY_TARGETS.second))
+      }
+      if (scenario === 'long-turn' || scenario === 'history-queue') {
         holdReleasePath = join(workloadRoot, 'long-turn.release')
         env.C1_HOLD_LONG_TURN = holdReleasePath
       }
@@ -6453,7 +6575,13 @@ async function handleStartProcessClient(message) {
   const serializeBarrierPath = holdSerialize ? join(clientDir, 'serialize-hold.barrier') : undefined
   const workspaceIntentPath = invalidWorkspacePath ? join(clientDir, 'invalid-workspace') : undefined
   const readAuthorityRequestPath = readAuthorityProof ? join(clientDir, 'read-authority-request.json') : undefined
-  const clientShellCompletionLocality = host?.shellCompletionLocality === true
+  const readAuthorityKind = readAuthorityProof
+    ? (PROCESS_HISTORY_SCENARIOS.has(host?.scenario) ? 'history-search-proof' : 'read-authority-proof')
+    : undefined
+  const clientShellCompletionLocality = (
+    (host?.shellCompletionLocality === true && message.sessionId === undefined)
+    || host?.scenario === 'shell-execution'
+  )
     && startupStop === undefined
     && expectedFailure === undefined
     && terminalMode === 'normal'
@@ -6462,7 +6590,6 @@ async function handleStartProcessClient(message) {
     && !recovery
     && !attach
     && !fallbackProbe
-    && message.sessionId === undefined
   let clientCompletionBin
   if (clientShellCompletionLocality) {
     clientCompletionBin = join(clientDir, 'completion-bin')
@@ -6504,6 +6631,7 @@ async function handleStartProcessClient(message) {
     expectedFailure,
     privateRpcProof,
     readAuthorityProof,
+    readAuthorityKind,
     readAuthorityRequestPath,
     readAuthorityNonce: undefined,
     readAuthorityOp: undefined,
@@ -6627,7 +6755,11 @@ async function handleStartProcessClient(message) {
     ...(startupStop === 'loader-gate' ? { SPLIT_PROCESS_CLIENT_HOLD_STARTUP_GATE: startupBarrier } : {}),
     ...(startupStop === 'before-start' ? { SPLIT_PROCESS_CLIENT_HOLD_BEFORE_START: startupBarrier } : {}),
     ...(privateRpcProof ? { SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF: '1' } : {}),
-    ...(readAuthorityProof ? { SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: readAuthorityRequestPath } : {}),
+    ...(readAuthorityProof && readAuthorityKind === 'history-search-proof'
+      ? { SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: readAuthorityRequestPath }
+      : readAuthorityProof
+        ? { SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: readAuthorityRequestPath }
+        : {}),
     ...(holdSerialize ? { SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE: serializeBarrierPath } : {}),
     ...(invalidWorkspacePath ? { SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH: workspaceIntentPath } : {}),
     ...(clientCompletionBin === undefined
@@ -6985,8 +7117,18 @@ async function handleProcessClientInput(message) {
       throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_INPUT submit text must be a string')
     }
     body = () => (input.text === undefined ? handle.terminal.submit() : handle.terminal.submit(input.text))
+  } else if (input.type === 'paste') {
+    if (typeof input.text !== 'string' || input.text.length === 0
+      || Buffer.byteLength(input.text, 'utf8') > 65_536
+      || input.text.includes('\x1b') || input.text.includes('\0')) {
+      throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_INPUT paste requires non-empty UTF-8 text (<= 64KiB) without ESC or NUL')
+    }
+    if (typeof handle.terminal.write !== 'function') {
+      throw new Error('PROCESS_CLIENT_INPUT: installed terminal backend does not expose write(data)')
+    }
+    body = () => handle.terminal.write(`\x1b[200~${input.text}\x1b[201~`)
   } else {
-    throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_INPUT type must be one of type/press/submit')
+    throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_INPUT type must be one of type/press/submit/paste')
   }
   await withProcessNativeOperation(`client-${String(input.type)}`, handle.clientId, body)
   return { ok: true }
@@ -7088,6 +7230,11 @@ const READ_AUTHORITY_TERMINALS = {
   'directory-browse': ['directory-browse', 'directory-browse-rejected', 'failed'],
   'answer-continued': ['continued-answer', 'failed'],
 }
+const HISTORY_READ_AUTHORITY_TERMINALS = {
+  'history-search': ['result', 'failed'],
+  'history-read-text': ['result', 'failed'],
+  'history-session-recall': ['result', 'failed'],
+}
 const DIRECTORY_BROWSE_TARGETS = new Set(['home', 'fixture', 'missing', 'relative'])
 const DIRECTORY_BROWSE_INTERRUPTIONS = new Set(['caller', 'carrier'])
 const READ_AUTHORITY_WINDOWS = {
@@ -7101,10 +7248,13 @@ const READ_AUTHORITY_WINDOWS = {
 
 function assertPriorReadAuthoritySettled(handle) {
   if (handle.readAuthorityNonce === undefined) return
-  const terminal = READ_AUTHORITY_TERMINALS[handle.readAuthorityOp]
+  const isHistory = handle.readAuthorityKind === 'history-search-proof'
+  const terminal = isHistory
+    ? HISTORY_READ_AUTHORITY_TERMINALS[handle.readAuthorityOp]
+    : READ_AUTHORITY_TERMINALS[handle.readAuthorityOp]
   const records = readOfficialClientRecords(handle.recordFile, handle.label)
   const settled = records.some(record => record?.m4b2s === 'qualification'
-    && record.op === 'read-authority-proof' && record.nonce === handle.readAuthorityNonce
+    && record.op === handle.readAuthorityKind && record.nonce === handle.readAuthorityNonce
     && terminal.includes(record.phase))
   if (!settled) {
     throw new Error(`PROCESS_CLIENT_READ_AUTHORITY: ${handle.label} still has an unsettled ${handle.readAuthorityOp} request`)
@@ -7140,9 +7290,114 @@ function handleProcessClientReadAuthority(message) {
     throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_READ_AUTHORITY requires a typed request object')
   }
   const op = request.op
-  if (typeof op !== 'string' || !Object.hasOwn(READ_AUTHORITY_TERMINALS, op)) {
+  const isHistory = handle.readAuthorityKind === 'history-search-proof'
+  const validOps = isHistory ? HISTORY_READ_AUTHORITY_TERMINALS : READ_AUTHORITY_TERMINALS
+  if (typeof op !== 'string' || !Object.hasOwn(validOps, op)) {
     throw new Error(`INPUT_UNQUALIFIED: PROCESS_CLIENT_READ_AUTHORITY unknown op ${JSON.stringify(op)}`)
   }
+  let payload
+  if (isHistory) {
+    if (op === 'history-search') {
+      const scope = request.scope
+      if (scope !== 'all' && scope !== 'session' && scope !== 'directory') {
+        throw new Error(`INPUT_UNQUALIFIED: history-search scope must be all, session or directory`)
+      }
+      const allowed = scope === 'session'
+        ? ['op', 'scope', 'sessionId', 'query', 'limit', 'cursor']
+        : scope === 'directory'
+          ? ['op', 'scope', 'target', 'query', 'limit', 'cursor']
+          : ['op', 'scope', 'query', 'limit', 'cursor']
+      const unexpected = Object.keys(request).filter(key => !allowed.includes(key))
+      if (unexpected.length > 0) {
+        throw new Error(`INPUT_UNQUALIFIED: PROCESS_CLIENT_READ_AUTHORITY ${op} rejects fields ${unexpected.join(', ')}`)
+      }
+      const { query, limit, cursor } = request
+      if (typeof query !== 'string' || query.length > 128) {
+        throw new Error('INPUT_UNQUALIFIED: history-search query must be a string of at most 128 UTF-16 code units')
+      }
+      if (limit !== 1 && limit !== 25) {
+        throw new Error('INPUT_UNQUALIFIED: history-search limit must be 1 or 25')
+      }
+      if (cursor !== undefined
+        && (typeof cursor !== 'string' || cursor.length === 0 || Buffer.byteLength(cursor, 'utf8') > 2048)) {
+        throw new Error('INPUT_UNQUALIFIED: history-search cursor must be a non-empty string of at most 2048 UTF-8 bytes')
+      }
+      if (scope === 'session') {
+        if (typeof request.sessionId !== 'string' || request.sessionId === '' || request.sessionId.length > 200) {
+          throw new Error('INPUT_UNQUALIFIED: history-search session scope requires a bounded non-empty sessionId')
+        }
+        payload = {
+          op: 'search',
+          scope,
+          sessionId: request.sessionId,
+          query,
+          limit,
+          ...(cursor === undefined ? {} : { cursor }),
+        }
+      } else if (scope === 'directory') {
+        const dirName = Object.hasOwn(HISTORY_DIRECTORY_TARGETS, request.target)
+          ? HISTORY_DIRECTORY_TARGETS[request.target]
+          : undefined
+        if (dirName === undefined) {
+          throw new Error('INPUT_UNQUALIFIED: history-search directory target must be first, second or other')
+        }
+        const dirPath = realpathSync(join(scene.workDir, dirName))
+        payload = {
+          op: 'search',
+          scope,
+          cwd: dirPath,
+          query,
+          limit,
+          ...(cursor === undefined ? {} : { cursor }),
+        }
+      } else {
+        payload = {
+          op: 'search',
+          scope,
+          query,
+          limit,
+          ...(cursor === undefined ? {} : { cursor }),
+        }
+      }
+    } else if (op === 'history-read-text') {
+      const unexpected = Object.keys(request).filter(key => !['op', 'sessionId', 'messageId', 'contentSha256', 'offset'].includes(key))
+      if (unexpected.length > 0) {
+        throw new Error(`INPUT_UNQUALIFIED: PROCESS_CLIENT_READ_AUTHORITY ${op} rejects fields ${unexpected.join(', ')}`)
+      }
+      const { sessionId, messageId, contentSha256, offset } = request
+      if (typeof sessionId !== 'string' || sessionId === '' || sessionId.length > 200
+        || typeof messageId !== 'string' || messageId === '' || messageId.length > 200) {
+        throw new Error('INPUT_UNQUALIFIED: history-read-text requires bounded non-empty sessionId and messageId')
+      }
+      if (typeof contentSha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(contentSha256)) {
+        throw new Error('INPUT_UNQUALIFIED: history-read-text requires a 64-character lowercase hex contentSha256')
+      }
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > 4096) {
+        throw new Error('INPUT_UNQUALIFIED: history-read-text offset must be a non-negative integer <= 4096')
+      }
+      payload = {
+        op: 'readText',
+        sessionId,
+        messageId,
+        contentSha256,
+        offset,
+        limit: 16,
+      }
+    } else {
+      const unexpected = Object.keys(request).filter(key => !['op', 'sessionId'].includes(key))
+      if (unexpected.length > 0) {
+        throw new Error(`INPUT_UNQUALIFIED: PROCESS_CLIENT_READ_AUTHORITY ${op} rejects fields ${unexpected.join(', ')}`)
+      }
+      const { sessionId } = request
+      if (typeof sessionId !== 'string' || sessionId === '' || sessionId.length > 200) {
+        throw new Error('INPUT_UNQUALIFIED: history-session-recall requires a bounded non-empty sessionId')
+      }
+      payload = {
+        op: 'readSessionRecall',
+        sessionId,
+      }
+    }
+  } else {
   const allowedFields = {
     read: ['op'],
     activity: ['op', 'window'],
@@ -7154,7 +7409,6 @@ function handleProcessClientReadAuthority(message) {
   if (unexpected.length > 0) {
     throw new Error(`INPUT_UNQUALIFIED: PROCESS_CLIENT_READ_AUTHORITY ${op} rejects fields ${unexpected.join(', ')}`)
   }
-  let payload
   if (op === 'read') {
     payload = { op }
   } else if (op === 'activity') {
@@ -7228,6 +7482,7 @@ function handleProcessClientReadAuthority(message) {
       callId,
       answers: { answers: [{ id: 'c1-question', selected: ['Proceed'] }] },
     }
+  }
   }
   assertPriorReadAuthoritySettled(handle)
   const business = handle.businessIdentities[0]
