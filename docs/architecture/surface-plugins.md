@@ -124,11 +124,11 @@ update source keeps the Remove-then-explicit-install guidance.
 
 ### Inventory read epoch
 
-`readEpoch` makes the latest-started read win. A failed refresh keeps the last
-good snapshot and marks `state='error'`; no mutation is admitted while
-loading/error/busy, and the controller keeps one mutation in flight. Every
-mutation is followed by an authoritative reread while `busyValue` stays set; a
-failed reread blocks further writes until a successful refresh. A stopped
+Only the latest-started read may commit. A failed refresh retains the last good
+snapshot and marks the inventory as errored. No mutation is admitted while
+loading, errored, or busy. The [controller](../../src/app/plugin-manager/controller.ts)
+keeps exclusive mutation ownership through the authoritative reread; a failed
+reread blocks further writes until a successful refresh. A stopped
 surface refuses pre-dispatch writes and does not restore into a destroyed
 editor; a dispatched write keeps its accepted receipt and is never
 reinterpreted.
@@ -163,13 +163,12 @@ normal successor of `applying`.
   and is NEVER automatically resubmitted.
 - A failed install may be retried only by explicit approval of the exact
   Host-reported `pendingBuilds` under a NEW request id.
-- `installEpoch` fences stale inspect results; `mutationToken` enforces one
-  mutation in flight.
+- Stale inspect results cannot commit; only one mutation may be in flight.
 - Leaving/hiding the page never cancels a Host operation. Every new page starts
   on the Plugin List; `i` reopens the SAME controller state (in-flight request,
   failed/unknown requestId, or a recent result) under the SAME request id and
-  never dispatches a second install. `hasResumableInstall` is the reopen
-  predicate for the list's hint only, never the initial view.
+  never dispatches a second install. Reopen eligibility controls only the
+  list's hint, never the initial view.
 - A Remote reply superseded by a Connection generation change is an
   indeterminate `PluginManagerStaleResultError`, never a new-Host success or
   refusal.
@@ -205,9 +204,9 @@ checking → selecting → confirm → running → done
   says why). Enter/pointer activation re-checks the last-painted action and the
   current installed-version/read epoch; a changed inventory withdraws the
   confirmation without writing.
-- `execute` sets the request id, `running`, `busyValue` and `mutationToken`
-  synchronously, then calls the official `updateBundle(name, exactVersion,
-  {registry, requestId})` exactly once. While the update owns the path, Remove,
+- Commit the request id, running state and exclusive mutation ownership
+  synchronously before notifying listeners, then call the official
+  `updateBundle(name, exactVersion, {registry, requestId})` exactly once. While the update owns the path, Remove,
   Toggle, a new Install, build approval and a second Update are refused. Hiding
   the page never cancels or re-dispatches it.
 - `running` renders the official `plugin-manager/update-state` steps and the
