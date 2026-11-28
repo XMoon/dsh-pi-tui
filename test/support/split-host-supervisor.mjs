@@ -202,7 +202,7 @@ const PROCESS_PTY_OWNER = fileURLToPath(new URL('./split-process-pty-owner.mjs',
 const PROCESS_HOST_SCENARIOS = new Set([
   'long-turn', 'job', 'question', 'approval-allow', 'approval-reject', 'foreground-tool',
   'child', 'unowned-job', 'goal-armed', 'goal-round', 'maintenance', 'schedule',
-  'plan-review', 'team-board', 'acp-po4a', 'acp-image-content', 'native-skill',
+  'plan-review', 'team-board', 'acp-po4a', 'native-skill', 'command-cancel',
 ])
 const PROCESS_HOST_CRASH_SIGNALS = new Set(['SIGHUP', 'SIGKILL'])
 const PROCESS_CLIENT_HMR_MODES = new Set(['replace', 'mount-failure', 'hold'])
@@ -745,6 +745,7 @@ function publicHostFacts(handle) {
     maintenanceReleasePath: handle.maintenanceReleasePath ?? null,
     scheduleDeletePath: handle.scheduleDeletePath ?? null,
     imageProbePath: handle.imageProbePath ?? null,
+    commandCancelReleasePath: handle.commandCancelReleasePath ?? null,
     startedAt: handle.startedAt,
     starttime: handle.starttime,
     closedAt: handle.closedAt,
@@ -4795,6 +4796,7 @@ async function handleStartHost(message) {
   let maintenanceReleasePath
   let scheduleDeletePath
   let imageProbePath
+  let commandCancelReleasePath
   if (scene.kind === 'process') {
     scenario = message.scenario
     crashSignal = message.crashSignal
@@ -4819,6 +4821,7 @@ async function handleStartHost(message) {
       goalArmed: message.goalArmed === true ? 'goal-armed' : undefined,
       unownedJob: message.unownedJob === true ? 'unowned-job' : undefined,
       maintenance: message.maintenance === true ? 'maintenance' : undefined,
+      commandCancel: message.commandCancel === true ? 'command-cancel' : undefined,
     }
     for (const [name, requiredScenario] of Object.entries(variants)) {
       if (message[name] !== undefined && message[name] !== true) {
@@ -4959,6 +4962,10 @@ async function handleStartHost(message) {
         env.C1_PO4A_IMAGE_PROBE_DIR = probeDir
         if (message.imageSha256 !== undefined) env.C1_PO4A_EXPECTED_IMAGE_SHA256 = message.imageSha256
       }
+      if (message.commandCancel === true) {
+        commandCancelReleasePath = join(workloadRoot, 'command.release')
+        env.C1_COMMAND_CANCEL_ROOT = workloadRoot
+      }
       if (message.cancelAgent === true) {
         cancelAgentBarrierPath = join(workloadRoot, 'approval-cancel.release')
         env.C1_CANCEL_AGENT = cancelAgentBarrierPath
@@ -5075,6 +5082,7 @@ async function handleStartHost(message) {
     maintenanceReleasePath,
     scheduleDeletePath,
     imageProbePath,
+    commandCancelReleasePath,
     child,
     records,
     workRoot,
@@ -5230,6 +5238,7 @@ async function handleStartHost(message) {
     maintenanceReleasePath: handle.maintenanceReleasePath ?? null,
     scheduleDeletePath: handle.scheduleDeletePath ?? null,
     imageProbePath: handle.imageProbePath ?? null,
+    commandCancelReleasePath: handle.commandCancelReleasePath ?? null,
     buildId: handle.buildId,
     scopeId: expectedScopeId,
     pgid: hostPgid(handle),

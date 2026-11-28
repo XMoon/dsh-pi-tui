@@ -101,6 +101,7 @@ const SCENARIOS = new Set([
   'skills-standing',
   'skills-recovery',
   'native-skill',
+  'command-cancel',
   // The PR2-B Host accepted-history lane only needs an ordinary text turn; it
   // must never reuse the Skills scenario's fault/profile semantics.
   'history-search',
@@ -4484,6 +4485,22 @@ export async function apply(ctx) {
       timer.unref?.()
       ctx.effect(() => () => clearInterval(timer))
     }
+  }
+
+  if (scenario === 'command-cancel') {
+    const root = process.env.C1_COMMAND_CANCEL_ROOT
+    if (root === undefined || root === '') throw new Error('m4-c1-host-work: command-cancel requires C1_COMMAND_CANCEL_ROOT')
+    ctx.effect(() => ctx.commands.register({
+      name: 'native-cancel',
+      description: 'Hold one official command until the qualification barrier is released.',
+      input: { hint: '<task>' },
+      handler: async invocation => {
+        record('command-cancel-started', { sessionId: String(invocation.agent.id), commandId: String(invocation.commandId) })
+        await waitForBarrier(join(root, 'command.release'))
+        record('command-cancel-released', { sessionId: String(invocation.agent.id), commandId: String(invocation.commandId) })
+        return { kind: 'success', text: 'command completed after cancellation' }
+      },
+    }))
   }
 
   if (scenario === 'foreground-tool') {

@@ -48,6 +48,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -378,6 +379,41 @@ function main() {
       check('published bundle carries the internal Host/Client process entries',
         has('dist/local-client.mjs') && has('dist/local-host.mjs'),
         `local-client=${String(has('dist/local-client.mjs'))} local-host=${String(has('dist/local-host.mjs'))}`)
+      check('published bundle carries the typed Native Client entry',
+        has('dist/native-client.mjs') && has('dist/native-client.d.mts'))
+      // The headless entry is intentionally self-contained: a clean consumer
+      // can import and typecheck it without installing any DSH package.
+      const nativeConsumer = join(workDir, 'native-client-consumer')
+      const nativePackageLink = join(nativeConsumer, 'node_modules', '@xmoon76', 'dsh-pi-tui')
+      mkdirSync(join(nativeConsumer, 'node_modules', '@xmoon76'), { recursive: true })
+      symlinkSync(extracted, nativePackageLink, 'dir')
+      writeFileSync(join(nativeConsumer, 'package.json'), '{"type":"module"}\n')
+      writeFileSync(join(nativeConsumer, 'index.ts'), [
+        "import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '@xmoon76/dsh-pi-tui/native-client'",
+        'const version: 1 = NATIVE_CLIENT_API_VERSION',
+        'void attachNativeClient',
+        'void version',
+        '',
+      ].join('\n'))
+      const nativeImport = spawnSync(process.execPath, ['--input-type=module', '-e', [
+        "const m = await import('@xmoon76/dsh-pi-tui/native-client')",
+        "if (m.NATIVE_CLIENT_API_VERSION !== 1 || typeof m.attachNativeClient !== 'function') process.exit(1)",
+      ].join('\n')], {
+        cwd: nativeConsumer,
+        env: { ...process.env, NODE_PATH: '' },
+        encoding: 'utf8',
+      })
+      check('Native Client imports without any installed DSH package',
+        nativeImport.status === 0, nativeImport.stderr.trim())
+      const tscPath = createRequire(import.meta.url).resolve('typescript/bin/tsc')
+      const nativeTypes = spawnSync(process.execPath, [tscPath, '--noEmit', '--strict', '--skipLibCheck',
+        '--target', 'ES2022', '--lib', 'ES2022,DOM', '--module', 'NodeNext', '--moduleResolution', 'NodeNext', 'index.ts'], {
+        cwd: nativeConsumer,
+        env: { ...process.env, NODE_PATH: '' },
+        encoding: 'utf8',
+      })
+      check('Native Client declarations typecheck without any installed DSH package',
+        nativeTypes.status === 0, nativeTypes.stdout.trim() || nativeTypes.stderr.trim())
       // The Client platform Store closure must be REAL build output, not a
       // manifest promise: one reachable Client chunk carries the official Store
       // implementation and no dist module keeps a runtime external import of the

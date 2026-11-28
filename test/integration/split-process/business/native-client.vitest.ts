@@ -824,10 +824,40 @@ test('qualifies the installed Native Client business and interaction paths', { t
       }
     }
 
-    // 5. Real owned Job observation and terminal output.
+    // A real official command entered its Host handler before Session close
+    // cancelled the caller. Native must report unknown, never not-dispatched.
+    {
+      const host = await scene.startHost({ scenario: 'command-cancel', commandCancel: true })
+      let client: NativeClient | undefined
+      try {
+        client = await attach(scene, host)
+        const { sessionId, session } = await createSession(scene, client, 'command-cancel')
+        const command = session.command('/native-cancel')
+        const started = await fixtureHelpers.waitForC1WorkEvent(host.workloadRoot!,
+          event => event.kind === 'command-cancel-started' && event.sessionId === sessionId,
+          'official command handler started')
+        const closing = session.close()
+        const result = await command
+        expect(result.kind, `post-dispatch command cancellation must be unknown: ${resultSummary(result)}`).toBe('unknown')
+        await closing
+        expect(session.snapshot().kind).toBe('closed')
+        writeFileSync(host.commandCancelReleasePath!, 'release\n', { mode: 0o600, flag: 'wx' })
+        const released = await fixtureHelpers.waitForC1WorkEvent(host.workloadRoot!,
+          event => event.kind === 'command-cancel-released' && event.commandId === started.commandId,
+          'official command handler released')
+        pass('post-dispatch-cancel', { sessionId, commandId: started.commandId, result, released })
+      } finally {
+        await client?.close()
+        await scene.stopHost(host)
+      }
+    }
+
+    // 5. Real Job observation plus a full Client close while the Job is held,
+    // followed by same-Host reconnect, cold reads, Job settlement and new work.
     {
       const host = await scene.startHost({ scenario: 'job' })
       let client: NativeClient | undefined
+      let reconnect: NativeClient | undefined
       try {
         client = await attach(scene, host)
         const { sessionId, session } = await createSession(scene, client, 'jobs')
@@ -835,6 +865,9 @@ test('qualifies the installed Native Client business and interaction paths', { t
         const offFirst = session.observeJobs(result => { rows.push(result) })
         const offSecond = session.observeJobs(result => { rows.push(result) })
         const prompt = accepted(await session.prompt({ content: [{ type: 'text', text: 'c1-job-start' }] }), 'job prompt')
+        const user = await scene.waitForSessionEvent(sessionId, 0,
+          event => event.type === 'user/message' && event.data?.source?.rpcId === prompt.requestId,
+          'job prompt durable user/message')
         const running = defined(await waitFor('Native running Job row', () => rows.at(-1),
           result => result?.kind === 'ok' && result.value.some(job => job.status === 'running')), 'Native running Job row')
         assert(running.kind === 'ok')
@@ -848,8 +881,25 @@ test('qualifies the installed Native Client business and interaction paths', { t
           'Job registered')
         expect(registered.owner).toBe(sessionId)
         expect(registered.status).toBe('running')
+
+        await client.close()
+        client = undefined
+        reconnect = await attach(scene, host)
+        const reopened = ok(await reconnect.openSession(sessionId), 'reopen Session with held Job')
+        const roster = ok(await reconnect.listSessions(), 'cold Session roster after reconnect')
+        expect(roster.some(entry => entry.sessionId === sessionId)).toBe(true)
+        const cut = ok(await reopened.history({ throughSeq: seqOf(user), maxMessages: 20 }), 'cold cut history after reconnect')
+        expect(cut.records.filter(entry => entry.type === 'event' && entry.event.type === 'user/message'
+          && (entry.event.data as { source?: { rpcId?: string } } | undefined)?.source?.rpcId === prompt.requestId)).toHaveLength(1)
+        const recoveredRows: Array<NativeResult<readonly NativeJob[]>> = []
+        const offRecovered = reopened.observeJobs(result => { recoveredRows.push(result) })
+        const recovered = defined(await waitFor('Native Job row recovered after reconnect', () => recoveredRows.at(-1),
+          result => result?.kind === 'ok' && result.value.some(item => item.id === job.id && item.status === 'running')),
+        'Native Job row recovered after reconnect')
+        assert(recovered.kind === 'ok')
+
         writeFileSync(join(host.jobWorkRoot!, 'job.release'), 'release\n', { mode: 0o600, flag: 'wx' })
-        const completed = await waitFor('Native completed Job row', () => rows.at(-1),
+        const completed = await waitFor('Native completed Job row after reconnect', () => recoveredRows.at(-1),
           result => result?.kind === 'ok' && result.value.some(item => item.id === job.id && item.status === 'completed'))
         const settled = await fixtureHelpers.waitForC1WorkEvent(host.jobWorkRoot!,
           event => event.kind === 'job-event' && event.event === 'settled' && event.jobId === job.id,
@@ -864,11 +914,38 @@ test('qualifies the installed Native Client business and interaction paths', { t
           'durable job/registered')
         expect(durableRegistered.data?.toolCall?.callId).toBe(toolCall.data?.callId)
         expect(durableSettled.data?.jobId).toBe(job.id)
-        await waitForPromptTerminal(scene, sessionId, prompt.requestId, 'job prompt')
-        offSecond()
-        pass('jobs', { sessionId, toolCallId: toolCall.data?.callId, job, registered, settled, durableRegistered, durableSettled })
+        const firstTerminal = await waitForPromptTerminal(scene, sessionId, prompt.requestId, 'job prompt')
+        expect(durableEvents(scene, sessionId).find(event => event.type === 'turn/end'
+          && Number(event.data?.turn) === firstTerminal.turn)?.data)
+          .toMatchObject({ reason: { kind: 'completed' } })
+
+        const followup = accepted(await reopened.prompt({ content: [{ type: 'text', text: 'native job followup' }] }), 'post-reconnect followup')
+        const followupTerminal = await waitForPromptTerminal(scene, sessionId, followup.requestId, 'post-reconnect followup')
+        expect(durableEvents(scene, sessionId).find(event => event.type === 'turn/end'
+          && Number(event.data?.turn) === followupTerminal.turn)?.data)
+          .toMatchObject({ reason: { kind: 'completed' } })
+        expect(durableEvents(scene, sessionId).filter(event => event.type === 'user/message'
+          && event.data?.source?.rpcId === prompt.requestId)).toHaveLength(1)
+        expect(durableEvents(scene, sessionId).filter(event => event.type === 'job/settled'
+          && event.data?.jobId === job.id)).toHaveLength(1)
+        offRecovered()
+        pass('jobs-held-work-reconnect', {
+          sessionId,
+          toolCallId: toolCall.data?.callId,
+          job,
+          registered,
+          settled,
+          durableRegistered,
+          durableSettled,
+          coldRosterCount: roster.length,
+          cutRecords: cut.records.length,
+          firstTerminal,
+          followupRequestId: followup.requestId,
+          followupTerminal,
+        })
       } finally {
         await client?.close()
+        await reconnect?.close()
         await scene.stopHost(host)
       }
     }
@@ -980,13 +1057,18 @@ test('qualifies the installed Native Client business and interaction paths', { t
         first = undefined
 
         let continuedRequest: typeof request | undefined
+        let continuedOffers = 0
         second = await attach(scene, host, { onQuestion: async incoming => {
+          continuedOffers += 1
           continuedRequest = incoming
           return { answers: [{ id: 'c1-question', selected: ['Proceed'] }] }
         } })
         const reopened = ok(await second.openSession(created.sessionId), 'reopen continued Session')
+        const reopenedSibling = ok(await second.openSession(created.sessionId), 'second continued handle')
         const recovered = defined(await waitFor('continued Native reoffer', () => continuedRequest, value => value !== undefined), 'continued Native reoffer')
         expect(recovered.callId).toBe(callId)
+        await sleep(100)
+        expect(continuedOffers).toBe(1)
         await waitFor('continued answer RPC settlement', () => ok(defined(second, 'continued Client').status(), 'continued status').pendingInteractions,
           pending => pending === 0)
         writeFileSync(host.timedDuplicateBarrierPath!, 'duplicate\n', { mode: 0o600, flag: 'wx' })
@@ -1008,8 +1090,9 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect(durableEvents(scene, created.sessionId).filter(event =>
           event.type === 'user/message' && event.data?.source?.kind === 'user-question-reply'
           && event.data?.source?.callId === callId)).toHaveLength(1)
+        await reopenedSibling.close()
         await reopened.close()
-        pass('question-pending-continued', { sessionId: created.sessionId, callId, request, recovered, reply, duplicate, expired })
+        pass('question-pending-continued', { sessionId: created.sessionId, callId, request, recovered, continuedOffers, reply, duplicate, expired })
       } finally {
         await first?.close()
         await second?.close()
@@ -1209,8 +1292,14 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect(childHistory.some(event => event.type === 'assistant/message'
           && textOf(event.data?.message?.content).includes('child answer'))).toBe(true)
         await waitForPromptTerminal(scene, sessionId, parentPrompt.requestId, 'child parent prompt')
+        const snapshotCount = snapshots.length
+        const closing = session.close()
+        expect(session.close()).toBe(closing)
+        await closing
+        await sleep(50)
+        expect(snapshots.length).toBe(snapshotCount)
         offSecond()
-        pass('subagent', { sessionId, toolCallId: call.data?.callId, child, catalog, childEnd, childMessage, inactive })
+        pass('subagent', { sessionId, toolCallId: call.data?.callId, child, catalog, childEnd, childMessage, inactive, closedWithObserver: true })
       } finally {
         await client?.close()
         await scene.stopHost(host)

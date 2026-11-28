@@ -5,6 +5,7 @@ import { isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type { IJobs } from '@deepseek-ai/dsh-api-job-controller/client'
+import type { JobListFrame } from '@deepseek-ai/dsh-api-job-controller/types'
 import type {
   ISessions,
   SessionBinding,
@@ -48,7 +49,7 @@ import {
 } from '../../runtime/remote/write-failure.ts'
 import { RemoteTaskReader } from '../../runtime/remote/task-read-remote.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
-import { observeSettled, runDetached } from '../../runtime/process/tasks.ts'
+import { observeSettled, runDetached, runOwned } from '../../runtime/process/tasks.ts'
 import { isRemoteBusinessRefusalCode } from '../../runtime/write-outcome.ts'
 import { mergeCause } from '../remote/dispose-cause.ts'
 import { createDiag, type Diag } from '../../runtime/process/diagnostics.ts'
@@ -60,15 +61,12 @@ import {
   readLocalRecord,
 } from './local-discovery.ts'
 import {
-  awaitLocalTransportReady,
-  installLocalTransport,
-} from './local-transport.ts'
-import {
   installedPackageRootFromEntry,
   inspectInstalledProfileScope,
   readInstalledDshVersion,
 } from './local-scope.ts'
 import { completeNativeClientRealm, reserveNativeClientRealm } from './native-client-realm.ts'
+import { nativePromptWriteFailure, nativeWriteFailure } from './native-client-write-result.ts'
 
 type SessionId = SessionReference['sessionId']
 type WorkspaceId = NonNullable<NonNullable<Parameters<ISessions['create']>[0]>['workspaceId']>
@@ -692,6 +690,7 @@ interface NativeClientState {
   readonly lifetime: AbortController
   readonly operations: Set<Promise<unknown>>
   closed: boolean
+  closePromise?: Promise<void>
   closeFailed: boolean
   terminalStatus?: LocalTransportStatus
   fatalError: unknown
@@ -886,18 +885,6 @@ function readFailure(error: unknown, officialMessage: boolean): NativeFailureRes
     : unavailableResult(failure.code, failure.message)
 }
 
-function writeFailure(failure: RemoteWriteFailure): NativeFailureResult {
-  if (failure.kind === 'rejected') return rejectedResult({ code: failure.error.code, message: failure.error.message })
-  if (failure.kind === 'cancelled') return notDispatchedResult('NATIVE_OPERATION_CANCELLED', 'The operation was cancelled before dispatch.')
-  return unknownResult({ code: failure.error.code, message: failure.error.message })
-}
-
-function promptWriteFailure(failure: RemoteWriteFailure, requestId: string): NativePromptResult {
-  if (failure.kind === 'rejected') return asPromptFailure(rejectedResult({ code: failure.error.code, message: failure.error.message }))
-  if (failure.kind === 'cancelled') return asPromptFailure(notDispatchedResult('NATIVE_OPERATION_CANCELLED', 'The operation was cancelled before dispatch.'))
-  return { kind: 'unknown', code: failure.error.code, message: failure.error.message, requestId }
-}
-
 function currentGeneration(state: NativeClientState): Generation {
   return state.transport.connection.generation.getSnapshot()
 }
@@ -958,7 +945,7 @@ async function settleWrite<T, U>(
   } catch (error) {
     return unknownResult(failureOf(error, 'NATIVE_OPERATION_OUTCOME_UNKNOWN', 'The operation outcome could not be determined.', false))
   }
-  if (!result.ok) return writeFailure(classify(result.error))
+  if (!result.ok) return nativeWriteFailure(classify(result.error))
   try {
     const value = map(result.value)
     return success === 'accepted'
@@ -1649,6 +1636,7 @@ class OwnedNativeSession implements NativeSession {
   get sessionId(): string { return this.reference.sessionId }
   get isClosed(): boolean { return this.closed }
   matchesSession(session: unknown): boolean { return this.binding.session === session }
+  bindingIdentity(): object { return this.binding }
   isCurrentBinding(): boolean { return this.state.sessions.binding(this.sessionId as SessionId) === this.binding }
   lifetimeSignal(): AbortSignal { return this.lifetime.signal }
   observeUserQuestions(listener: (value: unknown) => void): () => void {
@@ -1920,6 +1908,12 @@ class OwnedNativeSession implements NativeSession {
           }
         }
       } catch (error) {
+        if (signal.aborted) {
+          return asPromptFailure(unavailableResult(
+            'NATIVE_PROMPT_STAGING_INTERRUPTED',
+            'The prompt was not dispatched; attachment staging was interrupted after it began.',
+          ))
+        }
         return asPromptFailure(notDispatchedResult(
           remoteFailureCode(error) ?? 'NATIVE_PROMPT_STAGING_FAILED',
           'The prompt was not dispatched; attachment staging did not return a usable receipt.',
@@ -1942,7 +1936,7 @@ class OwnedNativeSession implements NativeSession {
         dispatched = true
         const result = await this.binding.session.prompt(content, mode, signal, submission.requestId)
         if (accepted) return { kind: 'accepted', requestId: submission.requestId }
-        if (!result.ok) return promptWriteFailure(classifyRemoteWriteFailure(result.error), submission.requestId)
+        if (!result.ok) return nativePromptWriteFailure(classifyRemoteWriteFailure(result.error), submission.requestId)
         return {
           kind: 'unknown',
           code: 'NATIVE_ACCEPTANCE_UNCONFIRMED',
@@ -2109,7 +2103,7 @@ class OwnedNativeSession implements NativeSession {
     } catch (error) {
       return unknownResult(failureOf(error, 'NATIVE_COMMAND_OUTCOME_UNKNOWN', 'The command outcome could not be determined.', false))
     }
-    if (!result.ok) return writeFailure(classifyRemoteWriteFailure(result.error))
+    if (!result.ok) return nativeWriteFailure(classifyRemoteWriteFailure(result.error))
     if (result.value === undefined) return { kind: 'committed', value: { matched: false } }
     try {
       return { kind: 'committed', value: commandExecutionOf(result.value) }
@@ -2278,34 +2272,58 @@ class OwnedNativeSession implements NativeSession {
       listener(this.closed ? closedSessionResult() : closedResult())
       return () => {}
     }
-    const jobs = this.state.jobs
-    if (jobs === undefined) {
-      listener(unsupportedResult('NATIVE_JOBS_UNAVAILABLE', 'The official Jobs service is unavailable.'))
+    const generation = currentGeneration(this.state)
+    if (generation === undefined) {
+      listener(unavailableResult('NATIVE_DISCONNECTED', 'No authenticated Host generation is current.'))
       return () => {}
     }
+    const stream = this.state.remote.$stream<JobListFrame>({
+      name: 'native-client: Job roster observation',
+      open: signal => this.state.remote.job.list({ sessionId: this.sessionId as SessionId }, signal),
+      ended: accepted => new Error(`native-client: the Job roster stream ended before ${accepted ? 'settlement' : 'its opening frame'}`),
+    })
     let released = false
-    const emit = (): void => {
-      if (released || this.closed || this.state.closed) return
-      try {
-        listener({ kind: 'ok', value: (jobs.state.getSnapshot().rows[this.sessionId] ?? []).map(jobOf) })
-      } catch (error) {
-        this.state.diag.error('native-client: Job listener failed', { error: safeErrorMessage(error) })
-        release()
-      }
-    }
     const release = (): void => {
       if (released) return
       released = true
-      offState()
-      offWatch()
-      this.subscriptions.delete(offState)
-      this.subscriptions.delete(offWatch)
+      this.subscriptions.delete(release)
+      const disposal = stream.dispose()
+      this.operations.add(disposal)
+      observeSettled(disposal, () => { this.operations.delete(disposal) })
+      runDetached('native-client: Job roster dispose', () => disposal, {
+        diag: this.state.diag,
+        sessionId: () => this.sessionId,
+      })
     }
-    const offState = jobs.state.subscribe(emit)
-    const offWatch = jobs.watchRows(this.sessionId as SessionId)
-    this.subscriptions.add(offState)
-    this.subscriptions.add(offWatch)
-    emit()
+    this.subscriptions.add(release)
+    runDetached('native-client: Job roster observation', async () => {
+      try {
+        for await (const item of stream) {
+          if (released || this.closed || this.state.closed) return
+          if (item.value.type !== 'rows') {
+            item.accept()
+            continue
+          }
+          const rows = item.value.jobs
+          item.accept()
+          if (!Object.is(generation, currentGeneration(this.state))) continue
+          try {
+            listener({ kind: 'ok', value: rows.map(jobOf) })
+          } catch (error) {
+            this.state.diag.error('native-client: Job listener failed', { error: safeErrorMessage(error) })
+            release()
+            return
+          }
+        }
+      } catch (error) {
+        if (!released && !this.closed && !this.state.closed) {
+          listener(unavailableResult(remoteFailureCode(error) ?? 'NATIVE_JOBS_UNAVAILABLE', 'The official Job roster stream is unavailable.'))
+        }
+      }
+    }, {
+      diag: this.state.diag,
+      sessionId: () => this.sessionId,
+    })
     return release
   }
 
@@ -2333,6 +2351,7 @@ class OwnedNativeSession implements NativeSession {
       this.subscriptions.delete(offList)
       this.subscriptions.delete(offJobs)
       this.subscriptions.delete(offGeneration)
+      this.subscriptions.delete(release)
     }
     const read = (): void => {
       if (released || this.closed || this.state.closed) return
@@ -2388,16 +2407,20 @@ class OwnedNativeSession implements NativeSession {
     const offList = this.state.sessions.list.subscribe(read)
     const offJobs = jobs.state.subscribe(read)
     const offGeneration = this.state.generation.subscribe(read)
-    this.subscriptions.add(offList)
-    this.subscriptions.add(offJobs)
-    this.subscriptions.add(offGeneration)
+    this.subscriptions.add(release)
     read()
     return release
   }
 
   close(): Promise<void> {
-    this.closePromise ??= (async (): Promise<void> => {
-      if (this.closed) return
+    if (this.closePromise !== undefined) return this.closePromise
+    let settle!: () => void
+    let fail!: (error: unknown) => void
+    this.closePromise = new Promise<void>((resolve, reject) => {
+      settle = resolve
+      fail = reject
+    })
+    runOwned('native-client: Session close', async () => {
       this.closed = true
       this.lifetime.abort(new Error('native-client: Session closed'))
       const errors: unknown[] = []
@@ -2417,7 +2440,12 @@ class OwnedNativeSession implements NativeSession {
         for (const error of errors.slice(1)) mergeCause(primary, error)
         throw primary
       }
-    })()
+    }, {
+      diag: this.state.diag,
+      sessionId: () => this.sessionId,
+      onResult: () => settle(),
+      onError: error => fail(error),
+    })
     return this.closePromise
   }
 }
@@ -2432,31 +2460,42 @@ function createNativeInteractionReceivers(
   const owned: Array<() => void> = []
   const changed = (): void => { if (!disposed) state.notifyStatus() }
   const liveQuestionCalls = new Set<string>()
-  const continuedByHandle = new Map<OwnedNativeSession, {
-    release: () => void
-    value: unknown
-    offered: Set<string>
-  }>()
+  const projectionByHandle = new Map<OwnedNativeSession, { value: unknown; release: () => void }>()
+  interface ContinuedDelivery {
+    readonly sessionId: string
+    readonly binding: object
+    readonly callId: string
+    readonly generation: Generation
+    readonly controller: AbortController
+    settled: boolean
+  }
+  const continuedByCall = new Map<string, ContinuedDelivery>()
+
+  const continuedKey = (sessionId: string, callId: string): string => `${sessionId}\u0000${callId}`
+  const currentBindingHandle = (sessionId: string, binding: object): OwnedNativeSession | undefined =>
+    [...(state.handlesBySession.get(sessionId) ?? [])]
+      .find(handle => !handle.isClosed && handle.bindingIdentity() === binding && handle.isCurrentBinding())
 
   const deliverContinued = async (
-    handle: OwnedNativeSession,
+    delivery: ContinuedDelivery,
     call: NativeUserQuestionProjection['active'][number],
     onQuestion: NonNullable<NativeAttachOptions['onQuestion']>,
   ): Promise<void> => {
-    const captured = currentGeneration(state)
-    const lifetime = AbortSignal.any([handle.lifetimeSignal(), state.lifetime.signal])
+    const lifetime = AbortSignal.any([delivery.controller.signal, state.lifetime.signal])
     const answer = await abortable(onQuestion({
-      sessionId: handle.sessionId,
+      sessionId: delivery.sessionId,
       callId: call.callId,
       timed: true,
       questions: call.questions,
       signal: lifetime,
     }), lifetime)
-    if (disposed || state.closed || handle.isClosed || lifetime.aborted
-      || !Object.is(captured, currentGeneration(state)) || !handle.isCurrentBinding()) {
+    if (disposed || state.closed || lifetime.aborted
+      || !Object.is(delivery.generation, currentGeneration(state))
+      || currentBindingHandle(delivery.sessionId, delivery.binding) === undefined) {
       throw nativeError('NATIVE_INTERACTION_STALE', 'the continued Question answer is no longer current')
     }
-    const result = await state.remote.userQuestions.answer(handle.sessionId as SessionId, call.callId as ToolCallId, {
+    delivery.settled = true
+    const result = await state.remote.userQuestions.answer(delivery.sessionId as SessionId, call.callId as ToolCallId, {
       answers: officialQuestionAnswers(answer),
     })
     if (!result.ok) {
@@ -2467,62 +2506,94 @@ function createNativeInteractionReceivers(
     }
   }
 
-  const reconcileContinued = (
-    handle: OwnedNativeSession,
-    entry: { readonly value: unknown; readonly offered: Set<string> },
+  const offerContinued = (
+    sessionId: string,
+    binding: object,
+    call: NativeUserQuestionProjection['active'][number],
   ): void => {
-    if (disposed || state.closed || handle.isClosed || options.onQuestion === undefined || entry.value === undefined) return
+    if (disposed || state.closed || options.onQuestion === undefined || call.state !== 'continued') return
+    const key = continuedKey(sessionId, call.callId)
+    const existing = continuedByCall.get(key)
+    if (existing !== undefined || liveQuestionCalls.has(call.callId)) return
+    const generation = currentGeneration(state)
+    if (generation === undefined || currentBindingHandle(sessionId, binding) === undefined) return
+    const delivery: ContinuedDelivery = {
+      sessionId,
+      binding,
+      callId: call.callId,
+      generation,
+      controller: new AbortController(),
+      settled: false,
+    }
+    continuedByCall.set(key, delivery)
+    pending += 1
+    changed()
+    const operation = deliverContinued(delivery, call, options.onQuestion).finally(() => {
+      pending -= 1
+      changed()
+    })
+    trackClientOperation(state, operation)
+    runDetached('native-client: continued Question delivery', () => operation, {
+      diag: state.diag,
+      sessionId: () => sessionId,
+    })
+  }
+
+  const reconcileProjection = (sessionId: string, binding: object, value: unknown): void => {
+    if (disposed || state.closed || options.onQuestion === undefined || value === undefined) return
     let projection: NativeUserQuestionProjection
     try {
-      projection = userQuestionsOf(entry.value)
+      projection = userQuestionsOf(value)
     } catch (error) {
       state.diag.error('native-client: continued Question projection was unusable', { error: safeErrorMessage(error) })
       return
     }
-    for (const call of projection.active) {
-      if (call.state !== 'continued' || entry.offered.has(call.callId) || liveQuestionCalls.has(call.callId)) continue
-      entry.offered.add(call.callId)
-      pending += 1
-      changed()
-      const operation = deliverContinued(handle, call, options.onQuestion).finally(() => {
-        pending -= 1
-        changed()
-      })
-      trackClientOperation(state, operation)
-      runDetached('native-client: continued Question delivery', () => operation, {
-        diag: state.diag,
-        sessionId: () => handle.sessionId,
-      })
-    }
+    for (const call of projection.active) offerContinued(sessionId, binding, call)
   }
 
-  const reconcileAllContinued = (): void => {
-    for (const [handle, entry] of continuedByHandle) reconcileContinued(handle, entry)
+  const revokeInvalidContinued = (): void => {
+    for (const [key, delivery] of continuedByCall) {
+      const current = currentBindingHandle(delivery.sessionId, delivery.binding)
+      if (state.closed || disposed || !Object.is(delivery.generation, currentGeneration(state)) || current === undefined) {
+        delivery.controller.abort(new Error('native-client: continued Question ownership revoked'))
+        continuedByCall.delete(key)
+      }
+    }
   }
 
   const watchHandle = (handle: OwnedNativeSession): void => {
-    if (continuedByHandle.has(handle)) return
-    const entry = { value: undefined as unknown, offered: new Set<string>(), release: () => {} }
-    continuedByHandle.set(handle, entry)
+    if (projectionByHandle.has(handle)) return
+    const entry = { value: undefined as unknown, release: () => {} }
+    projectionByHandle.set(handle, entry)
     entry.release = handle.observeUserQuestions(value => {
       entry.value = value
-      reconcileContinued(handle, entry)
+      if (!handle.isClosed) reconcileProjection(handle.sessionId, handle.bindingIdentity(), value)
     })
   }
 
+  const reconcileAllContinued = (): void => {
+    revokeInvalidContinued()
+    for (const [handle, entry] of projectionByHandle) {
+      if (!handle.isClosed) reconcileProjection(handle.sessionId, handle.bindingIdentity(), entry.value)
+    }
+  }
+
   const syncHandles = (): void => {
-    for (const [handle, entry] of continuedByHandle) {
+    for (const [handle, entry] of projectionByHandle) {
       if (!handle.isClosed) continue
       entry.release()
-      continuedByHandle.delete(handle)
+      projectionByHandle.delete(handle)
     }
     for (const handle of state.handles) watchHandle(handle)
+    reconcileAllContinued()
   }
   state.handleListeners.add(syncHandles)
   owned.push(() => {
     state.handleListeners.delete(syncHandles)
-    for (const entry of continuedByHandle.values()) entry.release()
-    continuedByHandle.clear()
+    for (const entry of projectionByHandle.values()) entry.release()
+    projectionByHandle.clear()
+    for (const delivery of continuedByCall.values()) delivery.controller.abort(new Error('native-client: interaction receivers disposed'))
+    continuedByCall.clear()
   })
   syncHandles()
 
@@ -2793,7 +2864,9 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
     await loader.create({ name: 'cordis:pi-tui-interaction-startup-gate' })
     options.signal?.throwIfAborted()
     if (!gate.pending) throw new Error('native-client: interaction startup gate failed before transport install')
-    installedTransport = await installLocalTransport(context, {
+    const localTransport = await import('./local-transport.ts')
+    options.signal?.throwIfAborted()
+    installedTransport = await localTransport.installLocalTransport(context, {
       dshAnchor,
       host,
       scope,
@@ -2892,7 +2965,7 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
     statusSubscriptions.push((nativeTransport.connection.state as unknown as { subscribe(listener: () => void): () => void }).subscribe(notifyStatus))
     statusSubscriptions.push(nativeTransport.connection.generation.subscribe(notifyStatus))
     gate.release()
-    await awaitLocalTransportReady(nativeTransport, { signal: options.signal })
+    await localTransport.awaitLocalTransportReady(nativeTransport, { signal: options.signal })
     mountedDomains = await prerequisites.complete({ signal: options.signal })
     prerequisites = undefined
     activeState.jobs = mountedDomains.jobs
@@ -3074,9 +3147,23 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
         return { kind: 'ok', value: { models: models.value, presets: presets.value, permissions: permissions.value } }
       })()),
       close: () => {
+        if (activeState.closePromise !== undefined) return activeState.closePromise
+        let settle!: () => void
+        let fail!: (error: unknown) => void
+        activeState.closePromise = new Promise<void>((resolve, reject) => {
+          settle = resolve
+          fail = reject
+        })
         activeState.closed = true
+        runOwned('native-client: Client close', async () => {
+          await cleanup(new Error('native-client: closed'))
+        }, {
+          diag: activeState.diag,
+          onResult: () => settle(),
+          onError: error => fail(error),
+        })
         activeState.notifyStatus()
-        return cleanup(new Error('native-client: closed'))
+        return activeState.closePromise
       },
     }
     return client

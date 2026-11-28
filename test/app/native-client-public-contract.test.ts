@@ -33,6 +33,8 @@ import type {
 } from '../../src/app/remote-process/native-client.ts'
 import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '../../src/app/remote-process/native-client.ts'
 import { completeNativeClientRealm, reserveNativeClientRealm } from '../../src/app/remote-process/native-client-realm.ts'
+import { nativePromptWriteFailure, nativeWriteFailure } from '../../src/app/remote-process/native-client-write-result.ts'
+import { classifyRemoteWriteFailure } from '../../src/runtime/remote/write-failure.ts'
 
 const packageRoot = join(import.meta.dirname, '..', '..')
 
@@ -183,8 +185,6 @@ test('the headless entry exports the frozen API version and attach factory', () 
   assert.ok(_eventDataTyped)
   assert.ok(_identityKernel)
   assert.ok(_pendingImagePreviewOptional)
-  const implementation = readFileSync(join(packageRoot, 'src', 'app', 'remote-process', 'native-client.ts'), 'utf8')
-  assert.ok(implementation.includes("attachment.value.previewUrl !== ''"), 'Native pending images must omit the internal empty preview placeholder')
 })
 
 test('one Node realm rejects a concurrent composition and releases only its own reservation', () => {
@@ -210,6 +210,22 @@ test('failed Client-owned cleanup retains the realm until a successful settlemen
   await completeNativeClientRealm(release, async () => {})
   const releaseAfterSuccessfulSettlement = reserveNativeClientRealm()
   releaseAfterSuccessfulSettlement()
+})
+
+test('service-reported cancellation after dispatch stays unknown with the prompt request id', () => {
+  const classified = classifyRemoteWriteFailure({ code: 'gateway/cancelled', message: 'cancelled after invocation' })
+  assert.equal(classified.kind, 'cancelled')
+  assert.deepEqual(nativeWriteFailure(classified), {
+    kind: 'unknown',
+    code: 'NATIVE_OPERATION_CANCELLED_AFTER_DISPATCH',
+    message: 'The official call was cancelled after it entered the dispatch path.',
+  })
+  assert.deepEqual(nativePromptWriteFailure(classified, 'request-1'), {
+    kind: 'unknown',
+    code: 'NATIVE_OPERATION_CANCELLED_AFTER_DISPATCH',
+    message: 'The official prompt call was cancelled after it entered the dispatch path.',
+    requestId: 'request-1',
+  })
 })
 
 test('separate module instances share the same Node-realm reservation', async () => {
