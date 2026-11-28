@@ -726,6 +726,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       return
     }
     if (data === 'r' || data === 'R') {
+      // In the normal active Detail, Refresh is a relocated body verb just like
+      // the others: it is admitted only while its complete body label or the
+      // physical bar span is visible. List/search and the special recovery
+      // phases keep their existing Refresh route.
+      if (this.region === 'detail' && this.focused && !this.paintedActionAdmitted('refresh')) return
       this.detailRemovalTarget = undefined
       this.controller.refresh()
       return
@@ -744,16 +749,19 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       if (matchesKey(data, 'pageUp')) return this.scrollDetail(-this.detailViewport())
       if (matchesKey(data, 'pageDown')) return this.scrollDetail(this.detailViewport())
       if (data === 'p' || data === 'P') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canOperateSelected()) this.controller.probe()
+        if (this.paintedActionAdmitted('probe')
+          && this.visibleSelection(snapshot) !== undefined && this.controller.canOperateSelected()) this.controller.probe()
         return
       }
       if (data === 'x' || data === 'X') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canOperateSelected()
+        if (this.paintedActionAdmitted('restart')
+          && this.visibleSelection(snapshot) !== undefined && this.controller.canOperateSelected()
           && snapshot.restartOutcomeUnconfirmed !== true) this.controller.beginRestart()
         return
       }
       if (data === 'e' || data === 'E') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canBeginEdit()) {
+        if (this.paintedActionAdmitted('edit')
+          && this.visibleSelection(snapshot) !== undefined && this.controller.canBeginEdit()) {
           this.formOrigin = 'detail'
           this.controller.beginEdit()
           this.enterEditor()
@@ -761,18 +769,21 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         return
       }
       if (data === 't' || data === 'T') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) this.controller.beginToggle()
+        if (this.paintedActionAdmitted('toggle')
+          && this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) this.controller.beginToggle()
         return
       }
       if (data === 'd' || data === 'D') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) {
+        if (this.paintedActionAdmitted('delete')
+          && this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) {
           this.detailRemovalTarget = undefined
           this.controller.beginDelete()
         }
         return
       }
       if (data === 'u' || data === 'U') {
-        if (this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) this.controller.beginReset()
+        if (this.paintedActionAdmitted('reset')
+          && this.visibleSelection(snapshot) !== undefined && this.controller.canEditConfiguration()) this.controller.beginReset()
         return
       }
       return
@@ -855,6 +866,15 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     // The controller's own typed receipt remains the only receipt authority;
     // the page contributes the return origin, never a synthetic Saved fact.
     if (!alreadyList) this.bumpRevision()
+  }
+
+  /** Whether the CURRENT painted frame admits this normal-Detail semantic
+   *  action through a complete body or physical-bar target. The frame identity
+   *  fence is the existing pointer currentness fence, so a stale A frame can
+   *  never authorise an action on a newly selected B subject. */
+  private paintedActionAdmitted(action: McpBarAction): boolean {
+    if (!this.pointerFrameCurrent()) return false
+    return this.paint?.targets.some(target => target.kind === 'action' && target.action === action) === true
   }
 
   /** The non-Esc Action-Bar spans this page's own bar really painted. The
@@ -2112,14 +2132,16 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     }
   }
 
-  /** The detail lines of the selected server (fixed field order, wrapped). */
-  private detailLines(snapshot: McpServersSnapshot, width: number): string[] {
-    const lines: string[] = []
+  /** The selected server's facts, split at the action boundary. Primary facts
+   *  explain the current phase and recovery; diagnostics stay below actions. */
+  private detailLines(snapshot: McpServersSnapshot, width: number): { primary: string[]; diagnostics: string[] } {
+    const primary: string[] = []
+    const diagnostics: string[] = []
     if (snapshot.phase !== 'ready') {
       const fact = snapshot.phase === 'unavailable'
         ? `UNAVAILABLE · ${snapshot.phaseReason ?? 'Host MCP Manager not mounted'}`
         : `READ ERROR · ${snapshot.phaseReason ?? 'observation lost'} (showing last known)`
-      for (const line of wrapCellsHard(fact, width, 1000).lines) lines.push(color.error(line))
+      for (const line of wrapCellsHard(fact, width, 1000).lines) primary.push(color.error(line))
     }
     const selected = this.visibleSelection(snapshot)
     const row = selected === undefined ? undefined : snapshot.rows.find(candidate => candidate.name === selected)
@@ -2127,62 +2149,62 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       // A non-ready observation states its OWN reason; it must never also claim
       // an empty managed fleet.
       if (snapshot.phase === 'ready') {
-        lines.push(snapshot.rows.length === 0
+        primary.push(snapshot.rows.length === 0
           ? color.textDim('No managed MCP servers')
           : color.textDim('Select a managed server'))
       }
-      return lines
+      return { primary, diagnostics }
     }
-    const add = (label: string, value: string, ink: (text: string) => string = color.text): void => {
-      lines.push(...wrapField(label, value, width, ink))
+    const add = (target: string[], label: string, value: string, ink: (text: string) => string = color.text): void => {
+      target.push(...wrapField(label, value, width, ink))
     }
-    add('Server', row.name)
-    add('Source', row.source, () => sourceInk(row.source))
-    const config = snapshot.selectedConfig
-    if (config !== undefined) {
-      add('Configuration', config.provenance === 'user-added'
-        ? 'User-added'
-        : config.provenance === 'inherited' ? 'Inherited' : 'Overridden (user)')
-      if (config.enabled !== undefined) add('Saved enabled', config.enabled ? 'yes' : 'no')
-      const transport = this.selectedConfigTransport(snapshot)
-      if (transport !== undefined) add('Saved transport', transport)
-    }
-    add('Transport', 'Not exposed', color.textDim)
-    add('State', mcpServerStatusText(row.status), (text) => statusInk(row.status, text))
+    add(primary, 'Server', row.name)
+    add(primary, 'State', mcpServerStatusText(row.status), (text) => statusInk(row.status, text))
     const status = row.status
-    if (status.state === 'connected') add('Tool count', String(status.toolCount))
-    if (status.state === 'connecting') add('Attempt', `${String(status.attempt)}${status.attempt === 0 ? ' (first attempt)' : ''}`)
+    if (status.state === 'connected') add(primary, 'Tool count', String(status.toolCount))
+    if (status.state === 'connecting') add(primary, 'Attempt', `${String(status.attempt)}${status.attempt === 0 ? ' (first attempt)' : ''}`)
     if (status.state === 'reconnecting') {
-      add('Attempt/retry', `${String(status.attempt)}/${String(status.maxAttempts)} · next retry in ${String(Math.max(0, Math.ceil((status.nextRetryAtMs - Date.now()) / 1000)))}s`)
+      add(primary, 'Attempt/retry', `${String(status.attempt)}/${String(status.maxAttempts)} · next retry in ${String(Math.max(0, Math.ceil((status.nextRetryAtMs - Date.now()) / 1000)))}s`)
     }
     const lastError = status.state === 'waiting-credentials' || status.state === 'reconnecting'
       ? status.lastError
       : status.state === 'failed' && status.reason !== 'cleanup'
         ? status.lastError
         : undefined
-    if (lastError !== undefined) add('Last error', sanitizedPhysicalLine(lastError), color.error)
+    if (lastError !== undefined) add(primary, 'Last error', sanitizedPhysicalLine(lastError), color.error)
     if (status.state === 'failed' && status.reason === 'cleanup') {
-      add('Cleanup', status.result.closeConfirmed ? 'failed after closure' : 'not confirmed', color.error)
+      add(primary, 'Cleanup', status.result.closeConfirmed ? 'failed after closure' : 'not confirmed', color.error)
     }
     if (status.state === 'closed' && !status.result.closeConfirmed) {
-      add('Cleanup', 'not confirmed', color.warning)
-    }
-    if (snapshot.lastProbe !== undefined && snapshot.lastProbe.name === row.name) {
-      const probe = snapshot.lastProbe.value
-      add('Last probe', probe.ok
-        ? `ok · ${String(probe.toolNames.length)}${probe.truncated ? '+' : ''} tools · ${String(probe.durationMs)} ms · ${probe.closeConfirmed ? 'closed' : 'cleanup not confirmed'}`
-        : `failed at ${probe.stage} · ${sanitizedPhysicalLine(probe.message)}`,
-      (text) => snapshot.lastProbe?.kind === 'passed' ? color.text(text) : color.error(text))
+      add(primary, 'Cleanup', 'not confirmed', color.warning)
     }
     if (snapshot.operation !== undefined && snapshot.operation.name === row.name) {
-      add('Operation', snapshot.operation.text ?? snapshot.operation.kind,
+      add(primary, 'Operation', snapshot.operation.text ?? snapshot.operation.kind,
         (text) => snapshot.operation?.phase === 'failed' ? color.error(text) : color.textDim(text))
     }
     if (snapshot.configStatus !== undefined && snapshot.configStatus.kind !== 'saving' && this.receiptRegion === 'detail') {
       const receipt = snapshot.configStatus
-      add('Configuration', receipt.text, (text) => this.configStatusInk({ ...receipt, text }))
+      add(primary, 'Configuration', receipt.text, (text) => this.configStatusInk({ ...receipt, text }))
     }
-    return lines
+    add(diagnostics, 'Source', row.source, () => sourceInk(row.source))
+    const config = snapshot.selectedConfig
+    if (config !== undefined) {
+      add(diagnostics, 'Saved configuration', config.provenance === 'user-added'
+        ? 'User-added'
+        : config.provenance === 'inherited' ? 'Inherited' : 'Overridden (user)')
+      if (config.enabled !== undefined) add(diagnostics, 'Saved enabled', config.enabled ? 'yes' : 'no')
+      const transport = this.selectedConfigTransport(snapshot)
+      if (transport !== undefined) add(diagnostics, 'Saved transport', transport)
+    }
+    add(diagnostics, 'Transport', 'Not exposed', color.textDim)
+    if (snapshot.lastProbe !== undefined && snapshot.lastProbe.name === row.name) {
+      const probe = snapshot.lastProbe.value
+      add(diagnostics, 'Last probe', probe.ok
+        ? `ok · ${String(probe.toolNames.length)}${probe.truncated ? '+' : ''} tools · ${String(probe.durationMs)} ms · ${probe.closeConfirmed ? 'closed' : 'cleanup not confirmed'}`
+        : `failed at ${probe.stage} · ${sanitizedPhysicalLine(probe.message)}`,
+      (text) => snapshot.lastProbe?.kind === 'passed' ? color.text(text) : color.error(text))
+    }
+    return { primary, diagnostics }
   }
 
   /** The saved transport of the selected entry (from the same descriptor). */
@@ -2216,40 +2238,51 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       for (const action of content.actions) {
         const row = action.line - this.detailOffset
         if (row < 0 || row >= viewport) continue
-        targets.push({ kind: 'action', action: action.action, row, startCol, endCol: startCol + Math.min(width, action.width) })
+        // A line that fit() had to clip is not a complete affordance: publish
+        // neither a pointer target nor keyboard admission for it. The complete
+        // verb remains reachable by the normal Detail scroll/short grant.
+        if (action.width > width) continue
+        targets.push({ kind: 'action', action: action.action, row, startCol, endCol: startCol + action.width })
       }
     }
     if (noticeRows === 1 && notice !== undefined) lines.push(fit(this.noticeLine(notice, width), width))
     return lines.slice(0, rows)
   }
 
-  /** The detail body plus the body action rows for bar segments the physical
-   *  bar really had to drop (never a second bar, never a duplicate primary). */
+  /** Detail facts with the complete legal body-action group immediately after
+   *  the current phase/receipt and before diagnostics. */
   private detailContent(snapshot: McpServersSnapshot, width: number): {
     readonly lines: readonly string[]
     readonly actions: readonly { readonly line: number; readonly action: McpBarAction; readonly width: number }[]
   } {
-    const lines = this.detailLines(snapshot, width)
-    if (!this.focused || this.region !== 'detail') return { lines, actions: [] }
-    const segments = this.detailBarSegments(snapshot)
-    const layout = layoutActionBarRow(segments, Math.max(1, this.currentBarWidth))
-    const painted = new Set(layout.spans.map(span => segments[span.inputIndex]?.action))
-    // The physical Esc is the Root's target and is never a body fallback.
-    const last = segments[segments.length - 1]
-    if (last?.action !== undefined) painted.add(last.action)
-    const dropped = segments.filter(segment => segment.action !== undefined && !painted.has(segment.action))
-    if (dropped.length === 0) return { lines, actions: [] }
+    const facts = this.detailLines(snapshot, width)
+    const lines = [...facts.primary]
+    if (!this.focused || this.region !== 'detail') return { lines: [...lines, ...facts.diagnostics], actions: [] }
+    // The body group carries every legal business verb exactly once; the
+    // physical bar keeps only the primary alias and Back.
+    // The bar predicate must use the SAME width-resolved layout the physical
+    // bar paints: a dropped segment supplies nothing, so the body fallback must
+    // remain. A candidate-only check would suppress Refresh at narrow widths.
+    const barSuppliesRefresh = paintBar(
+      this.detailBarSegments(snapshot), this.currentBarWidth, true,
+    ).spans.some(span => span.action === 'refresh')
+    const body = this.detailActionSegments(snapshot)
+      .filter(segment => segment.action !== undefined && segment.action !== 'back'
+        && !(barSuppliesRefresh && segment.action === 'refresh'))
     const actions: { line: number; action: McpBarAction; width: number }[] = []
-    lines.push('')
-    lines.push(color.textMuted('Actions'))
-    for (const segment of dropped) {
-      if (segment.action === undefined) continue
-      const text = segment.ink === 'primary'
-        ? color.textStrong(segment.text, 'primary')
-        : color.text(segment.text)
-      actions.push({ line: lines.length, action: segment.action, width: visibleWidth(segment.text) })
-      lines.push(text)
+    if (body.length > 0) {
+      lines.push('')
+      lines.push(color.textMuted('Actions'))
+      for (const segment of body) {
+        if (segment.action === undefined) continue
+        const text = segment.ink === 'primary'
+          ? color.textStrong(segment.text, 'primary')
+          : color.text(segment.text)
+        actions.push({ line: lines.length, action: segment.action, width: visibleWidth(segment.text) })
+        lines.push(text)
+      }
     }
+    lines.push(...facts.diagnostics)
     return { lines, actions }
   }
 
@@ -2368,9 +2401,8 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     return segments
   }
 
-  /** The Detail's complete bar intents, in frozen display order. The same list
-   *  feeds the body fallback when a narrow bar must drop a secondary action. */
-  private detailBarSegments(snapshot: McpServersSnapshot): readonly McpBarSegment[] {
+  /** The Detail's complete legal body actions, in frozen display order. */
+  private detailActionSegments(snapshot: McpServersSnapshot): readonly McpBarSegment[] {
     const selected = this.visibleSelection(snapshot)
     const row = selected === undefined ? undefined : snapshot.rows.find(candidate => candidate.name === selected)
     const operable = snapshot.phase === 'ready'
@@ -2398,6 +2430,20 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     }
     segments.push({ text: 'Back [Esc]', priority: 1000, action: 'back' })
     return segments
+  }
+
+  /** The physical Detail bar keeps ONE primary business verb plus Back. Every
+   *  other legal verb remains in the nearby body group, never a second bar. */
+  private detailBarSegments(snapshot: McpServersSnapshot): readonly McpBarSegment[] {
+    const segments = this.detailActionSegments(snapshot)
+    const back = segments.find(segment => segment.action === 'back')
+    const primary = segments.find(segment => segment.action === 'edit')
+      ?? segments.find(segment => segment.action === 'probe')
+      ?? segments.find(segment => segment.action === 'refresh')
+    return [
+      ...(primary === undefined ? [] : [primary]),
+      ...(back === undefined ? [] : [back]),
+    ]
   }
 
   private renderBar(width: number, snapshot: McpServersSnapshot, zeroBody: boolean): ReturnType<typeof paintBar> {

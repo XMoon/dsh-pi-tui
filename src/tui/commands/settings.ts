@@ -44,11 +44,11 @@ import { runDetached, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { color } from '../theme/runtime.ts'
 import { themeDisplayName as themeDisplayNameOf } from '../pickers/theme-menu.ts'
-import { allowlistSummary } from '../pickers/subagent-model-menu.ts'
 import { SubagentSettingsController } from '../../app/command/subagent-settings.ts'
 import { SubagentSettingsPage } from '../panels/subagent-settings-page.ts'
-import { HostNumericSettingsController, type HostNumericSettingsPort } from '../../app/command/host-numeric-settings.ts'
+import { HostNumericSettingsController, type HostNumericSettingsField, type HostNumericSettingsPort } from '../../app/command/host-numeric-settings.ts'
 import { HostNumericSettingsPage } from '../panels/host-numeric-settings-page.ts'
+import { formatShellSettingValue } from '../presentation/settings-values.ts'
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
 import { commitPersistedSetting, readPersistedSetting, resolvePersistedSettingOwner, type PersistedSettingCommitOutcome, type PersistedSettingRecord } from '../../app/client-extensions/persisted-setting.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
@@ -1200,7 +1200,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             const value = Number(text)
             return Number.isFinite(value) && value > 0
           }
-          const fields = [
+          const fields: readonly HostNumericSettingsField<ShellExecutionSettings>[] = [
             {
               key: 'timeoutMs' as const,
               label: 'Command timeout (ms)',
@@ -3902,10 +3902,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const subagentLimits = runner.config.subagentLimits.read()
     const subagentSelection = runner.config.subagentModelSelection.read()
     const limitsSummary = subagentLimits.kind === 'ready'
-      ? `Limits: depth ${subagentLimits.effective.maxDepth}, parallelism ${subagentLimits.effective.maxActiveSubagents}`
+      ? `Depth ${subagentLimits.effective.maxDepth} · Active ${subagentLimits.effective.maxActiveSubagents}`
       : `Limits: ${subagentLimits.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`
     const selectionSummary = subagentSelection.kind === 'ready'
-      ? `Model selection: ${subagentSelection.effective.enabled ? 'On' : 'Off'} · ${allowlistSummary(subagentSelection.effective.allowedModels)}`
+      ? `Selection ${subagentSelection.effective.enabled ? 'on' : 'off'}`
       : `Model selection: ${subagentSelection.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`
     const subagentRows: SettingsWorkspaceRow[] = [{
       id: 'subagent-settings', category: 'agent', label: 'Subagent settings',
@@ -4399,7 +4399,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           category: 'tools',
           label: 'Shell execution',
           summary: shellExecutionSettings.kind === 'ready'
-            ? `Timeout ${shellExecutionSettings.effective.timeoutMs} ms · Output cap ${shellExecutionSettings.effective.maxOutputBytes} bytes · ${shellExecutionSettings.effective.executor === 'bash' ? 'POSIX Bash' : 'Windows PowerShell'}`
+            ? `${formatShellSettingValue(shellExecutionSettings.effective.timeoutMs, 'ms')} · ${formatShellSettingValue(shellExecutionSettings.effective.maxOutputBytes, 'bytes')}`
             : `Active executor: ${shellExecutionSettings.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`,
           scope: 'DSH Host profile · Host-served model-tool shell executor',
           freshness: shellExecutionSettings.kind === 'ready'

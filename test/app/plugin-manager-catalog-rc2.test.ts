@@ -769,9 +769,19 @@ test('a real Host platform refusal stays out of the default list and never insta
 
   page.harness.vt.sendInput('\r') // Details
   await page.waitFor(() => page.frame().includes('[Details]'), 'the Details focus frame')
-  // The CUA card's Detail is longer than the pane: the Status/Source facts are
-  // read on the initial frame, then one navigation reveals the Actions block.
-  assert.match(page.frame(), /Default listing/u)
+  // The ordinary Detail places Status/Compatibility and the Actions block
+  // before the Source diagnostics, so the Host default-listing fact is read
+  // through the existing Detail scroll, then Home returns to the action block.
+  let defaultListing = page.frame()
+  for (let step = 0; step < 20 && !/Default listing/u.test(defaultListing); step += 1) {
+    page.harness.vt.sendInput('\x1b[6~')
+    await page.harness.waitForFrame()
+    defaultListing += `\n${page.frame()}`
+  }
+  assert.match(defaultListing, /Default listing/u)
+  page.harness.vt.sendInput('\x1b[H') // Home: back to the primary facts/actions
+  await page.harness.waitForFrame()
+  assert.match(page.frame(), /Actions/u)
   page.harness.vt.sendInput('\x1b[B')
   page.harness.vt.sendInput('\x1b[A')
   await page.harness.waitForFrame()

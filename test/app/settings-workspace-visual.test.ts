@@ -4101,7 +4101,7 @@ async function openShellGroup(h: Harness, entry: 'open' | 'enter' = 'open'): Pro
   }
   await clickPainted(h, '> Shell execution')
   await settle(h, 4)
-  assert.doesNotMatch(h.view(), /Command timeout \(ms\)/u, 'a row click only selects the row')
+  assert.doesNotMatch(h.view(), /Command timeout/u, 'a row click only selects the row')
   await clickPainted(h, 'Open…')
   await settle(h, 4)
 }
@@ -4133,11 +4133,11 @@ test('the real Root Shell group is entered explicitly and saves both caps in ONE
   await h.open('Tools')
   await key(h, '\r')
   await highlightRow(h, 'Shell execution')
-  assert.doesNotMatch(h.view(), /Command timeout \(ms\)/u, 'selection alone never mounts the group')
+  assert.doesNotMatch(h.view(), /Command timeout/u, 'selection alone never mounts the group')
   // Tab is a PURE Rows -> Detail focus transfer: still no mount and no Host read.
   await key(h, '\t')
   assert.match(h.view(), /Open…/u, 'the Detail preview paints its explicit OPEN entry')
-  assert.doesNotMatch(h.view(), /Command timeout \(ms\)/u, 'Tab never mounts the group')
+  assert.doesNotMatch(h.view(), /Command timeout/u, 'Tab never mounts the group')
   assert.match(h.view(), /not editable while the backend is not current|Open…/u)
   assert.doesNotMatch(h.view(), /read-only here · no candidate is available right now/u,
     'a hosted numeric row never paints the false no-candidate note')
@@ -4146,17 +4146,17 @@ test('the real Root Shell group is entered explicitly and saves both caps in ONE
   await settle(h, 4)
   assert.match(h.view(), /Settings · Tools · Shell execution/u, 'the SAME lease paints the grouped tenant')
   assert.match(h.view(), /Host model-tool executor · POSIX Bash/u)
-  assert.match(h.view(), /Command timeout \(ms\)\s+60000 ms/u, 'the first field is selected with unit')
-  assert.match(h.view(), /Output cap per stream \(bytes\)\s+64000 bytes/u)
+  assert.match(h.view(), /Command timeout\s+60 s/u, 'the first field is selected with unit')
+  assert.match(h.view(), /Output cap per stream\s+64 kB/u)
   assert.doesNotMatch(h.view(), /Value:|Edit Command timeout/u, 'entering the group never opens the Input')
   assert.match(h.view(), /Categories/u, 'the parent rail stays readable behind the tenant')
-  assert.match(h.view(), /Changes are staged until Save\./u)
+  assert.match(h.view(), /Edit values, then Save to apply\./u)
   const opened = h.view()
   const refreshesAtOpen = h.shellExecutionRefreshes()
 
   // A field click only SELECTS; the explicit Edit opens the editor on it.
-  await clickPainted(h, 'Output cap per stream (bytes)')
-  assert.match(h.view(), /^.*> Output cap per stream \(bytes\)/mu)
+  await clickPainted(h, 'Output cap per stream')
+  assert.match(h.view(), /^.*> Output cap per stream/mu)
   assert.doesNotMatch(h.view(), /Edit Output cap per stream/u, 'a field click never edits')
   await clickPainted(h, 'Edit [Enter]', true)
   await h.vt.waitForRender()
@@ -4167,22 +4167,22 @@ test('the real Root Shell group is entered explicitly and saves both caps in ONE
   for (const character of '128000') await key(h, character)
   await clickPainted(h, 'Stage [Enter]', true)
   await h.vt.waitForRender()
-  assert.match(h.view(), /Output cap per stream \(bytes\)\s+128000 bytes/u)
-  assert.match(h.view(), /Current: 64000 bytes · Unsaved/u, 'the served Current stays distinct from the draft')
+  assert.match(h.view(), /Output cap per stream\s+128 kB/u)
+  assert.match(h.view(), /Current: 64 kB · Unsaved/u, 'the served Current stays distinct from the draft')
   assert.match(h.view(), /1 unsaved change · Shell execution/u)
   assert.equal(h.shellExecutionAttempts(), 0, 'Stage never dispatches a Host write')
   assert.equal(h.shellExecutionAttempts(), 0)
-  assert.match(h.view(), /Timeout 60000 ms/u, 'the parent Row still projects the served value')
+  assert.match(h.view(), /Shell execution\s+60 s · 64 kB/u, 'the parent Row still projects the served value')
 
   // The first field through the same explicit route.
-  await stageShellField(h, 'Command timeout (ms)', '45000')
+  await stageShellField(h, 'Command timeout', '45000')
   assert.match(h.view(), /2 unsaved changes · Shell execution/u)
-  assert.match(h.view(), /Command timeout \(ms\)\s+45000 ms/u)
+  assert.match(h.view(), /Command timeout\s+45 s/u)
   assert.equal(h.shellExecutionAttempts(), 0, 'two local stages still write nothing')
   assert.equal(h.shellExecutionRefreshes(), refreshesAtOpen, 'staging never refreshes the Host')
 
   // Select the SECOND field again so the Save is made from that selection.
-  await clickPainted(h, 'Output cap per stream (bytes)')
+  await clickPainted(h, 'Output cap per stream')
   await clickPainted(h, 'Save [S]', true)
   await settle(h, 12)
   assert.equal(h.shellExecutionAttempts(), 1, 'ONE Save enters the official mutate once')
@@ -4203,8 +4203,8 @@ test('the real Root Shell group is entered explicitly and saves both caps in ONE
   })
   assert.match(h.view(), /\bSaved\b/u, 'the authoritative readback is stated once')
   assert.match(h.view(), /Settings · Tools · Shell execution/u, 'Save never leaves the group')
-  assert.match(h.view(), /> Output cap per stream \(bytes\)/u, 'the field selection survives the save')
-  assert.match(h.view(), /Timeout 45000 ms/u, 'the parent Row follows the verified readback')
+  assert.match(h.view(), /> Output cap per stream/u, 'the field selection survives the save')
+  assert.match(h.view(), /Shell execution\s+45 s · 128 kB/u, 'the parent Row follows the verified readback')
   assert.doesNotMatch(h.view(), /Save \[S\]|unsaved change/u, 'a verified group advertises no second Save')
   void opened
 
@@ -4212,7 +4212,7 @@ test('the real Root Shell group is entered explicitly and saves both caps in ONE
   await clickPainted(h, 'Back [Esc]', true)
   await settle(h, 4)
   assert.match(h.view(), /Settings · Tools · Rows/u)
-  assert.match(h.view(), /Shell execution\s+Timeout 45000 ms/u)
+  assert.match(h.view(), /Shell execution\s+45 s · 128 kB/u)
   assert.equal(h.shellExecutionAttempts(), 1, 'leaving never writes again')
   h.dispose()
 })
@@ -4228,7 +4228,7 @@ test('the real Root Shell group accepts the official positive-finite shapes and 
 
   // Blank and whitespace are `Value is required.`; nothing is staged or written.
   for (const bad of ['', '   ']) {
-    await clickPainted(h, 'Command timeout (ms)')
+    await clickPainted(h, 'Command timeout')
     await clickPainted(h, 'Edit [Enter]', true)
     await h.vt.waitForRender()
     await key(h, '\x15')
@@ -4243,7 +4243,7 @@ test('the real Root Shell group accepts the official positive-finite shapes and 
     assert.doesNotMatch(h.view(), /unsaved change/u, 'a cancelled invalid draft never stages')
   }
   for (const bad of ['0', '-1', 'NaN', 'Infinity', '12garbage']) {
-    await clickPainted(h, 'Command timeout (ms)')
+    await clickPainted(h, 'Command timeout')
     await clickPainted(h, 'Edit [Enter]', true)
     await h.vt.waitForRender()
     await key(h, '\x15')
@@ -4256,11 +4256,11 @@ test('the real Root Shell group accepts the official positive-finite shapes and 
     await h.vt.waitForRender()
   }
   // A legal decimal (and a scientific notation) stage, then a normal no-op.
-  await stageShellField(h, 'Command timeout (ms)', '1.5')
-  assert.match(h.view(), /Command timeout \(ms\)\s+1\.5 ms/u)
-  await stageShellField(h, 'Command timeout (ms)', '1e3')
-  assert.match(h.view(), /Command timeout \(ms\)\s+1000 ms/u, 'the browse paints the canonical value')
-  await stageShellField(h, 'Command timeout (ms)', '60000')
+  await stageShellField(h, 'Command timeout', '1.5')
+  assert.match(h.view(), /Command timeout\s+1\.5 ms/u)
+  await stageShellField(h, 'Command timeout', '1e3')
+  assert.match(h.view(), /Command timeout\s+1 s/u, 'the browse paints the canonical value')
+  await stageShellField(h, 'Command timeout', '60000')
   assert.match(h.view(), /No changes/u, 'an equal stage is a real no-op')
   assert.doesNotMatch(h.view(), /unsaved change|Save \[S\]/u)
   assert.equal(h.shellExecutionAttempts(), 0)
@@ -4280,8 +4280,8 @@ test('the Root Shell Advanced stages the SELECTED field reset and ONE Save sends
     },
   })
   await openShellGroup(h)
-  await stageShellField(h, 'Command timeout (ms)', '45000')
-  await clickPainted(h, 'Output cap per stream (bytes)')
+  await stageShellField(h, 'Command timeout', '45000')
+  await clickPainted(h, 'Output cap per stream')
   await clickPainted(h, 'Details…')
   await settle(h, 4)
   assert.match(h.view(), /Output cap per stream \(bytes\)/u)
@@ -4296,7 +4296,7 @@ test('the Root Shell Advanced stages the SELECTED field reset and ONE Save sends
   await clickPainted(h, 'Reset to inherited…')
   await h.vt.waitForRender()
   assert.match(h.view(), /Reset staged/u, 'the official unset is staged')
-  assert.match(h.view(), /Current: 64000 bytes · Unsaved/u, 'Reset staged is not the inherited value')
+  assert.match(h.view(), /Current: 64 kB · Unsaved/u, 'Reset staged is not the inherited value')
   assert.match(h.view(), /2 unsaved changes · Shell execution/u)
   assert.equal(h.shellExecutionAttempts(), 0, 'reset staging never writes')
   await clickPainted(h, 'Save [S]', true)
@@ -4329,7 +4329,7 @@ test('the Root Shell Advanced stages the SELECTED field reset and ONE Save sends
     },
   })
   await openShellGroup(equal)
-  await clickPainted(equal, 'Output cap per stream (bytes)')
+  await clickPainted(equal, 'Output cap per stream')
   await clickPainted(equal, 'Details…')
   await equal.vt.waitForRender()
   assert.match(equal.view(), /Matches base/u, 'the equal inherited state is stated truthfully')
@@ -4358,7 +4358,7 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
   })
   await openShellGroup(h)
   // The Input and the Advanced disclosure refuse every parent route outright.
-  await clickPainted(h, 'Command timeout (ms)')
+  await clickPainted(h, 'Command timeout')
   await clickPainted(h, 'Edit [Enter]', true)
   await h.vt.waitForRender()
   await clickPainted(h, 'Visual tools')
@@ -4372,7 +4372,7 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
   await key(h, '\x1b') // leave Advanced
   await h.vt.waitForRender()
 
-  await stageShellField(h, 'Command timeout (ms)', '45000')
+  await stageShellField(h, 'Command timeout', '45000')
 
   // Dirty Back opens the page's OWN leave question; Keep preserves the draft.
   await key(h, '\x1b')
@@ -4384,7 +4384,7 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
   await key(h, '\x1b')
   await h.vt.waitForRender()
   assert.match(h.view(), /Settings · Tools · Shell execution/u)
-  assert.match(h.view(), /Command timeout \(ms\)\s+45000 ms/u, 'Keep preserves the draft')
+  assert.match(h.view(), /Command timeout\s+45 s/u, 'Keep preserves the draft')
 
   // A parent ROW/category click is the SAME one leave gate (never a silent drop).
   await clickPainted(h, 'Visual tools')
@@ -4402,7 +4402,7 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
   await h.vt.waitForRender()
   assert.match(h.view(), /Settings · Tools · Shell execution/u)
   assert.doesNotMatch(h.view(), /unsaved change/u, 'the local discard stays on the group')
-  await stageShellField(h, 'Command timeout (ms)', '45000')
+  await stageShellField(h, 'Command timeout', '45000')
   const refreshes = h.shellExecutionRefreshes()
   await key(h, 'r')
   await h.vt.waitForRender()
@@ -4414,14 +4414,14 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
   assert.match(h.view(), /Settings · Tools · Shell execution/u, 'Refresh never leaves the group')
 
   // Save from the leave question stays; Discard and leave closes to Rows.
-  await stageShellField(h, 'Command timeout (ms)', '45000')
+  await stageShellField(h, 'Command timeout', '45000')
   await key(h, '\x1b')
   await h.vt.waitForRender()
   await clickPainted(h, 'Save [S]', true) // pointer Save from the leave question
   await settle(h, 12)
   assert.equal(h.shellExecutionBatches().length, 1)
   assert.match(h.view(), /Settings · Tools · Shell execution/u, 'Save and the question stay in the same group')
-  await stageShellField(h, 'Command timeout (ms)', '44000')
+  await stageShellField(h, 'Command timeout', '44000')
   await key(h, '\x1b')
   await h.vt.waitForRender()
   await clickPainted(h, 'Discard and leave [D]', true) // pointer Discard from the question
@@ -4433,7 +4433,7 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
   await highlightRow(h, 'Shell execution')
   await key(h, '\r')
   await settle(h, 4)
-  await stageShellField(h, 'Command timeout (ms)', '44000')
+  await stageShellField(h, 'Command timeout', '44000')
   await clickPainted(h, 'Models')
   await h.vt.waitForRender()
   assert.match(h.view(), /Discard and leave loses staged values\./u, 'a category click is the same leave gate')
@@ -4442,7 +4442,7 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
   assert.equal(h.shellExecutionBatches().length, 2)
   assert.match(h.view(), /Settings · Tools · Shell execution/u, 'Save keeps the page and does NOT follow the captured category')
   // A fresh category click + Discard reaches THAT destination exactly.
-  await stageShellField(h, 'Command timeout (ms)', '43000')
+  await stageShellField(h, 'Command timeout', '43000')
   await clickPainted(h, 'Models')
   await h.vt.waitForRender()
   await clickPainted(h, 'Discard and leave [D]', true) // pointer Discard
@@ -4461,14 +4461,14 @@ test('the Root Shell group refuses stale captures and never claims an accepted r
     shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
   })
   await openShellGroup(stale)
-  await stageShellField(stale, 'Command timeout (ms)', '45000')
+  await stageShellField(stale, 'Command timeout', '45000')
   stale.advanceShellRevision()
   await key(stale, 's')
   await settle(stale, 8)
   assert.equal(stale.shellExecutionAttempts(), 0, 'a stale captured read never dispatches')
   assert.match(stale.view(), /Last-known|Could not save/u)
   assert.doesNotMatch(stale.view(), /\bSaved\b/u, 'a stale zero-dispatch capture never claims Saved')
-  assert.match(stale.view(), /Command timeout \(ms\)\s+45000 ms/u, 'the draft is retained')
+  assert.match(stale.view(), /Command timeout\s+45 s/u, 'the draft is retained')
   stale.dispose()
 
   // A same-generation/revision executor switch is refused before dispatch.
@@ -4478,7 +4478,7 @@ test('the Root Shell group refuses stale captures and never claims an accepted r
     shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
   })
   await openShellGroup(switched)
-  await stageShellField(switched, 'Command timeout (ms)', '45000')
+  await stageShellField(switched, 'Command timeout', '45000')
   switched.switchShellExecutor('pwsh')
   await key(switched, 's')
   await settle(switched, 8)
@@ -4497,7 +4497,7 @@ test('the Root Shell group refuses stale captures and never claims an accepted r
     shellExecutionWriteGate: async () => { entered(); await gate },
   })
   await openShellGroup(accepted)
-  await stageShellField(accepted, 'Command timeout (ms)', '45000')
+  await stageShellField(accepted, 'Command timeout', '45000')
   await clickPainted(accepted, 'Save [S]', true)
   await waitForFrame(
     () => accepted.view(),
@@ -4511,7 +4511,7 @@ test('the Root Shell group refuses stale captures and never claims an accepted r
   assert.equal(accepted.shellExecutionBatches().length, 1, 'the admitted batch is dispatched exactly once')
   assert.doesNotMatch(accepted.view(), /\bSaved\b/u, 'another served row is never Verified')
   assert.match(accepted.view(), /Could not confirm save/u)
-  assert.match(accepted.view(), /Command timeout \(ms\)\s+45000 ms/u, 'the captured draft is retained')
+  assert.match(accepted.view(), /Command timeout\s+45 s/u, 'the captured draft is retained')
   assert.equal(accepted.shellExecutionAttempts(), 1, 'no blind replay')
   accepted.dispose()
 
@@ -4523,7 +4523,7 @@ test('the Root Shell group refuses stale captures and never claims an accepted r
     shellExecutionWriteFailure: 'the official validator refused the caps',
   })
   await openShellGroup(refused)
-  await stageShellField(refused, 'Command timeout (ms)', '45000')
+  await stageShellField(refused, 'Command timeout', '45000')
   await clickPainted(refused, 'Save [S]', true)
   await settle(refused, 12)
   assert.match(refused.view(), /Could not save/u)
@@ -4532,7 +4532,7 @@ test('the Root Shell group refuses stale captures and never claims an accepted r
   assert.match(refused.view(), /Refresh \[R\]/u, 'the refused state offers its real recovery')
   assert.doesNotMatch(refused.view(), /Save \[S\]|Edit \[Enter\]/u, 'a refused capture publishes no blind retry')
   assert.match(refused.view(), /Last-known · Host model-tool executor · POSIX Bash/u)
-  assert.match(refused.view(), /Last confirmed: 60000 ms · Unsaved/u)
+  assert.match(refused.view(), /Last confirmed: 60 s · Unsaved/u)
   // The local Discard is a REAL body action even in this read-only state.
   await clickPainted(refused, 'Discard…')
   await refused.vt.waitForRender()
@@ -4561,14 +4561,14 @@ test('the Root Shell group stays reachable and safe at the frozen short and zero
   await settle(h, 4)
   assert.match(h.view(), /Settings · Tools · Shell execution/u)
   await key(h, '\x1b[B')
-  assert.match(h.view(), /Output cap per stream \(bytes\)/u, 'the second field is reachable at 44x8')
+  assert.match(h.view(), /Output cap per stream/u, 'the second field is reachable at 44x8')
   await key(h, '\r')
   await h.vt.waitForRender()
   await key(h, '\x15')
   for (const character of '128000') await key(h, character)
   await key(h, '\r')
   await h.vt.waitForRender()
-  assert.match(h.view(), /Output cap per stream \(bytes\)\s+128000 bytes/u)
+  assert.match(h.view(), /Output cap per stream\s+128 kB/u)
   await key(h, '\x1b') // dirty Back -> the compact leave bar
   await h.vt.waitForRender()
   const leaveBar = (h.rowsPlain().at(-1) ?? '').replace(/\s+$/u, '')
@@ -4576,7 +4576,13 @@ test('the Root Shell group stays reachable and safe at the frozen short and zero
     `the 44x8 leave bar keeps all three complete actions: ${JSON.stringify(leaveBar)}`)
   await key(h, '\x1b')
   await h.vt.waitForRender()
-  assert.match(h.view(), /1 unsaved change/u, 'Keep preserves the draft at 44x8')
+  assert.match(h.view(), /Output cap per stream\s+128 kB/u, 'Keep preserves the exact staged value at 44x8')
+  assert.match(h.view(), /Current: 64 kB · Unsaved/u, 'the served Current and dirty marker survive at 44x8')
+  for (let step = 0; step < 6 && !/1 unsaved change/u.test(h.view()); step += 1) {
+    wheel(h, 4, 20, true)
+    await settle(h, 2)
+  }
+  assert.match(h.view(), /1 unsaved change/u, 'the dirty count stays reachable at 44x8')
 
   // 200/100/44 x 2: NO body row -> only the tenant's own Back is admitted;
   // every hidden action, both Tab directions and the real recovery keys are
@@ -4608,9 +4614,9 @@ test('the Root Shell group stays reachable and safe at the frozen short and zero
   h.vt.resize(200, 50)
   await h.vt.waitForRender()
   await settle(h, 6)
-  assert.match(h.view(), /> Output cap per stream \(bytes\)/u, 'the second field is still the selected one')
-  assert.match(h.view(), /Command timeout \(ms\)\s+60000 ms/u, 'the timeout was never part of this draft')
-  assert.match(h.view(), /Output cap per stream \(bytes\)\s+128000 bytes/u, 'the exact staged cap survives')
+  assert.match(h.view(), /> Output cap per stream/u, 'the second field is still the selected one')
+  assert.match(h.view(), /Command timeout\s+60 s/u, 'the timeout was never part of this draft')
+  assert.match(h.view(), /Output cap per stream\s+128 kB/u, 'the exact staged cap survives')
   assert.equal(h.shellExecutionRefreshes(), refreshesBeforeZero, 'no grant loss ever refreshed the Host')
   await clickPainted(h, 'Save [S]', true)
   await settle(h, 12)
@@ -4627,7 +4633,7 @@ test('a held Shell Save is refused across a resize and a fresh click still saves
     shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
   })
   await openShellGroup(h)
-  await stageShellField(h, 'Command timeout (ms)', '45000')
+  await stageShellField(h, 'Command timeout', '45000')
   await h.vt.waitForRender()
   const barRow = h.rowsPlain().length - 1
   const saveCol = cellIndexOf(h, barRow, 'Save [S]')
@@ -4640,7 +4646,7 @@ test('a held Shell Save is refused across a resize and a fresh click still saves
   await settle(h, 10)
   assert.equal(h.shellExecutionAttempts(), 0, 'a pre-repaint release never writes')
   assert.match(h.view(), /Settings · Tools · Shell execution/u, 'the group survives the resize')
-  assert.match(h.view(), /45000 ms/u, 'the draft survives the refused gesture')
+  assert.match(h.view(), /Command timeout\s+45 s/u, 'the draft survives the refused gesture')
   // The repaint happened (every line fits the new width); a fresh pointer Save
   // after the fork's multi-click window writes exactly once.
   assert.ok(h.rowsPlain().every(line => visibleWidth(line) <= 120), 'the frame repainted at the new width')
@@ -4661,7 +4667,7 @@ test('a held Shell Save is refused across a resize and a fresh click still saves
   // This fresh press targets the SAME Save cell, so the fork's multi-click
   // window must expire first (bounded observation; no other signal exists).
   await new Promise<void>(resolve => setTimeout(resolve, 650))
-  await stageShellField(h, 'Command timeout (ms)', '6000')
+  await stageShellField(h, 'Command timeout', '6000')
   h.vt.resize(200, 50)
   await h.vt.waitForRender()
   await settle(h, 4)
@@ -4677,7 +4683,7 @@ test('a held Shell Save is refused across a resize and a fresh click still saves
   release(h, wideRow, wideCol)
   await settle(h, 10)
   assert.equal(h.shellExecutionAttempts(), 1, 'a cross-width release after the repaint never saves')
-  assert.match(h.view(), /6000 ms/u, 'the draft survives the refused cross-width release')
+  assert.match(h.view(), /Command timeout\s+6 s/u, 'the draft survives the refused cross-width release')
   // The fresh gesture re-uses the same Save cell, so the fork's multi-click
   // window (bounded observation) must expire before that press.
   await new Promise<void>(resolve => setTimeout(resolve, 650))
@@ -4695,21 +4701,21 @@ test('a held Shell Save is refused across a resize and a fresh click still saves
   h.vt.resize(120, 50)
   await h.vt.waitForRender()
   await settle(h, 4)
-  const fieldRow = rowOf(h, 'Output cap per stream (bytes)')
-  const fieldCol = cellIndexOf(h, fieldRow, 'Output cap per stream (bytes)')
+  const fieldRow = rowOf(h, 'Output cap per stream')
+  const fieldCol = cellIndexOf(h, fieldRow, 'Output cap per stream')
   press(h, fieldRow, fieldCol)
   await h.vt.waitForRender()
   h.vt.resize(76, 24)
   await h.vt.waitForRender()
   await settle(h, 6)
-  const narrowFieldRow = rowOf(h, 'Output cap per stream (bytes)')
-  const narrowFieldCol = cellIndexOf(h, narrowFieldRow, 'Output cap per stream (bytes)')
+  const narrowFieldRow = rowOf(h, 'Output cap per stream')
+  const narrowFieldCol = cellIndexOf(h, narrowFieldRow, 'Output cap per stream')
   release(h, narrowFieldRow, narrowFieldCol)
   await settle(h, 6)
-  assert.match(h.view(), /> Command timeout \(ms\)/u, 'the stale wide press never re-selects a field')
-  await clickPainted(h, 'Output cap per stream (bytes)')
+  assert.match(h.view(), /> Command timeout/u, 'the stale wide press never re-selects a field')
+  await clickPainted(h, 'Output cap per stream')
   await settle(h, 4)
-  assert.match(h.view(), /> Output cap per stream \(bytes\)/u, 'the fresh click selects the second field')
+  assert.match(h.view(), /> Output cap per stream/u, 'the fresh click selects the second field')
   h.dispose()
 })
 
@@ -4725,22 +4731,22 @@ test('the Shell row preview facts and blank Detail cells stay passive until Open
   await settle(h, 4)
   const refreshes = h.shellExecutionRefreshes()
   assert.equal(h.shellExecutionAttempts(), 0)
-  assert.match(h.view(), /POSIX Bash/u, 'the Rows summary carries the executor fact')
-  await clickPainted(h, 'POSIX Bash')
+  assert.match(h.view(), /60 s · 64 kB/u, 'the preview projects the served caps')
+  await clickPainted(h, '60 s · 64 kB')
   await settle(h, 4)
-  assert.doesNotMatch(h.view(), /Command timeout \(ms\)/u, 'a preview fact click never mounts the group')
+  assert.doesNotMatch(h.view(), /Command timeout/u, 'a preview fact click never mounts the group')
   assert.equal(h.shellExecutionRefreshes(), refreshes, 'a preview fact click never reads the Host')
   // A blank cell inside the passive Detail column is inert too.
   press(h, 10, 150)
   await h.vt.waitForRender()
   release(h, 10, 150)
   await settle(h, 4)
-  assert.doesNotMatch(h.view(), /Command timeout \(ms\)/u, 'a blank Detail cell never mounts the group')
+  assert.doesNotMatch(h.view(), /Command timeout/u, 'a blank Detail cell never mounts the group')
   assert.equal(h.shellExecutionRefreshes(), refreshes, 'a blank Detail cell never reads the Host')
   // The explicit Open… is the ONE grant, and the ONE mount read.
   await clickPainted(h, 'Open…')
   await settle(h, 4)
-  assert.match(h.view(), /Command timeout \(ms\)/u)
+  assert.match(h.view(), /Command timeout/u)
   assert.equal(h.shellExecutionRefreshes(), refreshes + 1, 'the real grant performs the ONE Host read')
   h.dispose()
 })
@@ -4752,7 +4758,7 @@ test('the real Root Shell medium grant paints the complete canonical fact and se
     shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
   })
   await openShellGroup(h, 'enter')
-  await clickPainted(h, 'Command timeout (ms)')
+  await clickPainted(h, 'Command timeout')
   await clickPainted(h, 'Edit [Enter]', true)
   await h.vt.waitForRender()
   await key(h, '\x15')
@@ -4779,7 +4785,7 @@ test('the Root Shell group keeps an unconfirmed outcome out of the current-row s
     shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
   })
   await openShellGroup(h)
-  await stageShellField(h, 'Command timeout (ms)', '45000')
+  await stageShellField(h, 'Command timeout', '45000')
   await clickPainted(h, 'Save [S]', true)
   await settle(h, 12)
   assert.equal(h.shellExecutionAttempts(), 1)
@@ -4816,7 +4822,7 @@ test('the Root Shell group keeps an unconfirmed outcome out of the current-row s
   assert.equal((h.view().match(/The change may have been saved\. Refresh and check\./gu) ?? []).length, 1,
     'the recovery sentence is projected once')
   assert.match(h.view(), /Last-known · Host model-tool executor · POSIX Bash/u, 'the captured executor is not painted as current')
-  assert.match(h.view(), /Last confirmed: 60000 ms · Unsaved/u)
+  assert.match(h.view(), /Last confirmed: 60 s · Unsaved/u)
   assert.doesNotMatch(h.view(), /Current: 60000/u)
   assert.doesNotMatch(h.view(), /Save \[S\]|Edit \[Enter\]/u, 'no blind retry or edit is published')
   assert.doesNotMatch(h.view(), /Discard…/u, 'an ambiguous outcome has no ordinary local discard')
@@ -4838,11 +4844,11 @@ test('the Root Shell group keeps an unconfirmed outcome out of the current-row s
   assert.match(h.view(), /Refresh discards unsaved edits\./u)
   await clickPainted(h, 'Refresh…')
   await settle(h, 8)
-  assert.match(h.view(), /^.*Command timeout \(ms\)\s+45000 ms/mu, 'the refresh reads the new served row')
+  assert.match(h.view(), /^.*Command timeout\s+45 s/mu, 'the refresh reads the new served row')
   assert.doesNotMatch(h.view(), /Last-known · Host/u, 'no stale tag survives a successful refresh')
   assert.doesNotMatch(h.view(), /Save \[S\]/u, 'the refresh never replays the lost Save')
   // A NEW explicit edit/stage/save is required.
-  await stageShellField(h, 'Command timeout (ms)', '5000')
+  await stageShellField(h, 'Command timeout', '5000')
   await clickPainted(h, 'Save [S]', true)
   await settle(h, 12)
   const batches = h.shellExecutionBatches()
@@ -4862,14 +4868,14 @@ test('the real Root Shell short grant completes the whole pointer journey', asyn
   assert.match(h.view(), /Settings · Tools · Shell execution/u)
   wheel(h, 4, 20, true)
   await settle(h, 4)
-  await clickPainted(h, 'Output cap per stream (bytes)')
+  await clickPainted(h, 'Output cap per stream')
   await clickPainted(h, 'Edit [Enter]', true)
   await h.vt.waitForRender()
   await key(h, '\x15')
   for (const character of '128000') await key(h, character)
   await clickPainted(h, 'Stage [Enter]', true)
   await h.vt.waitForRender()
-  assert.match(h.view(), /128000 bytes/u, 'the staged draft is painted')
+  assert.match(h.view(), /128 kB/u, 'the staged draft is painted')
   wheel(h, 4, 20, true) // the short browse scrolls under the wheel to its facts
   await settle(h, 2)
   // The 44x8 dirty bar drops Details; its REAL body action stays reachable.
@@ -4926,7 +4932,7 @@ test('the Shell short group leaves on its compact pointer actions and closes by 
   await h.vt.waitForRender()
   await clickPainted(h, 'Keep [Esc]', true)
   await h.vt.waitForRender()
-  assert.match(h.view(), /Output cap per stream \(bytes\)\s+128000 bytes/u, 'Keep retains the exact selected draft')
+  assert.match(h.view(), /Output cap per stream\s+128 kB/u, 'Keep retains the exact selected draft')
   // Pointer Discard and leave really retires the group to Rows, no write.
   await key(h, '\x1b')
   await h.vt.waitForRender()
@@ -4951,7 +4957,7 @@ test('the Shell group is reachable through the real medium and narrow entries', 
   assert.match(medium.view(), /Settings · Tools · Shell execution/u)
   assert.match(medium.view(), /Host model-tool executor · Windows PowerShell/u)
   await key(medium, '\t') // the Shell group's Tab is a LOCAL field move, never the Root's
-  assert.match(medium.view(), /^.*> Output cap per stream \(bytes\)/mu, 'Tab moves the field selection inside the group')
+  assert.match(medium.view(), /^.*> Output cap per stream/mu, 'Tab moves the field selection inside the group')
   assert.match(medium.view(), /Settings · Tools · Shell execution/u, 'the Root never takes the grouped Tab')
   medium.dispose()
 
@@ -4960,7 +4966,7 @@ test('the Shell group is reachable through the real medium and narrow entries', 
   const narrow = setup({ columns: 44, rows: 20, shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 } })
   await openShellGroup(narrow, 'enter')
   assert.match(narrow.view(), /Settings · Tools · Shell execution/u)
-  assert.match(narrow.view(), /Command timeout \(ms\)/u)
+  assert.match(narrow.view(), /Command timeout/u)
   await key(narrow, '\x1b[B')
   await key(narrow, '\r')
   await narrow.vt.waitForRender()
@@ -12503,7 +12509,11 @@ test('an enabled Host paints the runtime actions and states both authorities sep
   assert.match(frame, /Current Host/u)
   assert.match(frame, /Serving\s+Enabled/u)
   assert.match(frame, /Access\s+This machine · 127\.0\.0\.1/u)
-  assert.match(frame, /Actions/u)
+  const webLines = frame.split('\n')
+  const webIndex = (needle: string): number => webLines.findIndex(line => line.includes(needle))
+  assert.ok(webIndex('Access') < webIndex('Open in browser')
+    && webIndex('Open in browser') < webIndex('Next Host Start'),
+    'the runtime actions follow the Current Host facts and precede the next-start section')
   assert.match(frame, /Open in browser/u)
   assert.match(frame, /Copy access link\s+Contains a sign-in token/u)
   assert.match(frame, /Disable Web…\s+Stops serving; does not revoke access/u)
@@ -12576,7 +12586,7 @@ test('Disable Web… requires the in-page confirmation; Cancel performs zero wri
   await key(h, '\r')
   await settle(h)
   const confirm = webUiPlain(h)
-  assert.match(confirm, /Stop serving the Web UI\? Existing browser credentials and sessions are not revoked\./u,
+  assert.match(webUiFlat(h), /Stop serving the Web UI\? Existing browser credentials and sessions are not revoked\./u,
     'the exact confirm sentence is painted in full')
   assert.match(confirm, /> Disable Web/u)
   assert.match(confirm, /Cancel/u)
@@ -13342,7 +13352,7 @@ test('Host → ACP access reaches the same page and its Esc ladder returns Rows 
   const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'enabled' } })
   await openAcpAccess(h)
   assert.match(h.view(), /Settings · Host · ACP access/u)
-  assert.match(h.view(), /> Copy client command/u, 'the enabled Host focuses Copy first')
+  assert.match(h.view(), /> Disable ACP…/u, 'the enabled Host focuses its runtime primary first')
   await key(h, '\x1b')
   await settle(h)
   assert.match(h.view(), /Settings · Host · Rows/u, 'page Esc returns the Host Rows level')
@@ -13363,8 +13373,13 @@ test('an enabled Host paints the runtime actions, the preference and the client 
   assert.match(frame, /Current Host/u)
   assert.match(frame, /Listener\s+Enabled/u)
   assert.match(frame, /Access\s+Local IPC · Same OS user/u)
-  assert.match(frame, /Actions/u)
-  assert.match(frame, /> Copy client command/u)
+  const acpLines = frame.split('\n')
+  const acpIndex = (needle: string): number => acpLines.findIndex(line => line.includes(needle))
+  assert.ok(acpIndex('Access') < acpIndex('Next Host Start')
+    && acpIndex('Next Host Start') < acpIndex('Client Setup')
+    && acpIndex('Client Setup') < acpIndex('Copy client command'),
+    'Current Host, Next Host Start and Client Setup keep one visual order with Copy beside its command')
+  assert.match(frame, /> Disable ACP…/u, 'the real runtime primary owns the first focus')
   assert.match(frame, /Disable ACP…\s+Disconnects active ACP clients/u)
   assert.match(frame, /Next Host Start/u)
   assert.match(frame, /Start automatically\s+Off \(default\) · Change…/u)
@@ -13558,7 +13573,7 @@ test('a Host A → B replacement repaints the new listener fact and re-reads bef
   await settle(h, 12)
   assert.ok(h.acpStatusReads() > readsBefore, 'the replacement Host is re-read')
   assert.match(acpAccessPlain(h), /Listener\s+Enabled/u, 'the new Host fact replaces the old one')
-  assert.match(acpAccessPlain(h), /> Copy client command/u, 'only the new Host\'s state admits its action')
+  assert.match(acpAccessPlain(h), /> Disable ACP…/u, 'only the new Host\'s state admits its action')
   assert.deepEqual(h.acpEnabledWrites(), [], 'the rollover itself writes nothing')
   h.dispose()
 })
@@ -13571,7 +13586,7 @@ test('the ACP access page is a real Detail tenant: parent panes stay readable, o
   assert.match(frame, /Rows \(\d+\)/u, 'the parent Rows stay readable')
   assert.match(frame, /\[Details\]/u, 'the Detail column owns the ONE active device')
   assert.match(frame, /Current Host/u, 'the tenant body owns the Detail cells')
-  assert.match(frame, /> Copy client command/mu, 'the page owns the ONE primary cursor')
+  assert.match(frame, /> Disable ACP…/mu, 'the page owns the ONE primary cursor')
   const acpRow = h.rowsPlain().find(line => /ACP access\s+Live listener · next Host start/u.test(line))
   assert.ok(acpRow !== undefined, `the parent ACP row must stay painted:\n${h.view()}`)
   assert.ok(!acpRow.startsWith('>'), 'the parent selection is passive context (no second cursor)')
@@ -14159,7 +14174,7 @@ test('the single-value Agent tenant keeps its geometry, input and Esc across the
     await key(shell, '\r')
     await settle(shell)
     assert.match(shell.view(), /Settings · Tools · Shell execution/u, `custom/${iconStyle}: the grouped tenant chrome stays`)
-    assert.match(shell.view(), /Command timeout \(ms\)\s+60000 ms/u)
+    assert.match(shell.view(), /Command timeout\s+60 s/u)
     assert.match(shell.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
     shell.dispose()
   }

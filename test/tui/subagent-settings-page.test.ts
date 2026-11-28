@@ -242,7 +242,7 @@ test('the grouped Subagent tenant browses four fields and opens the editor only 
   assert.match(plain, /Model selection/u)
   assert.match(plain, /Enabled\s+Off/u)
   assert.match(plain, /Allowed models\s+0 routes/u)
-  assert.match(plain, /Changes are staged until Save\./u)
+  assert.match(plain, /Edit values, then Save to apply\./u)
   assert.doesNotMatch(plain, /Value:\s/u, 'no editor opens on entry')
   assert.match(barLine(frame), /Edit \[Enter\].*Details \[\?\].*Back \[Esc\]/u)
 
@@ -1094,34 +1094,34 @@ test('the grouped Shell tenant browses both fields and opens the editor only on 
   let frame = h.page.render(80)
   let plain = frame.map(strip).join('\n')
   assert.match(plain, /Host model-tool executor · POSIX Bash/u, 'the real source fact heads the group')
-  assert.match(plain, /^> Command timeout \(ms\)\s+60000 ms\s*$/mu, 'the FIRST field is selected with its canonical value and unit')
-  assert.match(plain, /^ {2}Output cap per stream \(bytes\)\s+64000 bytes\s*$/mu, 'the second field is painted with its unit')
+  assert.match(plain, /^> Command timeout\s+60 s\s*$/mu, 'the FIRST field is selected with its canonical value and unit')
+  assert.match(plain, /^ {2}Output cap per stream\s+64 kB\s*$/mu, 'the second field is painted with its unit')
   assert.doesNotMatch(plain, /Value:/u, 'entering the group never opens the raw Input')
   const bar = strip(frame.at(-1) ?? '')
   assert.match(bar, /Edit \[Enter\] · Details \[\?\] · Refresh \[R\] · Back \[Esc\]/u)
-  assert.match(plain, /Changes are staged until Save\./u)
+  assert.match(plain, /Edit values, then Save to apply\./u)
   assert.match(plain, /New shell executions use the caps; a running subprocess keeps its\s+current timeout\./u)
   assert.doesNotMatch(plain, /Status: Ready/u, 'a clean group paints no permanent Ready banner')
 
   // A field row click only SELECTS; the editor needs the explicit Edit route.
   frame = h.page.render(80)
-  clickNumericRow(h.page, frame, numericRowIndex(frame, 'Output cap per stream (bytes)'), 80, 'Output cap per stream (bytes)')
+  clickNumericRow(h.page, frame, numericRowIndex(frame, 'Output cap per stream'), 80, 'Output cap per stream')
   frame = h.page.render(80)
   plain = frame.map(strip).join('\n')
-  assert.match(plain, /^> Output cap per stream \(bytes\)\s+64000 bytes\s*$/mu, 'the clicked field is only selected')
+  assert.match(plain, /^> Output cap per stream\s+64 kB\s*$/mu, 'the clicked field is only selected')
   assert.doesNotMatch(plain, /Value:|Edit Output cap/u, 'a field click never starts the editor')
 
   // Up/Down clamp at the boundaries; Tab/Shift+Tab wrap across the two fields.
   h.page.handleInput(DOWN)
-  assert.match(h.page.render(80).map(strip).join('\n'), /^> Output cap per stream \(bytes\)/mu, 'Down at the last field clamps')
+  assert.match(h.page.render(80).map(strip).join('\n'), /^> Output cap per stream/mu, 'Down at the last field clamps')
   h.page.handleInput(TAB)
-  assert.match(h.page.render(80).map(strip).join('\n'), /^> Command timeout \(ms\)/mu, 'Tab wraps to the first field')
+  assert.match(h.page.render(80).map(strip).join('\n'), /^> Command timeout/mu, 'Tab wraps to the first field')
   h.page.handleInput(SHIFT_TAB)
-  assert.match(h.page.render(80).map(strip).join('\n'), /^> Output cap per stream \(bytes\)/mu, 'Shift+Tab wraps backwards')
+  assert.match(h.page.render(80).map(strip).join('\n'), /^> Output cap per stream/mu, 'Shift+Tab wraps backwards')
   h.page.handleInput(UP)
-  assert.match(h.page.render(80).map(strip).join('\n'), /^> Command timeout \(ms\)/mu, 'Up walks to the previous field')
+  assert.match(h.page.render(80).map(strip).join('\n'), /^> Command timeout/mu, 'Up walks to the previous field')
   h.page.handleInput(UP)
-  assert.match(h.page.render(80).map(strip).join('\n'), /^> Command timeout \(ms\)/mu, 'Up at the first field clamps')
+  assert.match(h.page.render(80).map(strip).join('\n'), /^> Command timeout/mu, 'Up at the first field clamps')
 
   // The explicit Enter/Edit opens the CURRENT field's Input, and Cancel keeps
   // the browse (and any draft) untouched.
@@ -1133,7 +1133,7 @@ test('the grouped Shell tenant browses both fields and opens the editor only on 
   assert.match(plain, /Value: 60000/u)
   assert.match(plain, /Stage \[Enter\] · Cancel \[Esc\]/u)
   h.page.handleInput(ESC)
-  assert.match(h.page.render(80).map(strip).join('\n'), /^> Command timeout \(ms\)/mu, 'Cancel returns to the browse')
+  assert.match(h.page.render(80).map(strip).join('\n'), /^> Command timeout/mu, 'Cancel returns to the browse')
   assert.ok(h.page.paintedBarSpans().some(span => span.id === 'bar:edit'))
   assert.deepEqual(h.writes, [])
   h.page.dispose()
@@ -1149,8 +1149,8 @@ test('a grouped Stage keeps the draft local and ONE Save dispatches the whole pa
   h.page.handleInput(ENTER)
   let frame = h.page.render(80)
   let plain = frame.map(strip).join('\n')
-  assert.match(plain, /^> Command timeout \(ms\)\s+45000 ms\s*$/mu, 'the staged candidate is painted for the selected field')
-  assert.match(plain, /Current: 60000 ms · Unsaved/u, 'the served Current stays distinguishable from the draft')
+  assert.match(plain, /^> Command timeout\s+45 s\s*$/mu, 'the staged candidate is painted for the selected field')
+  assert.match(plain, /Current: 60 s · Unsaved/u, 'the served Current stays distinguishable from the draft')
   assert.match(plain, /1 unsaved change · Shell execution/u)
   assert.equal(h.writes.length, 0, 'Stage never dispatches a Host write')
   assert.ok(h.page.paintedBarSpans().some(span => span.id === 'bar:save'))
@@ -1165,8 +1165,8 @@ test('a grouped Stage keeps the draft local and ONE Save dispatches the whole pa
   h.page.handleInput(ENTER)
   frame = h.page.render(80)
   plain = frame.map(strip).join('\n')
-  assert.match(plain, /^> Output cap per stream \(bytes\)\s+128000 bytes\s*$/mu)
-  assert.match(plain, /Current: 64000 bytes · Unsaved/u)
+  assert.match(plain, /^> Output cap per stream\s+128 kB\s*$/mu)
+  assert.match(plain, /Current: 64 kB · Unsaved/u)
   assert.match(plain, /2 unsaved changes · Shell execution/u)
   assert.match(plain, /Save \[S\]/u)
   assert.equal(h.writes.length, 0, 'two local stages still write nothing')
@@ -1184,7 +1184,7 @@ test('a grouped Stage keeps the draft local and ONE Save dispatches the whole pa
   assert.deepEqual(h.effective(), { timeoutMs: 45_000, maxOutputBytes: 128_000 })
   plain = h.page.render(80).map(strip).join('\n')
   assert.match(plain, /^Saved\s*$/mu)
-  assert.match(plain, /^> Output cap per stream \(bytes\)/mu, 'the SAME group stays mounted with its field selection')
+  assert.match(plain, /^> Output cap per stream/mu, 'the SAME group stays mounted with its field selection')
   assert.doesNotMatch(plain, /Save \[S\]|unsaved change/u, 'a verified group advertises no second Save')
   assert.deepEqual(h.actions, [], 'Save never navigates by itself')
   h.page.dispose()
@@ -1244,7 +1244,7 @@ test('the grouped Stage is a real stage: empty/invalid text keeps its error and 
     assert.match(plain, /Value:\s*/u, 'the raw Input stays open (no implicit Reset)')
     assert.deepEqual(h.writes, [], `${JSON.stringify(text)} never dispatches`)
     h.page.handleInput(ESC) // Cancel the refused Input (the staged field stays)
-    assert.match(h.page.render(80).map(strip).join('\n'), /Output cap per stream \(bytes\)\s+128000 bytes/u,
+    assert.match(h.page.render(80).map(strip).join('\n'), /Output cap per stream\s+128 kB/u,
       'the other staged field is preserved')
   }
 
@@ -1256,7 +1256,7 @@ test('the grouped Stage is a real stage: empty/invalid text keeps its error and 
     for (const character of text) h.page.handleInput(character)
     h.page.render(80)
     h.page.handleInput(ENTER)
-    assert.match(h.page.render(80).map(strip).join('\n'), new RegExp(`> Command timeout \\(ms\\)\\s+${canonical.replace('.', '\\.')} ms`, 'u'))
+    assert.match(h.page.render(80).map(strip).join('\n'), new RegExp(canonical === '1000' ? '> Command timeout\\s+1 s' : `> Command timeout\\s+${canonical.replace('.', '\\.')} ms`, 'u'))
   }
   // A normal stage equal to the SERVED value removes only this field's patch:
   // with the other field still dirty the group never claims "no changes".
@@ -1309,8 +1309,8 @@ test('the grouped Advanced stages the SELECTED field reset without a confirmatio
 
   h.page.handleInput('x')
   plain = h.page.render(80).map(strip).join('\n')
-  assert.match(plain, /^> Output cap per stream \(bytes\)\s+Reset staged\s*$/mu, 'the selected field stages the official unset')
-  assert.match(plain, /Current: 64000 bytes · Unsaved/u, 'Reset staged is NOT the inherited value')
+  assert.match(plain, /^> Output cap per stream\s+Reset staged\s*$/mu, 'the selected field stages the official unset')
+  assert.match(plain, /Current: 64 kB · Unsaved/u, 'Reset staged is NOT the inherited value')
   assert.match(plain, /1 unsaved change · Shell execution/u, 'an equal-valued Reset is still a real dirty intent')
   assert.equal(h.writes.length, 0, 'Reset staging never dispatches')
 
@@ -1358,7 +1358,7 @@ test('the grouped dirty leave question offers Save, Discard and leave and Keep; 
   // Keep returns to the browse with the draft.
   h.page.handleInput(ESC)
   plain = h.page.render(80).map(strip).join('\n')
-  assert.match(plain, /^> Command timeout \(ms\)\s+45000 ms\s*$/mu)
+  assert.match(plain, /^> Command timeout\s+45 s\s*$/mu)
   assert.deepEqual(h.actions, [], 'Keep stays on the page')
 
   // Esc -> question -> Save saves and STAYS (never chases the leave target).
@@ -1488,7 +1488,7 @@ test('a pending grouped save blocks the exit and never repaints a closed page', 
 test('a stale grouped pointer press cannot open an editor on a newer painted frame', async () => {
   const h = await startedNumeric()
   const frame = h.page.render(80)
-  const row = numericRowIndex(frame, 'Command timeout (ms)')
+  const row = numericRowIndex(frame, 'Command timeout')
   assert.equal(h.page.handleMouse(mouse('press', 1, row, 80, frame.length))?.handled, true)
   h.page.handleInput(DOWN) // a repaint with a new semantic identity
   const next = h.page.render(80)
@@ -1496,12 +1496,12 @@ test('a stale grouped pointer press cannot open an editor on a newer painted fra
   assert.doesNotMatch(h.page.render(80).map(strip)[0] ?? '', /Edit Command timeout/u)
   // The stale release never re-selected the pressed field; the explicit DOWN
   // selection stands, and a FRESH click selects the other field.
-  assert.match(h.page.render(80).map(strip).join('\n'), /^> Output cap per stream \(bytes\)/mu,
+  assert.match(h.page.render(80).map(strip).join('\n'), /^> Output cap per stream/mu,
     'the stale release never moved the selection')
   const fresh = h.page.render(80)
-  const firstRow = numericRowIndex(fresh, 'Command timeout (ms)')
-  clickNumericRow(h.page, fresh, firstRow, 80, 'Command timeout (ms)')
-  assert.match(h.page.render(80).map(strip).join('\n'), /^> Command timeout \(ms\)/mu,
+  const firstRow = numericRowIndex(fresh, 'Command timeout')
+  clickNumericRow(h.page, fresh, firstRow, 80, 'Command timeout')
+  assert.match(h.page.render(80).map(strip).join('\n'), /^> Command timeout/mu,
     'a fresh click selects the first field')
   h.page.dispose()
 })
@@ -1622,7 +1622,7 @@ test('the grouped browse stays truthful when the section is unavailable, unreada
   page.setMaxRows(8)
   await Promise.resolve()
   await Promise.resolve()
-  assert.match(page.render(80).map(strip).join('\n'), /Current: 60000|Command timeout \(ms\)\s+60000 ms/u)
+  assert.match(page.render(80).map(strip).join('\n'), /Current: 60000|Command timeout\s+60 s/u)
   revision = 2
   const stale = page.render(80).map(strip).join('\n')
   assert.match(stale, /Last-known · Host model-tool executor/u, 'an external edit is never painted as the current row')
@@ -1640,7 +1640,7 @@ test('the grouped zero-body grant keeps only Back and never changes the field', 
   for (const data of [TAB, SHIFT_TAB, UP, DOWN, ENTER, '\r', 'x', 's', 'd', 'r', '?']) h.page.handleInput(data)
   assert.deepEqual(h.writes, [], 'no hidden action may write')
   h.page.setMaxRows(12)
-  assert.match(h.page.render(80).map(strip).join('\n'), /^> Output cap per stream \(bytes\)/mu,
+  assert.match(h.page.render(80).map(strip).join('\n'), /^> Output cap per stream/mu,
     'the field selection was never changed by a hidden body key')
   h.page.dispose()
 })
@@ -1651,8 +1651,8 @@ test('44x8 keeps the second field, its Reset and the dirty leave actions reachab
   h.page.handleInput(DOWN)
   let frame = h.page.render(44)
   let plain = frame.map(strip).join('\n')
-  assert.match(plain, /^> Output cap per stream \(bytes\)/mu, 'the second field is revealed at the short grant')
-  assert.match(plain, /64000 bytes/u, 'its canonical value and unit stay whole')
+  assert.match(plain, /^> Output cap per stream/mu, 'the second field is revealed at the short grant')
+  assert.match(plain, /64 kB/u, 'its canonical value and unit stay whole')
   h.page.handleInput('?')
   frame = h.page.render(44)
   assert.doesNotMatch(frame.map(strip).join('\n'), /Reset to inherited…/u,
@@ -1670,9 +1670,9 @@ test('44x8 keeps the second field, its Reset and the dirty leave actions reachab
   h.page.handleInput('x')
   frame = h.page.render(44)
   plain = frame.map(strip).join('\n')
-  assert.match(plain, /^> Output cap per stream \(bytes\)/mu)
+  assert.match(plain, /^> Output cap per stream/mu)
   assert.match(plain, /Reset staged/u)
-  assert.match(plain, /Current: 64000 bytes · Unsaved/u,
+  assert.match(plain, /Current: 64 kB · Unsaved/u,
     'the short grant keeps the staged reset, the served Current and the dirty count or block')
   h.page.handleInput(ESC)
   frame = h.page.render(44)
@@ -1744,8 +1744,8 @@ test('a grouped Reset staged inside its own callback stays local to the selected
   assert.ok(reentered, 'the callback really ran inside the reset stage')
   assert.equal(h.writes.length, 0, 'a local Reset never writes inside its own callback')
   const plain = h.page.render(80).map(strip).join('\n')
-  assert.match(plain, /Output cap per stream \(bytes\)\s+Reset staged/u, 'the exact SELECTED field stages the unset')
-  assert.match(plain, /Command timeout \(ms\)\s+60000 ms/u, 'the sibling field is untouched')
+  assert.match(plain, /Output cap per stream\s+Reset staged/u, 'the exact SELECTED field stages the unset')
+  assert.match(plain, /Command timeout\s+60 s/u, 'the sibling field is untouched')
   assert.match(plain, /1 unsaved change/u)
   h.page.handleInput('s')
   await h.drain()
@@ -2438,9 +2438,9 @@ test('44x8 paints the SECOND field and its complete Reset target stages THAT fie
   clickNumericRow(h.page, frame, resetRow, 44, 'Reset to inherited…')
   frame = h.page.render(44)
   const plain = frame.map(strip).join('\n')
-  assert.match(plain, /^> Output cap per stream \(bytes\)/u)
+  assert.match(plain, /^> Output cap per stream/u)
   assert.match(plain, /Reset staged/u, 'the painted second-field Reset target stages THAT field')
-  assert.match(plain, /Current: 64000 bytes · Unsaved/u)
+  assert.match(plain, /Current: 64 kB · Unsaved/u)
   assert.deepEqual(h.writes, [])
   h.page.dispose()
 })
@@ -2598,8 +2598,8 @@ test('an unconfirmed grouped outcome keeps the captured row truthful and offers 
   assert.match(plain, /^Could not confirm save\s*$/mu)
   assert.match(plain, /The change may have been saved\. Refresh and check\./u)
   assert.match(plain, /Last-known · Host model-tool executor · POSIX Bash/u, 'the old row is named last-known')
-  assert.match(plain, /Last confirmed: 60000 ms · Unsaved/u, 'the captured value is not painted as Current')
-  assert.doesNotMatch(plain, /Current: 60000 ms/u)
+  assert.match(plain, /Last confirmed: 60 s · Unsaved/u, 'the captured value is not painted as Current')
+  assert.doesNotMatch(plain, /Current: 60 s/u)
   assert.doesNotMatch(strip(frame.at(-1) ?? ''), /Save \[S\]/u, 'no blind retry is published')
   assert.doesNotMatch(plain, /Discard…/u, 'an ambiguous outcome has no ordinary local discard')
   assert.match(strip(frame.at(-1) ?? ''), /Refresh \[R\] · Back \[Esc\]/u)
@@ -2624,7 +2624,7 @@ test('an unconfirmed grouped outcome keeps the captured row truthful and offers 
   await h.drain()
   frame = h.page.render(80)
   plain = frame.map(strip).join('\n')
-  assert.match(plain, /^> Command timeout \(ms\)\s+45000 ms\s*$/mu, 'the refresh reads the new served row')
+  assert.match(plain, /^> Command timeout\s+45 s\s*$/mu, 'the refresh reads the new served row')
   assert.doesNotMatch(plain, /Last-known · /u, 'no stale tag survives a successful refresh')
   assert.doesNotMatch(strip(frame.at(-1) ?? ''), /Save \[S\]/u, 'a refresh does not replay the lost Save')
   // A NEW explicit edit/stage/save is required.
@@ -2717,7 +2717,7 @@ test('a refused grouped Save is read-only until Refresh, and its local Discard s
   assert.match(plain, /refresh to review\./u)
   assert.match(plain, /Last-known · Host model-tool executor · POSIX Bash/u,
     'a refused capture is not reprinted as the current row')
-  assert.match(plain, /Last confirmed: 60000 ms · Unsaved/u)
+  assert.match(plain, /Last confirmed: 60 s · Unsaved/u)
   assert.doesNotMatch(strip(frame.at(-1) ?? ''), /Save \[S\]|Edit \[Enter\]/u, 'a refused capture publishes no retry/edit')
   assert.match(strip(frame.at(-1) ?? ''), /Refresh \[R\] · Back \[Esc\]/u)
   const discardRow = numericRowIndex(frame, 'Discard…')
@@ -2780,7 +2780,7 @@ test('a legal draft with trailing whitespace still requires a readable sent valu
   assert.match(plain, /45000 ms/u)
   assert.match(strip(frame.at(-1) ?? ''), /Stage \[Enter\]/u)
   h.page.handleInput(ENTER)
-  assert.match(h.page.render(80).map(strip).join('\n'), /45000 ms/u)
+  assert.match(h.page.render(80).map(strip).join('\n'), /> Command timeout\s+45 s/u)
   assert.deepEqual(h.writes, [])
   h.page.dispose()
 })

@@ -901,7 +901,8 @@ test('the page toggles the live listener through ONE Host write and repaints the
   assert.match(h.view(), /Listener\s+Enabled/u)
   assert.match(h.view(), /Copy client command/u)
   assert.match(h.view(), /Disable ACP…/u)
-  await key(h, DOWN) // Copy -> Disable ACP…
+  // The verified enable retires the vanished `Enable` row and the runtime
+  // Disable verb is the page's first focus.
   assert.match(h.view(), /> Disable ACP…/mu)
   await key(h, ENTER) // stage the confirmation only
   assert.match(h.view(), /Disable the local ACP listener\?/u)
@@ -982,6 +983,7 @@ test('the Copy action is the proven Profile command and never reaches the Host',
   const h = setup({ status: { state: 'enabled' }, profile: 'work profile' })
   await openHostRows(h)
   await openAcpAccess(h)
+  await highlightRow(h, 'Copy client command')
   assert.match(h.view(), /> Copy client command/mu)
   assert.match(h.view(), /dsh --profile 'work profile' acp stdio/u)
   const readsBefore = h.acp.reads
@@ -1023,7 +1025,7 @@ test('a Host replacement during the live preflight is a definitive zero-write No
   assert.deepEqual(h.acp.setEnabledCalls, [], 'no Host write was invoked before the preflight settled')
   h.releaseAcpReads()
   await settle(h, 'the replacement Host fact', frame => /Listener\s+Enabled/u.test(frame))
-  assert.match(h.view(), /> Copy client command/mu, 'the replacement Host state owns the action')
+  assert.match(h.view(), /> Copy client command/mu, 'the retained Client-local Copy stays a valid selection')
   assert.deepEqual(h.acp.setEnabledCalls, [], 'the stale preflight reply never dispatches')
   h.dispose()
 })
@@ -1038,7 +1040,7 @@ test('a Host generation change repaints the new Host fact and never reuses the o
   h.bumpGeneration()
   await settle(h, 'the new Host fact', frame => /Listener\s+Enabled/u.test(frame))
   assert.deepEqual(h.acp.setEnabledCalls, [], 'the rollover itself writes nothing')
-  assert.match(h.view(), /> Copy client command/mu, 'the new Host offers its own enabled-state action')
+  assert.match(h.view(), /> Disable ACP…/mu, 'the new Host offers its own enabled-state action')
   h.dispose()
 })
 

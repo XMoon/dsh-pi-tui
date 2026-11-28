@@ -489,6 +489,71 @@ test('Probe reaches the Host once and cancels a restart that y executes exactly 
   assert.deepEqual(h.settingsMutateCalls, [])
 })
 
+test('a short real MCP Detail admits a secondary verb only after its complete label paints', async () => {
+  const h = setup({ columns: 44, rows: 8 })
+  await openMcpPage(h)
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  assert.match(h.view(), /Edit \[E\]/u, 'the config-owned primary owns the physical bar')
+  assert.doesNotMatch(h.view(), /Probe \[P\]/u, 'the secondary body verb starts below the short first screen')
+  const before = h.manager.probes.length
+  await press(h.vt, 'p')
+  await frames(h.vt)
+  await flushOwnedTurns()
+  assert.equal(h.manager.probes.length, before, 'an unpainted secondary key performs no probe')
+
+  for (let step = 0; step < 20 && !/Probe \[P\]/u.test(h.view()); step += 1) {
+    await press(h.vt, '\x1b[6~')
+    await frames(h.vt, 1)
+    await flushOwnedTurns()
+  }
+  assert.match(h.view(), /Probe \[P\]/u, 'the existing Detail scroll reveals the complete verb')
+  await press(h.vt, 'p')
+  await frames(h.vt)
+  await flushOwnedTurns()
+  assert.equal(h.manager.probes.length, before + 1, 'the painted verb reaches its existing Host probe sink')
+  assert.deepEqual(h.settingsMutateCalls, [])
+})
+
+test('a narrow Detail keeps the body Refresh fallback when the actual bar drops it', async () => {
+  const h = setup({ columns: 100, rows: 40 })
+  await openMcpPage(h)
+  // Select the retained gamma row; its only legal action is Refresh + Back.
+  await press(h.vt, '\x1b[B')
+  await press(h.vt, '\x1b[B')
+  await press(h.vt, '\r')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  const normal = h.view()
+  assert.equal((normal.match(/Refresh \[R\]/gu) ?? []).length, 1,
+    `the normal bar already supplies Refresh, so the body does not duplicate it:\n${normal}`)
+  const subscriptions = h.manager.watchSubscriptions
+
+  // The real 20-column bar cannot paint Refresh + Back + separator; the
+  // physical Refresh segment drops whole while the body fallback remains.
+  h.vt.resize(20, 40)
+  await frames(h.vt, 4)
+  await flushOwnedTurns()
+  const narrowLines = h.view().split('\n')
+  assert.doesNotMatch(narrowLines.at(-1)!, /Refresh \[R\]/u, 'the narrow physical bar drops the whole Refresh segment')
+  assert.match(narrowLines.at(-1)!, /Back \[Esc\]/u, 'Back remains the real escape')
+  for (let step = 0; step < 20 && !/Refresh \[R\]/u.test(h.view().split('\n').slice(0, -1).join('\n')); step += 1) {
+    await press(h.vt, '\x1b[6~')
+    await frames(h.vt, 1)
+    await flushOwnedTurns()
+  }
+  assert.match(h.view().split('\n').slice(0, -1).join('\n'), /Refresh \[R\]/u,
+    'the complete body fallback is reachable by the existing scroll')
+  await press(h.vt, 'r')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  assert.equal(h.manager.watchSubscriptions, subscriptions + 1,
+    'the painted body fallback reaches the existing refresh/watch sink once')
+  assert.deepEqual(h.manager.probes, [])
+  assert.deepEqual(h.manager.restarts, [])
+  assert.deepEqual(h.settingsMutateCalls, [])
+})
+
 test('closing and reopening the page leaves ONE active watch and starts a new one', async () => {
   const h = setup()
   await openMcpPage(h)
@@ -606,11 +671,15 @@ test('the mounted Detail keeps the FR3 p/x actions beside the new CRUD actions',
   await press(h.vt, '\r') // focus the Detail region
   await frames(h.vt)
   const bar = lastLine(h)
-  assert.match(bar, /Probe \[P\]/u)
-  assert.match(bar, /Restart \[X\]/u)
+  // The physical bar keeps the ONE primary business verb and Back; every other
+  // legal verb lives in the nearby body group exactly once.
   assert.match(bar, /Edit \[E\]/u)
-  assert.match(bar, /Enable\/Disable \[T\]/u)
-  assert.match(bar, /Delete \[D\]/u)
+  assert.match(bar, /Back \[Esc\]/u)
+  assert.doesNotMatch(bar, /Probe \[P\]|Restart \[X\]|Enable\/Disable \[T\]|Delete \[D\]/u)
+  assert.match(h.view(), /Probe \[P\]/u)
+  assert.match(h.view(), /Restart \[X\]/u)
+  assert.match(h.view(), /Enable\/Disable \[T\]/u)
+  assert.match(h.view(), /Delete \[D\]/u)
   // The saved transport now comes from the same configuration descriptor.
   assert.match(h.view(), /Saved transport: stdio/u)
 })
@@ -1019,18 +1088,26 @@ test('a replacement manager cannot reuse the painted admission of an identical t
   if (configA.kind !== 'ready' || configB.kind !== 'ready') assert.fail('both descriptors must be ready')
   assert.notEqual(configA.generation, configB.generation)
   assert.equal(configA.revision, configB.revision, 'same revision is deliberate')
-  // Paint the OLD admitted question frame again. This is a stale PAINT, not an
-  // unpainted grant transition: B's state exists while A's frame is on screen,
-  // exactly the reuse this case forbids.
-  page.render = () => oldFrame
-  h.app.requestRender()
-  await frames(h.vt, 2)
+  // The fresh normal Detail frame is current; the toggle verb may sit below
+  // the first viewport, so scroll to its complete label before admitting `t`.
+  for (let step = 0; step < 20 && !/Enable\/Disable \[T\]/u.test(h.view()); step += 1) {
+    await press(h.vt, '\x1b[6~')
+    await frames(h.vt, 1)
+  }
+  assert.match(h.view(), /Enable\/Disable \[T\]/u, 'the toggle body verb is painted before its key')
+  // Start B's own question. Then paint the OLD A question over it: a stale
+  // PAINT, not an unpainted grant transition, is exactly the reuse this case
+  // forbids.
   h.vt.sendInput('t')
   const questionB = controller.snapshot().configConfirm!
   assert.equal(questionB.kind, questionA.kind)
   assert.equal(questionB.name, questionA.name)
   assert.equal(questionB.capturedRevision, questionA.capturedRevision)
   assert.notEqual(questionB.question, questionA.question, 'a replacement question is a fresh instance')
+
+  page.render = () => oldFrame
+  h.app.requestRender()
+  await frames(h.vt, 2)
 
   // B has not painted. The old admitted A facts must authorise neither key nor
   // the Root's old Confirm cells, even though name/revision/consequence match.
@@ -1606,6 +1683,13 @@ test('a press armed against a stale painted bar frame is refused', async t => {
   await flushOwnedTurns()
   assert.equal((page as unknown as { pointerFrameCurrent: () => boolean }).pointerFrameCurrent(), false,
     'the painted frame is stale while B is already current')
+  // The SAME stale-frame fence applies to the relocated keyboard verb: the old
+  // A frame still shows Probe, but B is already the current subject.
+  h.vt.sendInput('p')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  assert.deepEqual(h.manager.probes, [], 'the stale frame never probes Host A')
+  assert.deepEqual(managerB.probes, [], 'the stale frame never probes Host B')
   // A press on the OLD painted span must not be recorded at all.
   sgrMouse(h, 'press', probe.col, probe.row)
   // The paint catches up, then the release resolves: nothing may run.

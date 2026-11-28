@@ -935,7 +935,7 @@ interface DetailProjection {
   readonly lines: readonly string[]
   readonly content: readonly string[]
   readonly viewport: number
-  readonly buttons: readonly { readonly button: DetailButton; readonly startCol: number }[]
+  readonly buttons: readonly { readonly button: DetailButton; readonly startCol: number; readonly row: number }[]
   /** The candidate rows the choice projection really painted, as offsets inside
    *  the granted viewport: only these may publish an `option` hit target. */
   readonly optionRows: readonly { readonly value: string; readonly line: number; readonly endCol: number }[]
@@ -3149,12 +3149,11 @@ export class SettingsWorkspacePanel implements Component {
       detailProjection = detail
       this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
       this.paintedServiceInstallActions = detail.serviceInstallActionsVisible
-      const buttonRow = contentTop + Math.max(0, contentRows - 1)
       for (const painted of detail.buttons) {
         itemHits.push({
           kind: painted.button.verb,
           id: painted.button.id,
-          row: buttonRow,
+          row: contentTop + painted.row,
           startCol: pane.x + painted.startCol,
           endCol: pane.x + painted.startCol + visibleWidth(painted.button.text),
         })
@@ -3299,12 +3298,11 @@ export class SettingsWorkspacePanel implements Component {
         },
       }),
     }
-    const buttonRow = bodyTop + Math.max(0, viewport - 1)
     for (const painted of detail.buttons) {
       targets.push({
         kind: painted.button.verb,
         id: painted.button.id,
-        row: buttonRow,
+        row: bodyTop + painted.row,
         startCol: painted.startCol,
         endCol: painted.startCol + visibleWidth(painted.button.text),
       })
@@ -3371,11 +3369,11 @@ export class SettingsWorkspacePanel implements Component {
     // remainder is then handed to the (truncatable) value, right-aligned.
     const lead = truncateToWidth(`${cursor}${sanitizedPhysicalLine(row.label)}`, width, '…', false)
     const leadCells = visibleWidth(lead)
-    const summaryCellRoom = Math.max(0, width - leadCells - 1)
+    const summaryCellRoom = Math.max(0, width - leadCells - 2)
     const value = summaryCellRoom >= 1
       ? truncateToWidth(sanitizedPhysicalLine(row.summary), summaryCellRoom, '…', false)
       : ''
-    const gap = Math.max(1, width - leadCells - visibleWidth(value))
+    const gap = Math.max(2, width - leadCells - visibleWidth(value))
     const pad = ' '.repeat(gap)
     // The cursor is the row's FIRST two cells whenever they survive truncation.
     const cursorText = leadCells >= 2 ? lead.slice(0, 2) : ''
@@ -3402,10 +3400,9 @@ export class SettingsWorkspacePanel implements Component {
     const includeTitle = this.currentLayout() !== 'narrow'
     const buttons = row === undefined ? [] : this.detailButtons(row)
     // A row without a write channel says so instead of looking editable. The
-    // note is NOT a button and grants nothing: it keeps its own pinned row
-    // when the row has no action left to carry it. The decoration is dropped
-    // WHOLE when it does not fit — a half-cut note would read as a different
-    // statement.
+    // note is NOT a button and grants nothing: it follows the primary facts in
+    // the same scroll region. The decoration is dropped WHOLE when it does not
+    // fit — a half-cut note would read as a different statement.
     const note =
       // SUX-01/02: a hosted numeric row's own explicit entries already state
       // what is possible; a generic "read-only here" note would contradict them.
@@ -3419,31 +3416,72 @@ export class SettingsWorkspacePanel implements Component {
             // that a candidate exists when none does.
             ? 'read-only here · no candidate is available right now'
             : ''
-    const noteAloneFits = buttons.length === 0 && note !== '' && visibleWidth(note) <= width
-    const pinned = (buttons.length > 0 || noteAloneFits) && viewport >= 2 ? 1 : 0
-    const scrollViewport = Math.max(0, viewport - pinned)
+    const noteLine = buttons.length === 0 && note !== '' && visibleWidth(note) <= width
+      ? color.textMuted(note)
+      : undefined
     const directPage = this.categoryId === 'models'
       ? 'Models'
       : this.categoryId === 'account'
         ? 'Account'
         : 'this page'
-    const content = row === undefined
+    const projection = row === undefined
       // Two DIFFERENT absences: a direct category has no Rows level at all, while
       // a configuration category whose rows are all unavailable has no
       // SELECTABLE row (never "press Enter to open a page" — it has none).
       // BOTH go through the width-fitted wording so a narrow frame never paints
       // a truncated sentence.
-      ? [isDirectCategory(this.categoryId)
-          ? color.textDim(this.fittedLine(`This category is a direct page entry. Press Enter or Right to open ${directPage}.`, width, [
-            'Direct page. Press Enter to open.',
-            'Direct page.',
-          ]))
-          : color.textDim(this.fittedLine(
-            'No setting is available in this category right now.',
-            width,
-            ['No setting is available.', 'None available.'],
-          ))]
+      ? {
+          lines: [isDirectCategory(this.categoryId)
+            ? color.textDim(this.fittedLine(`This category is a direct page entry. Press Enter or Right to open ${directPage}.`, width, [
+              'Direct page. Press Enter to open.',
+              'Direct page.',
+            ]))
+            : color.textDim(this.fittedLine(
+              'No setting is available in this category right now.',
+              width,
+              ['No setting is available.', 'None available.'],
+            ))],
+          primaryCount: 1,
+        }
       : this.detailContent(row, width, includeTitle)
+    const projectionLines = [...projection.lines]
+    if (noteLine !== undefined) projectionLines.splice(Math.min(projection.primaryCount, projectionLines.length), 0, noteLine)
+    const content = projectionLines
+    // Normal browse: when the real content AND the existing action row fit the
+    // grant, the actions follow the primary facts directly (secondary prose
+    // follows, padding last). A long projection keeps the original bounded
+    // reserved action row and its scroll extent.
+    const flowActions = buttons.length > 0
+      && this.serviceInstall === undefined
+      && viewport >= 2
+      && content.length + 1 <= viewport
+    if (flowActions) {
+      const actionRow = Math.min(projection.primaryCount, content.length)
+      const painted = this.layoutButtons(width, buttons)
+      const noteInk = note === '' ? '' : color.textMuted(note)
+      const decorated = painted.text === '' ? noteInk : noteInk === '' ? painted.text : `${painted.text}  ${noteInk}`
+      const actionLine = fit(visibleWidth(decorated) <= width ? decorated : painted.text, width)
+      const lines = [
+        ...content.slice(0, actionRow),
+        actionLine,
+        ...content.slice(actionRow),
+      ]
+      while (lines.length < viewport) lines.push('')
+      // A fit grant has no scroll extent. Do not carry a previous short
+      // grant's offset back into the next shrinking frame.
+      this.detailOffset = 0
+      return {
+        lines,
+        content,
+        viewport,
+        buttons: painted.painted.map(entry => ({ ...entry, row: actionRow })),
+        optionRows: [],
+        confirmCandidateVisible: false,
+        serviceInstallActionsVisible: false,
+      }
+    }
+    const pinned = buttons.length > 0 && viewport >= 2 ? 1 : 0
+    const scrollViewport = Math.max(0, viewport - pinned)
     const offset = Math.min(Math.max(0, this.detailOffset), Math.max(0, content.length - scrollViewport))
     this.detailOffset = offset
     const lines: string[] = []
@@ -3492,7 +3530,7 @@ export class SettingsWorkspacePanel implements Component {
       lines,
       content,
       viewport: scrollViewport,
-      buttons: painted.painted,
+      buttons: painted.painted.map(entry => ({ ...entry, row: scrollViewport })),
       optionRows: [],
       confirmCandidateVisible: false,
       serviceInstallActionsVisible,
@@ -3537,7 +3575,7 @@ export class SettingsWorkspacePanel implements Component {
       }
       if (previousFactRows !== factRows || previousOptionRows !== optionViewport) this.detailOffset = 0
     }
-    const factContent = [...warningLines, ...this.detailContent(row, width, false, true)]
+    const factContent = [...warningLines, ...this.detailContent(row, width, false, true).lines]
     const factMaxOffset = Math.max(0, factContent.length - factRows)
     this.detailOffset = Math.min(Math.max(0, this.detailOffset), factMaxOffset)
     if (warning === undefined || this.detailOffset + factRows >= warningLines.length) {
@@ -3588,7 +3626,7 @@ export class SettingsWorkspacePanel implements Component {
       lines,
       content: factContent,
       viewport: factRows,
-      buttons: painted.painted,
+      buttons: painted.painted.map(entry => ({ ...entry, row: lines.length - 1 })),
       optionRows,
       ...(factRows === 0 ? {} : {
         factRegion: { lineStart: 0, rows: factRows, maxOffset: factMaxOffset },
@@ -3879,9 +3917,16 @@ export class SettingsWorkspacePanel implements Component {
     }
   }
 
-  private detailContent(row: SettingsWorkspaceRow, width: number, includeTitle: boolean, inlineChoice = false): string[] {
+  private detailContent(
+    row: SettingsWorkspaceRow,
+    width: number,
+    includeTitle: boolean,
+    inlineChoice = false,
+  ): { lines: string[]; primaryCount: number } {
     const labelWidth = width >= 26 ? 12 : 8
     const bodyWidth = Math.max(1, width - labelWidth)
+    const fieldWidth = Math.min(bodyWidth, 64)
+    const proseWidth = Math.min(bodyWidth, 72)
     const lines: string[] = []
     // The follow-up block range is recomputed per projection (it may be absent).
     this.serviceInstallBlock = undefined
@@ -3894,23 +3939,24 @@ export class SettingsWorkspacePanel implements Component {
       value: string,
       ink: (text: string) => string = color.textDim,
       compact = false,
+      room = fieldWidth,
     ): void => {
       const head = fit(color.textDim(label), labelWidth)
       const escaped = escapedPhysicalLine(value)
       if (compact) {
-        const clipped = truncateToWidth(escaped, bodyWidth, '…', false)
+        const clipped = truncateToWidth(escaped, room, '…', false)
         lines.push(head + ink(clipped))
-        if (visibleWidth(escaped) > bodyWidth) {
+        if (visibleWidth(escaped) > room) {
           const fullLabel = `Full ${label.toLowerCase()}`
           const fullHead = fit(color.textDim(fullLabel), labelWidth)
-          const wrapped = wrapTextWithAnsi(escaped, bodyWidth)
+          const wrapped = wrapTextWithAnsi(escaped, room)
           const parts = wrapped.length === 0 ? [''] : wrapped
           fullFacts.push(fullHead + ink(parts[0]!))
           for (const extra of parts.slice(1)) fullFacts.push(' '.repeat(labelWidth) + ink(extra))
         }
         return
       }
-      const wrapped = wrapTextWithAnsi(escaped, bodyWidth)
+      const wrapped = wrapTextWithAnsi(escaped, room)
       const parts = wrapped.length === 0 ? [''] : wrapped
       lines.push(head + ink(parts[0]!))
       for (const extra of parts.slice(1)) lines.push(' '.repeat(labelWidth) + ink(extra))
@@ -3925,6 +3971,8 @@ export class SettingsWorkspacePanel implements Component {
       const body = reason === undefined
         ? paint(word)
         : `${paint(escapedPhysicalLine(word))}${color.textDim(` · ${escapedPhysicalLine(reason)}`)}`
+      // A settlement reason is primary exception information: it keeps the
+      // full pane width instead of the ordinary field cap.
       const wrapped = wrapTextWithAnsi(body, bodyWidth)
       const parts = wrapped.length === 0 ? [''] : wrapped
       lines.push(head + parts[0]!)
@@ -3948,15 +3996,15 @@ export class SettingsWorkspacePanel implements Component {
     } else {
       field('Value', row.summary, color.text)
     }
-    if (row.value !== undefined && row.value !== row.summary) field('Source', row.value)
+    if (row.value !== undefined && row.value !== row.summary) field('Source', row.value, color.textDim, false, bodyWidth)
     if (row.extensionOwner !== undefined) {
       // C2-R6: the registration's own facts. The Owner is the raw FULL owner
       // identity and the ID the raw registry id — never a display-name guess.
       // A registration with no selectable values is READ-ONLY and states it; a
       // current value outside the registered choices is reported instead of
       // being silently replaced or auto-selected.
-      field('Owner', row.extensionOwner)
-      field('ID', extensionSettingIdOf(row.id))
+      field('Owner', row.extensionOwner, color.textDim, false, bodyWidth)
+      field('ID', extensionSettingIdOf(row.id), color.textDim, false, bodyWidth)
       if (edit === undefined) field('Choices', 'No selectable values registered')
       else if (!edit.options.some(option => option.current)) field('Choices', 'Current value is not in selectable choices')
     }
@@ -3995,10 +4043,23 @@ export class SettingsWorkspacePanel implements Component {
       }
       if (edit.options.length === 0) field('Choice', 'No candidate is available for this setting right now.')
     }
+    // Abnormal currentness and its necessary reason are PRIMARY facts: a fit
+    // grant must not put a read-only Open/Details action before the fact that
+    // explains why this row is stale/unavailable. Normal scope/description
+    // stay secondary and follow the actions.
+    const abnormalFreshness = row.freshness === 'last-known'
+      || row.freshness === 'unavailable'
+      || row.freshness === 'read-error'
+    if (abnormalFreshness) {
+      field('Freshness', freshnessText(row, this.snapshot.configReadiness))
+      if (row.freshness === 'read-error' && this.snapshot.readIssue !== undefined) {
+        field('Issue', this.snapshot.readIssue, color.textDim, false, bodyWidth)
+      }
+    }
+    const primaryCount = lines.length
     field('Scope', row.scope)
-    field('Freshness', freshnessText(row, this.snapshot.configReadiness))
-    field('Description', row.description)
-    if (row.freshness === 'read-error' && this.snapshot.readIssue !== undefined) field('Issue', this.snapshot.readIssue)
+    if (!abnormalFreshness) field('Freshness', freshnessText(row, this.snapshot.configReadiness))
+    field('Description', row.description, color.textDim, false, proseWidth)
     // M6 UX PR2: the ONE transient service-install follow-up, painted inside
     // the SAME Detail lease. The explanation and the truthfulness line are the
     // frozen copy; the actable candidate rows exist ONLY while the command
@@ -4062,7 +4123,7 @@ export class SettingsWorkspacePanel implements Component {
       // `detailLines` only when the WHOLE block (risk copy + both rows) really
       // lands on screen.
     }
-    return lines
+    return { lines, primaryCount }
   }
 
   /**

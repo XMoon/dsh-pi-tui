@@ -540,7 +540,8 @@ test('the page opened while DISCONNECTED settles Unreadable and recovers on conn
   assert.match(h.frame(), /Serving\s+Unavailable/u)
   assert.match(h.frame(), /the Client is not connected to a Host/u)
   assert.doesNotMatch(h.frame(), /Reading the Host Web state…/u)
-  assert.match(h.frame(), /Actions\s*\n\s+Refresh/u, 'the settled page offers Refresh')
+  assert.match(h.frame(), /the Client is not connected to a Host\s+Refresh/u,
+    'the settled page offers Refresh beside the runtime facts')
   assert.match(h.bar(), /Refresh \[R\] · Back \[Esc\]/u)
   assert.equal(h.reads(), 1)
   assert.equal(h.writes().length, 0, 'a disconnected page offers no Host action')

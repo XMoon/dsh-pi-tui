@@ -373,6 +373,11 @@ export class ModelsWorkspacePage implements Component {
   private requestRender: () => void
   private readonly onOpenAccount: () => void
   private view: ModelsView = { kind: 'list' }
+  /** SUX-09: ordinary browse reading width and proximity apply only to the
+   *  normal home/provider/reference/records surfaces. Protected confirmations,
+   *  active authorization and the add/review flows keep their original pinned
+   *  placement and full-width exact facts. */
+  private ordinaryReading = true
   private providerRows: readonly ModelsProviderRow[] = []
   private account: ModelsAccountSummary = { available: false }
   private readonly credentialStates = new Map<string, ModelsCredentialState>()
@@ -2065,18 +2070,20 @@ export class ModelsWorkspacePage implements Component {
         this.paintedRowIds.add(target.id)
       }
     }
-    while (lines.length < height - 1 - actionLines.length) lines.push(fit('', width))
+    const pinned = !this.ordinaryReading
+    if (pinned) while (lines.length < height - 1 - actionLines.length) lines.push(fit('', width))
     lines.push(...actionLines.map(line => fit(line, width)))
     for (const [index, action] of projection.actions.entries()) {
       targets.push({
         kind: 'action',
         id: action.id,
-        row: height - 1 - actionLines.length + index,
+        row: pinned ? height - 1 - actionLines.length + index : lines.length - actionLines.length + index,
         startCol: 0,
         endCol: width,
       })
       if (action.enabled) this.paintedActionIds.add(action.id)
     }
+    while (lines.length < height - 1) lines.push(fit('', width))
     lines.push(this.actionBar(width, projection.actions))
     this.paintedTargets = targets
     return this.pad(lines, height, width)
@@ -2136,7 +2143,16 @@ export class ModelsWorkspacePage implements Component {
     return id === undefined || target === undefined ? undefined : target
   }
 
+  private protectedActionLayout(): boolean {
+    return this.pendingMutation()
+      || this.view.kind === 'add-catalog'
+      || this.view.kind === 'add-provider'
+      || this.view.kind === 'review'
+      || this.view.kind === 'logout'
+  }
+
   private project(width: number): Projection {
+    this.ordinaryReading = !this.protectedActionLayout()
     this.rowIds.clear()
     this.rowTargets.clear()
     this.rowOrder.length = 0
@@ -2338,17 +2354,21 @@ export class ModelsWorkspacePage implements Component {
     const standalone = this.isStandaloneSignIn(row)
     const content: string[] = [color.textStrong(`${standalone ? 'Sign-in' : 'Provider'} · ${sanitizedPhysicalLine(row.label)}`), '']
     content.push(...this.fact(standalone ? 'Sign-in key' : 'Route', standalone ? (row.key ?? '—') : row.route, width))
-    if (standalone && row.route !== '') content.push(...this.fact('Route', row.route, width))
+    if (row.route !== '' && standalone) content.push(...this.fact('Route', row.route, width))
+    const state = this.credentialStateOf(row)
     if (!standalone) {
       content.push(...this.fact('Profile', row.profile.configured ? 'configured' : 'not configured', width))
+      content.push(...this.fact('Auth kind', row.kind === 'authorization' ? 'provider-native authorization' : 'API key reference', width))
+      content.push(...this.fact('Credential', credentialWord(state, row.kind, this.presenceIsStale()).word, width))
+      content.push('', color.textDim('Credential presence only — not a connection test.'))
       content.push(...this.fact('API protocol', row.profile.api ?? 'unknown', width))
       content.push(...this.fact('Endpoint', row.profile.baseURL ?? 'unknown', width))
       content.push(...this.fact('Models', row.profile.models.length === 0 ? 'none listed' : row.profile.models.join(', '), width))
+    } else {
+      content.push(...this.fact('Auth kind', row.kind === 'authorization' ? 'provider-native authorization' : 'API key reference', width))
+      content.push(...this.fact('Credential', credentialWord(state, row.kind, this.presenceIsStale()).word, width))
+      content.push('', color.textDim('Credential presence only — not a connection test.'))
     }
-    content.push(...this.fact('Auth kind', row.kind === 'authorization' ? 'provider-native authorization' : 'API key reference', width))
-    const state = this.credentialStateOf(row)
-    content.push(...this.fact('Credential', credentialWord(state, row.kind, this.presenceIsStale()).word, width))
-    content.push('', color.textDim('Credential presence only — not a connection test.'))
     if (this.auth !== undefined && this.auth.targetIdentity === row.identity) {
       content.push('', color.textStrong('Sign-in'))
       content.push(color.text(sanitizedPhysicalLine(this.auth.status ?? this.auth.phase)))
@@ -2420,13 +2440,22 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private fact(label: string, value: string, width: number): string[] {
-    const bodyWidth = Math.max(1, width - LABEL_WIDTH)
+    // Ordinary browse fields read in at most 64 cells; protected states keep
+    // their original full-width exact identities/errors.
+    const bodyWidth = Math.max(1, (this.ordinaryReading ? Math.min(width, 64) : width) - LABEL_WIDTH)
     const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(value), bodyWidth)
     const parts = wrapped.length === 0 ? [''] : wrapped
     return [
       `${fit(color.textDim(sanitizedPhysicalLine(label)), LABEL_WIDTH)}${color.text(parts[0]!)}`,
       ...parts.slice(1).map(extra => `${' '.repeat(LABEL_WIDTH)}${color.text(extra)}`),
     ]
+  }
+
+  /** Ordinary explanatory prose wraps at no more than 72 cells; long public
+   *  identities/URLs and authoritative error text keep their existing grant. */
+  private prose(value: string, width: number, ink: (text: string) => string): string[] {
+    const room = this.ordinaryReading ? Math.min(width, 72) : width
+    return wrapTextWithAnsi(sanitizedPhysicalLine(value), Math.max(1, room)).map(line => ink(line))
   }
 
   private projectReference(width: number): Projection {
@@ -2436,14 +2465,14 @@ export class ModelsWorkspacePage implements Component {
     content.push(...this.fact('Reference', view.ref, width))
     content.push(...this.fact('Stored', this.referenceConfigured === undefined ? 'reading…' : this.referenceConfigured ? 'Configured' : 'Not set', width))
     if (this.referenceStatus !== undefined) content.push(...this.fact('Status', this.referenceStatus, width))
-    content.push('', color.textDim('The value is written directly to the Host credential store; it is never shown, logged or written to the transcript. Verified requires the store to report the reference configured after the write.'))
+    content.push('', ...this.prose('The value is written directly to the Host credential store; it is never shown, logged or written to the transcript. Verified requires the store to report the reference configured after the write.', width, color.textDim))
     if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
     // The write waits for the store's own authoritative read of this exact
     // reference: until it answers, the previous presence is not a
     // confirmation. The action states WHY it is disabled.
     const mayWrite = this.referenceConfigured !== undefined
     if (!mayWrite) {
-      content.push('', color.textDim('The credential store has not answered for this reference — Configure waits for the authoritative read (press r).'))
+      content.push('', ...this.prose('The credential store has not answered for this reference — Configure waits for the authoritative read (press r).', width, color.textDim))
     }
     this.copyValue = view.ref
     const actions: ActionLine[] = []
@@ -2502,7 +2531,7 @@ export class ModelsWorkspacePage implements Component {
     content.push('', color.textDim(shownFilter === ''
       ? 'Type to narrow the list.'
       : `Filter: ${shownFilter} · ${available.length + signIns.length} match${available.length + signIns.length === 1 ? '' : 'es'}`))
-    content.push('', color.textDim('Browsing adds nothing. A provider is configured only by the operation you choose.'))
+    content.push('', ...this.prose('Browsing adds nothing. A provider is configured only by the operation you choose.', width, color.textDim))
     if (this.notice !== undefined) content.push(color.warning(sanitizedPhysicalLine(this.notice)))
     this.copyValue = undefined
     const actions: ActionLine[] = [
@@ -2617,15 +2646,15 @@ export class ModelsWorkspacePage implements Component {
     content.push(...this.fact('Display name', add.draft.displayName === '' ? add.draft.route : add.draft.displayName, width))
     content.push(...this.fact('Models', add.draft.models.join(', '), width))
     content.push(...this.fact('API key', add.draft.key === '' ? 'not stored (provider-native authentication)' : 'will be stored in the credential store', width))
-    content.push('', color.textDim('Create persists the provider profile; a stored key is a separate Host write whose failure is reported separately.'))
+    content.push('', ...this.prose('Create persists the provider profile; a stored key is a separate Host write whose failure is reported separately.', width, color.textDim))
     if (add.result !== undefined) content.push('', add.result.kind === 'created' ? color.success(sanitizedPhysicalLine(add.result.text)) : color.error(sanitizedPhysicalLine(add.result.text)))
     if (add.creating === true && add.result === undefined) {
-      content.push('', color.textMuted('Creating — one Host write at a time; Esc reports the in-flight write instead of leaving. The dispatched write is not retried.'))
+      content.push('', ...this.prose('Creating — one Host write at a time; Esc reports the in-flight write instead of leaving. The dispatched write is not retried.', width, color.textMuted))
     }
     // The disabled Create states WHY it is disabled: a muted label alone does
     // not tell the user what to do.
     if (add.result === undefined && this.readState !== 'ready') {
-      content.push('', color.textDim('The provider configuration is not current — Create waits for a fresh read (press r).'))
+      content.push('', ...this.prose('The provider configuration is not current — Create waits for a fresh read (press r).', width, color.textDim))
     }
     if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
     this.copyValue = undefined
@@ -2656,7 +2685,7 @@ export class ModelsWorkspacePage implements Component {
       }
       return { content, actions: [{ id: 'records:back', label: '← Back', enabled: true }] }
     }
-    if (records.recordCleanupUnavailable) content.push(color.warning('Stored credential records cannot be enumerated or removed on this backend.'))
+    if (records.recordCleanupUnavailable) content.push(...this.prose('Stored credential records cannot be enumerated or removed on this backend.', width, color.warning))
     for (const failure of records.referenceReadFailures) content.push(color.warning(`Reference read failed: ${sanitizedPhysicalLine(failure)}`))
     if (records.rows.length === 0) {
       content.push(color.textMuted('Nothing to sign out.'))
@@ -2701,7 +2730,7 @@ export class ModelsWorkspacePage implements Component {
       // A dispatched delete whose Host settlement was lost: neither success nor
       // failure, and never a reason to re-send it automatically.
       if (clear.reason !== undefined) content.push(color.textDim(sanitizedPhysicalLine(clear.reason)))
-      content.push(color.textDim('The Host may already have removed it. Reading the current Host once is the only next step.'))
+      content.push(...this.prose('The Host may already have removed it. Reading the current Host once is the only next step.', width, color.textDim))
     } else if (clear.phase === 'failed') {
       const reasonText = sanitizedPhysicalLine(clear.reason ?? 'the clear could not be verified')
       if (clear.failure === 'not-sent') content.push(color.error(`Not sent: ${reasonText}`))

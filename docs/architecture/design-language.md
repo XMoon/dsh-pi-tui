@@ -791,6 +791,27 @@ This contract therefore allows state facts on the bar under §7.1's shape rule, 
 that when the dedicated facts row *is* granted, the bar does not repeat it
 (the existing `facts.readingFacts` gate).
 
+### 7.4 Body actions and proximity
+
+The ONE physical Action Bar remains the last row. A surface's own contract
+decides whether its body scrolls with its business actions or reserves them;
+this section only fixes the common proximity vocabulary:
+
+- **Normal browse that fits its grant.** The business actions follow the primary
+  facts they act on, before optional secondary provenance/explanation prose;
+  padding comes last. Blank rows are never fabricated before the actions, and a
+  larger grant does not stretch the gap.
+- **A surface that does not fit keeps its existing policy**: a bounded reserved
+  action row where that surface already has one, or one scrolling body where it
+  does not. The fit/overflow switch must not move actions outside the grant,
+  drop a whole safety affordance, or change a protected confirmation/pending
+  layout. Each owning surface document states which fallback it uses.
+- **Only complete painted actions are pointer targets.** A surface may alias
+  its ONE physical-bar primary verb in the body where its owner allows it; the
+  no-duplicate rule for other verbs is surface-specific (MCP's one-primary bar
+  is owned by surface-settings, not by this general rule). Disabled, hidden,
+  clipped or stale cells stay inert.
+
 ## 8. Responsive degradation ladder
 
 Frozen order of what yields as space shrinks (both workspaces already follow it;

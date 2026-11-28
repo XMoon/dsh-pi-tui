@@ -331,6 +331,42 @@ test('clear requires the painted confirmation action and re-reads the store', as
   assert.match(viewText(page), /API key ACME_API_KEY cleared/u)
 })
 
+test('Models normal browse follows content; the protected clear keeps its pinned row and full identity', async () => {
+  const { source, calls } = fakeSource()
+  const normal = openWith(source, { view: 'provider', route: 'acme' }, 40)
+  await flush()
+  const normalLines = normal.render(100).map(stripTerminalSequences)
+  const labels = ['Configure API Key…', 'Clear stored credential…', 'View model config guide', '← Providers']
+  const firstAction = normalLines.findIndex(line => labels.some(label => line.includes(label)))
+  assert.ok(firstAction > 0)
+  assert.notEqual(normalLines[firstAction - 1]!.trim(), '', 'normal browse places the actions directly after content')
+  const oldPinned = 40 - 1 - labels.length
+  assert.ok(firstAction < oldPinned, 'the old pinned bottom location is now blank')
+  assert.equal(normalLines[oldPinned]!.trim(), '', 'no action occupies the old artificial bottom row')
+  const before = calls.length
+  normal.onCellPress(2, oldPinned)
+  normal.onCellClick(2, oldPinned)
+  assert.equal(calls.length, before, 'the old bottom row is not a business target')
+  normal.dispose()
+
+  const longRef = `ACME_${'X'.repeat(70)}`
+  const protectedPage = new ModelsWorkspacePage(source, () => {}, {
+    view: 'logout',
+    target: { kind: 'reference', ref: longRef, label: 'Acme' },
+  }, () => {})
+  protectedPage.setBodyHeight(24)
+  protectedPage.render(100)
+  await flush()
+  const protectedLines = protectedPage.render(100).map(stripTerminalSequences)
+  const clearRow = protectedLines.findIndex(line => line.includes('Clear credential'))
+  assert.ok(clearRow >= 0)
+  assert.equal(clearRow, 24 - 1 - 2, 'the protected clear keeps Clear + Back pinned to the physical bar')
+  assert.equal(protectedLines[clearRow - 1]!.trim(), '', 'the protected row remains separated from the facts')
+  const identity = protectedLines.find(line => line.includes('API key referen'))
+  assert.ok(identity !== undefined && identity.includes(longRef), `the protected exact identity keeps the full grant:\n${protectedLines.join('\n')}`)
+  protectedPage.dispose()
+})
+
 test('the Models account row opens the Account page instead of a provider flow', async () => {
   const { page, accountOpened } = open()
   await flush()
@@ -3116,7 +3152,8 @@ test('a pending reference write names Esc wait on the clipped fallback', async (
   const { source } = fakeSource()
   source.setReference = () => new Promise<void>(resolve => { resolveWrite = resolve })
   source.describeReference = async () => ({ configured: true })
-  const page = openWith(source, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, 24)
+  const pendingRef = `ACME_${'X'.repeat(70)}`
+  const page = openWith(source, { view: 'reference', ref: pendingRef, label: 'Acme Gateway' }, 24)
   await flush()
   viewText(page)
   const idleIdentity = page.gestureIdentity()
@@ -3127,6 +3164,10 @@ test('a pending reference write names Esc wait on the clipped fallback', async (
   page.handleInput('\r')
   page.handleInput('\r')
   await flush()
+
+  const pendingFrame = viewText(page, 200)
+  assert.ok(pendingFrame.split('\n').some(line => line.includes(pendingRef)),
+    'the held pending reference keeps its full-width exact identity while the write settles')
 
   page.setBodyHeight(2)
   const rows = viewText(page).split('\n')

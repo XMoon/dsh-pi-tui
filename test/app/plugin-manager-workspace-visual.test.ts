@@ -36,6 +36,20 @@ async function open(options: Parameters<typeof openWorkspace>[0] = {}): Promise<
 const rowOf = (harness: WorkspaceHarness, text: string): number =>
   harness.viewport().findIndex(line => plain([line]).includes(text))
 
+/** The DETAIL column of the painted frame as one whitespace-collapsed string.
+ *  A dual grant shares each physical row with the List column, so a prose
+ *  assertion must read only the column the sentence is painted in. */
+const detailColumn = (harness: WorkspaceHarness): string => {
+  const lines = harness.viewport().map(line => plain([line]))
+  if (!harness.panel.contentLayout().dual) return lines.join(' ').replace(/\s+/gu, ' ').trim()
+  // The focused pane header carries `[Details]`; the breadcrumb's own
+  // `Details` word must not be mistaken for the column origin.
+  const header = lines.findIndex(line => line.includes('[Details]'))
+  assert.ok(header >= 0, `the focused Details pane header must be painted:\n${harness.view()}`)
+  const start = Math.max(0, lines[header]!.indexOf('[Details]'))
+  return lines.map(line => line.slice(start)).join(' ').replace(/\s+/gu, ' ').trim()
+}
+
 const press = (harness: WorkspaceHarness, row: number, col: number): void => {
   harness.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`)
 }
@@ -358,12 +372,26 @@ test('CJK identities stay width-safe in the list and complete in Detail/copy', a
   await harness.waitForFrame()
   const detail = harness.view()
   assert.ok(detail.replace(/\s+/g, '').includes(longName), `the complete CJK identity is readable:\n${detail}`)
-  assert.match(detail.replace(/\s+/g, ''), /https:\/\/\*\*\*@example\.com\/foo\.git/, 'URL credentials are masked')
-  assert.doesNotMatch(detail, /secret/)
-  // The Detail opens at its top; one Down moves the action cursor and reveals
-  // the pinned-by-scroll action block at 44x20.
-  harness.vt.sendInput('\x1b[B')
-  await harness.waitForFrame()
+  // The ordinary Detail now places its action group right after Status; the
+  // Source facts (including the masked URL) stay reachable through the SAME
+  // existing Detail scroll.
+  let maskedSeen = false
+  let scrollPages = 0
+  while (!maskedSeen && scrollPages < 12) {
+    const text = harness.view()
+    maskedSeen = /https:\/\/\*\*\*@example\.com\/foo\.git/.test(text.replace(/\s+/g, ''))
+    if (maskedSeen) break
+    harness.vt.sendInput('\x1b[6~')
+    await harness.waitForFrame()
+    scrollPages += 1
+  }
+  assert.ok(maskedSeen, `URL credentials are masked:\n${harness.view()}`)
+  assert.doesNotMatch(harness.view(), /secret/)
+  // Back at the top the action group is already reachable at 44x20.
+  for (let page = 0; page < 12 && !/Actions/.test(harness.view()); page += 1) {
+    harness.vt.sendInput('\x1b[5~')
+    await harness.waitForFrame()
+  }
   const withActions = harness.view()
   assert.match(withActions, /Actions/, 'the action block is reachable at 44x20')
   assert.match(withActions, /(Back|Remove|Enable)/, 'an action is painted at 44x20')
@@ -499,31 +527,35 @@ test('the B11 surface/risk copy is fully readable (scrolled) at 80×24, 72×24 a
     await harness.waitForFrame()
     harness.vt.sendInput('\r')
     await harness.waitForFrame()
-    const gather = (): string => plain(harness.viewport())
-    for (let page = 0; page < 12 && !gather().includes('TUI surface'); page += 1) {
-      harness.vt.sendInput('\x1b[6~') // PgDn
-      await harness.waitForFrame()
-    }
-    assert.match(gather(), /TUI surface/u, `${columns}x${rows} exposes the surface fact via the existing Detail scroll`)
-    // The Detail legitimately grew (Host default-listing/update facts), so
-    // the paragraph's LAST line is the reachability target, not its first.
-    for (let page = 0; page < 12 && !gather().includes('guaranteed Job'); page += 1) {
+    // Read the Detail through its pages: the ordinary Detail now places its
+    // action group right after Status, so the capability copy is reached by
+    // the SAME existing scroll and can span a page break.
+    const pages: string[] = []
+    let riskInk: number | undefined
+    for (let page = 0; page < 12; page += 1) {
+      const lines = harness.viewport()
+      for (const line of lines) {
+        assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} capability copy never exceeds the width: ${JSON.stringify(line)}`)
+      }
+      pages.push(detailColumn(harness))
+      if (riskInk === undefined) {
+        const row = lines.findIndex(line => plain([line]).includes('May run multiple rounds'))
+        if (row >= 0) {
+          const col = plain([lines[row]!]).indexOf('May run multiple rounds')
+          riskInk = harness.vt.getCellFgRgb(row, col)
+        }
+      }
       harness.vt.sendInput('\x1b[6~')
       await harness.waitForFrame()
     }
-    const frame = gather().replace(/\s+/gu, ' ')
-    assert.match(frame, /ralph is a Host foreground tool/u)
-    // A dual List|Details frame interleaves the list column between the wrapped
-    // paragraph's rows, so the copy is matched with one bounded wildcard.
-    assert.match(frame, /May run multiple rounds and incur model cost\.[\s\S]{0,200}?No dedicated Ralph UI or guaranteed Job\./u)
-    for (const line of harness.viewport()) {
-      assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} capability copy never exceeds the width: ${JSON.stringify(line)}`)
-    }
+    const read = pages.join(' ').replace(/\s+/gu, ' ')
+    assert.match(read, /TUI surface ralph is a Host foreground tool; its workflow events and result use existing/u,
+      `${columns}x${rows} exposes the surface fact via the existing Detail scroll`)
+    assert.match(read, /result use existing Tool\/Activity views\./u)
+    assert.match(read, /Risk May run multiple rounds and incur model cost\./u)
+    assert.match(read, /No dedicated Ralph UI or guaranteed Job\./u)
     // The Risk fact keeps the semantic warning ink (not a text/dim token).
-    const riskRow = harness.viewport().findIndex(line => plain([line]).includes('May run multiple rounds'))
-    assert.ok(riskRow >= 0)
-    const riskCol = plain([harness.viewport()[riskRow]!]).indexOf('May run multiple rounds')
-    assert.equal(harness.vt.getCellFgRgb(riskRow, riskCol), hexToRgb(darkColors.warning),
+    assert.equal(riskInk, hexToRgb(darkColors.warning),
       `${columns}x${rows} paints the hazard in warning ink`)
     started.delete(harness)
     harness.app.dispose()
@@ -553,15 +585,18 @@ test('keeps its unverified host limit visible in the real Detail', async () => {
   await harness.waitForFrame()
   harness.vt.sendInput('\r')
   await harness.waitForFrame()
-  for (let page = 0; page < 12 && !plain(harness.viewport()).includes('Host activation is not qualified here.'); page += 1) {
+  // The ordinary Detail places its action group after Status, so the bounded
+  // capability facts are read through the existing Detail scroll across pages.
+  const pages: string[] = []
+  for (let page = 0; page < 12; page += 1) {
+    pages.push(detailColumn(harness))
     harness.vt.sendInput('\x1b[6~')
     await harness.waitForFrame()
   }
-  const frame = plain(harness.viewport()).replace(/\s+/gu, ' ')
-  // A dual List|Details frame interleaves the list column between the wrapped
-  // fact's rows, so the paragraph is matched with one bounded wildcard.
-  assert.match(frame, /Browser\/Node Inspector has no[\s\S]{0,200}?PiTui inspection page\./u)
-  assert.match(frame, /captureFetch may expose unredacted debugging data\.[\s\S]{0,200}?Host activation is not qualified here\./u)
+  const frame = pages.join(' ').replace(/\s+/gu, ' ')
+  assert.match(frame, /TUI surface Browser\/Node Inspector has no PiTui inspection page\./u)
+  assert.match(frame, /Risk Requires Web transport; captureFetch may expose unredacted debugging data\./u)
+  assert.match(frame, /Host activation is not qualified here\./u)
   assert.doesNotMatch(frame, /Host capability not yet qualified for TUI/u)
 })
 

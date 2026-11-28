@@ -4310,13 +4310,25 @@ function detailLines(detail: PluginDetailView, width: number, focused: boolean, 
   lines.push(fit(titleLine, width))
   lines.push(...wrapTextWithAnsi(sanitizedPhysicalLine(detail.card.name), width).map(line => color.textDim(line)))
   if (detail.card.official) lines.push(color.textMuted('Official DSH catalog entry'))
-  for (const group of detail.groups) {
+  const renderGroup = (group: (typeof detail.groups)[number]): void => {
     lines.push('')
     lines.push(color.textDim(group.title === 'Status' ? '‣ Status' : group.title))
     for (const fact of group.facts) {
-      lines.push(...factLines(fact.label, fact.value, fact.tone, width))
+      // Ordinary facts read in at most 64 cells and explanatory prose in at
+      // most 72; a long Source identity keeps the real grant. Wrapping never
+      // truncates the value.
+      const factWidth = group.title === 'Description'
+        ? Math.min(width, 72)
+        : fact.label === 'Source'
+          ? width
+          : Math.min(width, 64)
+      lines.push(...factLines(fact.label, fact.value, fact.tone, factWidth))
     }
   }
+  const status = detail.groups.find(group => group.title === 'Status')
+  const compatibility = detail.groups.find(group => group.title === 'Compatibility')
+  if (status !== undefined) renderGroup(status)
+  if (compatibility !== undefined) renderGroup(compatibility)
   const actions = detail.actions
   const actionLines: PaintedActionLine[] = []
   lines.push('')
@@ -4333,6 +4345,10 @@ function detailLines(detail: PluginDetailView, width: number, focused: boolean, 
       : color.textMuted(` — ${sanitizedPhysicalLine(action.reason)}`)
     actionLines.push({ value: action.value, line: lines.length })
     lines.push(fit(`${cursor}${label}${reason}`, width))
+  }
+  for (const group of detail.groups) {
+    if (group === status || group === compatibility) continue
+    renderGroup(group)
   }
   return { lines, actionLines }
 }

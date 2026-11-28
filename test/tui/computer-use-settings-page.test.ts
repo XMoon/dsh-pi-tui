@@ -205,6 +205,8 @@ test('a disabled bundle paints the truthful Disabled state and no permission que
   assert.match(text, /Disabled/u)
   assert.match(text, /Open Settings → Plugins/u, 'the Plugin recovery is the first explicit action')
   assert.doesNotMatch(text, /Accessibility: Not allowed/u)
+  assert.doesNotMatch(text, /^(?:Permissions|Authorization)$/mu,
+    'a non-ready Host paints no empty Permissions/Authorization heading')
   assert.deepEqual(mounted.calls, [], 'no cuaAccess read may run while the bundle is disabled')
   assert.equal(mounted.page.title, COMPUTER_USE_PAGE_TITLE)
   mounted.page.dispose()
@@ -232,6 +234,33 @@ test('the Overview paints Availability, both permissions and their exact actions
   mounted.page.dispose()
 })
 
+test('group headings stay attached and permission prose follows its actions', async () => {
+  const mounted = mount()
+  await settle(mounted, 'Bundle: Enabled')
+  const lines = mounted.render(120)
+  const text = lines.join('\n')
+  const row = (needle: string, from = 0): number => lines.findIndex((line, index) => index >= from && line.includes(needle))
+
+  const availability = row('Availability')
+  const permissions = row('Permissions')
+  const authorization = row('Authorization')
+  const applications = row('Application access')
+  assert.ok(availability >= 0 && permissions > availability && authorization > permissions && applications > authorization)
+  assert.match(lines[availability + 1]!, /Bundle: Enabled/u, 'Availability stays attached to its bundle fact')
+  assert.match(lines[permissions + 1]!, /Accessibility: Not allowed/u, 'Permissions stays attached to its first fact')
+  assert.match(lines[authorization + 1]!, /New Sessions:/u, 'Authorization stays attached to its fact')
+  assert.match(lines[applications + 1]!, /Applications:/u, 'Application access stays attached to its fact')
+
+  const accessibilityFact = row('Accessibility: Not allowed')
+  const request = row('Request permission', accessibilityFact)
+  const open = row('Open settings', accessibilityFact)
+  const explanation = row('Reads and operates UI controls.', accessibilityFact)
+  assert.ok(request > accessibilityFact && open > request && explanation > open,
+    'the optional permission prose follows its fact and both actions')
+  assert.match(text, /Reads and operates UI controls\./u)
+  mounted.page.dispose()
+})
+
 test('the 44x8 real grant keeps bundle/Host/first-missing/Request on the first screen', async () => {
   const mounted = mount({
     cua: { readSystemStatus: async () => ({ ...STATUS, accessibility: true, screenRecording: false }) },
@@ -246,6 +275,8 @@ test('the 44x8 real grant keeps bundle/Host/first-missing/Request on the first s
   assert.match(text, /Screen Recording: Not allowed/u)
   assert.match(text, /Request permission/u)
   assert.doesNotMatch(text, /Accessibility: Allowed/u, 'the short grant never spends its rows on the granted permission')
+  assert.doesNotMatch(text, /^(?:Availability|Permissions|Authorization|Application access)$/mu,
+    'a short grant omits the optional group headings instead of deferring orphaned labels')
   // The exact sink follows the MISSING permission (pointer-only, no keyboard).
   const requestRow = frame.findIndex(line => line.includes('Request permission'))
   const start = frame[requestRow]!.indexOf('Request permission')
