@@ -118,15 +118,14 @@ Prefer an existing narrow fixture and Node's own test runner. Avoid:
 
 A fake must implement exactly the capability the test exercises. A fake
 with MORE capabilities than the test uses makes the test look like it
-covers more than it does.
+covers more than it does. A shared fixture must have a real consumer.
 
 This rule is a REVIEW judgement, and it stays one: whether a fake exposes
 more capability than its consumer USES depends on what the test is trying
 to prove, which no static check can decide. A text scan of the test tree
 cannot decide it either — a mention in a comment is not a consumer, and an
 indirect consumer through another helper is not a text match — so the
-repository does not pretend to check it. `docs/guides/code-review.md` §2
-carries the question the reviewer answers.
+repository leaves these decisions to the reviewer.
 
 ### 5. Deterministic Async Testing
 
@@ -1055,7 +1054,6 @@ into shape the gate likes. Rule 4 in particular is NOT checked by a text
 scan of the test tree: a mention in a comment is not a consumer, and an
 indirect consumer through another helper is not a text match — a gate built
 on that would be a false assurance, which is worse than no gate.
-`docs/guides/code-review.md` §2 carries the question instead.
 
 ## 5. The operator tools
 
@@ -1081,4 +1079,3 @@ partial run can never produce a conclusion.
 - The release and packaging procedure: `docs/guides/releasing.md`.
 - The tmux and Tern-pane verification procedures:
   `docs/guides/tmux-testing.md`, `docs/guides/tern-pane-testing.md`.
-- The code-review procedure: `docs/guides/code-review.md`.

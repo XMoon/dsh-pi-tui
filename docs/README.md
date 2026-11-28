@@ -6,26 +6,46 @@ the canonical policy plus the index of every long-lived document.
 
 ## Policy (MUST)
 
-`docs/` contains ONLY durable, cross-version technical facts, current
-load-bearing architecture/behavior contracts, and reusable procedures. A
-contract may change between releases, but it must remain useful without being
-tied to one PR, milestone, run, branch SHA, or candidate version.
+Default to no new or expanded `docs/` content. The same admission rule applies
+to new files, new sections and added paragraphs in existing documents. The
+proposer must establish a concrete reader need that existing documentation or
+the authoritative source does not adequately meet. A fact being correct,
+durable or useful to implement the current PR is not sufficient.
 
-The positive/negative test for a proposed document or section:
+Admit only the minimum sufficient content for lasting behavior or architecture
+contracts, necessary design rationale, and reusable operating or development
+procedures that real readers need. A contract may change between releases, but
+must remain useful beyond one PR, milestone, run, branch SHA or candidate version.
 
-| Belongs in `docs/` | Does NOT belong in `docs/` (where it goes instead) |
-|---|---|
-| Session writer authority and lifecycle invariants | M3-DONE, S4-D2 progress, qualification ledgers → GitHub Issue/PR |
-| Durable JSONL / Session V2/V3 compatibility handling | An exact npm pairing table for one upgrade → release notes, compat matrix, changelog |
-| The terminal untrusted-text contract | Screenshots, failure dumps, benchmark milliseconds from one PR → PR or test artifacts |
-| How to run headless, tmux or Tern-pane smoke tests | A dated PASS record with counts/versions → CI or PR artifacts |
-| The SDK-vs-client evidence-tier principle | A one-off comparison of one SDK pin against upstream main → PR/investigation reference |
+Do not turn documentation into a maintained prose mirror of ordinary internal
+functions, types, state fields, call chains, file or registration lists, test
+rosters, or fixture/probe/receipt implementations. Describe necessary public
+interfaces, load-bearing invariants and procedural steps only to the extent
+needed to explain the contract or perform the procedure.
+
+Never add or retain implementation plans, milestone roadmaps, progress/TODO/debt
+trackers, PR/review/qualification ledgers, decisions awaiting approval, dated
+investigations, version-pinned measurements/screenshots/benchmarks, handoff
+notes, or generated/static copies of facts already owned by source, manifests,
+gates, tests, releases or GitHub issues/PRs. Use the existing authoritative
+carriers; do not create `docs/archive`, `docs/history`, `docs/plans` or
+`docs/evidence` as a workaround.
 
 Each long-lived fact has exactly ONE owning document. Link to it; never copy it.
 Source code, tests, manifests and machine-generated inventories remain the
-authority for implementation state. Update a repository document only when its
-durable contract or reusable procedure actually changes — not because a PR,
-milestone or review round progressed.
+authority for implementation state. Ordinary implementation changes, internal
+refactoring, module moves and test changes default to no documentation update
+when the lasting contract and reusable procedure are unchanged. Actual contract
+changes, incorrect descriptions and obsolete procedures must be corrected in
+their owning document. Change only the necessary portion, remove obsolete or
+duplicated text in the affected scope, and preserve unique load-bearing contracts.
+Do not expand unrelated sections or move redundant content into other long-lived
+documents.
+
+Planners must not prescribe documentation updates mechanically; executors must
+not expand them on their own. Reviewers requesting new or expanded documentation
+bear the same necessity burden as any other proposer. Reviewers must treat
+violations of this policy or unresolved documentation conflicts as merge blockers.
 
 ## STOP / Owner adjudication
 
@@ -98,7 +118,6 @@ MANDATORY or BLOCKING.
 
 | Path | Audience | What it owns |
 |---|---|---|
-| `guides/code-review.md` | contributors/reviewers | Repository review checkpoints, evidence tiers, documentation-policy gate, PR acceptance vs stage closure |
 | `guides/development.md` | contributors | Worktree policy, mise toolchain, npm/source DSH modes and runbooks, isolated profiles, doctor/bootstrap, source-build diagnosis, benchmark/replay method |
 | `guides/releasing.md` | ops | Versioning, bilingual changelog/README metadata, verification, tag and publication procedure |
 | `guides/tmux-testing.md` | contributors | When/how to verify in tmux, capture flow, Focus-replay and measurement procedures, traps |
@@ -132,10 +151,9 @@ MANDATORY or BLOCKING.
 
 ## How these documents evolve
 
-Record a decision and its rationale in the owning document at the same time as
-the behavior change. Write the rule and the *why*, not a walkthrough of the
-implementation. Keep a new fact in exactly one place: link, don't copy. English
-only, unless the user explicitly asks otherwise.
+Apply the admission policy above. Write the rule and the *why*, not a
+walkthrough of the implementation. English only, unless the user explicitly
+asks otherwise.
 
 For a documentation-only change or a new product behavior:
 
@@ -152,6 +170,3 @@ For a documentation-only change or a new product behavior:
 4. Run the repository documentation gate with `node scripts/docs-gate.mjs`
    (also part of `mise run check`), and review links, source-path claims and
    formatting. A green path/index check cannot prove the written semantics.
-5. Keep implementation plans, decisions requiring approval, run evidence and
-   historical comparison snapshots in the owning PR/Issue or external plan,
-   not in this long-lived documentation tree.
