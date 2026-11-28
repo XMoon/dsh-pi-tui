@@ -9,47 +9,30 @@ backend selection and Client detach contract remain in
 
 The basic daemon is an independent Host process. A public `daemon` cold start
 that finds no reusable authenticated Host brings one up without requiring any
-system service manager; the profile-scoped manager facts decide only OS
-supervision, never the Host business services, the authenticated carrier, the
-Session/Writer authority or readiness. Linux supports the verified systemd user
-unit; macOS supports an explicit user-level launchd LaunchAgent when one is
-installed for this Profile. Both managers are optional: with no installed
-service definition a cold start keeps the basic detached Host. Windows supports
-only the independent process: `status`, `start`, `stop`, `restart` and `logs`
-are available, there is no Windows service manager, and `install`/`uninstall`
-are explicitly `UNSUPPORTED_PLATFORM` before any scope or manager work. The
-Windows Host is a normal independent Host: a supported interactive daemon
-Client attaches to it exactly like on Linux/macOS, client exit never stops it,
-and only an explicit authenticated stop or real process failure ends it. ACP
-uses the same profile-scoped local endpoint as Linux/macOS, with a local Named
-Pipe on Windows (see [host-acp.md](./host-acp.md)); the runtime controls, stdio
-bridge and next-launch preference keep the same contract. The supported domain is native
-Windows 11 x64, an ordinary (non-elevated) user and an ordinary local fixed-NTFS
-profile path.
+system service manager. Manager facts govern only OS supervision, never Host
+business services, the carrier or Session/Writer authority. Linux supports
+optional systemd user supervision;
+macOS supports an explicit user-level launchd LaunchAgent. Windows supports
+only the independent process; the supported platform domain, kernel seats,
+authenticated carrier and attachment lifetime are defined by
+[the Host transport contract](./host-client.md#split-process-local-host-transport).
+The [daemon management commands](#daemon-management-commands) own the platform
+verb and exit contracts. ACP ingress remains owned by [host-acp.md](./host-acp.md).
 
 - **Manager vs. authentication authority.** The manager answers "how is the Host
   OS process supervised", never "is a Host ready". When a live Host is already
   reusable it is authenticated and reused before any manager work; the manager
   never replaces, adopts, kills or migrates a live Host (including a compatible
-  different build or one without a product service definition). Readiness remains the official
-  `/connect` Cookie + authenticated identity echo + the platform's exact kernel
-  identity handshake (Linux schema 1 `/proc` starttime, macOS schema 2 Darwin
-  identity, Windows schema 3 token SID + creation FILETIME).
+  different build or one without a product service definition). Readiness requires
+  the full
+  [authenticated Host identity handshake](./host-client.md#split-process-local-host-transport),
+  not a manager observation.
   A systemd `ActiveState=active` / `systemctl start` returning 0, or a launchd
   job whose `launchctl print` reports `state = running` / `kickstart` returning
   0, is only a submitted request, never `Ready`.
-- **Windows is process-only, with kernel seats and a per-instance stop Event.**
-  The Host and the short-lived management seat are `Global\` named mutexes
-  derived from the scope: a newly created mutex receives a protected owner-only
-  DACL, while an already existing named object is adopted only after its current
-  owner SID and DACL are proved (ACE shape is not a boundary). The same canonical
-  profile under another DSH home competes for the same Host seat.
-  `stop` opens the authenticated instance's exact process handle (token SID +
-  creation FILETIME must match the registry), opens that instance's native stop
-  Event, calls `SetEvent` once, and proves the original held handle terminal
-  before reporting `stopped`. There is no SIGTERM, `taskkill`,
-  `TerminateProcess`, PID lookup or second shutdown owner: the Event only
-  delivers the existing `requestStop`/official `runProfile.shutdown` path.
+- **Windows is process-only.** Its Host seat follows the Host transport
+  contract above; its separate admin seat and per-instance stop Event follow
+  the management contract below.
 - **The installed service definition is the ONLY manager-IO admission.** A
   public cold start first authenticates and reuses a live Host. Only when it
   must start one does it inspect whether THIS Profile has an installed service
@@ -101,13 +84,7 @@ profile path.
   existing file (a foreign service), the install refuses before any write or
   reload. Only a cached `FragmentPath` that is definitively missing (ENOENT —
   an obsolete cache of a removed file) may be reloaded away; an inaccessible or
-  otherwise unresolvable loaded source stays refused. Any post-write failure (a rejected
-  reload, a unit the manager still reports `not-found`, a post-reload state
-  query that itself fails, or a `FragmentPath` that does not adopt the fresh
-  file) removes exactly the file this install
-  created, so a failed install never leaves a poisoned unit that blocks the
-  basic daemon. The post-write `daemon-reload` plus the manager's real
-  `LoadState`/`FragmentPath` are the load authority. The initial definition is
+  otherwise unresolvable loaded source stays refused. The initial definition is
   created atomically as 0600 with
   no-overwrite, uses validated installation facts and minimal official
   environment anchors, carries no token, Cookie, secret, one-shot backend
@@ -120,9 +97,12 @@ profile path.
   historical install build too. A FRESHLY created unit always gets exactly one
   `daemon-reload` BEFORE any cached `LoadState`/`FragmentPath` check (even when
   the manager still caches an older definition at the same path), so a later
-  `start` can never dispatch a stale `ExecStart`; if that reload fails, the
-  freshly created file is removed so a retry is a fresh install rather than a
-  silent reuse of the cached unit. An existing loaded same-identity unit is not
+  `start` cannot dispatch a stale `ExecStart`. Only the post-reload
+  `LoadState`/`FragmentPath` proves the load. A rejected reload, failed
+  verification, `not-found` or foreign `FragmentPath` requires rollback of
+  exactly the file this install created; a failed rollback is reported as
+  failure, never silent reuse or removal of a replacement. An existing loaded
+  same-identity unit is not
   reloaded on reinstall, while an existing verified unit the manager has not
   loaded gets that one reload before `FragmentPath` verification. A foreign
   identity or mismatched canonical `FragmentPath` is
@@ -285,35 +265,6 @@ an unavailable log source, `5` busy/timeout/transition-uncertain. Errors print
 argv, absolute private paths, Cookies, tokens and Host URLs never reach
 stdout/stderr.
 
-### Headless Web CLI
-
-`dsh --profile pi-tui web status|enable|disable|url|open` is the ONE headless
-Web control grammar. It is nested under the same command, needs no interactive
-TTY, publishes one typed `web-control` intent to the same launcher row, and
-never resolves a Client artifact, opens a Direct/Remote TUI, creates a
-Session/Agent/Writer, replaces a Host or starts a Host. `web` and `web --help`
-are pure help and publish no service. The verbs are supported on Linux, macOS
-and Windows; `--session`, `--continue` and `--preset` are refused before any
-Host probe, in either argument position.
-
-Every verb operates on the official `profileContext` Profile and the current
-same-scope authenticated Host only: the read-only scope facts, official
-`/connect` Cookie, identity echo and fresh kernel identity are the same local
-authority `daemon status` uses. A missing/dead/unverifiable Host exits `3`
-with `HOST_NOT_RUNNING` / `HOST_IDENTITY_REFUSED` / `HOST_AUTH_FAILED`; none of
-the five verbs starts a Host. `status` prints one `web=<state>` line for any
-legal Host state and exits `0`; `enable`/`disable` print the Host-reached state
-(`0` only when it matches the request, `4` for a settled `unavailable`, `5`
-with `WEB_OUTCOME_UNCONFIRMED` for a still-changing or mismatched state), and a
-write whose response is lost is reported as unknown without any automatic
-retry. `url` prints exactly one official authenticated URL on stdout and
-nothing else; `open` asks the local OS opener on the CLI machine and reports
-only `browser=requested`, never that a Browser page loaded. The URL contains
-the Host's official launch token: it must be treated as a credential, is never
-logged or embedded in diagnostics, and the product offers no automatic expiry
-or revocation. The Host's own `PiTuiWebAccess` service remains the only Web
-state authority and the only mutation writer.
-
 - **Status is a pure read.** The management command performs no Host
   control-plane mutation: it does not create the profile run directory or a
   service definition, does not reload/start/stop the manager, starts no Host, Session, Agent
@@ -419,8 +370,9 @@ state authority and the only mutation writer.
   `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`, proves the same token SID
   and creation FILETIME, verifies the instance Event's existing-object private
   boundary, calls `SetEvent` once, and waits on the ORIGINAL held handle to become
-  terminal; it never sends SIGTERM, `taskkill` or `TerminateProcess`. A
-  `gone`/`different`/`unknown` observation, a replaced registry instance, a
+  terminal without reopening by PID; it never sends SIGTERM, `taskkill` or
+  `TerminateProcess`. A `gone`/`different`/`unknown` observation, a replaced
+  registry instance, a
   missing Event or a different process identity is refused without a signal.
   No platform invokes `readLinuxStarttime`/`/proc` or a Linux abstract admin
   seat on macOS, and Windows never invokes a POSIX `/proc`, UID or signal path.
@@ -573,6 +525,35 @@ state authority and the only mutation writer.
   cancels, replays or rolls back a pending business result. The CLI prints a
   stable line that current work may be interrupted and that unsettled writes are
   not replayed automatically.
+
+### Headless Web CLI
+
+`dsh --profile pi-tui web status|enable|disable|url|open` is the ONE headless
+Web control grammar. It is nested under the same command, needs no interactive
+TTY, publishes one typed `web-control` intent to the same launcher row, and
+never resolves a Client artifact, opens a Direct/Remote TUI, creates a
+Session/Agent/Writer, replaces a Host or starts a Host. `web` and `web --help`
+are pure help and publish no service. The verbs are supported on Linux, macOS
+and Windows; `--session`, `--continue` and `--preset` are refused before any
+Host probe, in either argument position.
+
+Every verb operates on the official `profileContext` Profile and the current
+same-scope authenticated Host only: the read-only scope facts, official
+`/connect` Cookie, identity echo and fresh kernel identity are the same local
+authority `daemon status` uses. A missing/dead/unverifiable Host exits `3`
+with `HOST_NOT_RUNNING` / `HOST_IDENTITY_REFUSED` / `HOST_AUTH_FAILED`; none of
+the five verbs starts a Host. `status` prints one `web=<state>` line for any
+legal Host state and exits `0`; `enable`/`disable` print the Host-reached state
+(`0` only when it matches the request, `4` for a settled `unavailable`, `5`
+with `WEB_OUTCOME_UNCONFIRMED` for a still-changing or mismatched state), and a
+write whose response is lost is reported as unknown without any automatic
+retry. `url` prints exactly one official authenticated URL on stdout and
+nothing else; `open` asks the local OS opener on the CLI machine and reports
+only `browser=requested`, never that a Browser page loaded. The URL contains
+the Host's official launch token: it must be treated as a credential, is never
+logged or embedded in diagnostics, and the product offers no automatic expiry
+or revocation. The Host's own `PiTuiWebAccess` service remains the only Web
+state authority and the only mutation writer.
 
 ### Headless ACP CLI
 

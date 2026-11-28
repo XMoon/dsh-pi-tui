@@ -231,15 +231,10 @@ confirmed exact Session is restored instead of re-running the public intent.
 The daemon backend is the LOCAL split process on Linux, macOS and native
 Windows (the supported Windows domain is the ordinary local user with a local
 fixed-NTFS Profile): it requires a real interactive TTY, and any unsupported OS
-or a non-interactive launch fails closed. A real public-managed start uses the
-platform's supervision path when one exists: Linux delegates to the verified
-systemd user unit, and macOS to the verified user-level LaunchAgent; on Windows
-no service unit is used and the detached Host starts directly. In both
-supervised cases the strict-absence detached Host process remains the fallback
-only when no service definition is installed. The
-public `dsh daemon status/start/stop/restart/logs/install/uninstall`
-management verbs cover both the launchd job and the independent macOS Host
-process (see the management section below). Selection is cold-launch only: writing the Profile value shows "applies on next
+or a non-interactive launch fails closed. Public Host startup and optional OS
+supervision follow
+[the daemon process-manager contract](./host-daemon.md#profile-scoped-host-process-manager).
+Selection is cold-launch only: writing the Profile value shows "applies on next
 launch" and never hot-switches the running process or restarts the Host, and an
 environment override never writes back to the Profile. The `.volatile()` Config
 value lets a Direct and a Remote TUI Client read and write the same Host Profile
