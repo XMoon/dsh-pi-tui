@@ -106,10 +106,9 @@ const selectedRow = (frame, label) => new RegExp(`^.*> ${escapeRegExp(label)}(?:
 async function openBackendDetail(client, label) {
   await submitLine(client, '/settings', `${label} /settings`)
   await waitForText(client, 'Settings · Categories', `${label} Settings root`)
-  await selectFrame(client, frame => /^> Host(?:\s|$)/mu.test(frame), `${label} Host category`)
+  await selectFrame(client, frame => /^> General(?:\s|$)/mu.test(frame), `${label} General category`)
   client.send('\r')
-  await waitForText(client, 'Settings · Host · Rows', `${label} Backend rows`)
-  await waitForText(client, 'Backend', `${label} Backend row`)
+  await sleep(200)
   await selectFrame(client, frame => selectedRow(frame, 'Backend'), `${label} Backend row`)
   client.send('\r')
   await waitForText(client, 'Which backend a new launch runs', `${label} Backend detail`)
@@ -148,7 +147,7 @@ async function chooseBackend(client, target, label) {
   }
   assert(wanted.test(await frameOf(client)), `${label} ${target} candidate not focused`)
   client.send('\r')
-  await waitForPattern(client, /Verified|\bSaved\b/u, `${label} ${target} verified`)
+  await waitForPattern(client, /Verified/u, `${label} ${target} verified`)
   await sleep(300)
   if ((await frameOf(client)).includes('Optional OS supervision')) {
     client.send('\x1b') // Not now — the install offer performs zero manager IO

@@ -555,7 +555,7 @@ export async function runF2AccountComposition(context) {
     await clientB.waitForScreen('Settings · Categories', 'F2 offline Settings category rail opened', 30_000)
     // Follow the category that was actually painted; inserting/reordering a
     // category must not redirect this offline Account witness into Models.
-    const CATEGORY_LABELS_F2 = ['About', 'Host', 'Models', 'Account', 'Agent', 'Appearance', 'Conversation', 'Input & Terminal', 'Tools', 'Plugins']
+    const CATEGORY_LABELS_F2 = ['About', 'General', 'Models', 'Account', 'Agent', 'Appearance', 'Conversation', 'Input & Terminal', 'Tools', 'Plugins']
     const selectedCategoryOf = frame => {
       const strict = /^\s*(?:│\s*)?> ([^│]+?)\s{2,}/mu.exec(frame)?.[1]?.trim()
       if (frame.includes('Settings · Categories') && /\[Categories \(\d+\)\]/u.test(frame)

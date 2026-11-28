@@ -202,7 +202,7 @@ const PROCESS_PTY_OWNER = fileURLToPath(new URL('./split-process-pty-owner.mjs',
 const PROCESS_HOST_SCENARIOS = new Set([
   'long-turn', 'job', 'question', 'approval-allow', 'approval-reject', 'foreground-tool',
   'child', 'unowned-job', 'goal-armed', 'goal-round', 'maintenance', 'schedule',
-  'plan-review', 'team-board',
+  'plan-review', 'team-board', 'acp-po4a', 'native-skill', 'command-cancel',
 ])
 const PROCESS_HOST_CRASH_SIGNALS = new Set(['SIGHUP', 'SIGKILL'])
 const PROCESS_CLIENT_HMR_MODES = new Set(['replace', 'mount-failure', 'hold'])
@@ -744,6 +744,8 @@ function publicHostFacts(handle) {
     unownedJobReleasePath: handle.unownedJobReleasePath ?? null,
     maintenanceReleasePath: handle.maintenanceReleasePath ?? null,
     scheduleDeletePath: handle.scheduleDeletePath ?? null,
+    imageProbePath: handle.imageProbePath ?? null,
+    commandCancelReleasePath: handle.commandCancelReleasePath ?? null,
     startedAt: handle.startedAt,
     starttime: handle.starttime,
     closedAt: handle.closedAt,
@@ -4767,6 +4769,9 @@ async function handleStartHost(message) {
   if (scene.kind !== 'process' && message.crashSignal !== undefined) {
     throw new Error('START_HOST: only a process Scene accepts a declared Host crash signal')
   }
+  if (scene.kind !== 'process' && message.shellCompletionLocality !== undefined) {
+    throw new Error('START_HOST: only a process Scene accepts shellCompletionLocality')
+  }
 
   let source = 'profile'
   let entry
@@ -4778,6 +4783,7 @@ async function handleStartHost(message) {
   let env
   let scenario
   let crashSignal
+  let shellCompletionLocality = false
   let workloadRoot
   let holdReleasePath
   let jobWorkRoot
@@ -4793,6 +4799,8 @@ async function handleStartHost(message) {
   let unownedJobReleasePath
   let maintenanceReleasePath
   let scheduleDeletePath
+  let imageProbePath
+  let commandCancelReleasePath
   if (scene.kind === 'process') {
     scenario = message.scenario
     crashSignal = message.crashSignal
@@ -4808,6 +4816,13 @@ async function handleStartHost(message) {
     if (message.extraEnv !== undefined) {
       throw new Error('START_HOST: a process scene does not accept arbitrary extra environment')
     }
+    if (message.shellCompletionLocality !== undefined && message.shellCompletionLocality !== true) {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST shellCompletionLocality may only be true when set')
+    }
+    shellCompletionLocality = message.shellCompletionLocality === true
+    if (shellCompletionLocality && (scenario !== undefined || crashSignal !== undefined)) {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST shellCompletionLocality requires an ordinary Host without workload or crash variants')
+    }
     const variants = {
       holdTool: message.holdTool === true ? 'foreground-tool' : undefined,
       holdChild: message.holdChild === true ? 'child' : undefined,
@@ -4817,6 +4832,7 @@ async function handleStartHost(message) {
       goalArmed: message.goalArmed === true ? 'goal-armed' : undefined,
       unownedJob: message.unownedJob === true ? 'unowned-job' : undefined,
       maintenance: message.maintenance === true ? 'maintenance' : undefined,
+      commandCancel: message.commandCancel === true ? 'command-cancel' : undefined,
     }
     for (const [name, requiredScenario] of Object.entries(variants)) {
       if (message[name] !== undefined && message[name] !== true) {
@@ -4828,6 +4844,19 @@ async function handleStartHost(message) {
     }
     if (message.questionEligibility === true && message.timedQuestion === true) {
       throw new Error('INPUT_UNQUALIFIED: START_HOST question eligibility and timed Question are separate fixed variants')
+    }
+    if (message.imageProbe !== undefined && message.imageProbe !== true) {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST imageProbe may only be true when set')
+    }
+    if (message.imageProbe === true && scenario !== 'acp-po4a') {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST imageProbe requires scenario acp-po4a')
+    }
+    if (message.imageSha256 !== undefined
+      && (typeof message.imageSha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(message.imageSha256))) {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST imageSha256 must be a lowercase SHA-256')
+    }
+    if (message.imageSha256 !== undefined && message.imageProbe !== true) {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST imageSha256 requires imageProbe')
     }
     // A next generation is allowed only after the previous one is provably
     // stopped: a finished qualification attempt with its declared terminal, or
@@ -4898,6 +4927,19 @@ async function handleStartHost(message) {
       SPLIT_PROCESS_PROFILE: 'pi-tui',
       SPLIT_PROCESS_SCRATCH: hostScratch,
     }
+    if (shellCompletionLocality) {
+      const completionBin = join(workRoot, 'completion-bin')
+      mkdirSync(completionBin, { recursive: true, mode: 0o700 })
+      writeFileSync(
+        join(completionBin, 'workspace-command-host'),
+        '#!/bin/sh\nprintf "host-fixture-command\\n"\n',
+        { mode: 0o700, flag: 'wx' },
+      )
+      const basePath = env.PATH ?? process.env.PATH ?? '/usr/bin:/bin'
+      env.PATH = `${completionBin}:${basePath}`
+      env.WORKSPACE_COMPLETION_HOST = 'host-fixture'
+      delete env.WORKSPACE_COMPLETION_CLIENT
+    }
     if (scenario !== undefined) {
       processC1Work = processC1Work ?? writeC1WorkFixture(scene.installation.profileDir, scene.workDir)
       const workloadLabel = `${scenario}-${generationLabel}`
@@ -4935,6 +4977,19 @@ async function handleStartHost(message) {
         env.C1_HOLD_AFTER_TIMED = timedAfterBarrierPath
         env.C1_ANSWER_PROBE_DUPLICATE = timedDuplicateBarrierPath
         env.C1_ANSWER_PROBE_EXPIRED = timedExpiredBarrierPath
+      }
+      if (message.imageProbe === true) {
+        const probeDir = join(workloadRoot, 'image-probe')
+        mkdirSync(probeDir, { recursive: true, mode: 0o700 })
+        imageProbePath = join(probeDir, 'image-probe.jsonl')
+        env.C1_PO4A_IMAGE_CAPABLE = '1'
+        env.C1_PO4A_IMAGE_PROBE_DIR = probeDir
+        if (message.imageSha256 !== undefined) env.C1_PO4A_EXPECTED_IMAGE_SHA256 = message.imageSha256
+      }
+      if (message.reasoningEffort === true) env.C1_NATIVE_REASONING_EFFORT = '1'
+      if (message.commandCancel === true) {
+        commandCancelReleasePath = join(workloadRoot, 'command.release')
+        env.C1_COMMAND_CANCEL_ROOT = workloadRoot
       }
       if (message.cancelAgent === true) {
         cancelAgentBarrierPath = join(workloadRoot, 'approval-cancel.release')
@@ -5036,6 +5091,7 @@ async function handleStartHost(message) {
     source,
     scenario: scenario ?? message.scenario,
     crashSignal,
+    shellCompletionLocality,
     workloadRoot,
     holdReleasePath,
     jobWorkRoot,
@@ -5051,6 +5107,8 @@ async function handleStartHost(message) {
     unownedJobReleasePath,
     maintenanceReleasePath,
     scheduleDeletePath,
+    imageProbePath,
+    commandCancelReleasePath,
     child,
     records,
     workRoot,
@@ -5205,6 +5263,8 @@ async function handleStartHost(message) {
     unownedJobReleasePath: handle.unownedJobReleasePath ?? null,
     maintenanceReleasePath: handle.maintenanceReleasePath ?? null,
     scheduleDeletePath: handle.scheduleDeletePath ?? null,
+    imageProbePath: handle.imageProbePath ?? null,
+    commandCancelReleasePath: handle.commandCancelReleasePath ?? null,
     buildId: handle.buildId,
     scopeId: expectedScopeId,
     pgid: hostPgid(handle),
@@ -6393,6 +6453,26 @@ async function handleStartProcessClient(message) {
   const serializeBarrierPath = holdSerialize ? join(clientDir, 'serialize-hold.barrier') : undefined
   const workspaceIntentPath = invalidWorkspacePath ? join(clientDir, 'invalid-workspace') : undefined
   const readAuthorityRequestPath = readAuthorityProof ? join(clientDir, 'read-authority-request.json') : undefined
+  const clientShellCompletionLocality = host?.shellCompletionLocality === true
+    && startupStop === undefined
+    && expectedFailure === undefined
+    && terminalMode === 'normal'
+    && hmr === undefined
+    && !dropPromptAck
+    && !recovery
+    && !attach
+    && !fallbackProbe
+    && message.sessionId === undefined
+  let clientCompletionBin
+  if (clientShellCompletionLocality) {
+    clientCompletionBin = join(clientDir, 'completion-bin')
+    mkdirSync(clientCompletionBin, { recursive: true, mode: 0o700 })
+    writeFileSync(
+      join(clientCompletionBin, 'workspace-command-client'),
+      '#!/bin/sh\nprintf "client-fixture-command\\n"\n',
+      { mode: 0o700, flag: 'wx' },
+    )
+  }
   for (const barrier of [holdBarrier, startupBarrier, serializeBarrierPath, workspaceIntentPath]) {
     if (barrier !== undefined && existsSync(barrier)) {
       throw new Error(`START_PROCESS_CLIENT: the Supervisor-allocated barrier already exists: ${barrier}`)
@@ -6550,7 +6630,14 @@ async function handleStartProcessClient(message) {
     ...(readAuthorityProof ? { SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: readAuthorityRequestPath } : {}),
     ...(holdSerialize ? { SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE: serializeBarrierPath } : {}),
     ...(invalidWorkspacePath ? { SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH: workspaceIntentPath } : {}),
+    ...(clientCompletionBin === undefined
+      ? {}
+      : {
+          PATH: `${clientCompletionBin}:${scene.installation.base.env.PATH ?? process.env.PATH ?? '/usr/bin:/bin'}`,
+          WORKSPACE_COMPLETION_CLIENT: 'client-fixture',
+        }),
   }
+  if (clientCompletionBin !== undefined) delete env.WORKSPACE_COMPLETION_HOST
   let opened
   try {
     if (handle.owner !== undefined) {
@@ -6998,8 +7085,11 @@ const READ_AUTHORITY_TERMINALS = {
   read: ['facts', 'failed'],
   activity: ['activity-result', 'failed'],
   workspaces: ['workspaces-ended', 'workspaces-failed', 'failed'],
+  'directory-browse': ['directory-browse', 'directory-browse-rejected', 'failed'],
   'answer-continued': ['continued-answer', 'failed'],
 }
+const DIRECTORY_BROWSE_TARGETS = new Set(['home', 'fixture', 'missing', 'relative'])
+const DIRECTORY_BROWSE_INTERRUPTIONS = new Set(['caller', 'carrier'])
 const READ_AUTHORITY_WINDOWS = {
   activity: { warm: 3_000, cold: 4_000 },
   workspaces: {
@@ -7057,6 +7147,7 @@ function handleProcessClientReadAuthority(message) {
     read: ['op'],
     activity: ['op', 'window'],
     workspaces: ['op', 'window'],
+    'directory-browse': ['op', 'target', 'interruption'],
     'answer-continued': ['op', 'sessionId', 'callId'],
   }
   const unexpected = Object.keys(request).filter(key => !allowedFields[op].includes(key))
@@ -7078,6 +7169,52 @@ function handleProcessClientReadAuthority(message) {
     }
     const window = READ_AUTHORITY_WINDOWS.workspaces[request.window]
     payload = { op, ...window }
+  } else if (op === 'directory-browse') {
+    const { target, interruption } = request
+    if (typeof target !== 'string' || !DIRECTORY_BROWSE_TARGETS.has(target)) {
+      throw new Error('INPUT_UNQUALIFIED: directory-browse target is not declared')
+    }
+    if (interruption !== undefined
+      && (typeof interruption !== 'string' || !DIRECTORY_BROWSE_INTERRUPTIONS.has(interruption))) {
+      throw new Error('INPUT_UNQUALIFIED: directory-browse interruption must be caller or carrier')
+    }
+    if (interruption !== undefined && target !== 'fixture') {
+      throw new Error('INPUT_UNQUALIFIED: directory-browse interruption is allowed only for the fixture target')
+    }
+    const rawHostHome = scene.installation.base.env?.HOME
+    if (typeof rawHostHome !== 'string' || rawHostHome === '' || !existsSync(rawHostHome)) {
+      throw new Error('PROCESS_CLIENT_READ_AUTHORITY: the Scene Host HOME is unavailable')
+    }
+    const hostHome = realpathSync(rawHostHome)
+    const sceneRoot = realpathSync(scene.workDir)
+    const homeRel = relative(sceneRoot, hostHome)
+    if (homeRel === '..' || homeRel.startsWith(`..${sep}`) || isAbsolute(homeRel)) {
+      throw new Error('PROCESS_CLIENT_READ_AUTHORITY: the Scene Host HOME escapes the Scene root')
+    }
+    let browsePath
+    if (target === 'fixture') {
+      const candidate = join(hostHome, 'directory-probe')
+      if (existsSync(candidate)) {
+        const resolved = realpathSync(candidate)
+        const rel = relative(hostHome, resolved)
+        if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+          throw new Error('PROCESS_CLIENT_READ_AUTHORITY: directory-probe escapes the Scene Host HOME')
+        }
+        browsePath = resolved
+      } else {
+        browsePath = candidate
+      }
+    } else if (target === 'missing') {
+      browsePath = join(hostHome, 'directory-probe-missing')
+    } else if (target === 'relative') {
+      browsePath = 'directory-probe'
+    }
+    const abort = interruption === 'caller' ? true : interruption === 'carrier' ? 'drop' : undefined
+    payload = {
+      op,
+      ...(browsePath === undefined ? {} : { path: browsePath }),
+      ...(abort === undefined ? {} : { abort }),
+    }
   } else {
     const { sessionId, callId } = request
     if (typeof sessionId !== 'string' || sessionId === '' || sessionId.length > 200

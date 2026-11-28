@@ -448,79 +448,46 @@ export const runWebProductQualification = async context => {
       `${label}: the ONE loopback listener is not a bound 127.0.0.1 port`)
     assert(ready.services?.piTuiWebAccess === true, `${label}: the private Web access service is missing`)
   }
-  /** Wait until the real Settings Web UI page paints one Host runtime state. */
-  const waitForWebState = async (tui, state, label, timeoutMs = 120_000) => {
-    const pattern = new RegExp(`Serving\\s+${state}`, 'u')
-    await waitForCondition(async () => pattern.test((await tui.viewport()).join('\n')), label, timeoutMs)
-  }
-  /** Prove the actual selected Settings action row, not merely its visible label. */
-  const waitForWebRow = async (tui, label, timeoutMs = 30_000) => {
-    const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
-    const selected = new RegExp(`^.*> ${escaped}(?:\\s|$)`, 'mu')
-    await waitForCondition(async () => selected.test((await tui.viewport()).join('\n')),
-      `${label} row selected`, timeoutMs)
-  }
-  /** Open the current PiTui `/web` deep link through a proven editor seat. */
-  const openWebSettings = async (tui, label) => {
-    const marker = `web-ready-${randomUUID()}`
-    tui.send(marker)
-    await tui.waitForComposerDraft(marker, 30_000)
-    tui.send('\x15')
-    await waitForCondition(async () => {
-      const draft = await tui.composerText()
-      return draft !== undefined && !draft.includes(marker)
-    }, `${label} Composer ready`, 30_000)
-    tui.send('/web\r')
-    await tui.waitForScreen('Settings · Host · Web UI', `${label} /web page`, 120_000)
-  }
-  /** Retire Settings Web UI -> Host Rows -> category rail -> editor. */
-  const closeWebSettings = async (tui, label) => {
-    tui.send('\u001b')
-    await tui.waitForScreen('Settings · Host · Rows', `${label} page retired`, 30_000)
-    tui.send('\u001b')
-    await tui.waitForScreen('Settings · Categories', `${label} category rail`, 30_000)
-    tui.send('\u001b')
-    await tui.waitForScreenGone('Settings ·', `${label} workspace closed`, 30_000)
+  /** Move the `/web` menu highlight until the requested action is selected. */
+  const selectWebRow = async (tui, description, label) => {
+    for (let step = 0; step < 10; step += 1) {
+      if ((await tui.viewport()).join('\n').includes(description)) {
+        tui.send('\r')
+        return
+      }
+      tui.send('\u001b[B')
+      await sleep(120)
+    }
+    throw new SplitSmokeAssertionError(`${label}: the /web menu never selected "${description}"`)
   }
   const enableWeb = async (tui, label, options = {}) => {
-    await openWebSettings(tui, label)
-    await waitForCondition(async () => /Serving\s+(?:Enabled|Disabled)/u.test((await tui.viewport()).join('\n')),
-      `${label} Host state projection`, 120_000)
-    const frame = (await tui.viewport()).join('\n')
-    const initial = /Serving\s+Enabled/u.test(frame) ? 'enabled'
-      : /Serving\s+Disabled/u.test(frame) ? 'disabled' : 'unknown'
-    assert(initial !== 'unknown', `${label}: the Web UI page painted no known Host state`)
+    tui.send('/web\r')
+    await tui.waitForScreen('Status:', `${label} /web menu`, 120_000)
+    const menu = (await tui.viewport()).join('\n')
+    const initial = menu.includes('Status: enabled') ? 'enabled'
+      : menu.includes('Status: disabled') ? 'disabled' : 'unknown'
+    assert(initial !== 'unknown', `${label}: the /web menu painted no known Web status`)
     if (options.requireDisabled === true) {
       assert(initial === 'disabled', `${label}: the initial Web state was ${initial}, expected disabled`)
     }
     if (initial === 'enabled') {
-      await closeWebSettings(tui, label)
+      tui.send('\u001b')
+      await tui.waitForScreenGone('Status:', `${label} menu closed`, 30_000)
       return initial
     }
-    await waitForWebRow(tui, 'Enable Web')
-    tui.send('\r')
-    await waitForWebState(tui, 'Enabled', `${label} enabled projection`, 180_000)
-    await waitForCondition(async () => /Status\s+Web enabled/u.test((await tui.viewport()).join('\n')),
-      `${label} enable settled`, 30_000)
-    await closeWebSettings(tui, label)
+    await selectWebRow(tui, 'Start serving the official Web frontend', `${label} Enable Web`)
+    await tui.waitForScreen('Status: enabled', `${label} enabled projection`, 180_000)
+    tui.send('\u001b')
+    await tui.waitForScreenGone('Status: enabled', `${label} menu closed`, 30_000)
     return initial
   }
   const disableWeb = async (tui, label) => {
-    await openWebSettings(tui, label)
-    await waitForWebState(tui, 'Enabled', `${label} /web enabled page`)
-    await waitForWebRow(tui, 'Open in browser')
-    tui.send('\u001b[B')
-    await waitForWebRow(tui, 'Copy access link')
-    tui.send('\u001b[B')
-    await waitForWebRow(tui, 'Disable Web…')
-    tui.send('\r')
-    await tui.waitForScreen('Stop serving the Web UI?', `${label} disable confirmation`, 30_000)
-    await waitForWebRow(tui, 'Disable Web')
-    tui.send('\r')
-    await waitForWebState(tui, 'Disabled', `${label} disabled projection`, 180_000)
-    await waitForCondition(async () => /Status\s+Web disabled/u.test((await tui.viewport()).join('\n')),
-      `${label} disable settled`, 30_000)
-    await closeWebSettings(tui, label)
+    tui.send('/web\r')
+    await tui.waitForScreen('Status: enabled', `${label} /web enabled menu`, 120_000)
+    await selectWebRow(tui, 'Stop serving the official Web frontend', `${label} Disable Web`)
+    await tui.waitForScreen('Status: disabled', `${label} disabled projection`, 180_000)
+    tui.send('\u001b')
+    await tui.waitForScreenGone('Status: disabled', `${label} menu closed`, 30_000)
   }
   const tuiNewSession = async (tui, label) => {
     const boundary = tui.records.length
@@ -662,20 +629,6 @@ export const runWebProductQualification = async context => {
     chmodSync(coord, 0o700)
     writeFileSync(join(coord, 'case.json'), `${JSON.stringify({ caseId, nonce: productNonce, ...config }, null, 2)}\n`, { mode: 0o600 })
     chmodSync(join(coord, 'case.json'), 0o600)
-    // The Driver creates a fact path before its JSON write is complete. Wait
-    // for a parseable document instead of racing the writer with readJson().
-    const readJsonSettled = async (path, label, timeoutMs = 30_000) => {
-      await waitForCondition(() => {
-        try {
-          JSON.parse(readFileSync(path, 'utf8'))
-          return true
-        } catch (error) {
-          if (error instanceof SyntaxError) return false
-          throw error
-        }
-      }, label, timeoutMs)
-      return readJson(path)
-    }
     const child = spawn(process.execPath, [driverPath, coord, caseId, productNonce], {
       cwd: workDir,
       env: driverEnv,
@@ -708,7 +661,7 @@ export const runWebProductQualification = async context => {
           // the exit race must not discard a fact that ALREADY exists.
           if (!existsSync(factPath)) throw error
         }
-        return readJsonSettled(factPath, `${label} complete fact`)
+        return readJson(factPath)
       },
       readFact: name => readJson(join(coord, `browser-${name}.json`)),
       writeCommand: command => {
@@ -726,7 +679,7 @@ export const runWebProductQualification = async context => {
         } catch (error) {
           if (!existsSync(stepPath)) throw error
         }
-        return readJsonSettled(stepPath, `${label} complete step`)
+        return readJson(stepPath)
       },
     }
     evidence.caseStart(caseId)

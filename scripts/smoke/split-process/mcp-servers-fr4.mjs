@@ -33,7 +33,7 @@
  * @module split-process/mcp-servers-fr4
  */
 
-import { appendFileSync, chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -227,26 +227,23 @@ export async function runMcpServersFr4(context) {
   // patch — a layer BELOW the user document. The run's command-line overlay
   // would win over the user layer and make ConfigEditor refuse every write.
   const basePatch = join(context.installation.profilePackage, 'cordis.patch.yml')
-  const basePatchBefore = readFileSync(basePatch, 'utf8')
-  const userPatch = join(context.installation.profileDir, 'cordis.patch.yml')
-  const userPatchBefore = existsSync(userPatch) ? readFileSync(userPatch, 'utf8') : undefined
+  appendFileSync(basePatch, [
+    '',
+    '- id: mcp-manager',
+    '  config:',
+    '    servers:',
+    `      ${INHERITED_NAME}:`,
+    '        transport: stdio',
+    `        command: ${JSON.stringify(process.execPath)}`,
+    `        args: [${JSON.stringify(serverScript)}]`,
+    '        enabled: true',
+    '',
+  ].join('\n'))
 
   let host
   let client
   let clientB
   try {
-    appendFileSync(basePatch, [
-      '',
-      '- id: mcp-manager',
-      '  config:',
-      '    servers:',
-      `      ${INHERITED_NAME}:`,
-      '        transport: stdio',
-      `        command: ${JSON.stringify(process.execPath)}`,
-      `        args: [${JSON.stringify(serverScript)}]`,
-      '        enabled: true',
-      '',
-    ].join('\n'))
     const started = await scene.startC1Host('mcp-servers-fr4', 'FR4 MCP Host', { C1_FR4_PLUGIN: '1' })
     host = started.host
     const row = await mcpManagerRow(host, 'FR4 initial')
@@ -259,7 +256,7 @@ export async function runMcpServersFr4(context) {
     await waitForScreenText(client, INHERITED_NAME, 'FR4 inherited server row')
     await waitForScreenText(client, 'Connected', 'FR4 inherited connection')
     await openRow(client, INHERITED_NAME, 'FR4 inherited')
-    await waitForScreenText(client, 'Saved configuration: Inherited', 'FR4 inherited provenance')
+    await waitForScreenText(client, 'Configuration: Inherited', 'FR4 inherited provenance')
     await waitForScreenText(client, 'Saved transport: stdio', 'FR4 inherited saved transport')
     trace('fr4.inherited-classified', { provenance: 'Inherited', state: 'Connected' })
 
@@ -272,7 +269,7 @@ export async function runMcpServersFr4(context) {
     await waitForScreenText(client, PLUGIN_NAME, 'FR4 plugin-owned row listed')
     await openRow(client, PLUGIN_NAME, 'FR4 plugin-owned')
     await waitForScreenText(client, 'Source: Plugin-owned', 'FR4 plugin-owned source')
-    assert(!(await frameOf(client)).includes('Saved configuration: User-added'),
+    assert(!(await frameOf(client)).includes('Configuration: User-added'),
       'FR4: a plugin registration has no configuration provenance')
     const before = patchText(context.installation.profileDir)
     for (const key of ['e', 't', 'd', 'u']) {
@@ -433,12 +430,12 @@ export async function runMcpServersFr4(context) {
     await waitForPattern(client, new RegExp(`(Disable|Enable) server ${INHERITED_NAME}\\.`, 'u'), 'FR4 override confirmation')
     client.send('y')
     await waitForScreenText(client, 'State: Disabled', 'FR4 inherited overridden state')
-    await waitForScreenText(client, 'Saved configuration: Overridden (user)', 'FR4 inherited now overridden')
+    await waitForScreenText(client, 'Configuration: Overridden (user)', 'FR4 inherited now overridden')
     client.send('u')
     await waitForPattern(client, new RegExp(`Reset server ${INHERITED_NAME}\\b`, 'u'), 'FR4 reset confirmation')
     client.send('y')
     await waitForScreenText(client, 'Inherited configuration restored', 'FR4 reset result')
-    await waitForScreenText(client, 'Saved configuration: Inherited', 'FR4 inherited restored')
+    await waitForScreenText(client, 'Configuration: Inherited', 'FR4 inherited restored')
     await waitForScreenText(client, 'State: Connected', 'FR4 inherited reconnected')
     trace('fr4.inherited-reset', { restored: true, connected: true })
 
@@ -546,12 +543,6 @@ export async function runMcpServersFr4(context) {
     if (client !== undefined) await client.dispose().catch(() => {})
     await httpFixture.close().catch(() => {})
     await scene.dispose()
-    // Both layers belong to the shared packed Profile. Restore them only after
-    // this case's Host is gone, so a late configuration write cannot re-pollute
-    // the layer a later full-lane case will inherit.
-    writeFileSync(basePatch, basePatchBefore, { mode: 0o600 })
-    if (userPatchBefore === undefined) rmSync(userPatch, { force: true })
-    else writeFileSync(userPatch, userPatchBefore, { mode: 0o600 })
   }
 }
 

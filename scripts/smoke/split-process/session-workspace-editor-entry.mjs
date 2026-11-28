@@ -115,13 +115,13 @@ export async function runSessionWorkspaceEditorEntry(context) {
   await selectPaintedSessionRow(clientA, sessionX, 'U-E select the Needs row')
   const eventsBeforePeek = (hostSessionEvents(dshHome, sessionX) ?? []).length
   clientA.send(' ')
-  await clientA.waitForScreen('Transcript ·', 'U-E read-only Peek', 30_000)
+  await clientA.waitForScreen('Peek ·', 'U-E read-only Peek', 30_000)
   const peek = await viewportText(clientA)
-  assert(peek.includes('Read-only'),
-    `U-E the Peek does not state its read-only provenance:\n${peek}`)
+  assert(peek.includes('Pending: Question'),
+    `U-E the Peek does not state the proved pending kind:\n${peek}`)
   assert(!/Allow|Deny|Proceed/.test(peek), `U-E the Peek carries an answer affordance:\n${peek}`)
   clientA.send('\x1b')
-  await clientA.waitForScreenGone('Transcript ·', 'U-E Peek back to the list', 30_000)
+  await clientA.waitForScreenGone('Peek ·', 'U-E Peek back to the list', 30_000)
   assert((hostSessionEvents(dshHome, sessionX) ?? []).length === eventsBeforePeek,
     'U-E Peek wrote a Host session event')
 

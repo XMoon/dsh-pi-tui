@@ -9,7 +9,7 @@
  */
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 import { expect, test } from 'vitest'
@@ -353,6 +353,239 @@ test('completes Host workspace files before creating the first session in that w
       }
       throw new AggregateError(teardownErrors,
         'the Host-file business test passed but its Scene cleanup failed')
+    }
+  }
+})
+
+function composerDraftOf(frame: string): string | undefined {
+  const lines = frame.split('\n')
+  const marker = lines.findLastIndex(line => line.trimStart().startsWith('❯')
+    && !line.includes('[connection]'))
+  if (marker < 0) return undefined
+  const at = lines[marker]!.indexOf('❯')
+  return lines[marker]!.slice(at + '❯'.length).trim()
+}
+
+function belowComposer(frame: string): string {
+  const lines = frame.split('\n')
+  let bottom = -1
+  for (let index = 0; index < lines.length; index += 1) {
+    if (/^─{10,}$/u.test(lines[index]!.trim())) bottom = index
+  }
+  return bottom < 0 ? '' : lines.slice(bottom + 1).join('\n')
+}
+
+async function waitForDraft(
+  client: SplitProcessClient,
+  expected: string,
+  label: string,
+  timeoutMs = 60_000,
+): Promise<void> {
+  const started = Date.now()
+  for (;;) {
+    const draft = composerDraftOf(await frameText(client))
+    if (expected === '') {
+      if (typeof draft === 'string' && (draft === '' || /^…{1,2}$/u.test(draft))) return
+    } else if (draft === expected) {
+      return
+    }
+    if (Date.now() - started >= timeoutMs) {
+      throw new Error(`${label}: composer did not hold ${JSON.stringify(expected)} (saw ${JSON.stringify(draft)})`)
+    }
+    await sleep(25)
+  }
+}
+
+async function readWorkspaceBaseline(client: SplitProcessClient, label: string): Promise<Array<{
+  workspaceId: string
+  path: string | null
+  sessionIds: string[]
+}>> {
+  const dispatched = await client.readAuthority({ op: 'workspaces', window: 'peer-baseline' })
+  expect(dispatched.op, `${label}: unexpected read-authority op`).toBe('workspaces')
+  const frame = await client.waitForRecord(
+    record => record.m4b2s === 'qualification'
+      && record.op === 'read-authority-proof'
+      && record.nonce === dispatched.nonce
+      && record.phase === 'workspaces-frame',
+    `${label}: workspaces baseline frame`,
+  )
+  await client.waitForRecord(
+    record => record.m4b2s === 'qualification'
+      && record.op === 'read-authority-proof'
+      && record.nonce === dispatched.nonce
+      && record.phase === 'workspaces-ended',
+    `${label}: workspaces baseline terminal`,
+  )
+  const items = (Array.isArray(frame.items) ? frame.items : []).map((item: Record<string, any>) => ({
+    workspaceId: String(item.workspaceId),
+    path: typeof item.path === 'string' ? (existsSync(item.path) ? realpathSync(item.path) : item.path) : null,
+    sessionIds: Array.isArray(item.sessionIds) ? item.sessionIds.map(String).sort() : [],
+  }))
+  return items.sort((left, right) => left.workspaceId.localeCompare(right.workspaceId))
+}
+
+test('completes explicit Host paths outside a selected Workspace and keeps bare queries scoped', async () => {
+  const scene = await createSplitProcessScene()
+  let primary: unknown
+  try {
+    const hostHome = scene.installation.base.env.HOME
+    expect(hostHome, 'the Scene installation must expose its isolated Host HOME').toBeTypeOf('string')
+    const canonicalHostHome = realpathSync(hostHome!)
+    const alphaName = 'workspace-scope-alpha'
+    const externalName = 'workspace-scope-external'
+    const alphaDir = join(canonicalHostHome, alphaName)
+    const externalDir = join(canonicalHostHome, externalName)
+    const clientCwd = join(scene.workDir, 'explicit-client-cwd')
+    const clientHome = join(scene.workDir, 'explicit-client-home')
+    const refusedHome = join(scene.workDir, 'refused-client-home')
+    for (const dir of [alphaDir, externalDir, clientCwd, clientHome, refusedHome]) {
+      mkdirSync(dir, { recursive: true, mode: 0o700 })
+    }
+    const insideFile = 'scope-marker-inside.ts'
+    const outsideFile = 'scope-marker-outside.ts'
+    const clientFile = 'scope-marker-client.ts'
+    writeFileSync(join(alphaDir, insideFile), 'inside\n', { mode: 0o600 })
+    writeFileSync(join(externalDir, outsideFile), 'outside\n', { mode: 0o600 })
+    writeFileSync(join(clientCwd, clientFile), 'client\n', { mode: 0o600 })
+
+    const canonicalAlpha = realpathSync(alphaDir)
+    const canonicalExternal = realpathSync(externalDir)
+    const canonicalClientCwd = realpathSync(clientCwd)
+    expect(canonicalClientCwd).not.toBe(canonicalAlpha)
+
+    const absoluteDraft = `@${canonicalExternal}/${outsideFile}`
+    const explicitCols = Math.max(180, Math.min(400, absoluteDraft.length + 24))
+    expect(absoluteDraft.length).toBeLessThan(explicitCols - 4)
+
+    const host = await scene.startHost()
+    const hostPid = host.ready.localHost?.hostPid
+    const hostInstanceId = host.ready.localHost?.instanceId
+
+    const client = await scene.startClient({
+      label: 'explicit-host-file',
+      cwd: clientCwd,
+      home: clientHome,
+      readAuthorityProof: true,
+      cols: explicitCols,
+      rows: 40,
+    })
+    expect(client.ready.sessionOpen).toBe(false)
+    expect(client.ready.surfaceMounted).toBe(true)
+    await waitForConfirmedDirectory(client, canonicalClientCwd, 'explicit client initial auto-confirmed directory')
+
+    // Manually select Host alpha through `/sessions` -> `Add directory`
+    await waitForDraft(client, '', 'explicit client empty composer before /sessions')
+    await client.type('/sessions')
+    await waitForDraft(client, '/sessions', 'explicit client typed /sessions')
+    await client.press('Enter')
+    await waitForFrame(client, 'Sessions ·', 'explicit client Workspace tree')
+    await waitForFrame(client, 'Add directory', 'explicit client Add directory row')
+    await client.press('Home')
+    const startedSelect = Date.now()
+    for (;;) {
+      const f = await frameText(client)
+      if (f.split('\n').some(line => line.includes('>') && line.includes('Add directory'))) break
+      if (Date.now() - startedSelect >= 60_000) throw new Error('explicit client did not select Add directory')
+      await sleep(50)
+    }
+    await client.press('Enter')
+    await waitForFrame(client, 'Host directory:', 'explicit client inline Host editor')
+    await waitForFrame(client, canonicalHostHome, 'explicit client Host home prefill')
+    await client.type(alphaName)
+    await waitForFrame(client, `> ${alphaName}/`, 'explicit client Host alpha candidate')
+    await client.press('Tab')
+    await waitForFrame(client, `${alphaName}/`, 'explicit client accepted Host alpha path')
+    await client.press('Enter')
+    await waitForFrame(client, 'Directory added:', 'explicit client registered Host alpha')
+    await client.press('Escape')
+    await waitForFrameGone(client, 'Sessions ·', 'explicit client closed Browser')
+    await waitForConfirmedDirectory(client, canonicalAlpha, 'explicit client confirmed Host alpha')
+
+    const sessionsBefore = [...await scene.sessionIds()].sort()
+    const logCountBefore = scene.hostSessionLogCount()
+    const workspacesBefore = await readWorkspaceBaseline(client, 'explicit client before queries')
+
+    // 1. Bare `@scope-marker-` stays scoped to the selected Host alpha Workspace
+    const bareStart = Date.now()
+    await waitForDraft(client, '', 'explicit client empty before bare query')
+    await client.type('@scope-marker-')
+    const barePopup = await waitForFrame(client, insideFile, 'explicit client bare inside candidate')
+    const bareLatencyMs = Date.now() - bareStart
+    const bareMenu = belowComposer(barePopup)
+    expect(bareMenu).toContain(insideFile)
+    expect(bareMenu).not.toContain(outsideFile)
+    expect(bareMenu).not.toContain(clientFile)
+    await client.press('Escape')
+    await waitForFrameGone(client, insideFile, 'explicit client bare popup closed')
+    await client.press('Ctrl+U')
+    await waitForDraft(client, '', 'explicit client cleared bare draft')
+
+    // 2. Explicit relative `@../<external>/` preserves the typed relative spelling
+    const relativeQuery = `@../${basename(canonicalExternal)}/`
+    const relativeExpected = `${relativeQuery}${outsideFile}`
+    await client.type(relativeQuery)
+    await waitForFrame(client, outsideFile, 'explicit client relative outside candidate')
+    await client.press('Tab')
+    await waitForDraft(client, relativeExpected, 'explicit client accepted relative outside draft')
+    await client.press('Ctrl+U')
+    await waitForDraft(client, '', 'explicit client cleared relative draft')
+
+    // 3. Explicit absolute `@<canonicalExternal>/` preserves the canonical absolute spelling
+    const absoluteQuery = `@${canonicalExternal}/`
+    await client.type(absoluteQuery)
+    await waitForFrame(client, outsideFile, 'explicit client absolute outside candidate')
+    await client.press('Tab')
+    await waitForDraft(client, absoluteDraft, 'explicit client accepted absolute outside draft')
+    await client.press('Ctrl+U')
+    await waitForDraft(client, '', 'explicit client cleared absolute draft')
+
+    // 4. Refused manual proposal never falls back to its own launch cwd (`alphaDir`)
+    const refusedClient = await scene.startClient({
+      label: 'refused-host-file',
+      cwd: alphaDir,
+      home: refusedHome,
+      invalidWorkspacePath: true,
+    })
+    expect(refusedClient.ready.sessionOpen).toBe(false)
+    await waitForFrame(refusedClient, 'Host directory unavailable', 'refused client unavailable notice')
+    await refusedClient.type('@scope-marker-')
+    await waitForFrame(refusedClient, '@scope-marker-', 'refused client typed @ query')
+    // Bounded negative window anchored to the positive bare query latency above.
+    await sleep(Math.max(2_000, bareLatencyMs * 3))
+    const refusedFrame = await frameText(refusedClient)
+    expect(belowComposer(refusedFrame)).not.toContain(insideFile)
+    expect(composerDraftOf(refusedFrame)).toBe('@scope-marker-')
+    expect(refusedClient.readRecords()
+      .filter(record => record?.m4b2s === 'surface-status')
+      .some(record => record.sessionOpen === true)).toBe(false)
+    await refusedClient.press('Ctrl+U')
+    await refusedClient.exitGracefully()
+
+    // 5. No Session, log or extra Workspace was created; same Host survives
+    expect([...await scene.sessionIds()].sort()).toEqual(sessionsBefore)
+    expect(scene.hostSessionLogCount()).toBe(logCountBefore)
+    expect(await readWorkspaceBaseline(client, 'explicit client after queries')).toEqual(workspacesBefore)
+    expect(client.readRecords()
+      .filter(record => record?.m4b2s === 'surface-status')
+      .some(record => record.sessionOpen === true)).toBe(false)
+
+    await client.exitGracefully()
+    const hostAfter = await scene.hostStatus(host)
+    expect(hostAfter.localHost?.hostPid).toBe(hostPid)
+    expect(hostAfter.localHost?.instanceId).toBe(hostInstanceId)
+    await scene.stopHost(host)
+  } catch (error) {
+    primary = error
+    throw error
+  } finally {
+    try {
+      await scene.dispose()
+    } catch (cleanupError) {
+      if (primary !== undefined) {
+        throw new AggregateError([primary, cleanupError], 'explicit host-file test failed and Scene cleanup also failed')
+      }
+      throw cleanupError
     }
   }
 })

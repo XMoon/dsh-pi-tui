@@ -274,11 +274,6 @@ export function createDarwinSurfacePtyScope() {
         }
         flushKeys()
       },
-      /** One real SGR left-button click at a 1-based pane cell. */
-      mouseClick(row, col) {
-        const sequence = `\x1b[<0;${String(col)};${String(row)}M\x1b[<0;${String(col)};${String(row)}m`
-        tmux(['send-keys', '-t', session, '-l', sequence], `mouse click ${role}`)
-      },
       /** Teardown: kill the pane, wait for its death; never guess a pid. */
       async dispose() {
         tmux(['kill-session', '-t', session], `kill-session ${role}`, { allowMissing: true })

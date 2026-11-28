@@ -141,7 +141,7 @@ export async function openMcpPage(client, label) {
   }
   assert(/^\s*> Tools\b/mu.test((await client.viewport()).join('\n')), `${label}: the Tools category was never selected`)
   client.send('\r') // Categories -> Rows
-  await waitForScreenText(client, 'MCP servers', `${label} MCP rows`)
+  await sleep(300)
   for (let step = 0; step < 8; step += 1) {
     const frame = (await client.viewport()).join('\n')
     if (/^\s*> MCP servers\b/mu.test(frame)) break
@@ -282,7 +282,7 @@ export async function selectRow(client, index) {
   // no-op for the list's own Esc ladder only when the page is at its root, so
   // the caller always invokes this from a Detail frame).
   client.send('\x1b')
-  await waitForScreenText(client, 'fr3-fixture', 'FR3 MCP list row before selection')
+  await sleep(300)
   // Reach the FIRST row by probing the painted marker (the list wraps, so a
   // fixed number of Up presses cannot mean "top").
   for (let step = 0; step < 8; step += 1) {

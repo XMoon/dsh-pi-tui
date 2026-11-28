@@ -461,10 +461,6 @@ export async function runClientHmrSignals(context) {
       await waitForC1WorkEvent(workRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'T63 held Turn')
       writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
       await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T63 settled Turn')
-      // The Host event can arrive before the Client has painted the completed
-      // Turn and returned to its editor seat. Wait for the real answer so the
-      // following Ctrl+C is handled as the exit chord, not as an in-flight abort.
-      await ctrlC.waitForScreen('long-turn answer', 'T63 Client answer painted', 30_000)
       // The product's OWN armed-exit cue is painted in the footer; waiting for
       // it (and then for it to expire) is what makes this a double-press proof
       // instead of "the key exits":

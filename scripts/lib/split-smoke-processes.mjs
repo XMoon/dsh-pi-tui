@@ -749,15 +749,6 @@ export function createSplitProcessScope() {
       this.child.stdin.write(data)
     }
 
-    /** One real SGR left-button click at a 1-based terminal cell. */
-    mouseClick(x, y) {
-      if (this.platform === 'darwin') {
-        this.darwin.mouseClick(y, x)
-        return
-      }
-      this.child.stdin.write(`\x1b[<0;${String(x)};${String(y)}M\x1b[<0;${String(x)};${String(y)}m`)
-    }
-
     /** Signal the business Client process (never the `script` wrapper / tmux). */
     signalBusiness(signal) {
       const pid = this.records.find(record => record.m4a0 === 'ready')?.pid
