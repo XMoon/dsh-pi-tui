@@ -26,9 +26,11 @@ export function openExternalUrl(rawUrl: string): void {
 
   try {
     const { command, args } = openerFor(url.href, process.platform)
-    const child = spawn(command, args, { stdio: 'ignore', detached: true })
+    // Windows PowerShell must stay attached until its browser request completes.
+    const detached = process.platform !== 'win32'
+    const child = spawn(command, args, { stdio: 'ignore', detached })
     child.on('error', () => {})
-    child.unref()
+    if (detached) child.unref()
   } catch {
     // Best-effort: an unavailable opener must never crash the surface.
   }
