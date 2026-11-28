@@ -517,23 +517,43 @@ test('open reports a spawn error as BROWSER_LAUNCH_UNAVAILABLE without argv', as
   assert.doesNotMatch(result.stderr, /ENOENT|token|xdg-open/u)
 })
 
-test('open reports an immediately observable non-zero opener exit as a failure', async (t) => {
+test('open reports non-zero opener exit, waiting for Windows even beyond the POSIX observation window', async (t) => {
   const fx = fixture(t)
   const server = await startServer(t, { status: 200, body: JSON.stringify({ schema: 1, instanceId: UUID, url: `${'http://127.0.0.1:4444'}/?token=x` }) })
   const realUrl = `${server.origin}/?token=opaque`
   server.setReply({ status: 200, body: JSON.stringify({ schema: 1, instanceId: UUID, url: realUrl }) })
-  class FakeChild extends EventEmitter {
-    unref(): void {}
+  const systemRoot = process.env.SystemRoot
+  if (systemRoot === undefined) process.env.SystemRoot = 'D:\\Windows'
+  t.after(() => { if (systemRoot === undefined) delete process.env.SystemRoot })
+  for (const platform of ['linux', 'win32'] as const) {
+    let detached: boolean | undefined
+    let unrefs = 0
+    class FakeChild extends EventEmitter {
+      unref(): void { unrefs += 1 }
+    }
+    const fakeSpawn = ((_command: string, _args: readonly string[], options: { detached?: boolean }) => {
+      detached = options.detached
+      const child = new FakeChild()
+      setImmediate(() => {
+        child.emit('spawn')
+        if (platform === 'win32') {
+          // Deliver exit after the old zero-length POSIX observation timer would settle.
+          setTimeout(() => child.emit('exit', 3, null), 0)
+        } else {
+          child.emit('exit', 3, null)
+        }
+      })
+      return child
+    }) as unknown as typeof import('node:child_process').spawn
+    const result = await run(fx, recordOf(fx.scope, server.origin), 'open', {
+      deps: { platform, spawn: fakeSpawn, openerWaitMs: 0 },
+    })
+    assert.equal(result.code, 4)
+    assert.equal(result.stdout, '')
+    assert.match(result.stderr, /BROWSER_LAUNCH_UNAVAILABLE/u)
+    assert.equal(detached, platform !== 'win32')
+    assert.equal(unrefs, platform === 'win32' ? 0 : 1)
   }
-  const fakeSpawn = (() => {
-    const child = new FakeChild()
-    setImmediate(() => { child.emit('spawn'); child.emit('exit', 3, null) })
-    return child
-  }) as unknown as typeof import('node:child_process').spawn
-  const result = await run(fx, recordOf(fx.scope, server.origin), 'open', { deps: { spawn: fakeSpawn } })
-  assert.equal(result.code, 4)
-  assert.equal(result.stdout, '')
-  assert.match(result.stderr, /BROWSER_LAUNCH_UNAVAILABLE/u)
 })
 
 // ── unsupported platform ───────────────────────────────────────────────────
