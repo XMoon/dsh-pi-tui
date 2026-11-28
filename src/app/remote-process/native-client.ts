@@ -332,7 +332,7 @@ export interface NativePendingSubmission {
   readonly text: string
   readonly attachments: readonly (
     | { readonly type: 'image'; readonly value: {
-      readonly previewUrl: string
+      readonly previewUrl?: string
       readonly name?: string
       readonly width?: number
       readonly height?: number
@@ -1712,7 +1712,9 @@ class OwnedNativeSession implements NativeSession {
                 bytes: attachment.value.bytes,
               } }
               : { type: 'image', value: {
-                previewUrl: attachment.value.previewUrl,
+                ...typeof attachment.value.previewUrl === 'string' && attachment.value.previewUrl !== ''
+                  ? { previewUrl: attachment.value.previewUrl }
+                  : {},
                 ...attachment.value.name === undefined ? {} : { name: attachment.value.name },
                 ...attachment.value.width === undefined ? {} : { width: attachment.value.width },
                 ...attachment.value.height === undefined ? {} : { height: attachment.value.height },
@@ -1857,40 +1859,55 @@ class OwnedNativeSession implements NativeSession {
       let text = ''
       try {
         for (const part of input.content) {
-          if (part.type === 'text') {
-            text += part.text
-            content.push({ type: 'text', text: part.text })
-            continue
+          if (typeof part !== 'object' || part === null) {
+            throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'prompt parts must be objects')
           }
-          if (!(part.bytes instanceof Uint8Array)) throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'attachment bytes must be Uint8Array')
-          if (part.type === 'image') {
-            if (part.mediaType !== 'image/png' && part.mediaType !== 'image/jpeg'
-              && part.mediaType !== 'image/webp' && part.mediaType !== 'image/gif') {
-              throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'image media type is invalid')
+          switch (part.type) {
+            case 'text': {
+              if (typeof part.text !== 'string') throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'text prompt part must contain text')
+              text += part.text
+              content.push({ type: 'text', text: part.text })
+              break
             }
-            content.push({
-              type: 'image',
-              mediaType: part.mediaType,
-              data: Buffer.from(part.bytes.buffer, part.bytes.byteOffset, part.bytes.byteLength).toString('base64'),
-              ...part.name === undefined ? {} : { name: part.name },
-            })
-            echoAttachments.push({ type: 'image', value: { previewUrl: '', ...part.name === undefined ? {} : { name: part.name } } })
-            continue
+            case 'image': {
+              if (!(part.bytes instanceof Uint8Array)) throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'attachment bytes must be Uint8Array')
+              if (part.mediaType !== 'image/png' && part.mediaType !== 'image/jpeg'
+                && part.mediaType !== 'image/webp' && part.mediaType !== 'image/gif') {
+                throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'image media type is invalid')
+              }
+              if (part.name !== undefined && typeof part.name !== 'string') {
+                throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'image name must be a string')
+              }
+              content.push({
+                type: 'image',
+                mediaType: part.mediaType,
+                data: Buffer.from(part.bytes.buffer, part.bytes.byteOffset, part.bytes.byteLength).toString('base64'),
+                ...part.name === undefined ? {} : { name: part.name },
+              })
+              echoAttachments.push({ type: 'image', value: { previewUrl: '', ...part.name === undefined ? {} : { name: part.name } } })
+              break
+            }
+            case 'file': {
+              if (!(part.bytes instanceof Uint8Array)) throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'attachment bytes must be Uint8Array')
+              requireNonEmpty(part.name, 'file name')
+              const uploaded = await this.state.uploader.upload(this.sessionId, {
+                name: part.name,
+                byteLength: part.bytes.byteLength,
+                source: {
+                  kind: 'client-stream',
+                  open: () => (async function* (): AsyncIterable<Uint8Array> { yield part.bytes })(),
+                },
+              }, signal)
+              content.push({ type: 'file', receiptId: uploaded.receiptId as FileUploadReceiptId })
+              echoAttachments.push({ type: 'file', value: {
+                ...uploaded.file,
+                attachmentId: uploaded.file.attachmentId as ImageAttachmentRef['attachmentId'],
+              } })
+              break
+            }
+            default:
+              throw nativeError('NATIVE_CLIENT_INVALID_INPUT', 'prompt part type is invalid')
           }
-          requireNonEmpty(part.name, 'file name')
-          const uploaded = await this.state.uploader.upload(this.sessionId, {
-            name: part.name,
-            byteLength: part.bytes.byteLength,
-            source: {
-              kind: 'client-stream',
-              open: () => (async function* (): AsyncIterable<Uint8Array> { yield part.bytes })(),
-            },
-          }, signal)
-          content.push({ type: 'file', receiptId: uploaded.receiptId as FileUploadReceiptId })
-          echoAttachments.push({ type: 'file', value: {
-            ...uploaded.file,
-            attachmentId: uploaded.file.attachmentId as ImageAttachmentRef['attachmentId'],
-          } })
         }
       } catch (error) {
         return asPromptFailure(notDispatchedResult(
@@ -2418,13 +2435,13 @@ function createNativeInteractionReceivers(
   ): Promise<void> => {
     const captured = currentGeneration(state)
     const lifetime = AbortSignal.any([handle.lifetimeSignal(), state.lifetime.signal])
-    const answer = await onQuestion({
+    const answer = await abortable(onQuestion({
       sessionId: handle.sessionId,
       callId: call.callId,
       timed: true,
       questions: call.questions,
       signal: lifetime,
-    })
+    }), lifetime)
     if (disposed || state.closed || handle.isClosed || lifetime.aborted
       || !Object.is(captured, currentGeneration(state)) || !handle.isCurrentBinding()) {
       throw nativeError('NATIVE_INTERACTION_STALE', 'the continued Question answer is no longer current')
@@ -2573,13 +2590,13 @@ function createNativeInteractionReceivers(
     try {
       const handle = await waitForHandle(sessionId, session, request.signal, captured)
       const lifetime = request.signal === undefined ? handle.lifetimeSignal() : AbortSignal.any([request.signal, handle.lifetimeSignal()])
-      const answer = await options.onQuestion({
+      const answer = await abortable(options.onQuestion({
         sessionId,
         callId,
         timed: request.wait?.timed === true,
         questions: questionItemsOf(request.questions),
         signal: lifetime,
-      })
+      }), lifetime)
       if (disposed || state.closed || handle.isClosed || lifetime.aborted
         || !Object.is(captured, currentGeneration(state))
         || !handle.matchesSession(state.sessions.sessionOf(this))) {
@@ -2614,14 +2631,14 @@ function createNativeInteractionReceivers(
     try {
       const handle = await waitForHandle(sessionId, session, request.signal, captured)
       const lifetime = request.signal === undefined ? handle.lifetimeSignal() : AbortSignal.any([request.signal, handle.lifetimeSignal()])
-      const outcome = await options.onApproval({
+      const outcome = await abortable(options.onApproval({
         sessionId,
         callId,
         toolName: request.toolName,
         ...request.reason === undefined ? {} : { reason: request.reason },
         ...request.displayReason === undefined ? {} : { displayReason: request.displayReason },
         signal: lifetime,
-      })
+      }), lifetime)
       if (disposed || state.closed || handle.isClosed || lifetime.aborted
         || !Object.is(captured, currentGeneration(state))
         || !handle.matchesSession(state.sessions.sessionOf(this))) {

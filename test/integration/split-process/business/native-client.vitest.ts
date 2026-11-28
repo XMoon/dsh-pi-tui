@@ -127,6 +127,20 @@ async function withAbort<T>(decision: Promise<T>, signal: AbortSignal | undefine
   }
 }
 
+async function settleWithin<T>(promise: Promise<T>, label: string, timeoutMs = 30_000): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label}: timed out after ${String(timeoutMs)}ms`)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 async function waitFor<T>(
   label: string,
   read: () => Promise<T> | T,
@@ -311,6 +325,22 @@ test('qualifies the installed Native Client business and interaction paths', { t
     evidence.nativeEntry = nativeEntry
     save()
 
+    // Pre-auth negatives run before any Host exists or authentication is attempted.
+    {
+      const base = { dshAnchor: scene.installation.anchor, profile: 'pi-tui', expectedScopeId: scene.scope.scopeId }
+      await expect(attachNativeClient(base)).rejects.toMatchObject({ code: 'NATIVE_CLIENT_HOST_UNAVAILABLE' })
+      await expect(attachNativeClient({ ...base, expectedScopeId: 'foreign-scope' })).rejects.toMatchObject({ code: 'NATIVE_CLIENT_SCOPE_MISMATCH' })
+      const preCancelled = new AbortController()
+      preCancelled.abort(new Error('pre-cancel'))
+      await expect(attachNativeClient({ ...base, signal: preCancelled.signal })).rejects.toThrow('pre-cancel')
+      const fakeAnchorDir = join(scene.workDir, 'foreign-dsh-anchor')
+      mkdirSync(fakeAnchorDir, { recursive: true, mode: 0o700 })
+      writeFileSync(join(fakeAnchorDir, 'package.json'), JSON.stringify({ name: 'not-dsh', version: '0.2.2-rc.5' }), { mode: 0o600 })
+      await expect(attachNativeClient({ ...base, dshAnchor: join(fakeAnchorDir, 'package.json') }))
+        .rejects.toMatchObject({ code: 'NATIVE_CLIENT_UNSUPPORTED_DSH' })
+      pass('pre-auth-negatives', { missingHost: true, foreignScope: true, preCancelled: true, foreignPackage: true })
+    }
+
     // 1. Attach/status/realm/close/reattach plus exact Host identity.
     {
       const host = await scene.startHost({ scenario: 'foreground-tool', holdTool: true })
@@ -320,6 +350,17 @@ test('qualifies the installed Native Client business and interaction paths', { t
         first = await attach(scene, host)
         const initial = ok(first.status(), 'initial status')
         const identity = statusIdentity(initial)
+        const startupAbort = new AbortController()
+        const cancelledAttach = attachNativeClient({
+          dshAnchor: scene.installation.anchor,
+          profile: 'pi-tui',
+          expectedScopeId: scene.scope.scopeId,
+          expectedInstanceId: host.ready.localHost.instanceId,
+          signal: startupAbort.signal,
+        })
+        startupAbort.abort(new Error('startup-cancel'))
+        await expect(cancelledAttach).rejects.toThrow()
+        expect(first.status().kind).toBe('ok')
         expect(identity.scopeId).toBe(scene.scope.scopeId)
         expect(identity.instanceId).toBe(host.ready.localHost.instanceId)
         expect(identity.hostPid).toBe(host.ready.localHost.hostPid)
@@ -336,6 +377,15 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect(statuses.length).toBeGreaterThan(0)
         offStatus()
         await expect(attach(scene, host)).rejects.toMatchObject({ code: 'NATIVE_CLIENT_REALM_BUSY' })
+        const duplicateEntry = await import(`${pathToFileURL(nativeEntry).href}?native-realm-copy`) as {
+          attachNativeClient: (options: NativeAttachOptions) => Promise<NativeClient>
+        }
+        await expect(duplicateEntry.attachNativeClient({
+          dshAnchor: scene.installation.anchor,
+          profile: 'pi-tui',
+          expectedScopeId: scene.scope.scopeId,
+          expectedInstanceId: host.ready.localHost.instanceId,
+        })).rejects.toMatchObject({ code: 'NATIVE_CLIENT_REALM_BUSY' })
         const hostStatus = await scene.hostStatus(host)
         expect(hostStatus.localHost.instanceId).toBe(identity.instanceId)
         expect(hostStatus.localHost.hostPid).toBe(identity.hostPid)
@@ -353,6 +403,10 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect(history.records.length).toBeGreaterThan(0)
 
         const watched = watchSession(sibling)
+        const beforeInvalidPrompt = durableEvents(scene, created.sessionId).length
+        const invalidPrompt = await sibling.prompt({ content: [{ type: 'bogus', name: 'x.txt', bytes: new Uint8Array([1]) } as never] })
+        expect(invalidPrompt.kind, `unknown prompt discriminator must fail before Host effects: ${resultSummary(invalidPrompt)}`).toBe('not-dispatched')
+        expect(durableEvents(scene, created.sessionId).length).toBe(beforeInvalidPrompt)
         const prompt = accepted(await sibling.prompt({ content: [{ type: 'text', text: 'native foreground tool' }] }), 'foreground prompt')
         const toolCall = await scene.waitForSessionEvent(created.sessionId, 0,
           event => event.type === 'tool/call' && event.data?.name === 'c1_foreground_tool',
@@ -376,6 +430,11 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect(catalog.permissions.options.some(option => option.value === 'read-only')).toBe(true)
         const commands = ok(await configured.session.commands(), 'commands')
         expect(commands.some(command => command.name === 'plan')).toBe(true)
+        expect(commands.some(command => command.name === 'footer')).toBe(false)
+        const unknownCommand = committed(await configured.session.command('/native-unknown-command'), 'unknown command')
+        expect(unknownCommand).toEqual({ matched: false })
+        const tuiOnlyCommand = committed(await configured.session.command('/footer'), 'TUI-only command')
+        expect(tuiOnlyCommand).toEqual({ matched: false })
         const command = committed(await configured.session.command('/plan'), 'command /plan')
         expect('matched' in command ? command.matched : command.result.kind).toBe('success')
         await waitFor('plan active after /plan', async () => ok(await configured.session.configuration(), 'configuration').plan,
@@ -394,8 +453,20 @@ test('qualifies the installed Native Client business and interaction paths', { t
         const file = ok(await sibling.readFile({ path: 'host-marker.txt' }), 'readFile')
         expect(Buffer.from(file.data).toString('utf8')).toBe('native-host-basic\n')
 
+        const beforeClose = ok(first.status(), 'status before close')
+        expect(beforeClose.activeWrappers).toBeGreaterThan(0)
+        expect(beforeClose.liveSockets).toBeGreaterThan(0)
         await first.close()
         expect(first.status().kind).toBe('closed')
+        const hostAfterClose = await scene.hostStatus(host)
+        expect(hostAfterClose.localHost.instanceId).toBe(identity.instanceId)
+        expect(hostAfterClose.localHost.hostPid).toBe(identity.hostPid)
+        await expect(attachNativeClient({
+          dshAnchor: scene.installation.anchor,
+          profile: 'pi-tui',
+          expectedScopeId: scene.scope.scopeId,
+          expectedInstanceId: 'foreign-instance',
+        })).rejects.toMatchObject({ code: 'NATIVE_CLIENT_INSTANCE_MISMATCH' })
         second = await attach(scene, host)
         const reattached = ok(second.status(), 'reattach status')
         expect(reattached.identity.instanceId).toBe(identity.instanceId)
@@ -403,7 +474,13 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect(reread.records.some(entry => entry.type === 'event' && entry.event.type === 'user/message')).toBe(true)
         watched.release()
         await sibling.close()
-        pass('attach-status-realm-close-reattach', { identity, generationId: reattached.generationId })
+        pass('attach-status-realm-close-reattach', {
+          identity,
+          generationId: reattached.generationId,
+          beforeClose: { activeWrappers: beforeClose.activeWrappers, liveSockets: beforeClose.liveSockets },
+          hostAfterClose: { instanceId: hostAfterClose.localHost.instanceId, hostPid: hostAfterClose.localHost.hostPid },
+          duplicateEntryRejected: true,
+        })
         pass('session-handles-history-config-commands-file', {
           sessionId: created.sessionId,
           workspacePath: created.workspacePath,
@@ -415,6 +492,88 @@ test('qualifies the installed Native Client business and interaction paths', { t
       } finally {
         await first?.close()
         await second?.close()
+        await scene.stopHost(host)
+      }
+    }
+
+    // Typed file bytes use official staging and reach durable/model consumers.
+    {
+      const host = await scene.startHost({ scenario: 'foreground-tool', holdTool: true })
+      let client: NativeClient | undefined
+      try {
+        client = await attach(scene, host)
+        const { sessionId, session } = await createSession(scene, client, 'file-input')
+        const bytes = Buffer.from('native typed file payload\n', 'utf8')
+        const prompt = accepted(await session.prompt({ content: [
+          { type: 'text', text: 'native typed file input' },
+          { type: 'file', name: 'native-input.txt', bytes },
+        ] }), 'typed file prompt')
+        const user = await scene.waitForSessionEvent(sessionId, 0,
+          event => event.type === 'user/message' && event.data?.source?.rpcId === prompt.requestId,
+          'typed file durable user/message')
+        const file = (user.data?.content ?? []).find((part: Record<string, any>) => part.type === 'file')?.attachment
+        expect(file).toBeDefined()
+        expect(file.name).toBe('native-input.txt')
+        expect(file.bytes).toBe(bytes.byteLength)
+        const promptEvidencePath = scene.installation.base.env.SPLIT_PROCESS_PROMPT_EVIDENCE
+        const modelRow = await waitFor('model request userFiles', () => {
+          if (!existsSync(promptEvidencePath)) return undefined
+          const text = readFileSync(promptEvidencePath, 'utf8')
+          if (!text.endsWith('\n')) return undefined
+          return text.slice(0, -1).split('\n').filter(Boolean).map(line => JSON.parse(line))
+            .find(row => row.userFileHandles?.some((text: string) => text.includes(file.name)
+              && text.includes(`${bytes.byteLength} bytes`)))
+        }, value => value !== undefined)
+        expect(modelRow.userFileHandles.some((text: string) => text.includes(file.attachmentId.slice(0, 15))
+          && text.includes(file.name) && text.includes(`${bytes.byteLength} bytes`))).toBe(true)
+        const toolCall = await scene.waitForSessionEvent(sessionId, 0,
+          event => event.type === 'tool/call' && event.data?.name === 'c1_foreground_tool',
+          'typed file tool/call')
+        writeFileSync(host.toolReleasePath!, 'release\n', { mode: 0o600, flag: 'wx' })
+        const terminal = await waitForPromptTerminal(scene, sessionId, prompt.requestId, 'typed file prompt')
+        const toolResult = await scene.waitForSessionEvent(sessionId, 0,
+          event => event.type === 'tool/result' && event.data?.message?.toolCallId === toolCall.data?.callId,
+          'typed file tool/result')
+        expect(toolResult.data?.message?.isError).not.toBe(true)
+        pass('typed-file-input', { sessionId, attachment: file, modelRow, terminal, toolCallId: toolCall.data?.callId })
+      } finally {
+        await client?.close()
+        await scene.stopHost(host)
+      }
+    }
+
+    // A real user skill is resolved by the Host tool and replayed durably.
+    {
+      const skillDir = join(scene.installation.dshHome, 'skills', 'native-skill')
+      mkdirSync(skillDir, { recursive: true, mode: 0o700 })
+      writeFileSync(join(skillDir, 'SKILL.md'), [
+        '---',
+        'name: native-skill',
+        'description: Native candidate skill',
+        '---',
+        '',
+        'NATIVE_SKILL_INSTRUCTIONS_MARKER',
+        '',
+      ].join('\n'), { mode: 0o600 })
+      const host = await scene.startHost({ scenario: 'native-skill' })
+      let client: NativeClient | undefined
+      try {
+        client = await attach(scene, host)
+        const { sessionId, session } = await createSession(scene, client, 'skill')
+        const prompt = accepted(await session.prompt({ content: [{ type: 'text', text: 'native user skill' }] }), 'skill prompt')
+        const call = await scene.waitForSessionEvent(sessionId, 0,
+          event => event.type === 'tool/call' && event.data?.name === 'skill',
+          'user skill tool/call')
+        expect(call.data?.arguments).toContain('native-skill')
+        const result = await scene.waitForSessionEvent(sessionId, 0,
+          event => event.type === 'tool/result' && event.data?.message?.toolCallId === call.data?.callId,
+          'user skill tool/result')
+        expect(result.data?.message?.isError).not.toBe(true)
+        expect(eventText(result)).toContain('NATIVE_SKILL_INSTRUCTIONS_MARKER')
+        const terminal = await waitForPromptTerminal(scene, sessionId, prompt.requestId, 'skill prompt')
+        pass('user-skill', { sessionId, toolCallId: call.data?.callId, terminal })
+      } finally {
+        await client?.close()
         await scene.stopHost(host)
       }
     }
@@ -785,6 +944,31 @@ test('qualifies the installed Native Client business and interaction paths', { t
       } finally {
         await first?.close()
         await second?.close()
+        await scene.stopHost(host)
+      }
+    }
+
+    // A caller callback that ignores its signal must not hold Client close forever.
+    {
+      const host = await scene.startHost({ scenario: 'question', timedQuestion: true })
+      let client: NativeClient | undefined
+      try {
+        let request: Parameters<NonNullable<NativeAttachOptions['onQuestion']>>[0] | undefined
+        client = await attach(scene, host, { onQuestion: async incoming => {
+          request = incoming
+          return await new Promise<never>(() => {})
+        } })
+        const created = await createSession(scene, client, 'noncooperative-question')
+        accepted(await created.session.prompt({ content: [{ type: 'text', text: 'native noncooperative question acp-question-blocking' }] }), 'noncooperative question prompt')
+        const received = defined(await waitFor('noncooperative Question request', () => request, value => value !== undefined), 'noncooperative Question request')
+        await settleWithin(client.close(), 'close with noncooperative Question callback')
+        client = undefined
+        expect(received.signal?.aborted).toBe(true)
+        expect(durableEvents(scene, created.sessionId).some(event =>
+          event.type === 'user/message' && event.data?.source?.kind === 'user-question-reply')).toBe(false)
+        pass('noncooperative-callback-close', { sessionId: created.sessionId, callId: received.callId, closed: true })
+      } finally {
+        await client?.close()
         await scene.stopHost(host)
       }
     }

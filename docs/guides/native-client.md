@@ -42,11 +42,14 @@ never return the Host home, origin, token, registry or credentials.
 ## Owned Session handles
 
 ```ts
-const session = await client.openSession(sessionId)
-const current = await session.snapshot()
+const opened = await client.openSession(sessionId)
+if (opened.kind !== 'ok') throw new Error('Session open failed')
+const session = opened.value
+const current = session.snapshot()
 const page = await session.history({ maxMessages: 20 })
-const unsubscribe = session.subscribe(change => {
-  if (change.kind === 'reconcile-required') unsubscribe()
+let unsubscribe = () => {}
+unsubscribe = session.subscribe(change => {
+  if (change.kind === 'ok' && change.value.reconcileRequired) unsubscribe()
 })
 const accepted = await session.prompt({
   content: [
@@ -56,6 +59,7 @@ const accepted = await session.prompt({
   mode: 'queue',
   signal,
 })
+if (accepted.kind !== 'accepted') throw new Error(accepted.message)
 await session.close()
 await client.close()
 ```

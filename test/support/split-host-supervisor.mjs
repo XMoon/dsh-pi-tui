@@ -202,7 +202,7 @@ const PROCESS_PTY_OWNER = fileURLToPath(new URL('./split-process-pty-owner.mjs',
 const PROCESS_HOST_SCENARIOS = new Set([
   'long-turn', 'job', 'question', 'approval-allow', 'approval-reject', 'foreground-tool',
   'child', 'unowned-job', 'goal-armed', 'goal-round', 'maintenance', 'schedule',
-  'plan-review', 'team-board', 'acp-po4a',
+  'plan-review', 'team-board', 'acp-po4a', 'acp-image-content', 'native-skill',
 ])
 const PROCESS_HOST_CRASH_SIGNALS = new Set(['SIGHUP', 'SIGKILL'])
 const PROCESS_CLIENT_HMR_MODES = new Set(['replace', 'mount-failure', 'hold'])

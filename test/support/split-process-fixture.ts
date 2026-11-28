@@ -98,6 +98,7 @@ export type ProcessHostScenario =
   | 'long-turn' | 'job' | 'question' | 'approval-allow' | 'approval-reject'
   | 'foreground-tool' | 'child' | 'unowned-job' | 'goal-armed' | 'goal-round'
   | 'maintenance' | 'schedule' | 'plan-review' | 'team-board' | 'acp-po4a'
+  | 'acp-image-content' | 'native-skill'
 
 /** A bounded read-authority operation: the Supervisor owns the concrete wire values. */
 export type ProcessReadAuthorityRequest =

@@ -100,6 +100,7 @@ const SCENARIOS = new Set([
   // model stays inert and the fault provider is gated by C1_SKILLS_FAULT_DIR.
   'skills-standing',
   'skills-recovery',
+  'native-skill',
   // The PR2-B Host accepted-history lane only needs an ordinary text turn; it
   // must never reuse the Skills scenario's fault/profile semantics.
   'history-search',
@@ -444,6 +445,12 @@ function recordPromptFacts(options) {
       mediaType: image.attachment?.mediaType,
       bytes: image.attachment?.bytes,
     }))
+  const userFileHandles = (options.messages ?? [])
+    .filter(message => message?.role === 'user')
+    .flatMap(message => Array.isArray(message.content) ? message.content : [])
+    .filter(part => part?.type === 'text' && typeof part.text === 'string'
+      && part.text.includes(' bytes') && part.text.includes('sha256:'))
+    .map(part => part.text)
   const allText = [options.system, ...(options.messages ?? [])
     .map(message => message.content)]
     .map(textOf).join('\\n')
@@ -469,6 +476,7 @@ function recordPromptFacts(options) {
     userTexts,
     userMessageSources,
     userImages,
+    userFileHandles,
     responseSection: systemText.includes('# Response style:'),
     gitSection: systemText.includes('# Git attribution'),
   }) + '\n', { mode: 0o600 })
@@ -2172,6 +2180,30 @@ class C1Model extends LlmAdapter {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: `foreground answer ${token}` }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `foreground answer ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
+    if (this.scenario === 'native-skill') {
+      if (!this.toolIssued.has(sessionId)) {
+        this.toolIssued.add(sessionId)
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: {
+            type: 'tool-call',
+            id: `c1-skill-${sessionId}`,
+            name: 'skill',
+            arguments: JSON.stringify({ name: 'native-skill' }),
+          },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: `skill answer ${token}` }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `skill answer ${token}` } }
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }

@@ -9,7 +9,9 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import test from 'node:test'
+import ts from 'typescript'
 import type {
   NativeAttachOptions,
   NativeApprovalOutcome,
@@ -19,6 +21,7 @@ import type {
   NativeJsonValue,
   NativePromptInput,
   NativePromptResult,
+  NativePendingSubmission,
   NativeQuestionAnswer,
   NativeQuestionItem,
   NativeQuestionRequest,
@@ -106,6 +109,7 @@ const _promptBytes: AssertAssignable<NativePromptInput['content'][number], {
 } | {
   readonly type: 'file'; readonly name: string; readonly bytes: Uint8Array
 }> = true
+const _pendingImagePreviewOptional: AssertEqual<{} extends Pick<Extract<NativePendingSubmission['attachments'][number], { readonly type: 'image' }>['value'], 'previewUrl'> ? true : false, true> = true
 const _eventDataTyped: AssertAssignable<NativeSessionEvent['data'], NativeJsonValue> = true
 const _identityKernel: AssertAssignable<NativeHostIdentity['kernel'], {
   readonly platform: 'linux'; readonly hostStarttime: string
@@ -121,6 +125,44 @@ test('package.json publishes one typed native-client subpath', () => {
   assert.ok(entry !== undefined && typeof entry !== 'string', 'the public subpath must exist')
   assert.equal(entry.types, './dist/native-client.d.mts')
   assert.equal(entry.default, './dist/native-client.mjs')
+})
+
+test('the Native Client guide Session example typechecks against the public contract', () => {
+  const guide = readFileSync(join(packageRoot, 'docs', 'guides', 'native-client.md'), 'utf8')
+  const section = guide.slice(guide.indexOf('## Owned Session handles'))
+  const example = /```ts\n([\s\S]*?)\n```/u.exec(section)?.[1]
+  assert.ok(example !== undefined, 'the Native Client guide must contain a Session example')
+  const virtualPath = join(packageRoot, 'test', 'app', 'native-client-guide-example.ts')
+  const source = [
+    "import type { NativeClient } from '../../src/app/remote-process/native-client.ts'",
+    'declare const client: NativeClient',
+    'declare const sessionId: string',
+    'declare const pngBytes: Uint8Array',
+    'declare const signal: AbortSignal',
+    example,
+  ].join('\n')
+  const options: ts.CompilerOptions = {
+    noEmit: true,
+    strict: true,
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    allowImportingTsExtensions: true,
+    skipLibCheck: true,
+    types: ['node'],
+  }
+  const host = ts.createCompilerHost(options)
+  const getSourceFile = host.getSourceFile.bind(host)
+  const fileExists = host.fileExists.bind(host)
+  const readFile = host.readFile.bind(host)
+  host.getSourceFile = (fileName, languageVersion, onError, shouldCreateNewSourceFile) => fileName === virtualPath
+    ? ts.createSourceFile(fileName, source, languageVersion, true)
+    : getSourceFile(fileName, languageVersion, onError, shouldCreateNewSourceFile)
+  host.fileExists = fileName => fileName === virtualPath || fileExists(fileName)
+  host.readFile = fileName => fileName === virtualPath ? source : readFile(fileName)
+  const program = ts.createProgram([virtualPath], options, host)
+  const diagnostics = ts.getPreEmitDiagnostics(program).filter(diagnostic => diagnostic.file?.fileName === virtualPath)
+  assert.deepEqual(diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')), [])
 })
 
 test('the headless entry exports the frozen API version and attach factory', () => {
@@ -140,6 +182,9 @@ test('the headless entry exports the frozen API version and attach factory', () 
   assert.ok(_promptBytes)
   assert.ok(_eventDataTyped)
   assert.ok(_identityKernel)
+  assert.ok(_pendingImagePreviewOptional)
+  const implementation = readFileSync(join(packageRoot, 'src', 'app', 'remote-process', 'native-client.ts'), 'utf8')
+  assert.ok(implementation.includes("attachment.value.previewUrl !== ''"), 'Native pending images must omit the internal empty preview placeholder')
 })
 
 test('one Node realm rejects a concurrent composition and releases only its own reservation', () => {
@@ -165,4 +210,18 @@ test('failed Client-owned cleanup retains the realm until a successful settlemen
   await completeNativeClientRealm(release, async () => {})
   const releaseAfterSuccessfulSettlement = reserveNativeClientRealm()
   releaseAfterSuccessfulSettlement()
+})
+
+test('separate module instances share the same Node-realm reservation', async () => {
+  const moduleUrl = pathToFileURL(join(import.meta.dirname, '..', '..', 'src', 'app', 'remote-process', 'native-client-realm.ts')).href
+  const first = await import(`${moduleUrl}?review-copy=a`) as typeof import('../../src/app/remote-process/native-client-realm.ts')
+  const second = await import(`${moduleUrl}?review-copy=b`) as typeof import('../../src/app/remote-process/native-client-realm.ts')
+  const release = first.reserveNativeClientRealm()
+  assert.throws(() => second.reserveNativeClientRealm(), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, 'NATIVE_CLIENT_REALM_BUSY')
+    return true
+  })
+  release()
+  const releaseSecond = second.reserveNativeClientRealm()
+  releaseSecond()
 })

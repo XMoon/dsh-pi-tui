@@ -7,21 +7,23 @@
  * headless compositions from racing in the same realm.
  */
 
-let activeReservation: symbol | undefined
+const REALM_STATE_KEY = Symbol.for('@xmoon76/dsh-pi-tui/native-client-realm')
+const realm = globalThis as unknown as Record<symbol, { activeReservation?: symbol }>
+const realmState = realm[REALM_STATE_KEY] ??= {}
 
 export function reserveNativeClientRealm(): () => void {
-  if (activeReservation !== undefined) {
+  if (realmState.activeReservation !== undefined) {
     throw Object.assign(new Error('native-client: another attach is active in this Node realm'), {
       code: 'NATIVE_CLIENT_REALM_BUSY',
     })
   }
   const token = Symbol('native-client-realm')
-  activeReservation = token
+  realmState.activeReservation = token
   let released = false
   return () => {
     if (released) return
     released = true
-    if (activeReservation === token) activeReservation = undefined
+    if (realmState.activeReservation === token) realmState.activeReservation = undefined
   }
 }
 
