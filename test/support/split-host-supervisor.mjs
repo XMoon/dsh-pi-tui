@@ -9255,7 +9255,7 @@ async function handlePublicDaemonInput(message) {
       if (input.x >= size.cols || input.y >= size.rows) {
         throw new Error('INPUT_UNQUALIFIED: PUBLIC_DAEMON_INPUT mouseClick coordinate is outside the current terminal')
       }
-      await handle.terminal.mouseClick({ x: input.x, y: input.y })
+      await handle.terminal.mouse.click(input.x, input.y)
     }
   } else if (input.type === 'submit') {
     if (input.text !== undefined && typeof input.text !== 'string') throw new Error('INPUT_UNQUALIFIED: PUBLIC_DAEMON_INPUT submit text must be a string')
