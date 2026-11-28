@@ -74,7 +74,7 @@ MANDATORY or BLOCKING.
 
 | Path | Audience | What it owns |
 |---|---|---|
-| `architecture/overview.md` | contributors | Ownership map and canonical layers, dependency direction, composition zone, source-placement policy and root ledger, architecture-gate scope |
+| `architecture/overview.md` | contributors | Ownership map and canonical layers, dependency direction, composition zone, closed-root placement contract and architecture-gate scope |
 | `architecture/host-client.md` | contributors | Host/Client locality, semantic ports, backend selection, Split transport, Direct/Remote equivalence, currentness and Session/Host authority; canonical owner for Client detach |
 | `architecture/host-daemon.md` | contributors | Profile-scoped daemon supervision, Host process management and administrative command lifecycle |
 | `architecture/host-acp.md` | contributors | Host-owned local ACP v1 listener, bounded protocol admission and session-view contract |

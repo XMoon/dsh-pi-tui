@@ -12,11 +12,12 @@ owned by [concurrency.md](./concurrency.md) and the async failure model by
 
 ## Ownership map
 
-Every production module belongs to exactly one owner layer:
+Every production module belongs to exactly one owner layer. The application and
+runtime subzones below clarify responsibilities within their respective layers:
 
 | Zone | Owner role |
 |---|---|
-| `src/index.ts` | Public package facade; delegates application startup |
+| `src/app/**` | Application lifecycle, orchestration, currentness and owner composition |
 | `src/app/bootstrap.ts` + `src/app/bootstrap/**` | Application composition facade and cohesive wiring-only helpers |
 | `src/app/session/**` | Session application ownership, currentness and orchestration |
 | `src/app/submission/**` | Prompt / user-shell application orchestration |
@@ -30,7 +31,6 @@ Every production module belongs to exactly one owner layer:
 | `src/client/**` | Client-local non-TUI platform capabilities (media, clipboard, artifact IO, local completion, history IO, themes, launcher/git reads) |
 | `src/tui/**` | Terminal rendering, pickers, panels, commands and interaction |
 | `src/extension/**` | Public extension compatibility boundary and internal registries |
-| `src/commands.ts`, `src/transcript.ts`, `src/tui-app.ts` | Documented root facades/transitional entries; not a template for new modules |
 
 `src/tui-app.ts` is still a large owner of terminal composition and mutable
 renderer state. Its size is structural debt, not an invitation to move business
@@ -40,27 +40,18 @@ re-export facade over `src/domain/transcript/**`.
 
 ## Canonical layers
 
-| Layer | Owns |
-|---|---|
-| `src/app/**` | Application lifecycle, orchestration, currentness and owner composition |
-| `src/runtime/**` | Semantic ports/contracts plus Direct/Remote backend adapters |
-| `src/domain/**` | Transport/UI-neutral semantic models, policies, folds and derived state |
-| `src/client/**` | Client-local non-TUI platform capability |
-| `src/tui/**` | Terminal rendering, pickers, panels, commands and interaction |
-| `src/extension/**` | Public extension compatibility boundary |
-
-Root modules are limited to the documented entries/facades/compatibility islands
-(`src/index.ts`, `src/startup.ts`, `src/commands.ts`, `src/tui-app.ts`,
-`src/transcript.ts`, `src/extensions.ts`, `src/builtins.ts`); an ordinary new
-root feature/helper (`src/*.ts`, `*.tsx`, `*.mts`, `*.cts`) is forbidden and
-mechanically rejected.
+Use the [ownership map](#ownership-map) above to choose the owning layer.
+Root modules are limited to the closed entries/facades/compatibility islands
+defined by the [root ledger and architecture gate](#source-placement-and-the-root-ledger);
+they are not a template for ordinary features or helpers.
 
 A feature may span several layers when the responsibilities differ — for
 example file completion owns neutral ranking/discovery policy in
 `domain/file-completion/**`, the Client-local filesystem capability in
 `client/file-completion/**`, terminal trigger/presentation in
 `tui/file-completion/**` and Direct Host WORKSPACE IO in
-`runtime/direct/file-completion/**`. Choose placement by the owning layer, not
+`runtime/direct/file-completion/**`. Do not recreate the retired mixed
+`src/file-completion/**` directory. Choose placement by the owning layer, not
 by the feature noun. Do not recreate a parallel root feature tree, move code
 only for visual symmetry, or hide cross-layer dependencies behind a generic
 Context/Services bag.
@@ -247,18 +238,17 @@ Detailed locality rows, composition owners and wire stories live in
 
 ## Source placement and the root ledger
 
-`scripts/source-root-baseline.json` records the production root modules. The
-ledger is CLOSED at exactly the seven stable entries/facades:
+The root ledger is CLOSED; there are no legacy root entries. The exact allowed
+set is owned by [scripts/source-root-baseline.json](../../scripts/source-root-baseline.json)
+and [scripts/application-architecture-gate.mjs](../../scripts/application-architecture-gate.mjs),
+not a second list here. Ordinary new root features/helpers (`src/*.ts`, `*.tsx`,
+`*.mts`, `*.cts`) are forbidden.
 
-```text
-builtins.ts, commands.ts, extensions.ts, index.ts, startup.ts, transcript.ts, tui-app.ts
-```
-
-There is no legacy root left. The architecture gate rejects a new unclassified
-root module, a stale `stable` entry, a duplicate entry, an unknown schema, and
-any recreated retired root path (including a forwarding shim or a production
-import that names a retired path). Growing the root set is a deliberate contract
-change (documentation and ledger together), never an ordinary refactor.
+The architecture gate rejects a new unclassified root module, a stale `stable`
+entry, a duplicate entry, an unknown schema, and any recreated retired root
+path (including a forwarding shim or a production import that names a retired
+path). Growing the root set requires an explicit Owner-approved contract
+amendment and the corresponding ledger/gate change, never an ordinary refactor.
 
 The architecture gate also enforces the dependency direction and the zones that
 exist today. Its rule unit tests live in
