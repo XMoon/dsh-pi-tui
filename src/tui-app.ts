@@ -434,6 +434,7 @@ const JOB_LOCAL_FIND_RESERVED_KEYS: ReadonlySet<KeyId> = new Set([
   'home',
   'end',
   JOB_LOCAL_KEYS.switchPage,
+  JOB_LOCAL_KEYS.togglePreview,
 ])
 
 /** Semantic inspection actions that may cross a response modal boundary. */
@@ -28869,6 +28870,9 @@ export class TuiApp {
         ].find(key => !JOB_LOCAL_FIND_RESERVED_KEYS.has(key))
         return leader === undefined ? '' : formatLeaderSequence(leader)
       },
+      isLocalKeyPreempted: (key) =>
+        this.keybindings.keysFor('app.exit.request').includes(key)
+        || this.keybindings.leaderMachine()?.leaderKey === key,
       focusComponent: (component) => screen.setFocus(component),
     })
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
@@ -28881,13 +28885,6 @@ export class TuiApp {
       // reveal (and leaves a search whose row the frame could not show), so no
       // layout is ever mutated from inside `render()`.
       onFramePainted: () => panel.onFramePainted(),
-      // Phase 3B / B1-C: the header's Command summary / Copy All affordances AND
-      // the pinned Action Bar's Esc affordance are plain painted cells (no
-      // mouse-handling component), so their same-cell press/click arrives here
-      // as the panel's ONE chrome gesture and it re-proves the press-time
-      // painted identity before acting.
-      onCellPress: (x, y) => panel.onChromePress(x, y),
-      onCellClick: (x, y) => panel.onChromeClick(x, y),
     })
     const nativeCopyOnSelect = screen.getCopyOnSelect()
     screen.setLayoutRoot(panel)

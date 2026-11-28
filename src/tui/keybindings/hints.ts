@@ -154,7 +154,7 @@ export function formatKeyId(key: KeyId): string {
     else if (part === 'super') mods.push('Super')
     else base = part
   }
-  const baseLabel = BASE_KEY_LABELS[base] ?? (base.length === 1 ? base.toUpperCase() : base)
+  const baseLabel = BASE_KEY_LABELS[base] ?? (base.length === 1 || /^f\d+$/u.test(base) ? base.toUpperCase() : base)
   return [...mods, baseLabel].join('+')
 }
 
@@ -225,10 +225,19 @@ export const TSP_VISUAL_COPY_LABEL = formatKeyId(TSP_VISUAL_CHORDS.copy)
 export const JOB_LOCAL_KEYS = {
   /** Switch between the Output and Command pages, in both directions. */
   switchPage: 'tab',
+  /** Toggle the Output page's adaptive multi-line Command preview. */
+  togglePreview: 'f2',
   /** Copy the current page's exact original. A BARE letter — the same key the
    *  Settings workspace's copy uses and the one the `[C]` affordance badges name —
    *  so the bar hint reads `c copy …` and badge and key agree (§4.1, §7.1). */
   copy: 'c',
+} as const
+
+/** Fixed Job Find search-row keys (owned here so panels never hard-code chords). */
+export const JOB_SEARCH_LOCAL_KEYS = {
+  commit: 'enter',
+  next: 'n',
+  prev: 'shift+n',
 } as const
 
 /**

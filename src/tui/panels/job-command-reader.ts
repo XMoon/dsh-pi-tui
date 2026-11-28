@@ -27,6 +27,7 @@ import {
   MouseRegion,
   ScrollView,
   type Component,
+  type KeyId,
   type ScrollViewScrollToOptions,
   type TuiMouseEvent,
   type TuiMouseEventResult,
@@ -70,6 +71,12 @@ export interface JobCommandReaderIntents {
   readonly onCopy: (text: string) => void
   /** Whether the frame grants this Command's SearchRow a row. */
   readonly searchRowVisible: (width: number) => boolean
+  /** Optional chrome mouse handler for the Command SearchRow. */
+  readonly onSearchMouse?: (event: TuiMouseEvent) => TuiMouseEventResult | undefined
+  /** Optional live Find hint formatter for the SearchRow's Edit action. */
+  readonly findHint?: () => string
+  /** Optional live preemption predicate for fixed SearchRow key badges. */
+  readonly isLocalKeyPreempted?: (key: KeyId) => boolean
 }
 
 /** The reader's own paint face: the document rows with the Command search
@@ -164,7 +171,16 @@ export class JobCommandReader {
     this.intents = intents
     this.body = new JobCommandBody(this)
     this.mouseRegion = new MouseRegion(this.body, (event) => this.handleMouse(event))
-    this.searchModel = new JobOutputSearch(this.document, intents.searchRowVisible, 'Find Command: ')
+    this.searchModel = new JobOutputSearch(
+      this.document,
+      intents.searchRowVisible,
+      'Find Command: ',
+      {
+        ...(intents.onSearchMouse === undefined ? {} : { onMouse: intents.onSearchMouse }),
+        ...(intents.findHint === undefined ? {} : { findHint: intents.findHint }),
+        ...(intents.isLocalKeyPreempted === undefined ? {} : { isLocalKeyPreempted: intents.isLocalKeyPreempted }),
+      },
+    )
     // The Command viewport never follows: `Home`/`End`, the wheel and the
     // scrollbar move THIS view, and the Output's own follow intent is untouched.
     this.scrollView = new CommandScrollView(this.mouseRegion, { follow: 'none', primary: true, scrollbar: 'auto' })
@@ -188,6 +204,29 @@ export class JobCommandReader {
   /** The original label currently laid out (the ONE copy source). */
   get source(): string {
     return this.document.source
+  }
+
+  /** Total safe visual rows of the current Command document at `width`,
+   *  reusing the document's per-(source, width) cache without materializing
+   *  a preview array. */
+  previewRowCount(width: number): number {
+    if (this.document.source === '') return 0
+    return this.document.layoutAt(Math.max(1, Math.floor(width))).rows.length
+  }
+
+  /** Up to `maxRows` safe, undecorated visual rows of the current Command
+   *  document at `width` for the Output page's passive Command preview. Never
+   *  applies search/selection overlays and never allocates a second document. */
+  previewLines(width: number, maxRows: number): readonly string[] {
+    const limit = Math.max(0, Math.floor(maxRows))
+    if (limit === 0 || this.document.source === '') return []
+    const rows = this.document.layoutAt(Math.max(1, Math.floor(width))).rows
+    const count = Math.min(rows.length, limit)
+    const lines: string[] = []
+    for (let index = 0; index < count; index += 1) {
+      lines.push(rows[index]!.rendered)
+    }
+    return lines
   }
 
   /** Open (or re-open) the Command Find over the existing query. */

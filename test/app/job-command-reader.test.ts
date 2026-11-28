@@ -343,7 +343,7 @@ test('the opening row is never a Command source: only the observed label opens C
   // The SAME instance becomes eligible once the observation arrives.
   const live = makePanel({ opening: { jobId: 'job-a', kind: 'bash', label: 'pnpm build', status: 'running' } })
   live.panel.update(observedState({ label: 'pnpm build --watch' }))
-  assert.match(paint(live, 120).join('\n'), /Tab switch/, 'a wide Output bar advertises the page toggle')
+  assert.match(paint(live, 120).join('\n'), /Expand \[Tab\]/, 'an observed Output header advertises Expand [Tab]')
   live.panel.handleInput('\t')
   const command = paint(live, 120).join('\n')
   assert.match(command, /Copy All \[C\]/)
@@ -364,15 +364,7 @@ test('C-05/C-06 the Command page owns one body and its own viewport at every bud
     }
     const painted = lines.join('\n')
     assert.match(stripTerminalSequences(painted), /Output \[Esc\]/, `the Command bar is pinned at ${budget.width}x${budget.rows}`)
-    // The page toggle is SYMMETRIC: the same `Tab` switches back, so it is
-    // advertised on the Command page too. Like every other segment it obeys the
-    // ONE drop order, so a tight row (44 columns) may yield it before the
-    // pre-existing truth. What can NEVER appear here are the OUTPUT-ONLY verbs,
-    // which have no action on this page at any budget.
-    if (budget.width >= 80) {
-      assert.match(painted, /Tab switch/, `the symmetric page toggle is advertised on the Command page at ${budget.width}x${budget.rows}`)
-    }
-    assert.ok(!/c copy output/.test(painted), 'the Output-only copy verb is absent on the Command page')
+    assert.ok(!/Copy Output \[C\]/.test(painted), 'the Output-only copy verb is absent on the Command page')
     assert.ok(!/Stop \[/.test(painted), 'the Stop segment is absent on the Command page')
     assert.ok(!/Follow on|Follow paused/.test(painted), 'the Command page never claims a Follow state')
     assert.ok(!/Retained preview/.test(painted), 'the Command page never claims a retained preview')
@@ -511,55 +503,51 @@ test('C-16/C-06 an Output Follow/PAUSED position survives a round trip through t
   assert.ok(bodyRow(harness.vt, 'line 079') >= 0, 'the newest retained row is followed again')
 })
 
-test('the header click must re-prove the same painted target; a narrowed button has no target', () => {
-  const harness = makePanel(observedState({ label: 'echo one' }))
-  const lines = paint(harness)
-  const commandRow = lines.findIndex(line => line.includes('Command  echo one'))
-  assert.ok(commandRow >= 0)
-  // Press on the summary, repaint with ANOTHER label, release on the same cell:
+test('the header click must re-prove the same painted target; a narrowed button has no target', async () => {
+  const harness = startApp(80, 24)
+  await openFirstJob(harness)
+  harness.tasks.observation.latest()!.emit({ label: 'echo one' })
+  await harness.vt.waitForRender()
+  await flush(2)
+  const headingRow = bodyRow(harness.vt, 'Expand [Tab]')
+  const expandCol = cellIndexOf(rawView(harness.vt)[headingRow]!, 'Expand [Tab]') + 2
+  // Press on Expand [Tab], update with ANOTHER label, release on the same cell:
   // the document key changed, so the click must not open the old Command page.
-  harness.panel.onChromePress(2, commandRow)
-  harness.panel.update(observedState({ label: 'echo two' }))
-  paint(harness)
-  harness.panel.onChromeClick(2, commandRow)
-  assert.ok(!/Copy All \[C\]/.test(paint(harness).join('\n')), 'a ghost click must not open a Command page')
-  // Press + release on the SAME painted target DOES open it.
-  harness.panel.onChromePress(2, commandRow)
-  harness.panel.onChromeClick(2, commandRow)
-  const command = paint(harness).join('\n')
-  assert.match(command, /Copy All \[C\]/)
-  harness.panel.dispose()
+  press(harness.vt, headingRow, expandCol)
+  harness.tasks.observation.latest()!.emit({ label: 'echo two' })
+  await harness.vt.waitForRender()
+  release(harness.vt, headingRow, expandCol)
+  await flush(4)
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'a ghost click must not open a Command page')
+  // Press + release on the SAME painted target DOES open it (use a neighboring
+  // cell inside the same span so fork clickCount is 1 rather than a rapid double-click).
+  press(harness.vt, headingRow, expandCol + 1)
+  release(harness.vt, headingRow, expandCol + 1)
+  await harness.vt.waitForRender()
+  await flush(2)
+  assert.match(view(harness.vt), /Copy All \[C\]/)
 
-  // A frame with no summary grant cannot paint the Copy All button: it must not
-  // create a click target there, while the `C` key stays reachable. Four rows is
-  // below the summary/tabs floor (plan B1-D §3.2), so the Command page shows only
-  // status + body + Action Bar.
-  const narrow = makePanel(observedState({ label: 'echo one' }))
-  narrow.rows.value = 4
-  narrow.panel.handleInput('\t')
-  const narrowLines = paint(narrow, 80).join('\n')
-  assert.ok(!/Copy All \[C\]/.test(narrowLines), 'the button is not painted without its row')
-  narrow.panel.onChromePress(1, 1)
-  narrow.panel.onChromeClick(1, 1)
-  assert.equal(narrow.copies.length, 0, 'an unpainted button has no click target')
-  narrow.panel.handleInput('c')
-  assert.deepEqual(narrow.copies, [{ source: 'command-all', text: 'echo one' }], '`C` remains the reachable path')
-  narrow.panel.dispose()
+  // A 4-row Command frame has no summary grant, so Copy All [C] moves to the
+  // Action Bar (never duplicated on a frame that has both).
+  harness.vt.resize(80, 4)
+  await harness.vt.waitForRender()
+  await flush(2)
+  assert.match(rawView(harness.vt).at(-1)!, /Copy All \[C\]/, 'Action Bar carries Copy All [C] when heading has no grant')
 
-  // A granted summary row that is still too narrow for the button paints the
-  // title ONLY: the clip leaves no partial/ghost target behind.
-  const clipped = makePanel(observedState({ label: 'echo one' }))
-  clipped.panel.handleInput('\t')
-  const clippedLines = paint(clipped, 12)
-  assert.ok(!/Copy All \[C\]/.test(clippedLines.join('\n')), 'the button is not painted at 12 columns')
-  const titleRow = clippedLines.findIndex(line => /Full command/.test(line))
-  assert.ok(titleRow >= 0, 'the title row is still granted')
-  clipped.panel.onChromePress(5, titleRow)
-  clipped.panel.onChromeClick(5, titleRow)
-  assert.deepEqual(clipped.copies, [], 'the clipped affordance leaves no click target')
-  clipped.panel.handleInput('c')
-  assert.deepEqual(clipped.copies, [{ source: 'command-all', text: 'echo one' }], '`C` stays reachable')
-  clipped.panel.dispose()
+  // At 12 columns neither heading nor Action Bar can paint complete Copy All [C]:
+  // no partial/ghost target survives, while `c` stays reachable.
+  harness.vt.resize(12, 24)
+  await harness.vt.waitForRender()
+  await flush(2)
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'the button is not painted at 12 columns')
+  const titleRow = bodyRow(harness.vt, 'Full')
+  press(harness.vt, titleRow, 5)
+  release(harness.vt, titleRow, 5)
+  await flush(4)
+  assert.deepEqual(harness.copied, [], 'the clipped affordance leaves no click target')
+  harness.vt.sendInput('c')
+  await flush(4)
+  assert.deepEqual(harness.copied, ['echo two'], '`c` stays reachable')
 })
 
 test('the Command reader selection overlays its search highlight without changing painted cells', async () => {
@@ -873,20 +861,21 @@ test('the official Bash label reaches the Command page and Copy All copies it ex
   assert.equal(harness.tasks.observation.latest()!.closes, 0, 'the copy never releases the observer')
 })
 
-test('the header Command summary click opens the Command page, and Copy All clicks copy the original', async () => {
+test('the header Expand click opens the Command page, and Copy All clicks copy the original', async () => {
   const harness = startApp()
   await openFirstJob(harness)
   const label = 'echo hello\nworld'
   harness.tasks.observation.latest()!.emit({ label })
   await harness.vt.waitForRender()
   await flush(2)
-  const commandRow = bodyRow(harness.vt, 'Command  echo hello')
+  const headingRow = bodyRow(harness.vt, 'Expand [Tab]')
+  const expandCol = cellIndexOf(rawView(harness.vt)[headingRow]!, 'Expand [Tab]') + 2
   // A REAL same-cell click through the native SGR path.
-  press(harness.vt, commandRow, 4)
-  release(harness.vt, commandRow, 4)
+  press(harness.vt, headingRow, expandCol)
+  release(harness.vt, headingRow, expandCol)
   await harness.vt.waitForRender()
   await flush(2)
-  assert.match(view(harness.vt), /Copy All \[C\]/, 'the header click opens the Command page')
+  assert.match(view(harness.vt), /Copy All \[C\]/, 'the header Expand click opens the Command page')
   // Click the painted `Copy All [C]` button itself.
   const buttonRow = bodyRow(harness.vt, 'Copy All [C]')
   const buttonCol = rawView(harness.vt)[buttonRow]!.indexOf('Copy All [C]')
@@ -894,32 +883,25 @@ test('the header Command summary click opens the Command page, and Copy All clic
   release(harness.vt, buttonRow, buttonCol + 2)
   await flush(4)
   assert.deepEqual(harness.copied, [label], 'the painted button copies the ORIGINAL label')
-  // plan §5: a REAL visible `Copy All [C]` stays clickable while a Find owns the
-  // keyboard, and the click changes nothing about the search.
+  // UX §6.4: while Find is active on Command, Copy All [C] is hidden/disabled
+  // so Find owns the workspace cleanly without hidden business actions firing.
   harness.copied.length = 0
-  // Leave the fork's 500 ms double-click window: a second click on the same cell
-  // would otherwise become a native word selection on this screen (pre-existing
-  // B1-A behaviour), which is a different gesture from the header click.
-  await new Promise<void>(resolve => setTimeout(resolve, 600))
   harness.vt.sendInput('/')
   await harness.vt.waitForRender()
   harness.vt.sendInput('hello')
   await harness.vt.waitForRender()
   await flush(2)
   assert.match(view(harness.vt), /Find Command: hello/, 'the Command query is being edited')
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'Copy All [C] is hidden while Find is active')
   press(harness.vt, buttonRow, buttonCol + 2)
   release(harness.vt, buttonRow, buttonCol + 2)
   await flush(4)
-  assert.deepEqual(harness.copied, [label], 'the button copies the ORIGINAL label, never the query or a hit')
-  const editing = view(harness.vt)
-  assert.match(editing, /Find Command: hello/, 'the query is unchanged by the click')
-  assert.match(editing, /Copy All \[C\]/, 'the click never switched pages')
+  assert.deepEqual(harness.copied, [], 'clicking the old Copy All cell while Find is active does nothing')
   // The Search Input still owns the keyboard: the next character edits the query.
   harness.vt.sendInput('!')
   await harness.vt.waitForRender()
   await flush(2)
-  assert.match(view(harness.vt), /Find Command: hello!/, 'the click never stole the search input focus')
-  assert.deepEqual(harness.copied, [label], 'no duplicate copy from the extra typing')
+  assert.match(view(harness.vt), /Find Command: hello!/, 'the inert click never stole the search input focus')
 })
 
 for (const producer of [
@@ -999,10 +981,11 @@ for (const producer of [
       const port = new DirectJobObservationPort(ctx as never, createDiag({ filePath: undefined, stderrLevel: 'off' }))
       harness = startApp(120, 40, [jobId], port, undefined, liveJobRows)
       await openFirstJob(harness)
-      await paintedWhen(harness.vt, frame => frame.includes('Tab switch'))
-      const commandRow = bodyRow(harness.vt, 'Command')
-      press(harness.vt, commandRow, 4)
-      release(harness.vt, commandRow, 4)
+      await paintedWhen(harness.vt, frame => frame.includes('Expand [Tab]'))
+      const headingRow = bodyRow(harness.vt, 'Expand [Tab]')
+      const expandCol = cellIndexOf(rawView(harness.vt)[headingRow]!, 'Expand [Tab]') + 2
+      press(harness.vt, headingRow, expandCol)
+      release(harness.vt, headingRow, expandCol)
       await paintedWhen(harness.vt, frame => frame.includes('Copy All [C]'))
       assert.ok(view(harness.vt).includes('Gate3B 雪'), 'the observed Command document is painted')
 
@@ -1419,89 +1402,66 @@ test('hardBreakEnd carries the real newline offsets and equals sourceEnd on a so
   }
 })
 
-test('the header hit map covers ONLY painted text: blank padding has no click target', () => {
+test('the header hit map covers ONLY painted action spans: blank padding and preview body are inert', async () => {
   // The Command page button region is exactly the painted `Copy All [C]`.
-  const harness = makePanel(observedState({ label: 'echo one' }))
-  harness.panel.handleInput('\t')
-  const commandLines = paint(harness, 80)
-  const readerRow = commandLines.findIndex(line => line.includes('Copy All [C]'))
-  assert.ok(readerRow >= 0)
-  const buttonCol = cellIndexOf(stripTerminalSequences(commandLines[readerRow]!), 'Copy All [C]')
-  harness.panel.onChromePress(buttonCol + 2, readerRow)
-  harness.panel.onChromeClick(buttonCol + 2, readerRow)
-  assert.deepEqual(harness.copies, [{ source: 'command-all', text: 'echo one' }], 'the button itself copies')
-  harness.copies.length = 0
+  const harness = startApp(80, 24)
+  await openFirstJob(harness)
+  harness.tasks.observation.latest()!.emit({ label: 'echo one' })
+  await harness.vt.waitForRender()
+  await flush(2)
+  await openCommand(harness)
+  const readerRow = bodyRow(harness.vt, 'Copy All [C]')
+  const buttonCol = cellIndexOf(rawView(harness.vt)[readerRow]!, 'Copy All [C]')
+  press(harness.vt, readerRow, buttonCol + 2)
+  release(harness.vt, readerRow, buttonCol + 2)
+  await flush(4)
+  assert.deepEqual(harness.copied, ['echo one'], 'the button itself copies')
+  harness.copied.length = 0
   // The `Full command` title is painted but is NOT the button.
-  harness.panel.onChromePress(2, readerRow)
-  harness.panel.onChromeClick(2, readerRow)
-  assert.deepEqual(harness.copies, [], 'the Full command title is inert')
+  press(harness.vt, readerRow, 2)
+  release(harness.vt, readerRow, 2)
+  await flush(4)
+  assert.deepEqual(harness.copied, [], 'the Full command title is inert')
   // The padding between the title and the right-aligned button is inert too.
-  harness.panel.onChromePress(40, readerRow)
-  harness.panel.onChromeClick(40, readerRow)
-  assert.deepEqual(harness.copies, [], 'the blank space left of the button is inert')
-  harness.panel.dispose()
+  press(harness.vt, readerRow, 40)
+  release(harness.vt, readerRow, 40)
+  await flush(4)
+  assert.deepEqual(harness.copied, [], 'the blank space left of the button is inert')
 
-  // The Output summary region is its own visible summary text AND the `↗ Command`
-  // entry — never the padding between them.
-  const output = makePanel(observedState({ label: 'echo one' }))
-  const outputLines = paint(output, 80)
-  const summaryRow = outputLines.findIndex(line => line.includes('Command  echo one'))
-  assert.ok(summaryRow >= 0)
-  output.panel.onChromePress(40, summaryRow)
-  output.panel.onChromeClick(40, summaryRow)
-  assert.ok(!/Copy All \[C\]/.test(paint(output, 80).join('\n')), 'the header padding never opens the page')
-  output.panel.onChromePress(5, summaryRow)
-  output.panel.onChromeClick(5, summaryRow)
-  assert.match(paint(output, 80).join('\n'), /Copy All \[C\]/, 'the summary text does open it')
-  // The painted `↗ Command` entry carries the SAME intent.
-  output.panel.handleInput('\x1b')
-  assert.ok(!/Copy All \[C\]/.test(paint(output, 80).join('\n')), 'Esc returns to Output')
-  const entryCol = cellIndexOf(stripTerminalSequences(outputLines[summaryRow]!), '↗ Command')
-  assert.ok(entryCol > 0, 'the entry is painted on the summary row')
-  output.panel.onChromePress(entryCol + 1, summaryRow)
-  output.panel.onChromeClick(entryCol + 1, summaryRow)
-  assert.match(paint(output, 80).join('\n'), /Copy All \[C\]/, 'the painted entry opens the page too')
-  output.panel.dispose()
+  // Back on Output: heading padding and preview body are inert; Expand [Tab] opens Command.
+  harness.vt.sendInput('\x1b')
+  await harness.vt.waitForRender()
+  await flush(2)
+  const headingRow = bodyRow(harness.vt, 'Expand [Tab]')
+  const previewRow = bodyRow(harness.vt, 'echo one')
+  press(harness.vt, headingRow, 20)
+  release(harness.vt, headingRow, 20)
+  await flush(4)
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'the header padding never opens the page')
+  press(harness.vt, previewRow, 2)
+  release(harness.vt, previewRow, 2)
+  await flush(4)
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'the passive preview body is inert')
+  const entryCol = cellIndexOf(rawView(harness.vt)[headingRow]!, 'Expand [Tab]')
+  press(harness.vt, headingRow, entryCol + 1)
+  release(harness.vt, headingRow, entryCol + 1)
+  await harness.vt.waitForRender()
+  await flush(2)
+  assert.match(view(harness.vt), /Copy All \[C\]/, 'the painted Expand [Tab] span opens the page')
 })
 
-test('the two read-only verbs are advertised with a deterministic drop order', () => {
+test('the Output Copy verb yields before safety disclosure and is absent when Output is empty', () => {
   const harness = makePanel(observedState({ label: 'echo one', text: 'tail' }))
-  // The two verbs carry DIFFERENT priorities, so the drop order is a decision
-  // and not an array-order accident: the copy verb always yields first, i.e. it
-  // can never appear alone.
-  let sawBoth = false
-  let sawCommandOnly = false
-  // Two heights: on a standard frame the DEDICATED reading-facts row takes the
-  // disclosure and the position off the Action Bar (plan B1-D §3.3), which frees
-  // the width both verbs need; on a compact frame the bar keeps them, so the
-  // narrow window where only the higher-priority verb fits is observable.
-  for (const rows of [24, 8]) {
-    harness.rows.value = rows
-    for (let width = 60; width <= 200; width += 1) {
-      const bar = paint(harness, width).at(-1)!
-      const hasCopy = /c copy output/.test(bar)
-      const hasCommand = /Tab switch/.test(bar)
-      assert.ok(!hasCopy || hasCommand, `the copy verb never survives alone at ${width}x${rows}`)
-      if (hasCopy) sawBoth = true
-      if (hasCommand && !hasCopy) sawCommandOnly = true
-    }
-  }
-  harness.rows.value = 24
-  assert.ok(sawBoth, 'there is a row wide enough to advertise BOTH verbs')
-  assert.ok(sawCommandOnly, 'there is a row where only the higher-priority page toggle survives')
-  const tight = paint(harness, 80).at(-1)!
-  assert.ok(!/Tab switch/.test(tight), 'a tight row yields the page toggle too')
-  assert.ok(!/c copy output/.test(tight), 'a tight row yields the copy verb')
+  const wideBar = stripTerminalSequences(paint(harness, 120).at(-1)!)
+  assert.match(wideBar, /Copy Output \[C\]/, 'a wide Output bar advertises Copy Output [C]')
+  const tight = stripTerminalSequences(paint(harness, 80).at(-1)!)
+  assert.ok(!/Copy Output \[C\]/.test(tight), 'a tight 80-col row yields Copy Output before the disclosure')
   assert.match(tight, /Retained preview · not full history/, 'the pre-existing disclosure is never the price')
   harness.panel.dispose()
 
-  // plan §4: an action that cannot execute this frame is never advertised. With
-  // nothing retained the copy verb is absent even where the row has all the room
-  // in the world, while the page toggle (which CAN act) stays.
   const emptyOutput = makePanel(observedState({ label: 'echo one', text: '' }))
-  const wideBar = paint(emptyOutput, 200).at(-1)!
-  assert.ok(!/c copy output/.test(wideBar), 'an empty Output never advertises the copy verb')
-  assert.match(wideBar, /Tab switch/, 'the page toggle can still act, so it stays advertised')
+  const emptyWideBar = stripTerminalSequences(paint(emptyOutput, 200).at(-1)!)
+  assert.ok(!/Copy Output \[C\]/.test(emptyWideBar), 'an empty Output never advertises Copy Output [C]')
   emptyOutput.panel.dispose()
 })
 
@@ -1555,7 +1515,7 @@ test('Direct L6: the official bash args.command label crosses the PRODUCTION Dir
   assert.equal(aborted, false, 'the adapter stream stays open while the viewer observes')
   const painted = view(harness.vt)
   assert.ok(!/Retained output unavailable/.test(painted), `the Direct observation really opened:\n${painted}`)
-  assert.match(painted, /Command {4}pnpm build/, 'the observed label IS the official args.command')
+  assert.match(painted, /Command[\s\S]*pnpm build/, 'the observed label IS the official args.command')
   assert.match(painted, /direct retained/, 'the retained output came through the same adapter')
   await openCommand(harness)
   harness.vt.sendInput('c')
@@ -1648,31 +1608,37 @@ test('a rapid double click on Copy All [C] cannot overwrite the command copy wit
   assert.notDeepEqual(harness.copied, [label], 'that native copy is screen text, not the command')
 })
 
-test('the compact header keeps the fact markers and the summary padding non-interactive', () => {
-  const harness = makePanel(observedState({ label: 'ls', gapBefore: true }))
-  const lines = paint(harness, 44)
-  // A compact frame spends no row on metadata (plan B1-D §3.2 grants it only from
-  // standard size): the GAP fact is the BRACKETED marker on the status row, and
-  // the summary row is the only clickable one.
-  const statusRow = lines.findIndex(line => line.includes('[GAP]'))
-  assert.ok(statusRow >= 0, `the status row carries the fact marker:\n${lines.join('\n')}`)
-  harness.panel.onChromePress(2, statusRow)
-  harness.panel.onChromeClick(2, statusRow)
-  assert.ok(!/Copy All \[C\]/.test(paint(harness, 44).join('\n')),
+test('the compact header keeps the fact markers and the summary padding non-interactive', async () => {
+  const harness = startApp(44, 10)
+  await openFirstJob(harness)
+  harness.tasks.observation.latest()!.emit({ label: 'ls', gapBefore: true })
+  await harness.vt.waitForRender()
+  await flush(2)
+  const statusRow = bodyRow(harness.vt, '[GAP]')
+  press(harness.vt, statusRow, 2)
+  release(harness.vt, statusRow, 2)
+  await flush(4)
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)),
     'clicking the status row never opens the Command page')
-  const summaryRow = lines.findIndex(line => line.includes('Command  ls'))
-  assert.ok(summaryRow >= 0, `the summary row is painted:\n${lines.join('\n')}`)
-  // The padding between the summary and the right-aligned `↗ Command` is inert.
-  harness.panel.onChromePress(25, summaryRow)
-  harness.panel.onChromeClick(25, summaryRow)
-  assert.ok(!/Copy All \[C\]/.test(paint(harness, 44).join('\n')),
+  const summaryRow = bodyRow(harness.vt, 'Command  ls')
+  // The summary text and padding between summary and `Expand [Tab]` are inert.
+  press(harness.vt, summaryRow, 20)
+  release(harness.vt, summaryRow, 20)
+  await flush(4)
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)),
     'the summary padding never opens the Command page')
-  const summaryCol = cellIndexOf(stripTerminalSequences(lines[summaryRow]!), 'Command  ls')
-  harness.panel.onChromePress(summaryCol + 1, summaryRow)
-  harness.panel.onChromeClick(summaryCol + 1, summaryRow)
-  assert.match(paint(harness, 44).join('\n'), /Copy All \[C\]/,
-    'the Command summary itself still opens it')
-  harness.panel.dispose()
+  press(harness.vt, summaryRow, 2)
+  release(harness.vt, summaryRow, 2)
+  await flush(4)
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)),
+    'the compact summary lead text itself is inert')
+  const expandCol = cellIndexOf(rawView(harness.vt)[summaryRow]!, 'Expand [Tab]')
+  press(harness.vt, summaryRow, expandCol + 1)
+  release(harness.vt, summaryRow, expandCol + 1)
+  await harness.vt.waitForRender()
+  await flush(2)
+  assert.match(view(harness.vt), /Copy All \[C\]/,
+    'the explicit Expand [Tab] affordance opens the Command page')
 })
 
 test('a hostile ROSTER label is sanitized in the workspace notice row (Stop settlement)', async () => {
@@ -1708,6 +1674,7 @@ test('a hostile ROSTER label is sanitized in the workspace notice row (Stop sett
   assert.ok(!stream.includes('UFdORUQ='), 'its clipboard payload never reaches the terminal')
   assert.ok(!stream.includes('\u009b'), 'no raw C1 control byte reaches the terminal')
   const painted = view(harness.vt)
-  assert.match(painted, /stopping echo ok/, `the notice shows the SANITIZED settlement:\n${painted}`)
-  assert.ok(!/]52;c;|\[2J/.test(painted), 'no escape payload text leaks into the painted notice')
+  const noticeLine = rawView(harness.vt).find(line => /stopping echo ok/.test(line)) ?? ''
+  assert.match(noticeLine, /stopping echo ok/, `the notice shows the SANITIZED settlement:\n${painted}`)
+  assert.ok(!/]52;c;|\[2J/.test(noticeLine), 'no escape payload text leaks into the painted notice')
 })

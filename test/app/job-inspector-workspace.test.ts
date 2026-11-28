@@ -385,9 +385,10 @@ test('the panel header keeps status/gap/error visible and its Action Bar is the 
     if (budget.width >= 80) {
       assert.match(painted, /Job · job-a · bash.*‣ Failed/, `the identity must stay visible at ${budget.width}x${budget.rows}`)
     }
-    // The Command/Label summary is part of the locked workspace UI: a short or
-    // narrow screen may drop the descriptive fact text, never the Command row.
-    assert.match(painted, /Command {2}pnpm build --watch/,
+    // The Command/Label summary (or multi-line preview heading + body) is part
+    // of the locked workspace UI: a short or narrow screen may drop the
+    // descriptive fact text, never the Command identity.
+    assert.match(painted, /Command[\s\S]*pnpm build --watch/,
       `the command identity must be shown at every budget (${budget.width}x${budget.rows})`)
     if (budget.width >= 80 && budget.rows >= 10) {
       assert.match(painted, /Progress: building 3\/8/, 'the typed progress row must be shown on a tall screen')
@@ -495,63 +496,43 @@ test('a long Job identity and a long error text never hide the status or the ind
   panel.dispose()
 })
 
-test('a Job bar gesture is revoked when the terminal resizes before the next paint', () => {
-  let rows = 24
-  let columns = 80
-  let closes = 0
-  let boxes: Array<{ x: number; y: number; width: number; height: number }> = []
-  const panel = new JobInspectorPanel(
-    { opening: { jobId: 'job-a', kind: 'bash', label: 'pnpm build', status: 'running' } },
-    {
-      rows: () => rows,
-      columns: () => columns,
-      requestRender: () => {},
-      notice: () => undefined,
-      onClose: () => { closes += 1 },
-      canStop: () => false,
-      onStop: () => {},
-      isFindKey: () => false,
-      findHint: () => '',
-      focusComponent: () => {},
-      onCopy: () => {},
-      // The frame-painted pass reads the header then the pinned bar in order.
-      paintedBox: () => boxes.shift(),
-      setNativeCopyOnSelect: () => {},
-    },
-  )
-  const paint = (): string => {
-    boxes = [
-      { x: 0, y: 0, width: columns, height: 4 },
-      { x: 0, y: rows - 1, width: columns, height: 1 },
-    ]
-    const lines = panel.render(columns)
-    panel.onFramePainted()
-    return stripTerminalSequences(lines.at(-1)!)
-  }
-  const bar = paint()
-  const col = bar.indexOf('Back')
-  assert.ok(col >= 0, `the bar paints its Back affordance:\n${bar}`)
+test('a Job bar gesture is revoked when the terminal resizes before the next paint', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const barRow = rawView(vt).length - 1
+  const col = rawView(vt)[barRow]!.indexOf('Back')
+  assert.ok(col >= 0, `the bar paints its Back affordance:\n${view(vt)}`)
 
-  // A resize between press and release (no repaint yet) revokes the gesture:
-  // the old physical cells must never replay the previous Esc outcome.
-  panel.onChromePress(col, rows - 1)
-  rows = 20
-  panel.onChromeClick(col, 23)
-  assert.equal(closes, 0, 'a pre-repaint row resize revokes the bar gesture')
+  // A resize between press and release BEFORE the next paint revokes the
+  // gesture: the old physical cells must never replay the previous Esc outcome.
+  vt.sendInput(`\x1b[<0;${col + 1};${barRow + 1}M`)
+  vt.resize(80, 20)
+  vt.sendInput(`\x1b[<0;${col + 1};${barRow + 1}m`)
+  await vt.waitForRender()
+  assert.match(view(vt), /Job · job-a · bash/, 'a before-next-paint row resize revokes the bar gesture')
 
-  // The same fence covers a width-only change.
-  rows = 24
-  panel.onChromePress(col, 23)
-  columns = 100
-  panel.onChromeClick(col, 23)
-  assert.equal(closes, 0, 'a pre-repaint width change revokes the bar gesture')
+  // The same fence covers a before-next-paint width-only change.
+  const row20 = rawView(vt).length - 1
+  const col20 = rawView(vt)[row20]!.indexOf('Back')
+  vt.sendInput(`\x1b[<0;${col20 + 1};${row20 + 1}M`)
+  vt.resize(100, 20)
+  vt.sendInput(`\x1b[<0;${col20 + 1};${row20 + 1}m`)
+  await vt.waitForRender()
+  assert.match(view(vt), /Job · job-a · bash/, 'a before-next-paint width change revokes the bar gesture')
 
   // Positive control: on an UNCHANGED frame the same cells act exactly once.
-  columns = 80
-  panel.onChromePress(col, 23)
-  panel.onChromeClick(col, 23)
-  assert.equal(closes, 1, 'an unchanged painted frame still runs the ONE close intent')
-  panel.dispose()
+  const finalRow = rawView(vt).length - 1
+  const finalCol = rawView(vt)[finalRow]!.indexOf('Back')
+  vt.sendInput(`\x1b[<0;${finalCol + 1};${finalRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${finalCol + 1};${finalRow + 1}m`)
+  await vt.waitForRender()
+  assert.ok(!rawView(vt).some(line => line.includes('Job · job-a')), 'an unchanged painted frame runs the ONE close intent')
+  app.stop()
 })
 
 test('the ONE chrome plan keeps the Action Bar on screen at every height, notice included', () => {
@@ -646,7 +627,7 @@ test('selecting a Job in the real Task Browser opens the fullscreen Job workspac
   assert.deepEqual(harness.retires, [], 'opening a Job never retires the browser')
   const painted = view(vt)
   assert.match(painted, /Job · job-a · bash.*‣ Running/, `the typed header must be painted:\n${painted}`)
-  assert.match(painted, /Command {2}job job-a/, 'a bash Job shows the Command identity row')
+  assert.match(painted, /Command[\s\S]*job job-a/, 'a bash Job shows the Command identity row')
   assert.match(painted, /retained job-a/, 'the retained tail is painted in the body')
   assert.match(painted, /Retained preview · not full history/, 'the retained-preview disclosure stays pinned')
   assert.ok(!/job job-b/.test(painted), 'the Job screen shows ONE Job, never the roster')
@@ -2042,7 +2023,7 @@ test('PR-4 R1: an effective Output-body wheel revokes a pressed header entry (no
     .join(',')
 
   // The fresh positive: the painted entry IS a real click target.
-  const entry = locate('↗ Command')
+  const entry = locate('Expand [Tab]')
   press(entry)
   await vt.waitForRender()
   release(entry)
@@ -2058,15 +2039,15 @@ test('PR-4 R1: an effective Output-body wheel revokes a pressed header entry (no
   // ROUND-TRIP regression: an effective scroll away AND back to the press-time
   // position must still retire the press (the boundary is the scroll, not the
   // final position).
-  const roundTripEntry = locate('↗ Command')
+  const roundTripEntry = locate('Expand [Tab]')
   const roundTripBody = locate('wheel proof line 119')
   press(roundTripEntry)
   await vt.waitForRender()
   const atPress = bodyWindow()
-  vt.sendInput(`\x1b[<64;12;${Math.max(4, Math.min(roundTripBody.row, 20))}M`)
+  vt.sendInput(`\x1b[<64;12;${Math.max(5, Math.min(roundTripBody.row + 1, 20))}M`)
   await vt.waitForRender()
   assert.notEqual(bodyWindow(), atPress, 'round-trip leg 1: the wheel scrolled the body')
-  vt.sendInput(`\x1b[<65;12;${Math.max(4, Math.min(roundTripBody.row, 20))}M`)
+  vt.sendInput(`\x1b[<65;12;${Math.max(5, Math.min(roundTripBody.row + 1, 20))}M`)
   await vt.waitForRender()
   assert.equal(bodyWindow(), atPress, 'round-trip leg 2: the wheel scrolled back to the press-time window')
   release(roundTripEntry)
@@ -2075,14 +2056,13 @@ test('PR-4 R1: an effective Output-body wheel revokes a pressed header entry (no
 
   // Control: a ZERO-EFFECT wheel (down at the follow tail) keeps the same-cell
   // press valid — the fence revokes only on a REAL viewport move.
-  const heldEntry = locate('↗ Command')
+  const heldEntry = locate('Expand [Tab]')
   // Use a different cell inside the SAME painted segment: the round-trip press
   // just released on the text cell, and a second same-cell click within the
-  // fork's double-click interval becomes a word-selection click, not a
-  // disclosure.
+  // fork's double-click interval has clickCount > 1.
   const heldCell = { row: heldEntry.row, col: heldEntry.col + 3 }
   const tailRow = locate('wheel proof line 119')
-  const tailWheelRow = Math.max(4, Math.min(tailRow.row, 20))
+  const tailWheelRow = Math.max(5, Math.min(tailRow.row + 1, 20))
   press(heldCell)
   await vt.waitForRender()
   const atTail = rawView(vt).join('\n')
@@ -2105,12 +2085,12 @@ test('PR-4 R1: an effective Output-body wheel revokes a pressed header entry (no
 
   // The stale journey: press the entry, let a REAL wheel scroll the body, then
   // release on the same cell. The wheel must actually move the window.
-  const staleEntry = locate('↗ Command')
+  const staleEntry = locate('Expand [Tab]')
   const bodyRow = locate('wheel proof line 119')
   press(staleEntry)
   await vt.waitForRender()
   const before = bodyWindow()
-  const wheelRow = Math.max(4, Math.min(bodyRow.row, 20))
+  const wheelRow = Math.max(5, Math.min(bodyRow.row + 1, 20))
   vt.sendInput(`\x1b[<64;12;${wheelRow}M`)
   await vt.waitForRender()
   assert.notEqual(bodyWindow(), before, 'the wheel really scrolled the Output body window')
@@ -2135,11 +2115,11 @@ test('PR-4 R1: a same-tick opposite-wheel burst still retires the pressed header
   await flush()
   await vt.waitForRender()
   const lines = (): string[] => rawView(vt)
-  const row = lines().findIndex(line => line.includes('↗ Command'))
+  const row = lines().findIndex(line => line.includes('Expand [Tab]'))
   assert.ok(row >= 0, `the header entry is painted:\n${lines().join('\n')}`)
-  const col = lines()[row]!.indexOf('↗ Command')
+  const col = lines()[row]!.indexOf('Expand [Tab]')
   const bodyRow = lines().findIndex(line => line.includes('burst proof line 119'))
-  const wheelRow = Math.max(4, Math.min(bodyRow, 20))
+  const wheelRow = Math.max(5, Math.min(bodyRow + 1, 20))
   vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`)
   // Two opposite effective wheels in the SAME input turn, before any paint.
   vt.sendInput(`\x1b[<64;12;${wheelRow}M`)
@@ -2160,8 +2140,8 @@ test('PR-4 R1: a same-tick opposite-wheel burst still retires the pressed header
   assert.match(lines().join('\n'), /burst proof line 119/, 'End really jumps the Output viewport back to the tail')
 
   // The same-tick Home -> End burst (no paint between the two jumps) must too.
-  const entryRow = lines().findIndex(line => line.includes('↗ Command'))
-  const entryCol = lines()[entryRow]!.indexOf('↗ Command')
+  const entryRow = lines().findIndex(line => line.includes('Expand [Tab]'))
+  const entryCol = lines()[entryRow]!.indexOf('Expand [Tab]')
   vt.sendInput(`\x1b[<0;${entryCol + 1};${entryRow + 1}M`)
   vt.sendInput('\x1b[H')
   vt.sendInput('\x1b[F')

@@ -190,7 +190,7 @@ can be reviewed against a frame:
 | 11 | Diagnostic line | `textMuted` | no | `Scope: … · Refreshed 09:41` |
 | 12 | Count / position | `textMuted` | no | `2 editable rows`, `rows 7-40/40`, `3/8 checks` |
 | 13 | Action hint | `textMuted` | no | `Esc back`, `Enter details` |
-| 14 | Affordance (clickable/keyed verb) | `primary` (except the Fullscreen dense Action Bars listed in §7.1) | no | `↗ Command`, `Copy All [C]`, `Change…`, `x remove` (fullscreen draft preview) |
+| 14 | Affordance (clickable/keyed verb) | `primary` (except the Fullscreen dense Action Bars listed in §7.1) | no | `Expand [Tab]`, `Copy All [C]`, `Change…`, `x remove` (fullscreen draft preview) |
 | 15 | Rule / gutter | `border` | no | `─`, 2-cell column gutter |
 | 16 | Placeholder / empty state | `textDim`, and `error` for the word of a *failed* one | no | `No matching commands`, `Model catalog unavailable: …`, `Waiting for retained output…` |
 | 17 | Notice | `textMuted` (info) / `error` (error) | no | `ℹ Copy sent`, `✗ Copy failed` |
@@ -836,9 +836,9 @@ this is the wording a new surface must match):
 8. Right-side affordances — a right-aligned affordance is painted only while the
    **whole** left-hand content still fits beside it; otherwise the affordance is
    dropped so the content keeps its cells (a truncated keyed affordance is worse
-   than none, and the summary row is itself clickable). This is a fit test, not a
-   width-class test: at 60 columns the command and `↗ Command` coexist, at 44 the
-   affordance yields.
+   than none, and the reading tabs keep the page-switch fallback). This is a fit
+   test, not a width-class test: on a tight row, whole actions yield in priority
+   order rather than truncating mid-word.
 
 Invariants that hold at every size:
 

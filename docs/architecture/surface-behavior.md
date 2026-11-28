@@ -479,26 +479,50 @@ SAME paused Task Browser (lease ownership: [overlay-focus.md](./overlay-focus.md
   independent.
 - The Action Bar / `planChrome` budgets rows in fixed priority; every Host
   string crosses the display boundary before theme styling.
-- A shell Job with an observed non-empty label gains a Command page in the same
-  workspace/screen/observer. `Tab` toggles Output ↔ Command in both directions,
-  `Esc` returns to Output, `v` is inert. Both bodies are mounted once and made
-  mutually invisible, so each keeps its own follow/viewport/anchor/query and its
-  own Find. `C`/`c` copy only when Find does not own the keys.
-- Command copy uses the original label bytes verbatim; Output copy uses the
-  captured snapshot text. Selection copy is `label.slice(start, end)`. Copy
-  only proves emission, never an OS-clipboard receipt; the raw-text policy is
-  owned by [terminal-output.md](./terminal-output.md).
-- **The pinned Action Bar is the workspace's ONE pointer action row.** Only its
-  complete visible `Verb [Esc]` segment is a target (a truncated or dropped
-  segment publishes none); a same-cell release replays the CURRENT Esc outcome
-  through the panel's own key dispatch — `Leave find`, `Output`, or `Back` — so a
-  Find-open bar can never close the lease in one click and the Command page
-  returns to Output without releasing the observation. The Header's
-  Command/Copy affordances remain the only other pointer targets; the Stop verb
-  stays keyboard-only. A press records the LIVE terminal grant and the painted
-  frame geometry; a resize before the next paint, or a repaint at another
-  grant/chrome layout, revokes the gesture, so an old physical cell never
-  replays the previous Esc outcome.
+- A shell Job (`bash`/`pwsh`) with an observed non-empty label gains both an
+  adaptive passive multi-line Command Preview on the Output page and a dedicated
+  Command page in the same workspace/screen/observer. `Tab` toggles Output ↔
+  Command in both directions, `Esc` returns from Command to Output, `F2`
+  toggles the Output Command Preview's per-open collapsed intent (never
+  persisted, never inherited by a new Job, and never overwritten by automatic
+  short-screen degradation), and `v` is inert. Both bodies are mounted once and
+  made mutually invisible, so each keeps its own follow/viewport/anchor/query
+  and its own Find. `c` copies only when Find does not own the keys.
+- On the Output page, the passive Command Preview renders safe undecorated
+  visual rows from the SAME `JobCommandDocument` that owns the Command page
+  (no third ScrollView, Reader, or parser). When the Output page is eligible,
+  not collapsed, `rows >= 12`, both summary and tab rows are granted, and
+  `cap = max(0, min(floor(0.60 * B), B - 6)) >= 2` (where `B` is the remaining
+  body grant after fixed chrome), the preview claims `P = min(N, cap)` rows
+  (showing `cap - 1` rows plus `… <remaining> more rows` when `N > cap`),
+  leaving at least 6 rows for Output; log length never participates in the
+  height formula. Below those thresholds the Output header falls back to a
+  single-line `Command` summary with an explicit `Expand` affordance when it
+  fits. When collapsed, `P = 0` and the heading shows `Show`.
+- Command copy (`Copy Command` on the Output preview heading, `Copy All [C]` on
+  the Command page, or `c` on Command) uses the original observed label bytes
+  verbatim — never the preview or painted text; Output copy (`Copy Output [C]`
+  or `c` on Output) uses the captured retained snapshot text. Command drag
+  selection is `label.slice(start, end)`. Copy only proves emission, never an
+  OS-clipboard receipt; the raw-text policy is owned by
+  [terminal-output.md](./terminal-output.md).
+- **Pointer actions converge on the same semantic handlers.** Complete painted
+  spans on the fixed chrome are pointer targets: Header `Copy Command`,
+  `Expand [Tab]`/`Expand`, `Hide [F2]`/`Show [F2]` (or `Hide`/`Show` when the
+  key is preempted by a higher-priority Host Exit or active leader prefix),
+  Command `Copy All [C]` (moved to the Action Bar only when the heading has no
+  grant or cannot fit it), and the other page's complete tab; SearchRow
+  `Search [Enter]` in EDIT and `Prev [Shift+N]` / `Next [N]` (only when
+  `total > 0`) / `Edit` in NAVIGATE; Action Bar `Resume [End]` (Output paused,
+  non-EDIT), the live Find hint, `Copy Output [C]`, and the trailing
+  `Leave find [Esc]` / `Output [Esc]` / `Back [Esc]`. While Find is active,
+  Command Preview actions, the other page's tab, Copy and Stop are hidden/inert.
+  The passive preview body, overflow marker, padding, facts, browsing hints and
+  the `s stop` hint stay inert — **Stop remains keyboard-only**. A press
+  captures the live terminal grant, painted chrome boxes, viewport positions
+  and semantic state; a resize, repaint geometry change, viewport scroll,
+  mode/query/label change, or terminal blur revokes the gesture, and rapid
+  same-cell multi-clicks execute only on the first click (`clickCount === 1`).
 
 Authority: `TuiApp.openJobInspector` + `JobInspectorPanel` (`planChrome`,
 `deriveJobInspectorView`), `JobOutputScrollView`, `JobOutputSearch`,

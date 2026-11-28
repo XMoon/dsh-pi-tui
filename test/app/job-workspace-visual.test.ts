@@ -275,7 +275,8 @@ test('120x40 paints status → metadata → summary → tabs → body → facts 
 
   const status = bodyRow(harness.vt, 'Job · job-a · bash')
   const metadata = bodyRow(harness.vt, 'Progress: 3/8 checks')
-  const summary = bodyRow(harness.vt, 'Command  pnpm build && pnpm test:product')
+  const heading = bodyRow(harness.vt, 'Copy Command · Expand [Tab] · Hide [F2]')
+  const preview = bodyRow(harness.vt, 'pnpm build && pnpm test:product')
   const tabs = bodyRow(harness.vt, '[Output]  Command')
   const firstBody = tabs + 1
   const facts = bodyRow(harness.vt, 'Retained preview · not full history')
@@ -283,9 +284,10 @@ test('120x40 paints status → metadata → summary → tabs → body → facts 
 
   assert.equal(status, 0, 'the status title owns the FIRST physical row')
   assert.equal(metadata, 1, 'the metadata row follows the status title')
-  assert.equal(summary, 2, 'the Command summary follows the metadata')
-  assert.equal(tabs, 3, 'the reading tabs follow the summary')
-  assert.equal(firstBody, 4, 'the body starts directly under the tabs — no blank separator row')
+  assert.equal(heading, 2, 'the Command preview heading follows the metadata')
+  assert.equal(preview, 3, 'the passive Command preview follows its heading')
+  assert.equal(tabs, 4, 'the reading tabs follow the preview')
+  assert.equal(firstBody, 5, 'the body starts directly under the tabs — no blank separator row')
   assert.match(plainRows(harness.vt)[firstBody]!, /^line \d{3}/, 'the first body row is real retained text')
   assert.equal(facts, 38, 'the reading-facts row closes the body')
   assert.equal(bar, 39, 'the Action Bar is pinned to the physical bottom')
@@ -294,18 +296,20 @@ test('120x40 paints status → metadata → summary → tabs → body → facts 
 
   // Status: identity + the ONE shared marker + the Title Case real status, all on the row.
   assert.match(plainRows(harness.vt)[status]!, /‣ Running/)
-  // Summary: the read-only command AND its clickable entry.
-  assert.match(plainRows(harness.vt)[summary]!, /↗ Command/)
+  // Heading: explicit Copy Command · Expand [Tab] · Hide [F2] controls.
+  assert.match(plainRows(harness.vt)[heading]!, /^Command\s+Copy Command · Expand \[Tab\] · Hide \[F2\]$/)
   // Tabs: the CURRENT page is the only bracketed one.
   assert.match(plainRows(harness.vt)[tabs]!, /^\[Output\] {2}Command ─+$/)
-  // Facts: the disclosure is bounded and carries the MEDIATED position.
-  assert.match(plainRows(harness.vt)[facts]!, /rows 7-40\/40/, 'the position is the REAL preview viewport')
-  // Action Bar: Esc + Follow + the browsing hint, and it never repeats the disclosure.
+  // Facts: Follow state + bounded disclosure + real measured position.
+  assert.match(plainRows(harness.vt)[facts]!, /Follow on · Retained preview · not full history/)
+  assert.match(plainRows(harness.vt)[facts]!, /rows 8-40\/40/, 'the position is the REAL preview viewport')
+  // Action Bar: Esc + Copy Output + Find + browsing hint, and never repeats the disclosure.
   const barText = plainRows(harness.vt)[bar]!
   assert.match(barText, /Back \[Esc\]/)
-  assert.match(barText, /Follow on/)
+  assert.match(barText, /Copy Output \[C\]/)
   assert.match(barText, /PgUp\/PgDn/)
   assert.ok(!/Retained preview/.test(barText), 'the Action Bar never repeats the dedicated facts row')
+  assert.ok(!/Follow on/.test(barText), 'the Action Bar never repeats Follow when the dedicated facts row is granted')
 
   // The body is the terminal's OWN background: no card/second frame. The
   // VirtualTerminal's cell attributes are the witness, not a string guess.
@@ -350,77 +354,75 @@ test('clicking the Command tab switches the body, keeps ONE observer, and the Ou
 
 // ── D-03: every affordance is a REAL sink ─────────────────────────────────
 
-test('the summary, the ↗ Command entry and Copy All [C] reach the original-command clipboard sink', async () => {
+test('preview Copy Command, Expand [Tab] and Command Copy All [C] reach the original-command clipboard sink', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   const label = '  pnpm build --watch  \n'
   harness.observation.latest()!.emit({ label, text: 'out' })
   await settle(harness.vt)
 
-  // (1) The summary text itself opens the Command page.
-  const summary = bodyRow(harness.vt, 'pnpm build --watch')
-  await click(harness.vt, summary, 4)
-  assert.match(view(harness.vt), /Copy All \[C\]/, 'the summary click opens the Command page')
+  // (1) Preview body itself is inert; Copy Command copies raw label verbatim.
+  const previewRow = bodyRow(harness.vt, 'pnpm build --watch')
+  await click(harness.vt, previewRow, 4)
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'clicking passive preview text does not switch pages')
+  assert.deepEqual(harness.copied, [], 'clicking passive preview text copies nothing')
 
-  // (2) The painted Copy All button copies the ORIGINAL bytes.
+  const heading = bodyRow(harness.vt, 'Copy Command')
+  await click(harness.vt, heading, cellIndexOf(harness.vt, heading, 'Copy Command') + 2)
+  await flush(6)
+  assert.deepEqual(harness.copied, [label], 'Copy Command delivers the official label byte for byte')
+
+  // (2) Expand [Tab] opens the Command page, and Copy All [C] copies the ORIGINAL bytes.
+  harness.copied.length = 0
+  await click(harness.vt, heading, cellIndexOf(harness.vt, heading, 'Expand [Tab]') + 2)
+  assert.match(view(harness.vt), /Copy All \[C\]/, 'Expand [Tab] opens the Command page')
+  assert.deepEqual(harness.copied, [], 'opening the page copies nothing by itself')
   const button = bodyRow(harness.vt, 'Copy All [C]')
   await click(harness.vt, button, cellIndexOf(harness.vt, button, 'Copy All [C]') + 2)
   await flush(6)
-  assert.deepEqual(harness.copied, [label], 'the button delivers the official label byte for byte')
-
-  // (3) Back on Output, the `↗ Command` entry is the SAME intent.
-  harness.copied.length = 0
-  harness.vt.sendInput('\x1b')
-  await settle(harness.vt)
-  const outputSummary = bodyRow(harness.vt, 'pnpm build --watch')
-  await click(harness.vt, outputSummary, cellIndexOf(harness.vt, outputSummary, '↗ Command') + 1)
-  assert.match(view(harness.vt), /Copy All \[C\]/, 'the ↗ Command entry opens the same page')
-  assert.deepEqual(harness.copied, [], 'opening the page copies nothing by itself')
+  assert.deepEqual(harness.copied, [label], 'Copy All [C] delivers the official label byte for byte')
 })
 
-test('a 1,500-character command summary stays ONE truncated row that still opens the full Command', async () => {
+test('a 1,500-character command uses adaptive multi-line preview with overflow marker on tall frames and compact summary on short frames', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
-  const label = `pnpm build ${'--flag=value '.repeat(120)}--tail`
-  assert.ok(label.length > 1_500, 'the fixture really is plan scale')
-  harness.observation.latest()!.emit({ label, text: 'out' })
+  const longLines = Array.from({ length: 30 }, (_, index) => `cmd-step-${String(index + 1).padStart(2, '0')} ${'--flag=value '.repeat(4)}`).join('\n')
+  assert.ok(longLines.length > 1_500, 'the fixture really is plan scale')
+  harness.observation.latest()!.emit({ label: longLines, text: 'out' })
   await settle(harness.vt)
 
-  const summary = bodyRow(harness.vt, 'pnpm build --flag=value')
+  // At 120x40 (no metadata/notice/search): B = 35, cap = min(floor(0.60*35), 35-6) = 21.
+  // 30 visual rows > 21 -> 20 command lines + 1 overflow marker `… 10 more rows`.
+  const heading = bodyRow(harness.vt, 'Copy Command · Expand [Tab] · Hide [F2]')
+  const overflow = bodyRow(harness.vt, '… 10 more rows')
   const tabs = bodyRow(harness.vt, '[Output]  Command')
-  assert.equal(tabs, summary + 1, 'the summary stays ONE row above the tabs')
-  assert.match(plainRows(harness.vt)[summary]!, /…/, 'the long identity is elided, never wrapped')
-  assert.ok(!/↗ Command/.test(plainRows(harness.vt)[summary]!),
-    'the affordance yields to the elided lead — it is painted only while the WHOLE lead fits')
+  assert.equal(overflow - heading, 21, 'preview occupies exactly cap=21 rows (20 lines + 1 marker)')
+  assert.equal(tabs, overflow + 1, 'tabs immediately follow the overflow marker with no blank gap')
+  assert.ok(plainRows(harness.vt).length - 2 - (tabs + 1) >= 6, 'Output body keeps >= 6 rows floor')
 
-  // The synthetic ellipsis is the truncation marker, NOT a summary cell: it must
-  // stay inert (the same contract the reading tabs follow).
-  const plainSummary = plainRows(harness.vt)[summary]!
-  const ellipsisCol = plainSummary.indexOf('…')
-  assert.ok(ellipsisCol > 0, 'the summary really is elided')
-  const ellipsisCell = visibleWidth(plainSummary.slice(0, ellipsisCol))
-  press(harness.vt, summary, ellipsisCell)
-  release(harness.vt, summary, ellipsisCell)
-  await flush(6)
-  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'the summary ellipsis opens nothing')
-  assert.deepEqual(harness.copied, [], 'and it never copies')
+  // Overflow marker is inert.
+  await click(harness.vt, overflow, 2)
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'clicking the overflow marker opens nothing')
+  assert.deepEqual(harness.copied, [], 'and never copies')
 
-  // The painted summary text still enters the page even without the affordance.
-  await click(harness.vt, summary, 4)
-  assert.match(view(harness.vt), /Copy All \[C\]/, 'the elided summary still opens the page')
+  // Expand [Tab] opens full Command Reader and Copy All [C] copies the whole original document.
+  await click(harness.vt, heading, cellIndexOf(harness.vt, heading, 'Expand [Tab]') + 1)
+  assert.match(view(harness.vt), /Copy All \[C\]/)
   const button = bodyRow(harness.vt, 'Copy All [C]')
   await click(harness.vt, button, cellIndexOf(harness.vt, button, 'Copy All [C]') + 2)
   await flush(6)
-  assert.deepEqual(harness.copied, [label], 'Copy All still delivers the WHOLE original document')
+  assert.deepEqual(harness.copied, [longLines], 'Copy All still delivers the WHOLE original document')
   assert.equal(harness.observation.records.length, 1, 'and never opens a second observer')
 
-  // No `↗ Command` entry is advertised on an elided row, and no phantom click
-  // region is published in its place: the dropped affordance owns no span.
+  // Return to Output and shrink below R=12: falls back to compact 1-line summary.
   harness.vt.sendInput('\x1b')
   await settle(harness.vt)
-  const entrySummary = bodyRow(harness.vt, 'pnpm build --flag=value')
-  assert.ok(!/↗ Command/.test(plainRows(harness.vt)[entrySummary]!),
-    'the entry stays absent on the elided summary row')
+  harness.vt.resize(80, 10)
+  await settle(harness.vt)
+  const compactSummary = bodyRow(harness.vt, 'Command  cmd-step-01')
+  const compactTabs = bodyRow(harness.vt, '[Output]  Command')
+  assert.equal(compactTabs, compactSummary + 1, 'R < 12 uses compact 1-line summary above tabs')
+  assert.match(plainRows(harness.vt)[compactSummary]!, /…/, 'long compact summary is elided')
 })
 
 // ── D-05: no faked Command affordance ─────────────────────────────────────
@@ -523,7 +525,7 @@ test('80x24 with no real metadata grows no blank row and keeps the bounded discl
   await settle(harness.vt)
 
   const tabs = bodyRow(harness.vt, '[Output]  Command')
-  assert.equal(tabs, 2, 'status + summary + tabs is the whole chrome above the body')
+  assert.equal(tabs, 3, 'status + heading + 1 preview row + tabs is the whole chrome above the body')
   assert.match(plainRows(harness.vt)[tabs + 1]!, /^line \d{3}/, 'the body starts directly under the tabs')
   assert.equal(bodyRow(harness.vt, 'line 039'), plainRows(harness.vt).length - 2, 'the tail is the last body row')
   const bar = plainRows(harness.vt).at(-1)!
@@ -639,35 +641,26 @@ test('a resize re-projects the hit map, keeps the current page AND its query, an
   harness.observation.latest()!.emit({ label, text: 'out' })
   await settle(harness.vt)
 
-  // Enter the Command page through the painted tab, then open a UNIQUE query on
-  // THIS page (the two pages own independent Find state).
+  // Enter the Command page through the painted tab, verify Copy All [C] before
+  // Find, then open a UNIQUE query on THIS page.
   const outputTabs = bodyRow(harness.vt, '[Output]  Command')
   await click(harness.vt, outputTabs, cellIndexOf(harness.vt, outputTabs, 'Command'))
-  harness.vt.sendInput('/')
-  await settle(harness.vt)
-  harness.vt.sendInput('cmd line 07')
-  await settle(harness.vt)
-  assert.match(view(harness.vt), /Find Command: cmd line 07/, 'the Command page owns the live query')
-  assert.match(view(harness.vt), /Copy All \[C\]/, 'the exact-copy button is painted')
-
-  // Press the Output TAB in the WIDE frame: after the shrink the SAME cell still
-  // holds an `open-output` target, but with a DIFFERENT painted range (`Output`
-  // shrinks to `Out`). Only the press-time row/range re-proof may refuse it.
-  const wideTabs = bodyRow(harness.vt, 'Output  [Command]')
-  const outputCol = cellIndexOf(harness.vt, wideTabs, 'Output') + 1
-  // The wide-only button cell, remembered before the shrink.
+  assert.match(view(harness.vt), /Copy All \[C\]/, 'the exact-copy button is painted while Find is inactive')
   const wideButtonRow = bodyRow(harness.vt, 'Copy All [C]')
   const wideButtonCol = cellIndexOf(harness.vt, wideButtonRow, 'Copy All [C]') + 2
+  const wideTabs = bodyRow(harness.vt, 'Output  [Command]')
+  const outputCol = cellIndexOf(harness.vt, wideTabs, 'Output') + 1
+
+  // Press the Output TAB in the WIDE frame, then shrink: after the shrink the
+  // SAME cell holds a DIFFERENT painted range (`Output` -> `Out`), so the stale
+  // press must not switch pages.
   press(harness.vt, wideTabs, outputCol)
   harness.vt.resize(44, 8)
   await settle(harness.vt)
   assert.match(view(harness.vt), /Out {2}\[Cmd\]/, 'the compact tabs are re-projected')
-  assert.match(view(harness.vt), /Find Command: cmd line 07/, 'the query survived the shrink')
   release(harness.vt, wideTabs, outputCol)
   await flush(6)
-  assert.match(view(harness.vt), /Find Command: cmd line 07/,
-    'the moved press never switched the page (its range is not the pressed one)')
-  assert.ok(!/\[Output\]  Command/.test(view(harness.vt)), 'the Output page was not entered')
+  assert.ok(!/\[Out\]  Cmd/.test(view(harness.vt)), 'the moved press never switched the page')
   assert.deepEqual(harness.copied, [], 'and it never copied')
 
   // The wide-only button cell is OUTSIDE the shrunk frame: hidden affordances keep
@@ -677,14 +670,21 @@ test('a resize re-projects the hit map, keeps the current page AND its query, an
   await flush(6)
   assert.deepEqual(harness.copied, [], 'the compact button copies only at its OWN painted cells')
 
-  // Growing back keeps the SAME page, the same query and the one observer.
+  // Open a Command query and verify it survives resize up and down.
+  harness.vt.sendInput('/')
+  await settle(harness.vt)
+  harness.vt.sendInput('cmd line 07')
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /1\/1/, 'narrow Input width still matches against the full body width')
   harness.vt.resize(120, 40)
   await settle(harness.vt)
   assert.match(view(harness.vt), /Find Command: cmd line 07/, 'the query is still live after growing back')
   assert.match(view(harness.vt), /Output  \[Command\]/, 'the Command page is still current')
   assert.equal(harness.observation.records.length, 1, 'the resize never re-opened the observation')
 
-  // Positive control: the re-projected compact button DOES act at its own cells.
+  // Leave Find, shrink back to 44x8, and verify the re-projected compact button copies.
+  harness.vt.sendInput('\x1b')
+  await settle(harness.vt)
   harness.vt.resize(44, 8)
   await settle(harness.vt)
   const compactRow = bodyRow(harness.vt, 'Copy All [C]')
@@ -699,15 +699,8 @@ test('an 8-column tab row keeps its truncation ellipsis inert (real press/releas
   harness.observation.latest()!.emit({ label: 'echo hello', text: 'retained body' })
   await settle(harness.vt)
 
-  // The summary row is truncated as well at this width: its ellipsis is inert.
-  const summaryRow = bodyRow(harness.vt, 'Command')
-  const summaryRowText = plainRows(harness.vt)[summaryRow]!
-  assert.match(summaryRowText, /…$/, 'the summary row really is truncated')
-  press(harness.vt, summaryRow, visibleWidth(summaryRowText) - 1)
-  release(harness.vt, summaryRow, visibleWidth(summaryRowText) - 1)
-  await flush(6)
-  assert.ok(!/Full co/.test(view(harness.vt)), 'the summary ellipsis never opens the Command page')
-
+  // At 8 columns the preview heading fits `Command` alone (no actions) and the
+  // tab row is truncated: clicking the truncation ellipsis stays inert.
   const tabs = bodyRow(harness.vt, '[Out]')
   const row = plainRows(harness.vt)[tabs]!
   assert.match(row, /…$/, 'the tab row really is truncated')
@@ -731,12 +724,12 @@ test('a press whose painted frame changed before the release never fires', async
   await openFirstJob(labelChange)
   labelChange.observation.latest()!.emit({ label: 'echo one', text: 'out' })
   await settle(labelChange.vt)
-  const summary = bodyRow(labelChange.vt, 'echo one')
-  const entryCol = cellIndexOf(labelChange.vt, summary, '↗ Command') + 1
-  press(labelChange.vt, summary, entryCol)
+  const heading = bodyRow(labelChange.vt, 'Expand [Tab]')
+  const entryCol = cellIndexOf(labelChange.vt, heading, 'Expand [Tab]') + 1
+  press(labelChange.vt, heading, entryCol)
   labelChange.observation.latest()!.emit({ label: 'echo two', text: 'out' })
   await settle(labelChange.vt)
-  release(labelChange.vt, summary, entryCol)
+  release(labelChange.vt, heading, entryCol)
   await flush(6)
   assert.ok(!/Copy All \[C\]/.test(view(labelChange.vt)),
     'a press from the previous Command source never opens the new one')
@@ -769,7 +762,8 @@ test('the Command page owns the EXACT selection copy; the Output page keeps the 
   const label = 'echo alpha beta'
   harness.observation.latest()!.emit({ label, text: 'retained job-a' })
   await settle(harness.vt)
-  await click(harness.vt, bodyRow(harness.vt, 'Command  echo alpha beta'), 4)
+  const heading = bodyRow(harness.vt, 'Expand [Tab]')
+  await click(harness.vt, heading, cellIndexOf(harness.vt, heading, 'Expand [Tab]') + 1)
 
   // A native DOUBLE click on Command text must NOT write a word: the Command
   // page suspends the fork's copy-on-select so the exact-copy affordance cannot
@@ -805,7 +799,8 @@ test('the Command page owns the EXACT selection copy; the Output page keeps the 
   // D-18: the tab interaction never wedges the BODY — entering through the tab and
   // wheeling over the body really scrolls the CURRENT page's viewport.
   harness.copied.length = 0
-  await click(harness.vt, bodyRow(harness.vt, 'Command  echo alpha beta'), 4)
+  const heading2 = bodyRow(harness.vt, 'Expand [Tab]')
+  await click(harness.vt, heading2, cellIndexOf(harness.vt, heading2, 'Expand [Tab]') + 1)
   harness.observation.latest()!.emit({
     label: Array.from({ length: 60 }, (_, index) => `cmd wheel ${String(index).padStart(2, '0')}`).join('\n'),
     text: 'retained job-a',
@@ -1039,17 +1034,19 @@ test('a hostile label is sanitized on the NEW header rows and never reaches the 
   await settle(harness.vt)
 
   const stream = written.join('')
-  assert.ok(!stream.includes(']52;c;'), 'no Host OSC reaches the terminal stream')
-  assert.ok(!stream.includes('UFdORUQ='), 'no Host clipboard payload reaches the terminal stream')
+  assert.ok(!stream.includes('\u001b]52;c;'), 'no raw Host OSC reaches the terminal stream')
   assert.ok(!stream.includes('\u009b'), 'no raw C1 control byte reaches the terminal stream')
-  assert.match(view(harness.vt), /Command {2}echo ok/, 'the summary shows the sanitized label')
-  assert.match(view(harness.vt), /Progress: echo ok/, 'the metadata row shows the sanitized progress')
-  assert.match(view(harness.vt), /Detail: echo ok/, 'the metadata row shows the sanitized detail')
-  assert.ok(!/\]52;c;|\[2J/.test(view(harness.vt)), 'no escape payload text leaks into the painted chrome')
+  assert.ok(!stream.includes('\u007f'), 'no raw DEL control byte reaches the terminal stream')
+  const rows = plainRows(harness.vt)
+  const metaRow = rows.find(line => line.includes('Progress: echo ok')) ?? ''
+  assert.match(metaRow, /Progress: echo ok/, 'the metadata row shows the sanitized progress')
+  assert.match(metaRow, /Detail: echo ok/, 'the metadata row shows the sanitized detail')
+  assert.ok(!/\]52;c;|\[2J/.test(metaRow), 'no escape payload text leaks into the painted metadata chrome')
+  assert.match(view(harness.vt), /\\x1b\]52;c;.*echo ok/, 'the Command preview displays escaped safe text with zero raw controls')
 
   // The official bytes still reach the Command copy verb untouched.
-  await click(harness.vt, bodyRow(harness.vt, 'Command  echo ok'), 4)
-  harness.vt.sendInput('c')
+  const heading = bodyRow(harness.vt, 'Copy Command')
+  await click(harness.vt, heading, cellIndexOf(harness.vt, heading, 'Copy Command') + 2)
   await flush(6)
   assert.deepEqual(harness.copied, [hostile], 'the copy payload stays the official original')
 })
@@ -1110,9 +1107,9 @@ test('Tab switches Output <-> Command in BOTH directions and v is inert', async 
   harness.observation.latest()!.emit({ label: 'pnpm build --watch', text: numberedLines(0, 39) })
   await settle(harness.vt)
 
-  // (1) The Output bar advertises the symmetric page toggle, and the retired
-  // `v command` hint does not exist anywhere on the frame any more.
-  assert.match(plainRows(harness.vt).at(-1)!, /Tab switch/, 'the Output bar advertises the page toggle')
+  // (1) The Output header advertises Expand [Tab], and the retired `v command`
+  // hint does not exist anywhere on the frame any more.
+  assert.match(view(harness.vt), /Expand \[Tab\]/, 'the Output header advertises Expand [Tab]')
   assert.ok(!/v command/.test(view(harness.vt)), 'the retired `v command` hint is never painted')
   // The Output page's OWN body rows, remembered before the round trip.
   const tabsBefore = bodyRow(harness.vt, '[Output]  Command')
@@ -1191,23 +1188,17 @@ interface JobLadder {
   readonly compact: boolean
   readonly metadataRows: number
   readonly summaryRows: number
+  readonly previewRows: number
   readonly tabRows: number
   readonly noticeRows: number
   readonly readingFactsRows: number
   readonly bodyRows: number
 }
 
-/**
- * The §8 ladder over the Job panel's own documented grants
- * (`job-inspector-panel.ts:104-116,181-230`: `COMPACT_WIDTH/ROWS = 80/10`,
- * `METADATA_MIN_BODY_ROWS = 4` requiring a standard `rows >= 10` frame,
- * `FACTS_MIN_WIDTH/ROWS/BODY_ROWS = 100/12/6`, and the `rows >= 5` tab/summary
- * grant that keeps the reserved body row).
- */
 function jobLadder(
   width: number,
   rows: number,
-  options: { readonly noticeLive: boolean; readonly metadataAvailable: boolean },
+  options: { readonly noticeLive: boolean; readonly metadataAvailable: boolean; readonly commandVisualRows?: number },
 ): JobLadder {
   const safeRows = Math.max(1, Math.floor(rows))
   const compact = width < 80 || safeRows < 10
@@ -1224,7 +1215,13 @@ function jobLadder(
   const noticeRows = grant(6, options.noticeLive)
   const metadataRows = grant(10, !compact && options.metadataAvailable, Math.max(minBodyRows, 4))
   const readingFactsRows = grant(12, width >= 100, Math.max(minBodyRows, 6))
-  return { compact, metadataRows, summaryRows, tabRows, noticeRows, readingFactsRows, bodyRows: remaining }
+  const commandVisualRows = options.commandVisualRows ?? 1
+  const cap = Math.max(0, Math.min(Math.floor(remaining * 0.6), remaining - 6))
+  const previewRows = safeRows >= 12 && summaryRows === 1 && tabRows === 1 && cap >= 2 && commandVisualRows > 0
+    ? Math.min(commandVisualRows, cap)
+    : 0
+  remaining -= previewRows
+  return { compact, metadataRows, summaryRows, previewRows, tabRows, noticeRows, readingFactsRows, bodyRows: remaining }
 }
 
 /** The frozen §11.2 matrix. */
@@ -1262,7 +1259,7 @@ test('the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size
       assertBarIsLastRow(painted, frame.readColor, 'Back [Esc]')
       assertNoHalfSegmentInBar(painted, painted.length - 1, ' · ')
       assertRowWidths(harness.vt, width)
-      const tabsRow = 1 + ladder.metadataRows + ladder.summaryRows
+      const tabsRow = 1 + ladder.metadataRows + ladder.summaryRows + ladder.previewRows
       const bodyTop = tabsRow + ladder.tabRows
       const bodyIndexes = Array.from({ length: ladder.bodyRows }, (_, index) => bodyTop + index)
       assertBodyFloor(painted, bodyIndexes, line => /^line \d{3}/.test(line), `Job ${width}x${height}`)
@@ -1285,8 +1282,11 @@ test('the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size
       const otherTabToken = ladder.compact ? '[Output]' : '[Out]'
       assert.ok(!painted.some(line => line.includes(otherTabToken)),
         `the tab row's compactness at ${width}x${height}:\n${view(harness.vt)}`)
-      assert.equal(painted.some(line => /^(Command|Label) {2}\S/.test(line)), ladder.summaryRows === 1,
-        `the Command/Label summary row at ${width}x${height}:\n${view(harness.vt)}`)
+      assert.equal(
+        painted.some(line => ladder.previewRows > 0 ? /^Command\b/.test(line) : /^(Command|Label) {2}\S/.test(line)),
+        ladder.summaryRows === 1,
+        `the Command/Label summary row at ${width}x${height}:\n${view(harness.vt)}`,
+      )
 
       // §8 step 3: the metadata row holds only with its own grant.
       assert.equal(painted.some(line => line.includes('Progress: 3/8 checks')), ladder.metadataRows === 1,
@@ -1320,4 +1320,210 @@ test('the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size
       disposeHarness(harness)
     }
   }
+})
+
+// ── JUX-01 / JUX-02: adaptive preview budget, log invariance & F2 collapse ──
+
+test('JUX-01/02: preview height ignores log growth, F2/Hide/Show toggles per-open intent across resize and Tab', async () => {
+  const harness = startApp(120, 40, ['job-a', 'job-b'])
+  await openFirstJob(harness)
+  const label = 'cd /repo &&\npnpm build &&\npnpm test:product'
+  harness.observation.latest()!.emit({ label, text: '' })
+  await settle(harness.vt)
+
+  // Empty log: 3-line command takes exactly 3 preview rows (no padding).
+  const headingRow = bodyRow(harness.vt, 'Copy Command · Expand [Tab] · Hide [F2]')
+  const tabsEmpty = bodyRow(harness.vt, '[Output]  Command')
+  assert.equal(tabsEmpty - headingRow - 1, 3, 'short 3-line command occupies exactly 3 preview rows')
+  assert.match(view(harness.vt), /No retained output/)
+
+  // Log grows from empty to 80 lines: preview height does NOT change.
+  harness.observation.latest()!.emit({ label, text: numberedLines(0, 79) })
+  await settle(harness.vt)
+  assert.equal(bodyRow(harness.vt, '[Output]  Command'), tabsEmpty,
+    'log growth never changes the Command preview row grant')
+
+  // F2 collapses preview -> P = 0 and heading shows Show [F2].
+  harness.vt.sendInput('\x1bOQ') // F2
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /Copy Command · Expand \[Tab\] · Show \[F2\]/)
+  assert.ok(!/pnpm build &&/.test(view(harness.vt)), 'collapsed preview hides command rows')
+  assert.equal(bodyRow(harness.vt, '[Output]  Command'), headingRow + 1, 'tabs immediately follow collapsed heading')
+
+  // Tab -> Command -> Esc preserves user's collapsed intent.
+  harness.vt.sendInput('\t')
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /Full command/)
+  harness.vt.sendInput('\x1b')
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /Show \[F2\]/, 'returning from Command preserves collapsed intent')
+
+  // Resize below R=12 and back to 120x40 preserves collapsed intent; automatic
+  // degradation when expanded also preserves expanded intent.
+  harness.vt.resize(80, 10)
+  await settle(harness.vt)
+  harness.vt.resize(120, 40)
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /Show \[F2\]/, 'resize round-trip preserves explicit collapsed intent')
+
+  // Click Show [F2] restores multi-line preview.
+  const showRow = bodyRow(harness.vt, 'Show [F2]')
+  await click(harness.vt, showRow, cellIndexOf(harness.vt, showRow, 'Show [F2]') + 1)
+  assert.match(view(harness.vt), /Hide \[F2\]/)
+  assert.match(view(harness.vt), /pnpm build &&/)
+
+  // Resize down to R=10 (auto-compact) and back up: expanded intent survives!
+  harness.vt.resize(80, 10)
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /Command {2}cd \/repo/)
+  harness.vt.resize(120, 40)
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /Hide \[F2\]/, 'automatic short-screen fallback never writes collapsed intent')
+  assert.match(view(harness.vt), /pnpm build &&/)
+
+  // Collapse again, then open a different Job: new Job does NOT inherit collapsed intent.
+  harness.vt.sendInput('\x1bOQ')
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /Show \[F2\]/)
+  harness.tasks.openJobView('job-b')
+  await settle(harness.vt)
+  harness.observation.latest()!.emit({ label: 'echo b1\necho b2', text: 'out-b' })
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /Hide \[F2\]/, 'a new Job starts with preview expanded')
+  assert.match(view(harness.vt), /echo b2/)
+})
+
+// ── JUX-03/04/07/08: full §12 pointer journey + negative controls ──────────
+
+test('JUX-03/04/07/08: complete 120x40 pointer journey, chrome wheel isolation, native drag handoff, Stop inert and blur revoke', async () => {
+  const harness = startApp(120, 40)
+  await openFirstJob(harness)
+  const label = '  echo "step1"\t&&\r\necho "step2"  '
+  const outLines = Array.from({ length: 80 }, (_, index) =>
+    index === 5 || index === 30 ? `needle-hit-${index}` : `log-row-${String(index).padStart(3, '0')}`).join('\n')
+  harness.observation.latest()!.emit({ label, text: outLines })
+  await settle(harness.vt)
+
+  // 1. Copy Command from preview heading + rapid double-click dedup (clickCount === 1).
+  const headingRow = bodyRow(harness.vt, 'Copy Command')
+  const copyCmdCol = cellIndexOf(harness.vt, headingRow, 'Copy Command') + 2
+  press(harness.vt, headingRow, copyCmdCol)
+  release(harness.vt, headingRow, copyCmdCol)
+  press(harness.vt, headingRow, copyCmdCol)
+  release(harness.vt, headingRow, copyCmdCol)
+  await flush(6)
+  assert.deepEqual(harness.copied, [label], 'rapid double-click on Copy Command executes once with exact raw bytes')
+
+  // 2. Chrome wheel over preview/header/facts/bar is consumed and never pauses Follow.
+  const previewRow = bodyRow(harness.vt, 'echo "step1"')
+  harness.vt.sendInput(`\x1b[<64;5;${previewRow + 1}M`)
+  harness.vt.sendInput(`\x1b[<64;5;${headingRow + 1}M`)
+  harness.vt.sendInput(`\x1b[<64;5;40M`)
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /Follow on/, 'wheel over chrome never pauses Output Follow')
+
+  // 3. Expand [Tab] -> Command -> Copy All [C] -> Find -> Search -> Next -> Edit -> Leave find -> Output [Esc].
+  harness.copied.length = 0
+  await click(harness.vt, headingRow, cellIndexOf(harness.vt, headingRow, 'Expand [Tab]') + 2)
+  assert.match(view(harness.vt), /Copy All \[C\]/)
+  const copyAllRow = bodyRow(harness.vt, 'Copy All [C]')
+  await click(harness.vt, copyAllRow, cellIndexOf(harness.vt, copyAllRow, 'Copy All [C]') + 2)
+  await flush(6)
+  assert.deepEqual(harness.copied, [label])
+
+  // Click live Find span on Command Action Bar -> type -> click Search [Enter] -> click Edit -> Leave find [Esc].
+  const cmdBarRow = plainRows(harness.vt).length - 1
+  await click(harness.vt, cmdBarRow, cellIndexOf(harness.vt, cmdBarRow, 'Ctrl+F find') + 1)
+  assert.match(view(harness.vt), /Find Command:/)
+  harness.vt.sendInput('step')
+  await settle(harness.vt)
+  const cmdSearchRow = bodyRow(harness.vt, 'Search [Enter]')
+  await click(harness.vt, cmdSearchRow, cellIndexOf(harness.vt, cmdSearchRow, 'Search [Enter]') + 1)
+  assert.match(view(harness.vt), /Next \[N\]/)
+  const navSearchRow = bodyRow(harness.vt, 'Next [N]')
+  await click(harness.vt, navSearchRow, cellIndexOf(harness.vt, navSearchRow, 'Next [N]') + 1)
+  assert.match(view(harness.vt), /2\/2/)
+  await click(harness.vt, navSearchRow, cellIndexOf(harness.vt, navSearchRow, 'Edit') + 1)
+  assert.match(view(harness.vt), /Search \[Enter\]/, 'Edit button re-enters EDIT preserving query')
+  assert.match(view(harness.vt), /Find Command: step/)
+  await click(harness.vt, cmdBarRow, cellIndexOf(harness.vt, cmdBarRow, 'Leave find [Esc]') + 1)
+  assert.ok(!/Find Command:/.test(view(harness.vt)))
+  await click(harness.vt, cmdBarRow, cellIndexOf(harness.vt, cmdBarRow, 'Output [Esc]') + 1)
+  assert.match(view(harness.vt), /\[Output\]  Command/)
+
+  // 4. Hide [F2] -> Show [F2] by mouse (use a neighboring cell so two rapid
+  // headless clicks 15ms apart are distinct clicks rather than a double-click).
+  const hideRow = bodyRow(harness.vt, 'Hide [F2]')
+  await click(harness.vt, hideRow, cellIndexOf(harness.vt, hideRow, 'Hide [F2]') + 1)
+  assert.match(view(harness.vt), /Show \[F2\]/)
+  const showRow = bodyRow(harness.vt, 'Show [F2]')
+  await click(harness.vt, showRow, cellIndexOf(harness.vt, showRow, 'Show [F2]') + 2)
+  assert.match(view(harness.vt), /Hide \[F2\]/)
+
+  // 5. Output native wheel pauses Follow; Resume [End] resumes Follow and tracks newer snapshot.
+  const logRow = bodyRow(harness.vt, 'log-row-079')
+  harness.vt.sendInput(`\x1b[<64;10;${logRow + 1}M`)
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /Follow paused/)
+  const outBarRow = plainRows(harness.vt).length - 1
+  await click(harness.vt, outBarRow, cellIndexOf(harness.vt, outBarRow, 'Resume [End]') + 1)
+  assert.match(view(harness.vt), /Follow on/)
+  const grown = `${outLines}\nlog-row-080`
+  harness.observation.latest()!.emit({ label, text: grown })
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /log-row-080/, 'resumed Follow tracks subsequent snapshot')
+
+  // 6. Output-origin native drag into preview completes Output selection without triggering preview action.
+  harness.copied.length = 0
+  const dragStartRow = bodyRow(harness.vt, 'log-row-080')
+  const previewDragTarget = bodyRow(harness.vt, 'echo "step1"')
+  press(harness.vt, dragStartRow, 0)
+  drag(harness.vt, previewDragTarget, 5)
+  release(harness.vt, previewDragTarget, 5)
+  await flush(6)
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'dragging from Output into preview never opens Command')
+  assert.equal(harness.copied.length, 1, 'Output-origin drag into preview still copies the clamped Output selection')
+  assert.match(harness.copied[0]!, /log-row-/, 'copied text comes from the Output body selection')
+  assert.notEqual(harness.copied[0], label, 'dragging from Output into preview never copies Command')
+
+  // 6b. R948-01: a NEW press+release on old A's Copy Command span after observation updates to B
+  //     but BEFORE the next frame paints must be refused (never copy B); once B paints, clicking copies B.
+  harness.copied.length = 0
+  const staleCopyRow = bodyRow(harness.vt, 'Copy Command')
+  const staleCopyCol = cellIndexOf(harness.vt, staleCopyRow, 'Copy Command') + 2
+  const updatedLabel = 'echo "command-B-updated"\necho "command-B-line2"'
+  harness.observation.latest()!.emit({ label: updatedLabel, text: grown })
+  press(harness.vt, staleCopyRow, staleCopyCol)
+  release(harness.vt, staleCopyRow, staleCopyCol)
+  await flush(6)
+  assert.deepEqual(harness.copied, [], 'a new press on an unpainted stale frame must never copy the newer command B')
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /command-B-updated/, 'the updated command B is now painted')
+  const freshCopyRow = bodyRow(harness.vt, 'Copy Command')
+  const freshCopyCol = cellIndexOf(harness.vt, freshCopyRow, 'Copy Command') + 3
+  await click(harness.vt, freshCopyRow, freshCopyCol)
+  await flush(6)
+  assert.deepEqual(harness.copied, [updatedLabel], 'once B is painted, clicking Copy Command copies B')
+
+  // 7. Copy Output [C] copies exact retained snapshot; Stop hint click is inert (keyboard-only).
+  harness.copied.length = 0
+  await click(harness.vt, outBarRow, cellIndexOf(harness.vt, outBarRow, 'Copy Output [C]') + 2)
+  await flush(6)
+  assert.deepEqual(harness.copied, [grown], 'Copy Output [C] delivers exact retained snapshot')
+  const stopCol = cellIndexOf(harness.vt, outBarRow, 's stop')
+  await click(harness.vt, outBarRow, stopCol + 1)
+  assert.deepEqual(harness.observation.stops, [], 'clicking Stop hint is inert (keyboard-only contract)')
+
+  // 8. Terminal blur (\x1b[O) revokes an in-flight Back [Esc] press.
+  const backCol = cellIndexOf(harness.vt, outBarRow, 'Back [Esc]') + 1
+  press(harness.vt, outBarRow, backCol)
+  harness.vt.sendInput('\x1b[O')
+  release(harness.vt, outBarRow, backCol)
+  await flush(6)
+  assert.match(view(harness.vt), /Job · job-a · bash/, 'terminal blur revokes in-flight chrome press')
+
+  // 9. Fresh Back [Esc] click closes workspace and releases observer once.
+  await click(harness.vt, outBarRow, backCol + 1)
+  assert.ok(!/Job · job-a · bash/.test(view(harness.vt)), 'Back [Esc] closes the workspace')
+  assert.deepEqual(harness.observation.records.map(r => r.closes), [1], 'observer released exactly once')
 })

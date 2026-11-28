@@ -26,8 +26,14 @@ import {
   type AltScreenSearchSegment,
   type Component,
   type Focusable,
+  type KeyId,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 import { highlightSearchLines } from '../components/transcript/search-presentation.ts'
+import { formatKeyId, JOB_SEARCH_LOCAL_KEYS } from '../keybindings/hints.ts'
+import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { paintActionSpan, type ActionInkRole } from '../presentation/action-ink.ts'
 import { color } from '../theme/runtime.ts'
 
 /**
@@ -48,6 +54,26 @@ export type JobOutputSearchMode = 'inactive' | 'edit' | 'navigate'
 export interface JobOutputSearchCounts {
   readonly selected: number
   readonly total: number
+}
+
+/** One clickable SearchRow action painted on the active search row. */
+export type JobSearchRowAction = 'search-commit' | 'search-prev' | 'search-next' | 'search-edit'
+
+/** One clickable hit region of the LAST PAINTED SearchRow frame (row-local cells). */
+export interface JobSearchRowHitTarget {
+  readonly action: JobSearchRowAction
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+  readonly mode: JobOutputSearchMode
+  readonly query: string
+}
+
+/** Optional pointer/hint wiring injected by the owning panel. */
+export interface JobOutputSearchOptions {
+  readonly onMouse?: (event: TuiMouseEvent) => TuiMouseEventResult | undefined
+  readonly findHint?: () => string
+  readonly isLocalKeyPreempted?: (key: KeyId) => boolean
 }
 
 /** One retained-window RENDER epoch: the rendered Output rows, the query's
@@ -149,16 +175,28 @@ export function rebaseRetainedAnchor(input: RetentionRebaseInput & { readonly ol
 }
 
 /** The ONE visible SearchRow of the Job workspace: the real `Input` (focused
- *  through the live screen) plus the independent `i / N` fact. It renders ZERO
- *  rows when the frame's chrome plan did not grant it a row. */
+ *  through the live screen), the independent `i / N` fact, and the state-scoped
+ *  action spans (`Search [Enter]` in EDIT; `Prev`/`Next`/`Edit` in NAVIGATE).
+ *  It renders ZERO rows when the frame's chrome plan did not grant it a row. */
 class JobOutputSearchRow implements Component, Focusable {
   private readonly search: JobOutputSearch
   private readonly visible: (width: number) => boolean
+  private readonly onMouse?: (event: TuiMouseEvent) => TuiMouseEventResult | undefined
+  private readonly findHint?: () => string
+  private readonly isLocalKeyPreempted?: (key: KeyId) => boolean
   private focusedValue = false
+  private hitTargets: readonly JobSearchRowHitTarget[] = []
 
-  constructor(search: JobOutputSearch, visible: (width: number) => boolean) {
+  constructor(
+    search: JobOutputSearch,
+    visible: (width: number) => boolean,
+    options?: JobOutputSearchOptions,
+  ) {
     this.search = search
     this.visible = visible
+    this.onMouse = options?.onMouse
+    this.findHint = options?.findHint
+    this.isLocalKeyPreempted = options?.isLocalKeyPreempted
   }
 
   get focused(): boolean {
@@ -170,20 +208,103 @@ class JobOutputSearchRow implements Component, Focusable {
     this.search.setInputFocused(value)
   }
 
+  /** The complete clickable action spans of the LAST rendered frame. */
+  hits(): readonly JobSearchRowHitTarget[] {
+    return this.hitTargets
+  }
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    return this.onMouse?.(event)
+  }
+
   render(width: number): string[] {
-    if (!this.visible(width)) return []
+    if (!this.visible(width)) {
+      this.hitTargets = []
+      return []
+    }
     const counts = this.search.countsFor(width)
     const query = this.search.query
+    const mode = this.search.mode
     const countText = query === ''
       ? ''
       : counts.total === 0 ? '0/0 · No matches' : `${counts.selected + 1}/${counts.total}`
     const countRendered = countText === '' ? '' : color.textDim(` ${countText} `)
     const countWidth = visibleWidth(countRendered)
-    const inputWidth = Math.max(1, width - countWidth)
+
+    interface Candidate extends ActionBarSegment {
+      readonly action: JobSearchRowAction
+      readonly role: ActionInkRole
+    }
+    const candidates: Candidate[] = []
+    if (mode === 'edit') {
+      const commitPreempted = this.isLocalKeyPreempted?.(JOB_SEARCH_LOCAL_KEYS.commit) ?? false
+      candidates.push({
+        action: 'search-commit',
+        text: commitPreempted ? 'Search' : `Search [${formatKeyId(JOB_SEARCH_LOCAL_KEYS.commit)}]`,
+        role: 'primary',
+        priority: 3,
+      })
+    } else if (mode === 'navigate') {
+      const hint = this.findHint?.() ?? ''
+      const editText = hint === '' ? 'Edit' : `Edit [${hint}]`
+      if (counts.total > 0) {
+        candidates.push(
+          { action: 'search-prev', text: `Prev [${formatKeyId(JOB_SEARCH_LOCAL_KEYS.prev)}]`, role: 'secondary', priority: 2 },
+          { action: 'search-next', text: `Next [${formatKeyId(JOB_SEARCH_LOCAL_KEYS.next)}]`, role: 'primary', priority: 3 },
+        )
+      }
+      candidates.push({
+        action: 'search-edit',
+        text: editText,
+        ...(hint === '' ? {} : { short: 'Edit' }),
+        role: 'secondary',
+        priority: 1,
+      })
+    }
+
+    const minInputWidth = Math.min(width, width >= 30 ? 16 : 10)
+    const leadingGap = countWidth === 0 ? 1 : 0
+    const actionBudget = width - minInputWidth - countWidth - leadingGap
+    const layout = actionBudget > 0 && candidates.length > 0
+      ? layoutActionBarRow(candidates, actionBudget)
+      : { text: '', spans: [], truncated: true }
+
+    if (layout.truncated || layout.spans.length === 0) {
+      this.hitTargets = []
+      const inputWidth = Math.max(1, width - countWidth)
+      const inputLine = this.search.renderInput(inputWidth)
+      const padding = ' '.repeat(Math.max(0, inputWidth - visibleWidth(inputLine)))
+      const line = `${inputLine}${padding}${countRendered}`
+      return [truncateToWidth(line, width, '…', true)]
+    }
+
+    const actionsWidth = layout.spans.at(-1)!.endCol
+    const rightWidth = countWidth + leadingGap + actionsWidth
+    const inputWidth = Math.max(1, width - rightWidth)
     const inputLine = this.search.renderInput(inputWidth)
     const padding = ' '.repeat(Math.max(0, inputWidth - visibleWidth(inputLine)))
-    const line = `${inputLine}${padding}${countRendered}`
-    return [truncateToWidth(line, width, '…', true)]
+    const actionsStartCol = inputWidth + countWidth + leadingGap
+    const targets: JobSearchRowHitTarget[] = []
+    const paintedActions: string[] = []
+    for (const span of layout.spans) {
+      const source = candidates[span.inputIndex]!
+      targets.push({
+        action: source.action,
+        row: 0,
+        startCol: actionsStartCol + span.startCol,
+        endCol: actionsStartCol + span.endCol,
+        mode,
+        query,
+      })
+      paintedActions.push(paintActionSpan(span.text, source.role))
+    }
+    const line = `${inputLine}${padding}${countRendered}${' '.repeat(leadingGap)}${paintedActions.join(color.textMuted(ACTION_BAR_SEPARATOR))}`
+    if (visibleWidth(line) > width) {
+      this.hitTargets = []
+      return [truncateToWidth(line, width, '…', true)]
+    }
+    this.hitTargets = targets
+    return [line]
   }
 
   invalidate(): void {
@@ -227,15 +348,25 @@ export class JobOutputSearch {
   private geometryWidth = 0
   private selectedIndexValue = -1
 
-  constructor(text: JobSearchTextSource, visible: (width: number) => boolean, prompt = 'Find Output: ') {
+  constructor(
+    text: JobSearchTextSource,
+    visible: (width: number) => boolean,
+    prompt = 'Find Output: ',
+    options?: JobOutputSearchOptions,
+  ) {
     this.text = text
     this.input = new Input({ prompt })
-    this.rowComponent = new JobOutputSearchRow(this, visible)
+    this.rowComponent = new JobOutputSearchRow(this, visible, options)
   }
 
   /** The mounted SearchRow (a real layout child, never a detached proxy). */
   get row(): Component & Focusable {
     return this.rowComponent
+  }
+
+  /** The complete clickable action spans of the LAST rendered SearchRow frame. */
+  rowHits(): readonly JobSearchRowHitTarget[] {
+    return this.rowComponent.hits()
   }
 
   get mode(): JobOutputSearchMode {
