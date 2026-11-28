@@ -1002,6 +1002,19 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             ? '; old turn stopped (cannot resume)'
             : '; turn stop requested (not yet confirmed)'
         }
+        // Returned AND thrown typed settlements share ONE command translation.
+        // A locally superseded create owns nothing: no error card, no success
+        // text, no commit callback and no attachment consumption. The machine
+        // cause (including a published Host id) stays in diagnostics.
+        const typedCreateSettlement = (error: LifecycleError): CommandResult | undefined => {
+          runner.diag.warn('fresh session create did not own the surface', {
+            settlement: error.settlement,
+            ownership: error.ownership,
+            publishedSessionId: error.publishedSessionId,
+            requestedSessionId: error.requestedSessionId,
+          })
+          return error.ownership === 'superseded' ? { kind: 'success' } : undefined
+        }
         try {
           if (runner.backendKind === 'remote' && workspaceNewCapture === undefined) {
             return done({ kind: 'error', text: 'fresh session creation failed: the remote connection is not connected' })
@@ -1207,19 +1220,8 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             }
             if (!result.ok) {
               if (result.error instanceof LifecycleError) {
-                // Preserve the machine-readable cause (incl. a published identity for
-                // D2.4 reconciliation) even on the UI-silent superseded path.
-                runner.diag.warn('fresh session create did not own the surface', {
-                  settlement: result.error.settlement,
-                  ownership: result.error.ownership,
-                  publishedSessionId: result.error.publishedSessionId,
-                  requestedSessionId: result.error.requestedSessionId,
-                })
-                // A locally SUPERSEDED create emits no error notice and NO
-                // user-visible success text (§0.2.1): the surface moved, so this
-                // result owns nothing. The machine-readable cause (incl. any
-                // published id) is already recorded in the diagnostic above.
-                if (result.error.ownership === 'superseded') return { kind: 'success' }
+                const settled = typedCreateSettlement(result.error)
+                if (settled !== undefined) return settled
               }
               return { kind: 'error', text: `${result.message}${stopNote()}` }
             }
@@ -1233,11 +1235,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
             // drop the unpinned ones only when this was a genuine owner change.
             // Exact-binding reuse and the sessionless first-owner path keep the
-            // active draft and staged attachments.
-            const ownerReplaced = freshSessionId === undefined
-              ? result.ownerReplaced === true
-              : navigation.scope.sessionId !== undefined && !runner.isSessionScopeCurrent(navigation.scope)
-            if (ownerReplaced) {
+            // active draft and staged attachments. Direct fresh New keeps its
+            // pre-PR successful-cleanup condition; `ownerReplaced` is Remote-only.
+            if (freshSessionId !== undefined || result.ownerReplaced === true) {
               runner.imageStore.clearUnpinned()
               runner.fileStore?.clearUnpinned()
             }
@@ -1259,6 +1259,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             return done({ kind: 'error', text: `fresh session creation failed: ${error.message}` })
           }
           if (isCancellation(error) || runner.signal.aborted) throw error
+          if (error instanceof LifecycleError) {
+            const settled = typedCreateSettlement(error)
+            if (settled !== undefined) return done(settled)
+          }
           // The transition can THROW after the quiesce (a synchronous commit
           // seam): keep the phase fact in the user-visible failure instead of
           // letting the generic command path drop it.

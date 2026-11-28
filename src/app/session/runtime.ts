@@ -50,6 +50,13 @@ import {
   type TransitionSteps,
 } from './transition.ts'
 
+/** Operation-local evidence sink for the post-publication readiness seams.
+ * The runtime owns the transition; the runner reports only what its real
+ * hydrate/catalog seams actually settled. Nothing here polls or retries. */
+export interface SessionReadinessSink {
+  notReady(reason: string): void
+}
+
 /** The runner-supplied surface operations the runtime drives. */
 export interface SessionRuntimeSurface {
   /** ALL user-facing retirement reporting stays with the runner (it owns the
@@ -71,8 +78,8 @@ export interface SessionRuntimeSurface {
   setCompletionOwner(identity: string | undefined): void
   // Post-commit surface work. These receive the opaque owner; the runner
   // resolves its own Direct attachment inside the provider.
-  initLiveSession(owner: SessionOwnerRef): Promise<void>
-  refreshLiveCatalog(owner: SessionOwnerRef): Promise<void>
+  initLiveSession(owner: SessionOwnerRef, readiness?: SessionReadinessSink): Promise<void>
+  refreshLiveCatalog(owner: SessionOwnerRef, readiness?: SessionReadinessSink): Promise<void>
   /** Report a committed switch (the runner logs it and adds its own Direct
    *  session detail). */
   reportSwitch(from: string | undefined, to: SessionOwnerRef): void
@@ -605,6 +612,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     let preCommitRelease: Promise<void> | undefined
     let transitionCommitted = false
     let postCommitFailed = false
+    const readinessFailures: string[] = []
+    const readinessSink: SessionReadinessSink = {
+      notReady: (reason) => { readinessFailures.push(reason) },
+    }
     try {
       const outcome = await runTransitionTo<T>({
         quiesceOld: async () => {
@@ -823,12 +834,19 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         if (nextOwner === oldOwner) {
           if (actualId) {
             try {
-              await deps.surface.refreshLiveCatalog(nextOwner)
+              await deps.surface.refreshLiveCatalog(nextOwner, readinessSink)
             } catch (error) {
               postCommitFailed = true
               deps.diag.error('same-binding New catalog refresh failed', {
                 to: committedSessionId,
                 error: safeErrorMessage(error),
+              })
+            }
+            if (readinessFailures.length > 0) {
+              postCommitFailed = true
+              deps.diag.error('same-binding New readiness not confirmed', {
+                to: committedSessionId,
+                failures: readinessFailures,
               })
             }
           }
@@ -971,7 +989,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           retired.push(`child whenIdle: ${safeErrorMessage(error)}`)
         }
         try {
-          await deps.surface.initLiveSession(nextOwner)
+          await deps.surface.initLiveSession(nextOwner, readinessSink)
         } catch (error) {
           retired.push(`surface rebuild: ${safeErrorMessage(error)}`)
         }
@@ -981,11 +999,14 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // failed attempt still returns a successful switch — the coordinator
         // warns and the transition commands keep re-validating).
         try {
-          await deps.surface.refreshLiveCatalog(nextOwner)
+          await deps.surface.refreshLiveCatalog(nextOwner, readinessSink)
         } catch (error) {
           retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
         }
         if (opening !== undefined) deps.surface.clearOpening(opening)
+        if (readinessFailures.length > 0) {
+          retired.push(...readinessFailures)
+        }
         if (retired.length > 0) {
           postCommitFailed = true
           deps.diag.error('transition retire failed (child committed)', {

@@ -1106,6 +1106,72 @@ test('sessionless Remote New commits the first actual owner without dropping sta
   }
 })
 
+test('a committed but non-ready actual New reports Session committed', async () => {
+  const capture = { generation: { id: 1 } }
+  const h = harness({
+    backendKind: 'remote',
+    agents: {
+      captureWorkspaceNewConversation: () => capture,
+      resolveWorkspace: (async () => ({ workspaceId: 'ws-a', path: '/ws' })) as never,
+      create: (async () => ({ session: { id: 'session-not-ready' } })) as never,
+    },
+    transitionToActualId: (async (steps: { create: () => Promise<unknown> }) => ({
+      ok: true,
+      next: await steps.create(),
+      degraded: true,
+    })) as never,
+  })
+  try {
+    const result = await h.runCommand('new')
+    assert.deepEqual(result, { kind: 'success', text: 'Session committed' })
+  } finally {
+    h.close()
+  }
+})
+
+test('a thrown superseded actual commit is UI-silent and consumes no staged refs', async () => {
+  const capture = { generation: { id: 1 } }
+  let cleared = 0
+  const h = harness({
+    backendKind: 'remote',
+    agents: {
+      captureWorkspaceNewConversation: () => capture,
+      resolveWorkspace: (async () => ({ workspaceId: 'ws-a', path: '/ws' })) as never,
+    },
+    transitionToActualId: (async () => {
+      throw new LifecycleError('superseded', 'superseded', 'the surface moved', 'session-published')
+    }) as never,
+  })
+  h.runner.imageStore.clearUnpinned = () => { cleared += 1 }
+  try {
+    const result = await h.runCommand('new')
+    assert.deepEqual(result, { kind: 'success' })
+    assert.equal(cleared, 0)
+  } finally {
+    h.close()
+  }
+})
+
+test('successful Direct sessionless New keeps the original unpinned cleanup', async () => {
+  let cleared = 0
+  const h = harness({
+    backendKind: 'direct',
+    currentSessionId: undefined,
+    agents: {
+      resolveWorkspace: (async () => ({ workspaceId: 'ws-a', path: '/ws' })) as never,
+      create: (async (options: { sessionId?: string }) => ({ session: { id: String(options.sessionId) } })) as never,
+    },
+  })
+  h.runner.imageStore.clearUnpinned = () => { cleared += 1 }
+  try {
+    const result = await h.runCommand('new')
+    assert.equal(result.kind, 'success', JSON.stringify(result))
+    assert.equal(cleared, 1)
+  } finally {
+    h.close()
+  }
+})
+
 test('a command-refused Folder New keeps the Browser and releases the pending lock for a retry', async () => {
   let attempts = 0
   const h = harness({

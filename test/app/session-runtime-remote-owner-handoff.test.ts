@@ -244,6 +244,8 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
   const queueRecalls = bindSubmissionRuntime({ surface: {} as never })
   let disposed = false
   let failNextCatalog = false
+  let notReadyNextInit = false
+  let notReadyNextCatalog = false
   const surface: SessionRuntimeSurface = {
     warnRetirement: () => {},
     warnRetirementSkipped: () => {},
@@ -264,10 +266,20 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
     settleLocalSubmitAck: () => {},
     resetSubmitLatency: () => {},
     setCompletionOwner: (identity) => { events.push(`completion:${String(identity)}`) },
-    initLiveSession: async (owner) => { events.push(`init:${services.owners.sessionId(owner)}`) },
-    refreshLiveCatalog: async (owner) => {
+    initLiveSession: async (owner, readiness) => {
+      events.push(`init:${services.owners.sessionId(owner)}`)
+      if (notReadyNextInit) {
+        notReadyNextInit = false
+        readiness?.notReady('controlled uncommitted hydrate')
+      }
+    },
+    refreshLiveCatalog: async (owner, readiness) => {
       const sessionId = services.owners.sessionId(owner)
       events.push(`catalog:${sessionId}`)
+      if (notReadyNextCatalog) {
+        notReadyNextCatalog = false
+        readiness?.notReady('controlled catalog failed')
+      }
       if (failNextCatalog) {
         failNextCatalog = false
         throw new Error('controlled catalog refresh failure')
@@ -390,6 +402,8 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
     setScopeCurrent: (current: boolean): void => { currentScope = current },
     setScopeAuthority: (authority: SessionScopeAuthority): void => { scopeAuthority = authority },
     failNextCatalogRefresh: (): void => { failNextCatalog = true },
+    reportNextInitNotReady: (): void => { notReadyNextInit = true },
+    reportNextCatalogNotReady: (): void => { notReadyNextCatalog = true },
     diagnostics,
     queueRecalls,
     recallSettlements,
@@ -453,6 +467,21 @@ test('an actual-id first owner uses first-publication ordering without target id
   assert.equal(idleCalls, 0, 'explicit Remote first-owner New never waits for target idle')
   assert.equal(h.events.includes('dropDraft'), false)
   assert.equal(h.events.includes('switch:undefined->session-first'), false)
+  assert.ok(h.events.includes('init:session-first'))
+  assert.ok(h.events.includes('catalog:session-first'))
+})
+
+test('an actual-id first owner with a normal-return uncommitted hydrate reports degraded, not ready', async () => {
+  const h = harness()
+  h.reportNextInitNotReady()
+  const next = h.retain('session-first')
+  const result = await h.runtime.transitionTo({
+    target: { header: { cwd: '/workspace' } },
+    create: async () => ({ session: { id: 'session-first' }, client: next }),
+  })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.ok && result.degraded, true, 'a committed but non-ready hydrate must carry degraded')
+  assert.equal(h.core.currentSessionId(), 'session-first', 'the committed owner still stands')
   assert.ok(h.events.includes('init:session-first'))
   assert.ok(h.events.includes('catalog:session-first'))
 })
