@@ -47,6 +47,7 @@ if (opened.kind !== 'ok') throw new Error('Session open failed')
 const session = opened.value
 const current = session.snapshot()
 const page = await session.history({ maxMessages: 20 })
+const skills = await session.skills()
 let unsubscribe = () => {}
 unsubscribe = session.subscribe(change => {
   if (change.kind === 'ok' && change.value.reconcileRequired) unsubscribe()
@@ -79,13 +80,19 @@ The public operations are:
 - `prompt`, `cancel`, `updateQueue`, `rename`
 - `configuration`, `selectModel`, `selectPreset`, `selectPermissionPreset`,
   `selectPlanMode`
-- `commands`, `command`, `readFile`, `readAttachment`
+- `commands`, `command`, `skills`, `readFile`, `readAttachment`
 - `observeJobs`, `observeSubagents`
 
 `prompt` accepts ordered text, image and file bytes. Staging uses the official
 Host upload/receipt path inside the same authorized request; there is no public
 generic upload-receipt maker. Attachment reads accept only references from the
 current Host Session's native content.
+
+`skills()` reads the official Session-addressed human-invocable catalog: each
+entry carries only its identifier, description, optional `whenToUse` and
+`modelInvocable` flag. It is independent of `commands()`, never returns skill
+bodies or paths, and does not select or execute a skill. To invoke one, send
+its literal `/name ...` prompt; the Host owns skill-body admission.
 
 ## Results and currentness
 

@@ -30,6 +30,7 @@ import type {
   NativeSessionConfiguration,
   NativeSessionEvent,
   NativeSessionSummary,
+  NativeSkillDescriptor,
 } from '../../src/app/remote-process/native-client.ts'
 import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '../../src/app/remote-process/native-client.ts'
 import { createNativeContinuedQuestionReceiver } from '../../src/app/remote-process/native-client-continued.ts'
@@ -77,11 +78,18 @@ const _sessionShape: AssertAssignable<NativeSession, {
   selectPlanMode(active: boolean): Promise<NativeResult<unknown>>
   commands(): Promise<NativeResult<unknown>>
   command(line: string): Promise<NativeResult<unknown>>
+  skills(): Promise<NativeResult<readonly NativeSkillDescriptor[]>>
   readFile(input: { readonly path: string }): Promise<NativeResult<unknown>>
   readAttachment(attachment: unknown): Promise<NativeResult<unknown>>
   observeJobs(listener: (result: NativeResult<unknown>) => void): () => void
   observeSubagents(listener: (result: NativeResult<unknown>) => void): () => void
   close(): Promise<void>
+}> = true
+const _skillDescriptorShape: AssertAssignable<NativeSkillDescriptor, {
+  readonly name: string
+  readonly description: string
+  readonly whenToUse?: string
+  readonly modelInvocable: boolean
 }> = true
 const _resultKinds: AssertEqual<NativeResult<string>['kind'],
   'ok' | 'accepted' | 'committed' | 'not-dispatched' | 'rejected' | 'unknown' | 'unsupported' | 'unavailable' | 'stale' | 'closed'> = true
@@ -176,6 +184,7 @@ test('the headless entry exports the frozen API version and attach factory', () 
   assert.ok(_packageRootRemoved)
   assert.ok(_clientShape)
   assert.ok(_sessionShape)
+  assert.ok(_skillDescriptorShape)
   assert.ok(_resultKinds)
   assert.ok(_questionShape)
   assert.ok(_questionHasNoPrompt)
