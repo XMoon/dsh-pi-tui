@@ -23,6 +23,7 @@ import {
   createSplitProcessScene,
   type PublicDaemonLaunch,
   type SessionEvent,
+  type SplitProcessScene,
 } from '../../../support/split-process-fixture.ts'
 
 const MAX_REFUSAL_BODY_BYTES = 1024
@@ -130,17 +131,57 @@ async function readBoundedResponseText(response: Response, maxBytes: number): Pr
   return new TextDecoder().decode(merged)
 }
 
-function extractMessageText(message: Record<string, any> | undefined): string {
-  const content = message?.content
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  return content.map(part => (typeof part?.text === 'string' ? part.text : '')).join('')
+function messageText(message: Record<string, any> | undefined): string {
+  return (message?.content ?? [])
+    .map((part: Record<string, any>) => part?.type === 'text' && typeof part.text === 'string' ? part.text : '')
+    .join('')
 }
 
-function isAuthoredUserEvent(event: SessionEvent, prompt: string): boolean {
-  if (event.type !== 'user/message') return false
-  const data = event.data as Record<string, any> | undefined
-  return extractMessageText(data?.message ?? data) === prompt
+function isHumanUserEvent(event: SessionEvent, prompt: string): boolean {
+  return event.type === 'user/message'
+    && event.data?.source?.kind === 'user'
+    && messageText(event.data) === prompt
+}
+
+function eventSeq(event: SessionEvent): number | undefined {
+  const seq = (event as Record<string, any>).seq
+  return typeof seq === 'number' ? seq : undefined
+}
+
+async function waitForCompletedTurn(
+  scene: SplitProcessScene,
+  sessionId: string,
+  prompt: string,
+  answer: string,
+  label: string,
+): Promise<{ user: SessionEvent; turn: number; end: SessionEvent }> {
+  const user = await scene.waitForSessionEvent(
+    sessionId, 0, event => isHumanUserEvent(event, prompt), `${label}: durable human user/message`)
+  const userSeq = eventSeq(user)
+  expect(userSeq, `${label}: durable user sequence`).toBeTypeOf('number')
+  let start: SessionEvent | undefined
+  const started = Date.now()
+  while (Date.now() - started < 120_000) {
+    start = (scene.sessionEvents(sessionId) ?? [])
+      .filter(event => event.type === 'turn/start' && (eventSeq(event) ?? Number.POSITIVE_INFINITY) < userSeq!)
+      .at(-1)
+    if (start !== undefined) break
+    await sleep(25)
+  }
+  expect(start, `${label}: enclosing turn/start`).toBeDefined()
+  const turn = start!.data?.turn
+  expect(turn, `${label}: numeric turn identity`).toBeTypeOf('number')
+  const end = await scene.waitForSessionEvent(
+    sessionId, 0,
+    event => event.type === 'turn/end' && event.data?.turn === turn && event.data?.reason?.kind === 'completed',
+    `${label}: completed turn/end`,
+  )
+  await scene.waitForSessionEvent(
+    sessionId, 0,
+    event => event.type === 'assistant/message' && event.data?.turn === turn && messageText(event.data?.message).includes(answer),
+    `${label}: durable assistant answer in the same Turn`,
+  )
+  return { user, turn: turn as number, end }
 }
 
 test('rejects a replaced launch directory and creates only after explicit Workspace selection', async () => {
@@ -260,33 +301,18 @@ test('rejects a replaced launch directory and creates only after explicit Worksp
     const newSessionId = await scene.waitForNewSessionId(beforeSubmitSet, 'explicitly authorized post-replacement Session')
     const header = await scene.waitForHostSessionHeader(newSessionId, 'post-replacement durable header')
     expect((header as Record<string, any>).cwd).toBe(canonicalLaunchCwd)
-    await scene.waitForSessionEvent(
-      newSessionId,
-      0,
-      event => isAuthoredUserEvent(event, acceptedPrompt),
-      'post-replacement authored user/message',
-    )
-    const turnStart = await scene.waitForSessionEvent(
-      newSessionId,
-      0,
-      event => event.type === 'turn/start',
-      'post-replacement turn/start',
-    )
-    await scene.waitForSessionEvent(
-      newSessionId,
-      0,
-      event => event.type === 'assistant/message' && JSON.stringify(event.data ?? {}).includes('stub answer'),
-      'post-replacement offline assistant answer',
-    )
-    await scene.waitForSessionEvent(
-      newSessionId,
-      0,
-      event => event.type === 'turn/end' && event.data?.turn === turnStart.data?.turn,
-      'post-replacement completed turn/end',
-    )
+    const settled = await waitForCompletedTurn(
+      scene, newSessionId, acceptedPrompt, 'stub answer', 'post-replacement')
 
     const finalEvents = scene.sessionEvents(newSessionId) ?? []
-    expect(finalEvents.filter(event => isAuthoredUserEvent(event, acceptedPrompt))).toHaveLength(1)
+    expect(finalEvents.filter(event => isHumanUserEvent(event, acceptedPrompt))).toHaveLength(1)
+    expect(finalEvents
+      .filter(event => event.type === 'user/message'
+        && messageText(event.data) === acceptedPrompt
+        && event.data?.source?.kind !== 'user')
+      .map(event => event.data?.source?.kind ?? 'missing')).toEqual([])
+    expect(finalEvents.some(event => event.type === 'turn/end'
+      && event.data?.turn === settled.turn && event.data?.reason?.kind === 'completed')).toBe(true)
     expect(finalEvents.some(event => JSON.stringify(event.data ?? {}).includes(refusedPrompt))).toBe(false)
     expect([...await scene.sessionIds()].sort()).toEqual([...sessionsBefore, newSessionId].sort())
     expect(scene.hostSessionLogCount()).toBe(logCountBefore + 1)

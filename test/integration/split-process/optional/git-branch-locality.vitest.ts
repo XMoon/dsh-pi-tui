@@ -69,6 +69,53 @@ async function waitForFrame(
   }
 }
 
+function messageText(message: Record<string, any> | undefined): string {
+  return (message?.content ?? [])
+    .map((part: Record<string, any>) => part?.type === 'text' && typeof part.text === 'string' ? part.text : '')
+    .join('')
+}
+
+async function waitForSettledTurn(
+  scene: SplitProcessScene,
+  sessionId: string,
+  prompt: string,
+): Promise<void> {
+  const user = await scene.waitForSessionEvent(
+    sessionId, 0,
+    event => event.type === 'user/message' && event.data?.source?.kind === 'user'
+      && messageText(event.data) === prompt,
+    'first Host Turn authored user/message',
+  )
+  const userSeq = (user as Record<string, any>).seq
+  expect(userSeq, 'first Host Turn authored sequence').toBeTypeOf('number')
+  let start: Record<string, any> | undefined
+  const started = Date.now()
+  while (Date.now() - started < 120_000) {
+    start = (scene.sessionEvents(sessionId) ?? [])
+      .filter(event => event.type === 'turn/start'
+        && typeof (event as Record<string, any>).seq === 'number'
+        && (event as Record<string, any>).seq < userSeq)
+      .at(-1)
+    if (start !== undefined) break
+    await sleep(25)
+  }
+  expect(start, 'first Host Turn enclosing turn/start').toBeDefined()
+  const turn = start!.data?.turn
+  expect(turn, 'first Host Turn numeric identity').toBeTypeOf('number')
+  await scene.waitForSessionEvent(
+    sessionId, 0,
+    event => event.type === 'assistant/message' && event.data?.turn === turn
+      && messageText(event.data?.message).includes('stub answer'),
+    'first Host Turn offline answer in the same Turn',
+  )
+  await scene.waitForSessionEvent(
+    sessionId, 0,
+    event => event.type === 'turn/end' && event.data?.turn === turn
+      && event.data?.reason?.kind === 'completed',
+    'first Host Turn completed',
+  )
+}
+
 async function waitForConfirmedDirectory(
   client: SplitProcessClient,
   canonicalPath: string,
@@ -163,18 +210,12 @@ test('shows the Client branch before a Session and never attributes it to a live
     const sessionId = await scene.waitForNewSessionId(sessionsBefore, 'new Host Session for git branch locality')
     const header = await scene.waitForHostSessionHeader(sessionId, 'durable Host Session header')
     expect((header as Record<string, any>).cwd).toBe(canonicalWorkspace)
-    await scene.waitForSessionEvent(
-      sessionId,
-      0,
-      event => event.type === 'assistant/message' && JSON.stringify(event.data ?? {}).includes('stub answer'),
-      'first Host Turn offline answer',
+    await waitForSettledTurn(scene, sessionId, prompt)
+    const mounted = await client.waitForSurfaceStatus(
+      record => record.sessionOpen === true && record.openSessionId === sessionId,
+      'live Host Session owns the current mounted footer',
     )
-    await scene.waitForSessionEvent(
-      sessionId,
-      0,
-      event => event.type === 'turn/end',
-      'first Host Turn completed',
-    )
+    expect(mounted.openSessionId).toBe(sessionId)
 
     // Negative control in the live Remote Session: the same footer keeps the
     // Host-authoritative cwd basename and drops the Client-local branch.

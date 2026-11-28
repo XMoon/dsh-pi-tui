@@ -138,18 +138,64 @@ function selectedRow(frame: string): string | undefined {
   return frame.split('\n').find(line => /(?:^|[\s│])>\s/u.test(line))
 }
 
-function extractMessageText(message: Record<string, any> | undefined): string {
-  const content = message?.content
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  return content.map(part => (typeof part?.text === 'string' ? part.text : '')).join('')
+function messageText(message: Record<string, any> | undefined): string {
+  return (message?.content ?? [])
+    .map((part: Record<string, any>) => part?.type === 'text' && typeof part.text === 'string' ? part.text : '')
+    .join('')
 }
 
-function isAuthoredUserEvent(event: SessionEvent, prompt: string): boolean {
-  if (event.type !== 'user/message') return false
-  const data = event.data as Record<string, any> | undefined
-  const text = extractMessageText(data?.message ?? data)
-  return text === prompt
+function isHumanUserEvent(event: SessionEvent, prompt: string): boolean {
+  return event.type === 'user/message'
+    && event.data?.source?.kind === 'user'
+    && messageText(event.data) === prompt
+}
+
+function eventSeq(event: SessionEvent): number | undefined {
+  const seq = (event as Record<string, any>).seq
+  return typeof seq === 'number' ? seq : undefined
+}
+
+async function waitForCompletedTurn(
+  scene: SplitProcessScene,
+  sessionId: string,
+  prompt: string,
+  answer: string,
+  label: string,
+): Promise<{ user: SessionEvent; turn: number; end: SessionEvent }> {
+  const user = await scene.waitForSessionEvent(
+    sessionId, 0, event => isHumanUserEvent(event, prompt), `${label}: durable human user/message`)
+  const userSeq = eventSeq(user)
+  expect(userSeq, `${label}: durable user sequence`).toBeTypeOf('number')
+  let start: SessionEvent | undefined
+  const started = Date.now()
+  while (Date.now() - started < 120_000) {
+    start = (scene.sessionEvents(sessionId) ?? [])
+      .filter(event => event.type === 'turn/start' && (eventSeq(event) ?? Number.POSITIVE_INFINITY) < userSeq!)
+      .at(-1)
+    if (start !== undefined) break
+    await sleep(25)
+  }
+  expect(start, `${label}: enclosing turn/start`).toBeDefined()
+  const turn = start!.data?.turn
+  expect(turn, `${label}: numeric turn identity`).toBeTypeOf('number')
+  const end = await scene.waitForSessionEvent(
+    sessionId, 0,
+    event => event.type === 'turn/end' && event.data?.turn === turn && event.data?.reason?.kind === 'completed',
+    `${label}: completed turn/end`,
+  )
+  await scene.waitForSessionEvent(
+    sessionId, 0,
+    event => event.type === 'assistant/message' && event.data?.turn === turn && messageText(event.data?.message).includes(answer),
+    `${label}: durable assistant answer in the same Turn`,
+  )
+  return { user, turn: turn as number, end }
+}
+
+function hostDirectoryEditorValue(frame: string): string | undefined {
+  const row = frame.split('\n').find(line => line.includes('Host directory:'))
+  if (row === undefined) return undefined
+  const at = row.indexOf('Host directory:')
+  return row.slice(at + 'Host directory:'.length).trim()
 }
 
 async function openAddDirectoryFromTree(
@@ -434,8 +480,14 @@ test('a refused first submit restores its exact draft and Verify never replays i
       frame => frame.includes('Host directory:') && frame.includes('invalid-workspace'),
       'submit target inline Host editor with refused proposal prefill',
     )
-    expect(editorFrame).toContain('process-clients/recovery-submit-target-')
     expect(editorFrame).not.toContain(clientTwinName)
+    const receipt = await scene.readSupervisorReceipt()
+    const refusedClient = (receipt.processClients ?? []).find(item => item.clientId === target.clientId)
+    const refusedPath = refusedClient?.workspaceIntentPath
+    expect(refusedPath, 'the Supervisor must allocate the refused Host proposal for this target Client').toBeTypeOf('string')
+    expect(existsSync(refusedPath!), 'the refused Host proposal must not exist').toBe(false)
+    expect(hostDirectoryEditorValue(editorFrame),
+      'the inline editor must be prefilled with the exact refused Host proposal').toBe(refusedPath)
     expect([...await scene.sessionIds()].sort()).toEqual(sessionsBefore)
     expect(scene.hostSessionLogCount()).toBe(logCountBefore)
     expect(await readWorkspaceBaseline(observer, 'submit-recovery after refusal')).toEqual(workspacesBefore)
@@ -486,35 +538,19 @@ test('a refused first submit restores its exact draft and Verify never replays i
     const header = await scene.waitForHostSessionHeader(newSessionId, 'submit-recovery durable header')
     expect((header as Record<string, any>).cwd).toBe(canonicalDest)
 
-    const userEvent = await scene.waitForSessionEvent(
-      newSessionId,
-      0,
-      event => isAuthoredUserEvent(event, prompt),
-      'submit-recovery authored user/message',
-    )
-    expect(userEvent.data?.id).toBeTypeOf('string')
-    const turnStart = await scene.waitForSessionEvent(
-      newSessionId,
-      0,
-      event => event.type === 'turn/start',
-      'submit-recovery turn/start',
-    )
-    await scene.waitForSessionEvent(
-      newSessionId,
-      0,
-      event => event.type === 'assistant/message' && JSON.stringify(event.data ?? {}).includes('stub answer'),
-      'submit-recovery offline assistant answer',
-    )
-    const turnEnd = await scene.waitForSessionEvent(
-      newSessionId,
-      0,
-      event => event.type === 'turn/end' && event.data?.turn === turnStart.data?.turn,
-      'submit-recovery completed turn/end',
-    )
-    expect(turnEnd.data?.turn).toBe(turnStart.data?.turn)
+    const settled = await waitForCompletedTurn(
+      scene, newSessionId, prompt, 'stub answer', 'submit-recovery')
+    expect(settled.user.data?.id).toBeTypeOf('string')
 
     const finalEvents = scene.sessionEvents(newSessionId) ?? []
-    expect(finalEvents.filter(event => isAuthoredUserEvent(event, prompt))).toHaveLength(1)
+    expect(finalEvents.filter(event => isHumanUserEvent(event, prompt))).toHaveLength(1)
+    expect(finalEvents
+      .filter(event => event.type === 'user/message'
+        && messageText(event.data) === prompt
+        && event.data?.source?.kind !== 'user')
+      .map(event => event.data?.source?.kind ?? 'missing')).toEqual([])
+    expect(finalEvents.some(event => event.type === 'turn/end'
+      && event.data?.turn === settled.turn && event.data?.reason?.kind === 'completed')).toBe(true)
     expect([...await scene.sessionIds()].sort()).toEqual([...sessionsBefore, newSessionId].sort())
     expect(scene.hostSessionLogCount()).toBe(logCountBefore + 1)
 
