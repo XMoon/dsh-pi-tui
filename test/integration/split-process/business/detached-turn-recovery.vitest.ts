@@ -474,38 +474,38 @@ test('detaches cleanly from a held Turn without cancelling or stopping the Host'
   let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'long-turn' })
-    client = await scene.startClient({ label: 't45-c1', ...clientDirectories(scene, 't45-c1') })
-    const sessionId = await openSession(scene, client, 't45 prompt', 't45')
+    client = await scene.startClient({ label: 'detach-c1', ...clientDirectories(scene, 'detach-c1') })
+    const sessionId = await openSession(scene, client, 'detach prompt', 'detach')
     const held = await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'long-turn-held' && event.sessionId === sessionId,
-      't45 held Turn',
+      'detach held Turn',
     )
     expect(held.agentStatus).toBe('running')
-    await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/start', 't45 turn/start')
+    await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/start', 'detach turn/start')
     const before = await hostIdentity(scene, host)
     const cut = scene.sessionEvents(sessionId)?.length ?? 0
-    await exitClientNormally(client, 't45-c1')
-    await expectHostIdentityKept(scene, host, before, 't45 after clean detach')
+    await exitClientNormally(client, 'detach-c1')
+    await expectHostIdentityKept(scene, host, before, 'detach after clean detach')
     expect((scene.sessionEvents(sessionId) ?? []).slice(cut).some(event => event.type === 'turn/end')).toBe(false)
-    releaseFile(host.holdReleasePath, 't45 long-turn release')
-    await scene.waitForSessionEvent(sessionId, cut, event => event.type === 'turn/end', 't45 turn/end')
+    releaseFile(host.holdReleasePath, 'detach long-turn release')
+    await scene.waitForSessionEvent(sessionId, cut, event => event.type === 'turn/end', 'detach turn/end')
     const events = scene.sessionEvents(sessionId) ?? []
-    expect(sessionHelpers.hostUserTexts(events).filter(text => text === 't45 prompt')).toHaveLength(1)
+    expect(sessionHelpers.hostUserTexts(events).filter(text => text === 'detach prompt')).toHaveLength(1)
     expect(sessionHelpers.hostAssistantHasText(events, 'long-turn answer')).toBe(true)
 
     const fresh = await scene.startClient({
-      label: 't45-c2',
-      ...clientDirectories(scene, 't45-c2'),
+      label: 'detach-c2',
+      ...clientDirectories(scene, 'detach-c2'),
       sessionId,
     })
     await fresh.waitForSurfaceStatus(
       record => record.sessionOpen === true && record.openSessionId === sessionId,
-      't45-c2 exact Session',
+      'detach-c2 exact Session',
     )
-    await waitFrame(fresh, 't45 prompt', 't45-c2 prompt readback')
-    await waitFrame(fresh, 'long-turn answer', 't45-c2 answer readback')
-    await exitClientNormally(fresh, 't45-c2')
+    await waitFrame(fresh, 'detach prompt', 'detach-c2 prompt readback')
+    await waitFrame(fresh, 'long-turn answer', 'detach-c2 answer readback')
+    await exitClientNormally(fresh, 'detach-c2')
     await scene.stopHost(host)
   } catch (error) {
     primary = error
@@ -514,7 +514,7 @@ test('detaches cleanly from a held Turn without cancelling or stopping the Host'
     try {
       await scene.dispose()
     } catch (cleanupError) {
-      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 't45 failed and Scene cleanup also failed')
+      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'detach failed and Scene cleanup also failed')
       throw cleanupError
     }
   }
@@ -527,36 +527,36 @@ test('keeps a held foreground Tool running after the Client business process die
   let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'foreground-tool', holdTool: true })
-    client = await scene.startClient({ label: 't46-c1', ...clientDirectories(scene, 't46-c1'), terminal: 'business-kill' })
-    const sessionId = await openSession(scene, client, 't46 prompt', 't46')
+    client = await scene.startClient({ label: 'foreground-tool-c1', ...clientDirectories(scene, 'foreground-tool-c1'), terminal: 'business-kill' })
+    const sessionId = await openSession(scene, client, 'foreground-tool prompt', 'foreground-tool')
     const started = await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'tool-started' && String(event.token).includes(sessionId),
-      't46 real Host tool start',
+      'foreground-tool real Host tool start',
     )
     const call = await scene.waitForSessionEvent(
       sessionId,
       0,
       event => event.type === 'tool/call' && event.data?.name === 'c1_foreground_tool',
-      't46 durable tool/call',
+      'foreground-tool durable tool/call',
     )
     expect(String(call.data?.callId)).toBe(started.callId)
     const before = await hostIdentity(scene, host)
     const cut = scene.sessionEvents(sessionId)?.length ?? 0
-    await killBusinessClient(scene, client, 't46-c1')
-    await expectHostIdentityKept(scene, host, before, 't46 after business kill')
+    await killBusinessClient(scene, client, 'foreground-tool-c1')
+    await expectHostIdentityKept(scene, host, before, 'foreground-tool after business kill')
     expect((scene.sessionEvents(sessionId) ?? []).slice(cut).some(
       event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === started.callId,
     )).toBe(false)
-    releaseFile(host.toolReleasePath, 't46 tool release')
+    releaseFile(host.toolReleasePath, 'foreground-tool tool release')
     const result = await scene.waitForSessionEvent(
       sessionId,
       cut,
       event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === started.callId,
-      't46 tool/result',
+      'foreground-tool tool/result',
     )
     expect(result.data?.message?.isError).not.toBe(true)
-    await scene.waitForSessionEvent(sessionId, cut, event => event.type === 'turn/end', 't46 turn/end')
+    await scene.waitForSessionEvent(sessionId, cut, event => event.type === 'turn/end', 'foreground-tool turn/end')
     const settledEvents = scene.sessionEvents(sessionId) ?? []
     expect(settledEvents.filter(
       event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === started.callId,
@@ -566,12 +566,12 @@ test('keeps a held foreground Tool running after the Client business process die
     )).toHaveLength(1)
 
     const fresh = await scene.startClient({
-      label: 't46-c2',
-      ...clientDirectories(scene, 't46-c2'),
+      label: 'foreground-tool-c2',
+      ...clientDirectories(scene, 'foreground-tool-c2'),
       sessionId,
     })
-    await waitFrame(fresh, 'foreground answer', 't46-c2 readback')
-    await exitClientNormally(fresh, 't46-c2')
+    await waitFrame(fresh, 'foreground answer', 'foreground-tool-c2 readback')
+    await exitClientNormally(fresh, 'foreground-tool-c2')
     await scene.stopHost(host)
   } catch (error) {
     primary = error
@@ -580,7 +580,7 @@ test('keeps a held foreground Tool running after the Client business process die
     try {
       await scene.dispose()
     } catch (cleanupError) {
-      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 't46 failed and Scene cleanup also failed')
+      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'foreground-tool failed and Scene cleanup also failed')
       throw cleanupError
     }
   }
@@ -593,18 +593,18 @@ test('keeps an owned background Job alive and observable without its Client', as
   let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'job' })
-    client = await scene.startClient({ label: 't47-c1', ...clientDirectories(scene, 't47-c1'), terminal: 'business-kill' })
-    const sessionId = await openSession(scene, client, 't47 prompt', 't47')
+    client = await scene.startClient({ label: 'background-job-c1', ...clientDirectories(scene, 'background-job-c1'), terminal: 'business-kill' })
+    const sessionId = await openSession(scene, client, 'background-job prompt', 'background-job')
     const registered = await fixtureHelpers.waitForC1WorkEvent(
       host.jobWorkRoot!,
       event => event.kind === 'job-event' && event.event === 'registered',
-      't47 running Job',
+      'background-job running Job',
     )
     expect(registered.status).toBe('running')
     expect(registered.owner).toBe(sessionId)
     const before = await hostIdentity(scene, host)
-    await killBusinessClient(scene, client, 't47-c1')
-    await expectHostIdentityKept(scene, host, before, 't47 after business kill')
+    await killBusinessClient(scene, client, 'background-job-c1')
+    await expectHostIdentityKept(scene, host, before, 'background-job after business kill')
     expect(fixtureHelpers.readC1WorkEvents(host.jobWorkRoot!).filter(
       event => event.kind === 'job-event' && event.jobId === registered.jobId && event.event === 'settled',
     )).toHaveLength(0)
@@ -613,11 +613,11 @@ test('keeps an owned background Job alive and observable without its Client', as
     expect(running.reasons).toContain('job-running')
     expect(running.sourceStates.jobs).toBe('ACTIVE')
 
-    releaseFile(join(host.jobWorkRoot!, 'job.release'), 't47 Job release')
+    releaseFile(join(host.jobWorkRoot!, 'job.release'), 'background-job Job release')
     const settled = await fixtureHelpers.waitForC1WorkEvent(
       host.jobWorkRoot!,
       event => event.kind === 'job-event' && event.jobId === registered.jobId && event.event === 'settled',
-      't47 Job settlement',
+      'background-job Job settlement',
     )
     expect(settled.status).toBe('completed')
     expect(settled.output).toContain('c1-job-done')
@@ -626,12 +626,12 @@ test('keeps an owned background Job alive and observable without its Client', as
     expect(after.reasons).not.toContain('job-stopping')
 
     const fresh = await scene.startClient({
-      label: 't47-c2',
-      ...clientDirectories(scene, 't47-c2'),
+      label: 'background-job-c2',
+      ...clientDirectories(scene, 'background-job-c2'),
       sessionId,
     })
-    await waitFrame(fresh, 'job accepted', 't47-c2 readback')
-    await exitClientNormally(fresh, 't47-c2')
+    await waitFrame(fresh, 'job accepted', 'background-job-c2 readback')
+    await exitClientNormally(fresh, 'background-job-c2')
     await scene.stopHost(host)
   } catch (error) {
     primary = error
@@ -640,7 +640,7 @@ test('keeps an owned background Job alive and observable without its Client', as
     try {
       await scene.dispose()
     } catch (cleanupError) {
-      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 't47 failed and Scene cleanup also failed')
+      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'background-job failed and Scene cleanup also failed')
       throw cleanupError
     }
   }
@@ -653,27 +653,27 @@ test('keeps a continuable Child alive after the Client business process dies', a
   let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'child', holdChild: true })
-    client = await scene.startClient({ label: 't48-c1', ...clientDirectories(scene, 't48-c1'), terminal: 'business-kill' })
-    const sessionId = await openSession(scene, client, 't48 prompt', 't48')
+    client = await scene.startClient({ label: 'child-continuity-c1', ...clientDirectories(scene, 'child-continuity-c1'), terminal: 'business-kill' })
+    const sessionId = await openSession(scene, client, 'child-continuity prompt', 'child-continuity')
     const started = await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'subagent-start',
-      't48 subagent/start',
+      'child-continuity subagent/start',
     )
     expect(started.childId).not.toBe(sessionId)
     await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'child-stream-held' && event.sessionId === started.childId,
-      't48 held Child stream',
+      'child-continuity held Child stream',
     )
     const before = await hostIdentity(scene, host)
-    await killBusinessClient(scene, client, 't48-c1')
-    await expectHostIdentityKept(scene, host, before, 't48 after business kill')
-    releaseFile(host.childReleasePath, 't48 Child release')
+    await killBusinessClient(scene, client, 'child-continuity-c1')
+    await expectHostIdentityKept(scene, host, before, 'child-continuity after business kill')
+    releaseFile(host.childReleasePath, 'child-continuity Child release')
     const ended = await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'subagent-end' && event.childId === started.childId,
-      't48 subagent/end',
+      'child-continuity subagent/end',
     )
     expect(ended.runId).toBe(started.runId)
     await expect.poll(async () => (scene.sessionEvents(started.childId) ?? []).filter(
@@ -681,12 +681,12 @@ test('keeps a continuable Child alive after the Client business process dies', a
     ).length, { timeout: 60_000 }).toBe(1)
 
     const fresh = await scene.startClient({
-      label: 't48-c2',
-      ...clientDirectories(scene, 't48-c2'),
+      label: 'child-continuity-c2',
+      ...clientDirectories(scene, 'child-continuity-c2'),
       sessionId,
     })
-    await waitFrame(fresh, 'child delegated', 't48 parent readback')
-    await exitClientNormally(fresh, 't48-c2')
+    await waitFrame(fresh, 'child delegated', 'child-continuity parent readback')
+    await exitClientNormally(fresh, 'child-continuity-c2')
     await scene.stopHost(host)
   } catch (error) {
     primary = error
@@ -695,7 +695,7 @@ test('keeps a continuable Child alive after the Client business process dies', a
     try {
       await scene.dispose()
     } catch (cleanupError) {
-      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 't48 failed and Scene cleanup also failed')
+      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'child-continuity failed and Scene cleanup also failed')
       throw cleanupError
     }
   }
@@ -825,75 +825,75 @@ test('queues one continued timed Question reply after a clean Client exit', asyn
   let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'question', timedQuestion: true })
-    client = await scene.startClient({ label: 't52-c1', ...clientDirectories(scene, 't52-c1') })
-    const sessionId = await openSession(scene, client, 't52 prompt', 't52')
+    client = await scene.startClient({ label: 'timed-question-c1', ...clientDirectories(scene, 'timed-question-c1') })
+    const sessionId = await openSession(scene, client, 'timed-question prompt', 'timed-question')
     const call = await scene.waitForSessionEvent(
       sessionId,
       0,
       event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
-      't52 timed Question tool/call',
+      'timed-question timed Question tool/call',
     )
     const callId = String(call.data?.callId)
     const request = await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'question-request' && event.sessionId === sessionId,
-      't52 timed Question request',
+      'timed-question timed Question request',
     )
     expect(request.timed).toBe(true)
     await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'question-failed' && event.sessionId === sessionId,
-      't52 timed foreground end',
+      'timed-question timed foreground end',
     )
     await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'question-projection' && event.callId === callId
         && Array.isArray(event.active) && event.active.some((item: Record<string, any>) => item?.callId === callId && item?.state === 'continued'),
-      't52 continued projection',
+      'timed-question continued projection',
     )
     await scene.waitForSessionEvent(
       sessionId,
       0,
       event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId,
-      't52 timed pending tool result',
+      'timed-question timed pending tool result',
     )
     await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'after-timed-held' && event.sessionId === sessionId,
-      't52 held after timed Question',
+      'timed-question held after timed Question',
     )
     const before = await hostIdentity(scene, host)
     await client.signal('SIGTERM')
     expect(await client.waitForExit()).toMatchObject({ code: 0, signal: null })
     await client.close()
-    await expectHostIdentityKept(scene, host, before, 't52 after clean detach')
+    await expectHostIdentityKept(scene, host, before, 'timed-question after clean detach')
 
-    fresh = await scene.startClient({ label: 't52-c2', ...clientDirectories(scene, 't52-c2'), sessionId })
-    await waitFrame(fresh, 't52 prompt', 't52-c2 history')
+    fresh = await scene.startClient({ label: 'timed-question-c2', ...clientDirectories(scene, 'timed-question-c2'), sessionId })
+    await waitFrame(fresh, 'timed-question prompt', 'timed-question-c2 history')
     await fresh.press('Down')
-    await waitFrame(fresh, 'Task Quick', 't52 Task Quick')
-    await waitFrame(fresh, 'Continue the C1 test?', 't52 continued row')
+    await waitFrame(fresh, 'Task Quick', 'timed-question Task Quick')
+    await waitFrame(fresh, 'Continue the C1 test?', 'timed-question continued row')
     await fresh.press('Enter')
-    await waitFrame(fresh, '[1] Proceed', 't52 continued Question modal')
+    await waitFrame(fresh, '[1] Proceed', 'timed-question continued Question modal')
     await fresh.type('1')
-    await waitFrame(fresh, 'Review your answer before submit', 't52 continued review', 30_000)
+    await waitFrame(fresh, 'Review your answer before submit', 'timed-question continued review', 30_000)
     const boundary = fresh.readRecords().length
     await fresh.press('Enter')
     await waitRecordAfter(
       fresh,
       boundary,
       record => record.m4b2s === 'qualification' && record.op === 'question-answer-continued' && record.result === 'queued',
-      't52 queued continued answer',
+      'timed-question queued continued answer',
     )
-    releaseFile(host.timedDuplicateBarrierPath, 't52 duplicate answer probe')
+    releaseFile(host.timedDuplicateBarrierPath, 'timed-question duplicate answer probe')
     const duplicate = await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'answer-probe' && event.phase === 'duplicate',
-      't52 duplicate answer probe',
+      'timed-question duplicate answer probe',
     )
     expect(duplicate.code).toBe('REPLY_QUEUED')
-    releaseFile(host.timedAfterBarrierPath, 't52 after-timed release')
-    await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/end', 't52 queued reply turn/end')
+    releaseFile(host.timedAfterBarrierPath, 'timed-question after-timed release')
+    await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/end', 'timed-question queued reply turn/end')
     await expect.poll(async () => (scene.sessionEvents(sessionId) ?? []).filter(
       event => event.type === 'user/message' && event.data?.source?.kind === 'user-question-reply'
         && event.data?.source?.callId === callId,
@@ -903,14 +903,14 @@ test('queues one continued timed Question reply after a clean Client exit', asyn
         && event.data?.source?.callId === callId,
     )
     expect(replies).toHaveLength(1)
-    releaseFile(host.timedExpiredBarrierPath, 't52 expired answer probe')
+    releaseFile(host.timedExpiredBarrierPath, 'timed-question expired answer probe')
     const expired = await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'answer-probe' && event.phase === 'expired',
-      't52 expired answer probe',
+      'timed-question expired answer probe',
     )
     expect(expired.value).toBe(false)
-    await exitClientNormally(fresh, 't52-c2')
+    await exitClientNormally(fresh, 'timed-question-c2')
     await scene.stopHost(host)
   } catch (error) {
     primary = error
@@ -919,7 +919,7 @@ test('queues one continued timed Question reply after a clean Client exit', asyn
     try {
       await scene.dispose()
     } catch (cleanupError) {
-      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 't52 failed and Scene cleanup also failed')
+      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'timed-question failed and Scene cleanup also failed')
       throw cleanupError
     }
   }
@@ -935,39 +935,39 @@ test('ignores a stale authenticated question peer result', async () => {
   let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'question' })
-    client = await scene.startClient({ label: 't51-c1', ...clientDirectories(scene, 't51-c1'), terminal: 'business-kill' })
-    const sessionId = await openSession(scene, client, 't51 prompt', 't51')
+    client = await scene.startClient({ label: 'stale-question-c1', ...clientDirectories(scene, 'stale-question-c1'), terminal: 'business-kill' })
+    const sessionId = await openSession(scene, client, 'stale-question prompt', 'stale-question')
     const call = await scene.waitForSessionEvent(
       sessionId,
       0,
       event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
-      't51 question tool/call',
+      'stale-question question tool/call',
     )
     const callId = String(call.data?.callId)
     await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'question-request' && event.sessionId === sessionId,
-      't51 pending Question',
+      'stale-question pending Question',
     )
-    await waitFrame(client, '[1] Proceed', 't51-c1 Question modal')
+    await waitFrame(client, '[1] Proceed', 'stale-question-c1 Question modal')
     const before = await hostIdentity(scene, host)
-    await killBusinessClient(scene, client, 't51-c1')
-    await expectHostIdentityKept(scene, host, before, 't51 after business kill')
-    peer = await startOldPeer(scene, 'question', 't51')
+    await killBusinessClient(scene, client, 'stale-question-c1')
+    await expectHostIdentityKept(scene, host, before, 'stale-question after business kill')
+    peer = await startOldPeer(scene, 'question', 'stale-question')
 
-    fresh = await scene.startClient({ label: 't51-c2', ...clientDirectories(scene, 't51-c2'), sessionId })
-    await waitFrame(fresh, '[1] Proceed', 't51-c2 Question modal')
+    fresh = await scene.startClient({ label: 'stale-question-c2', ...clientDirectories(scene, 'stale-question-c2'), sessionId })
+    await waitFrame(fresh, '[1] Proceed', 'stale-question-c2 Question modal')
     await fresh.type('1')
-    await waitFrame(fresh, 'Review your answer before submit', 't51-c2 Question review', 30_000)
+    await waitFrame(fresh, 'Review your answer before submit', 'stale-question-c2 Question review', 30_000)
     await fresh.press('Enter')
     const settled = await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'question-settled' && event.sessionId === sessionId,
-      't51 Question settlement',
+      'stale-question Question settlement',
     )
     expect(settled.answers?.[0]?.selected?.[0]).toBe('Proceed')
-    await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/end', 't51 turn/end')
-    await exitClientNormally(fresh, 't51-c2')
+    await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/end', 'stale-question turn/end')
+    await exitClientNormally(fresh, 'stale-question-c2')
 
     const staleCut = scene.sessionEvents(sessionId)?.length ?? 0
     const stale = await scene.sendStalePeerResult(peer, 'question')
@@ -976,8 +976,8 @@ test('ignores a stale authenticated question peer result', async () => {
     expect(stale.clientId).not.toBe('')
     await stopPeer(scene, peer)
 
-    readback = await scene.startClient({ label: 't51-c3', ...clientDirectories(scene, 't51-c3'), sessionId })
-    await waitFrame(readback, 'question answered', 't51-c3 settled transcript')
+    readback = await scene.startClient({ label: 'stale-question-c3', ...clientDirectories(scene, 'stale-question-c3'), sessionId })
+    await waitFrame(readback, 'question answered', 'stale-question-c3 settled transcript')
     const viewport = await readback.text()
     expect(viewport).not.toContain('○ Review')
     expect(viewport).not.toContain('✓ Review')
@@ -989,7 +989,7 @@ test('ignores a stale authenticated question peer result', async () => {
     expect((scene.sessionEvents(sessionId) ?? []).slice(staleCut).filter(
       event => event.type === 'tool/result',
     )).toHaveLength(0)
-    await exitClientNormally(readback, 't51-c3')
+    await exitClientNormally(readback, 'stale-question-c3')
     await scene.stopHost(host)
   } catch (error) {
     primary = error
@@ -998,7 +998,7 @@ test('ignores a stale authenticated question peer result', async () => {
     try {
       await scene.dispose()
     } catch (cleanupError) {
-      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 't51 failed and Scene cleanup also failed')
+      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'stale-question failed and Scene cleanup also failed')
       throw cleanupError
     }
   }
@@ -1103,32 +1103,32 @@ test('ignores a stale authenticated approval peer result', async () => {
   let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'approval-allow' })
-    client = await scene.startClient({ label: 't55a-c1', ...clientDirectories(scene, 't55a-c1'), terminal: 'business-kill' })
-    const sessionId = await openSession(scene, client, 't55a prompt', 't55a')
+    client = await scene.startClient({ label: 'stale-approval-c1', ...clientDirectories(scene, 'stale-approval-c1'), terminal: 'business-kill' })
+    const sessionId = await openSession(scene, client, 'stale-approval prompt', 'stale-approval')
     const asked = await scene.waitForSessionEvent(
       sessionId,
       0,
       event => event.type === 'approval/asked',
-      't55a approval/asked',
+      'stale-approval approval/asked',
     )
     const requestId = String(asked.data?.id)
-    await waitFrame(client, '[y] Allow once', 't55a-c1 Approval sheet')
+    await waitFrame(client, '[y] Allow once', 'stale-approval-c1 Approval sheet')
     const before = await hostIdentity(scene, host)
-    await killBusinessClient(scene, client, 't55a-c1')
-    await expectHostIdentityKept(scene, host, before, 't55a after business kill')
-    peer = await startOldPeer(scene, 'approval', 't55a')
+    await killBusinessClient(scene, client, 'stale-approval-c1')
+    await expectHostIdentityKept(scene, host, before, 'stale-approval after business kill')
+    peer = await startOldPeer(scene, 'approval', 'stale-approval')
 
-    fresh = await scene.startClient({ label: 't55a-c2', ...clientDirectories(scene, 't55a-c2'), sessionId })
-    await waitFrame(fresh, 'Reject', 't55a-c2 Approval sheet')
+    fresh = await scene.startClient({ label: 'stale-approval-c2', ...clientDirectories(scene, 'stale-approval-c2'), sessionId })
+    await waitFrame(fresh, 'Reject', 'stale-approval-c2 Approval sheet')
     await fresh.type('n')
     const decided = await scene.waitForSessionEvent(
       sessionId,
       0,
       event => event.type === 'approval/decided' && String(event.data?.id) === requestId,
-      't55a approval/decided',
+      'stale-approval approval/decided',
     )
     expect(decided.data?.outcome).toBe('rejected')
-    await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/end', 't55a rejected turn/end')
+    await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/end', 'stale-approval rejected turn/end')
     const staleCut = scene.sessionEvents(sessionId)?.length ?? 0
     const stale = await scene.sendStalePeerResult(peer, 'approval')
     expect(stale).toMatchObject({ kind: 'approval', ok: true })
@@ -1143,7 +1143,7 @@ test('ignores a stale authenticated approval peer result', async () => {
       event => event.type === 'approval/decided' || event.type === 'tool/result',
     )).toHaveLength(0)
     expect(existsSync(join(host.workloadRoot!, 'approval-allow.marker'))).toBe(false)
-    await exitClientNormally(fresh, 't55a-c2')
+    await exitClientNormally(fresh, 'stale-approval-c2')
     await stopPeer(scene, peer)
     await scene.stopHost(host)
   } catch (error) {
@@ -1153,7 +1153,7 @@ test('ignores a stale authenticated approval peer result', async () => {
     try {
       await scene.dispose()
     } catch (cleanupError) {
-      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 't55a failed and Scene cleanup also failed')
+      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'stale-approval failed and Scene cleanup also failed')
       throw cleanupError
     }
   }
@@ -1166,41 +1166,41 @@ test('settles a pending Approval as cancelled and ignores a late allow', async (
   let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'approval-allow', cancelAgent: true })
-    client = await scene.startClient({ label: 't55b-c1', ...clientDirectories(scene, 't55b-c1') })
-    const sessionId = await openSession(scene, client, 't55b prompt', 't55b')
+    client = await scene.startClient({ label: 'cancelled-approval-c1', ...clientDirectories(scene, 'cancelled-approval-c1') })
+    const sessionId = await openSession(scene, client, 'cancelled-approval prompt', 'cancelled-approval')
     const asked = await scene.waitForSessionEvent(
       sessionId,
       0,
       event => event.type === 'approval/asked',
-      't55b approval/asked',
+      'cancelled-approval approval/asked',
     )
     const requestId = String(asked.data?.id)
-    await waitFrame(client, '[y] Allow once', 't55b Approval sheet')
-    releaseFile(host.cancelAgentBarrierPath, 't55b Agent cancel')
+    await waitFrame(client, '[y] Allow once', 'cancelled-approval Approval sheet')
+    releaseFile(host.cancelAgentBarrierPath, 'cancelled-approval Agent cancel')
     await fixtureHelpers.waitForC1WorkEvent(
       host.workloadRoot!,
       event => event.kind === 'agent-cancel-requested',
-      't55b Agent cancel request',
+      'cancelled-approval Agent cancel request',
     )
     const decided = await scene.waitForSessionEvent(
       sessionId,
       0,
       event => event.type === 'approval/decided' && String(event.data?.id) === requestId,
-      't55b approval/decided',
+      'cancelled-approval approval/decided',
     )
     expect(decided.data?.outcome).toBe('cancelled')
-    await waitFrameGone(client, '[y] Allow once', 't55b Approval sheet withdrawal')
+    await waitFrameGone(client, '[y] Allow once', 'cancelled-approval Approval sheet withdrawal')
     // The official request is already terminal and its sheet is gone, so the
     // late allow must become ordinary editor text rather than a Host decision.
     await client.type('y')
-    await waitForComposerDraft(client, 'y', 't55b late allow reached the composer')
+    await waitForComposerDraft(client, 'y', 'cancelled-approval late allow reached the composer')
     await client.press('Ctrl+U')
-    await waitForComposerDraft(client, '', 't55b late allow cleared from the composer')
+    await waitForComposerDraft(client, '', 'cancelled-approval late allow cleared from the composer')
     expect(existsSync(join(host.workloadRoot!, 'approval-allow.marker'))).toBe(false)
     expect((scene.sessionEvents(sessionId) ?? []).filter(
       event => event.type === 'approval/decided' && String(event.data?.id) === requestId,
     )).toHaveLength(1)
-    await exitClientNormally(client, 't55b-c1')
+    await exitClientNormally(client, 'cancelled-approval-c1')
     await scene.stopHost(host)
   } catch (error) {
     primary = error
@@ -1209,7 +1209,7 @@ test('settles a pending Approval as cancelled and ignores a late allow', async (
     try {
       await scene.dispose()
     } catch (cleanupError) {
-      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 't55b failed and Scene cleanup also failed')
+      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'cancelled-approval failed and Scene cleanup also failed')
       throw cleanupError
     }
   }
@@ -1222,11 +1222,11 @@ test('answers the original pending interaction exactly once after HMR', async ()
     for (const kind of ['question', 'approval'] as const) {
       const host = await scene.startHost({ scenario: kind === 'question' ? 'question' : 'approval-allow' })
       const client = await scene.startClient({
-        label: `t55c-${kind}`,
-        ...clientDirectories(scene, `t55c-${kind}`),
+        label: `interaction-hmr-${kind}`,
+        ...clientDirectories(scene, `interaction-hmr-${kind}`),
         hmr: 'replace',
       })
-      const sessionId = await openSession(scene, client, `t55c ${kind} prompt`, `t55c-${kind}`)
+      const sessionId = await openSession(scene, client, `interaction-hmr ${kind} prompt`, `interaction-hmr-${kind}`)
       let requestId: string | undefined
       let approvalCallId: string | undefined
       if (kind === 'question') {
@@ -1234,29 +1234,29 @@ test('answers the original pending interaction exactly once after HMR', async ()
           sessionId,
           0,
           event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
-          't55c question tool/call',
+          'interaction-hmr question tool/call',
         )
         requestId = String(call.data?.callId)
-        await waitFrame(client, '[1] Proceed', 't55c initial Question modal')
+        await waitFrame(client, '[1] Proceed', 'interaction-hmr initial Question modal')
       } else {
         const asked = await scene.waitForSessionEvent(
           sessionId,
           0,
           event => event.type === 'approval/asked',
-          't55c approval/asked',
+          'interaction-hmr approval/asked',
         )
         requestId = String(asked.data?.id)
         const request = await fixtureHelpers.waitForC1WorkEvent(
           host.workloadRoot!,
           event => event.kind === 'approval-request',
-          't55c Host Approval request',
+          'interaction-hmr Host Approval request',
         )
         approvalCallId = String(request.callId)
-        await waitFrame(client, '[y] Allow once', 't55c initial Approval')
+        await waitFrame(client, '[y] Allow once', 'interaction-hmr initial Approval')
       }
       const before = await client.waitForSurfaceStatus(
         record => record.surfaceMounted === true && record.sessionOpen === true && record.openSessionId === sessionId,
-        't55c initial surface',
+        'interaction-hmr initial surface',
       )
       const hostBefore = await hostIdentity(scene, host)
       const boundary = client.readRecords().length
@@ -1265,50 +1265,50 @@ test('answers the original pending interaction exactly once after HMR', async ()
         client,
         boundary,
         record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start',
-        't55c HMR start',
+        'interaction-hmr HMR start',
       )
       const retired = await waitRecordAfter(
         client,
         boundary,
         record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired',
-        't55c HMR retired',
+        'interaction-hmr HMR retired',
       )
       const ready = await waitRecordAfter(
         client,
         boundary,
         record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready',
-        't55c HMR ready',
+        'interaction-hmr HMR ready',
       )
       expect(start.revision).not.toBe(before.surfaceRevision)
       expect(retired.revision).toBe(before.surfaceRevision)
       const after = await client.waitForSurfaceStatus(
         record => record.surfaceMounted === true && record.surfaceRevision === ready.revision,
-        't55c replacement surface',
+        'interaction-hmr replacement surface',
       )
       expect(after.pid).toBe(before.pid)
       expect(after.generationId).toBe(before.generationId)
       expect(after.openSessionId).toBe(sessionId)
-      await expectHostIdentityKept(scene, host, hostBefore, `t55c ${kind} HMR`)
+      await expectHostIdentityKept(scene, host, hostBefore, `interaction-hmr ${kind} HMR`)
       expect(client.readRecords().filter(
         record => record.m4b2s === 'qualification' && record.op === 'interaction-startup-gate',
       )).toHaveLength(1)
 
       if (kind === 'question') {
-        await waitFrame(client, '[1] Proceed', 't55c new Question modal')
+        await waitFrame(client, '[1] Proceed', 'interaction-hmr new Question modal')
         await client.type('1')
-        await waitFrame(client, 'Review your answer before submit', 't55c new Question review', 30_000)
+        await waitFrame(client, 'Review your answer before submit', 'interaction-hmr new Question review', 30_000)
         await client.press('Enter')
         const settled = await fixtureHelpers.waitForC1WorkEvent(
           host.workloadRoot!,
           event => event.kind === 'question-settled' && event.sessionId === sessionId,
-          't55c Question settlement',
+          'interaction-hmr Question settlement',
         )
         expect(settled.answers?.[0]?.selected?.[0]).toBe('Proceed')
         const result = await scene.waitForSessionEvent(
           sessionId,
           0,
           event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === requestId,
-          't55c Question result',
+          'interaction-hmr Question result',
         )
         expect(result.data?.message?.isError).not.toBe(true)
         const work = fixtureHelpers.readC1WorkEvents(host.workloadRoot!).filter(event => event.sessionId === sessionId)
@@ -1316,13 +1316,13 @@ test('answers the original pending interaction exactly once after HMR', async ()
         expect(work.filter(event => event.kind === 'question-settled')).toHaveLength(1)
         expect(work.some(event => event.kind === 'question-failed')).toBe(false)
       } else {
-        await waitFrame(client, '[y] Allow once', 't55c new Approval surface')
+        await waitFrame(client, '[y] Allow once', 'interaction-hmr new Approval surface')
         await client.type('y')
         const decided = await scene.waitForSessionEvent(
           sessionId,
           0,
           event => event.type === 'approval/decided' && String(event.data?.id) === requestId,
-          't55c approval/decided',
+          'interaction-hmr approval/decided',
         )
         expect(decided.data?.outcome).toBe('allowed-once')
         const marker = join(host.workloadRoot!, 'approval-allow.marker')
@@ -1335,16 +1335,16 @@ test('answers the original pending interaction exactly once after HMR', async ()
           sessionId,
           0,
           event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === approvalCallId,
-          't55c Approval tool result',
+          'interaction-hmr Approval tool result',
         )
         expect(result.data?.message?.isError).not.toBe(true)
         expect((scene.sessionEvents(sessionId) ?? []).filter(
           event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === approvalCallId,
         )).toHaveLength(1)
       }
-      await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/end', `t55c ${kind} turn/end`)
+      await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/end', `interaction-hmr ${kind} turn/end`)
       await client.type('\x15')
-      await exitClientNormally(client, `t55c-${kind}`)
+      await exitClientNormally(client, `interaction-hmr-${kind}`)
       await scene.stopHost(host)
     }
   } catch (error) {
@@ -1354,7 +1354,7 @@ test('answers the original pending interaction exactly once after HMR', async ()
     try {
       await scene.dispose()
     } catch (cleanupError) {
-      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 't55c failed and Scene cleanup also failed')
+      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'interaction-hmr failed and Scene cleanup also failed')
       throw cleanupError
     }
   }

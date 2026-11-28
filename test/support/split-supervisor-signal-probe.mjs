@@ -111,12 +111,12 @@ const PROCESS_CASE_TARGETS = new Map([
     file: 'test/integration/split-process/business/host-seat.vitest.ts',
     title: 'refuses cross-home discovery for the same canonical profile while the Host seat is owned',
   }],
-  ['p2a-client-domain-absent', {
+  ['client-domain-absent', {
     at: 'client-opened-before-ack',
     file: 'test/integration/split-process/business/session-write-recovery.vitest.ts',
     title: 'refuses an absent installed Client Domain module and restores the same Host',
   }],
-  ['p2a-stale-question-peer', {
+  ['stale-question-peer', {
     at: 'qualification-client-spawned',
     file: 'test/integration/split-process/business/detached-turn-recovery.vitest.ts',
     title: 'ignores a stale authenticated question peer result',
@@ -482,8 +482,8 @@ let crossHomeProducerStart
 /** The exact primary Host PID/birth captured before the Worker kill. */
 let crossHomePrimaryPid
 let crossHomePrimaryBirth
-/** Exact T39 mutation reservation captured before the external Worker kill. */
-let p2aDomainMutation
+/** Exact Client Domain mutation reservation captured before the external Worker kill. */
+let clientDomainMutation
 async function loadPublicObservation(receipt) {
   const anchor = receipt?.installation?.anchor
   if (typeof anchor !== 'string' || anchor === '') fail('the receipt carries no installed DSH anchor')
@@ -1658,26 +1658,26 @@ try {
             fail('client-opened-before-ack: the registered shell is not the live kernel process')
           }
           if (client.readyAt !== undefined) fail('client-opened-before-ack: the Client already reached ready')
-          if (probeCase === 'p2a-client-domain-absent') {
+          if (probeCase === 'client-domain-absent') {
             const mutation = receipt.installationMutation
             if (mutation?.fault !== 'client-domain-module-absent'
               || mutation.moduleName !== '@deepseek-ai/dsh-api-session-controller/client'
               || client.expectedFailure !== 'client-domain-module-absent') {
-              fail('p2a-client-domain-absent: the exact Client Domain mutation/target is not registered')
+              fail('client-domain-absent: the exact Client Domain mutation/target is not registered')
             }
             if (typeof mutation.target !== 'string' || typeof mutation.absentPath !== 'string'
               || existsSync(mutation.target) || !existsSync(mutation.absentPath)) {
-              fail('p2a-client-domain-absent: the owned module target is not absent with its rollback backup present')
+              fail('client-domain-absent: the owned module target is not absent with its rollback backup present')
             }
             if (typeof mutation.sha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(mutation.sha256)
               || sha256(mutation.absentPath) !== mutation.sha256) {
-              fail('p2a-client-domain-absent: the reserved module backup hash changed')
+              fail('client-domain-absent: the reserved module backup hash changed')
             }
             if (receipt.candidate?.sha256 !== sha256(requireEnv('SPLIT_VITEST_CANDIDATE_TGZ'))
               || mutation.candidateSha256 !== receipt.candidate?.sha256) {
-              fail('p2a-client-domain-absent: the immutable candidate hash changed')
+              fail('client-domain-absent: the immutable candidate hash changed')
             }
-            p2aDomainMutation = {
+            clientDomainMutation = {
               target: mutation.target, absentPath: mutation.absentPath, sha256: mutation.sha256,
               mode: mutation.mode, candidateSha256: mutation.candidateSha256,
               payloadHash: receipt.installFacts?.payloadHash, buildId: receipt.installFacts?.buildId,
@@ -1813,19 +1813,19 @@ try {
             crossHomeObservation = await loadPublicObservation(receipt)
             crossHomeExpectedEntry = realpathSync(receipt.installation.entries.host)
           }
-          if (probeCase === 'p2a-stale-question-peer') {
+          if (probeCase === 'stale-question-peer') {
             const peer = clients.find(value => value.mode === 'peer-stale-question')
             if (peer === undefined || identityLiveness(kernel, peer.pid, peer.birth) !== 'live') {
-              fail('p2a-stale-question-peer: the exact stale-question Peer identity is not live')
+              fail('stale-question-peer: the exact stale-question Peer identity is not live')
             }
             if (!Number.isInteger(peer.pgid) || !groupAlive(peer.pgid)) {
-              fail('p2a-stale-question-peer: the exact stale-question Peer group is not live')
+              fail('stale-question-peer: the exact stale-question Peer group is not live')
             }
             if (peer.expected !== 'peer-stale-question' || peer.ready !== undefined) {
-              fail('p2a-stale-question-peer: the registered Peer mode/readiness is not the pre-ACK target')
+              fail('stale-question-peer: the registered Peer mode/readiness is not the pre-ACK target')
             }
             if (host === undefined || identityLiveness(kernel, host.pid, host.birth) !== 'live') {
-              fail('p2a-stale-question-peer: the stable Host is not live at the Peer checkpoint')
+              fail('stale-question-peer: the stable Host is not live at the Peer checkpoint')
             }
           }
         } else if (at === 'identity-witness-spawned') {
@@ -2423,20 +2423,20 @@ try {
     if (probeCase === CROSS_HOME_CASE) {
       await assertCrossHomeProbeTerminal(receipt, kernel, crossHomeObservation)
     }
-    if (probeCase === 'p2a-client-domain-absent') {
-      if (p2aDomainMutation === undefined) fail('p2a-client-domain-absent: no pre-kill mutation reservation was captured')
+    if (probeCase === 'client-domain-absent') {
+      if (clientDomainMutation === undefined) fail('client-domain-absent: no pre-kill mutation reservation was captured')
       const restored = (receipt.notes ?? []).find(note => note?.event === 'installation-mutation-restored'
         && note.detail?.fault === 'client-domain-module-absent')
-      if (restored === undefined || restored.detail?.target !== p2aDomainMutation.target
-        || restored.detail?.absentPath !== p2aDomainMutation.absentPath
-        || restored.detail?.sha256 !== p2aDomainMutation.sha256
-        || restored.detail?.mode !== p2aDomainMutation.mode
-        || restored.detail?.payloadHash !== p2aDomainMutation.payloadHash
-        || restored.detail?.buildId !== p2aDomainMutation.buildId
-        || receipt.candidate?.sha256 !== p2aDomainMutation.candidateSha256) {
-        fail('p2a-client-domain-absent: compensation did not prove exact module bytes/mode and pristine build restoration')
+      if (restored === undefined || restored.detail?.target !== clientDomainMutation.target
+        || restored.detail?.absentPath !== clientDomainMutation.absentPath
+        || restored.detail?.sha256 !== clientDomainMutation.sha256
+        || restored.detail?.mode !== clientDomainMutation.mode
+        || restored.detail?.payloadHash !== clientDomainMutation.payloadHash
+        || restored.detail?.buildId !== clientDomainMutation.buildId
+        || receipt.candidate?.sha256 !== clientDomainMutation.candidateSha256) {
+        fail('client-domain-absent: compensation did not prove exact module bytes/mode and pristine build restoration')
       }
-      if (receipt.installationMutation !== undefined) fail('p2a-client-domain-absent: the mutation ledger is still active')
+      if (receipt.installationMutation !== undefined) fail('client-domain-absent: the mutation ledger is still active')
     }
     if (mode === 'process-worker-kill' && at === 'clients-ready') {
       if (siblingSnapshot === undefined) fail('the clients-ready sibling snapshot is missing')

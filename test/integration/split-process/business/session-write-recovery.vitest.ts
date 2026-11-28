@@ -686,8 +686,8 @@ test('public Clients keep private launch workspaces and one resumed writer appen
     }
     try { await scene.dispose() } catch (error) { cleanupErrors.push(asError(error)) }
     if (cleanupErrors.length > 0) {
-      if (primary !== undefined) throw new AggregateError([primary, ...cleanupErrors], 'public A06/A13 and cleanup both failed')
-      throw new AggregateError(cleanupErrors, 'public A06/A13 cleanup failed')
+      if (primary !== undefined) throw new AggregateError([primary, ...cleanupErrors], 'public workspace recovery and cleanup both failed')
+      throw new AggregateError(cleanupErrors, 'public workspace recovery cleanup failed')
     }
   }
 })
