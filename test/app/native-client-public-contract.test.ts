@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import type { NativeAttachOptions, NativeClient } from '../../src/app/remote-process/native-client.ts'
 import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '../../src/app/remote-process/native-client.ts'
-import { reserveNativeClientRealm } from '../../src/app/remote-process/native-client-realm.ts'
+import { completeNativeClientRealm, reserveNativeClientRealm } from '../../src/app/remote-process/native-client-realm.ts'
 
 const packageRoot = join(import.meta.dirname, '..', '..')
 
@@ -57,4 +57,16 @@ test('one Node realm rejects a concurrent composition and releases only its own 
   releaseAfterFailure()
   const releaseAfterClose = reserveNativeClientRealm()
   releaseAfterClose()
+})
+
+test('failed Client-owned cleanup retains the realm until a successful settlement', async () => {
+  const release = reserveNativeClientRealm()
+  await assert.rejects(completeNativeClientRealm(release, async () => { throw new Error('cleanup failed') }), /cleanup failed/u)
+  assert.throws(() => reserveNativeClientRealm(), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, 'NATIVE_CLIENT_REALM_BUSY')
+    return true
+  })
+  await completeNativeClientRealm(release, async () => {})
+  const releaseAfterSuccessfulSettlement = reserveNativeClientRealm()
+  releaseAfterSuccessfulSettlement()
 })

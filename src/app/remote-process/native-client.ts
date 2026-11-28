@@ -11,7 +11,7 @@ import {
   readLocalRecord,
 } from './local-discovery.ts'
 import { awaitLocalTransportReady, installLocalTransport } from './local-transport.ts'
-import { reserveNativeClientRealm } from './native-client-realm.ts'
+import { completeNativeClientRealm, reserveNativeClientRealm } from './native-client-realm.ts'
 import { createDiag } from '../../runtime/process/diagnostics.ts'
 
 export const NATIVE_CLIENT_API_VERSION = 1 as const
@@ -390,7 +390,7 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
   const cleanup = async (reason: Error): Promise<void> => {
     if (cleanupStarted) return
     cleanupStarted = true
-    try {
+    await completeNativeClientRealm(releaseRealm, async () => {
       const cleanupErrors: unknown[] = []
       for (const reference of references.values()) reference.release()
       references.clear()
@@ -408,9 +408,7 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
         for (const error of cleanupErrors) (reason as Error & { cause?: unknown }).cause ??= error
         throw reason
       }
-    } finally {
-      releaseRealm()
-    }
+    })
   }
 
   try {

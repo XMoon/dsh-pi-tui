@@ -24,3 +24,9 @@ export function reserveNativeClientRealm(): () => void {
     if (activeReservation === token) activeReservation = undefined
   }
 }
+
+/** Release the realm only after the caller's Client-owned cleanup has settled successfully. */
+export async function completeNativeClientRealm(release: () => void, cleanup: () => Promise<void>): Promise<void> {
+  await cleanup()
+  release()
+}
