@@ -259,7 +259,7 @@ export async function runMcpServersFr4(context) {
     await waitForScreenText(client, INHERITED_NAME, 'FR4 inherited server row')
     await waitForScreenText(client, 'Connected', 'FR4 inherited connection')
     await openRow(client, INHERITED_NAME, 'FR4 inherited')
-    await waitForScreenText(client, 'Configuration: Inherited', 'FR4 inherited provenance')
+    await waitForScreenText(client, 'Saved configuration: Inherited', 'FR4 inherited provenance')
     await waitForScreenText(client, 'Saved transport: stdio', 'FR4 inherited saved transport')
     trace('fr4.inherited-classified', { provenance: 'Inherited', state: 'Connected' })
 
@@ -272,7 +272,7 @@ export async function runMcpServersFr4(context) {
     await waitForScreenText(client, PLUGIN_NAME, 'FR4 plugin-owned row listed')
     await openRow(client, PLUGIN_NAME, 'FR4 plugin-owned')
     await waitForScreenText(client, 'Source: Plugin-owned', 'FR4 plugin-owned source')
-    assert(!(await frameOf(client)).includes('Configuration: User-added'),
+    assert(!(await frameOf(client)).includes('Saved configuration: User-added'),
       'FR4: a plugin registration has no configuration provenance')
     const before = patchText(context.installation.profileDir)
     for (const key of ['e', 't', 'd', 'u']) {
@@ -433,12 +433,12 @@ export async function runMcpServersFr4(context) {
     await waitForPattern(client, new RegExp(`(Disable|Enable) server ${INHERITED_NAME}\\.`, 'u'), 'FR4 override confirmation')
     client.send('y')
     await waitForScreenText(client, 'State: Disabled', 'FR4 inherited overridden state')
-    await waitForScreenText(client, 'Configuration: Overridden (user)', 'FR4 inherited now overridden')
+    await waitForScreenText(client, 'Saved configuration: Overridden (user)', 'FR4 inherited now overridden')
     client.send('u')
     await waitForPattern(client, new RegExp(`Reset server ${INHERITED_NAME}\\b`, 'u'), 'FR4 reset confirmation')
     client.send('y')
     await waitForScreenText(client, 'Inherited configuration restored', 'FR4 reset result')
-    await waitForScreenText(client, 'Configuration: Inherited', 'FR4 inherited restored')
+    await waitForScreenText(client, 'Saved configuration: Inherited', 'FR4 inherited restored')
     await waitForScreenText(client, 'State: Connected', 'FR4 inherited reconnected')
     trace('fr4.inherited-reset', { restored: true, connected: true })
 
