@@ -640,6 +640,7 @@ export async function runHostNumericSettingsFr5B(context) {
     // until the group Save, then the Host readback decides the value.
     const shellCommitted = profileUserConfig(installation.profileDir, SHELL_NS) ?? {}
     const committedCaps = { timeoutMs: shellCommitted.timeoutMs, maxOutputBytes: shellCommitted.maxOutputBytes }
+    await waitForDetailPattern(clientA, /Output cap per stream/u, 'FR5-B Shell reset field A hydrated')
     await selectFrame(clientA, frame => selectedRow(frame, 'Output cap per stream'), 'FR5-B Shell reset field A')
     clientA.send('?')
     const shellAdvanced = await waitForPattern(clientA, /Reset to inherited…/u, 'FR5-B Shell Advanced A')
