@@ -475,9 +475,9 @@ export async function runHostNumericSettingsFr5B(context) {
     // ONE Enter from Rows is the whole entry: the tenant opens its raw Input in
     // the SAME Detail pane (no field list, no Apply, no Save).
     clientA.send('\r')
-    const agentInput = await waitForPattern(clientA, /Settings · Agent · Parallel tool calls/u, 'FR5-B Agent tenant')
+    await waitForPattern(clientA, /Settings · Agent · Parallel tool calls/u, 'FR5-B Agent tenant')
+    const agentInput = await waitForPattern(clientA, /Value:\s*/u, 'FR5-B Agent raw value input')
     assert(/Current value\s+\d+/u.test(agentInput), `the Agent tenant must paint the current value: ${JSON.stringify(agentInput)}`)
-    await waitForPattern(clientA, /Value:\s*/u, 'FR5-B Agent raw value input')
     clientA.send('\x15')
     await sleep(80)
     for (const character of '2') {
