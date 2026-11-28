@@ -309,14 +309,14 @@ test('the collector reuses the one scoring model: case, ties, empty term, zero s
 test('a finder record stream parses NUL records split across chunks and normalizes each record', () => {
   const records: FinderRecord[] = []
   const stream = createFinderRecordStream(record => records.push(record))
-  assert.equal(stream.push('./src/foo'), true)
+  assert.equal(stream.push('./src/foo\n'), true)
   assert.equal(stream.push('bar.ts\0./baz'), true)
   assert.equal(stream.push('dir/\0./.git/config\0'), true)
   assert.equal(stream.finish(), true)
   assert.deepEqual(records, [
-    { path: 'src/foobar.ts', directoryHint: false },
+    { path: 'src/foo\nbar.ts', directoryHint: false },
     { path: 'bazdir', directoryHint: true },
-  ], 'a record split across chunks is ONE record; .git records never surface')
+  ], 'a newline inside a split NUL record stays literal; .git records never surface')
   // The single-record normalizer is the same policy for every caller.
   assert.deepEqual(normalizeFinderRecord('./a/b.txt'), { path: 'a/b.txt', directoryHint: false })
   assert.deepEqual(normalizeFinderRecord('dir/'), { path: 'dir', directoryHint: true })
