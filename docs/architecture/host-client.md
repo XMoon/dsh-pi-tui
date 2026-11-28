@@ -761,13 +761,16 @@ service or setting survives an arbitrary reload.
 ### Official Web frontend availability and the startup preference
 
 A Split Host owns the official Web frontend as a TOGGLEABLE Host capability, not
-as a boot mode. The Host-only overlay declares the official Web-only Loader row
-set the installed DSH Web composition needs once — including the mandatory
-`dsh.client.inject` closure of the shipped official Client UIs, the official
-file-actions and message-quotes Client features, and the official
-`workspace-changes` Host recorder the deliverables UI injects, so the Browser
-graph and the Host service those packages declare can actually resolve. Every
-row starts `disabled: true`, so an ordinary Split Host serves no SPA root and no
+as a boot mode. The bundle declares the official Web-only Loader roster once,
+generated from
+[the production roster](../../src/app/host/features/web-roster.ts). The roster
+must satisfy the shipped official Client dependency closure, including the
+Host providers their Browser surfaces require. These are profile-owned rows:
+a command-line overlay Config override would prevent official ConfigEditor
+user writes. The Host-only overlay fixes only the non-user safety values
+(Web runtime silence, Office Kit Host output directory, Office Skill user
+Python). Every row starts `disabled: true`, so an ordinary Split Host serves
+no SPA root and no
 `/plugins` browser graph;
 `/connect` and `/api` remain the only network surface, and a real TUI Client
 connects and operates without Web. The private `piTuiWebAccess` namespace of the
@@ -1071,14 +1074,6 @@ migrated fields plus `legacySettingsMigrationVersion: 2` in ONE official
 writes fail the start visibly and never advance the marker; the old profile
 rows and the imported document are preserved for downgrade/diagnosis. A Split
 Client never reads the Host profile and never migrates.
-
-The official Web roster is declared by the BUNDLE from the ONE production
-roster table (a generated bundle layer, default-disabled), not by the
-Host-only command-line overlay: an overlay config override makes the official
-ConfigEditor refuse that row's user writes. The Host-only overlay keeps only
-the three fixed non-user values without volatile Settings forms (Web runtime
-silence, Office Kit Host output directory, Office Skill user Python); the
-private `piTuiWebAccess` service remains the only runtime owner of the toggle.
 
 ### Per-Turn TUI prompt policy and session-view presence
 
@@ -2093,7 +2088,8 @@ pre-dispatch generation rule.
 
 ## Provider credentials and DeepSeek Account
 
-The `ConfigPort` keeps the three credential planes distinct:
+The `ConfigPort` keeps provider, credential, authorization and Account
+authority distinct:
 
 - `providers` — detached provider-profile facts and the keyless-profile write;
 - `credentials` — API-key references (`setReference`/`unsetReference`) and
@@ -2275,10 +2271,7 @@ object and Connection as its other generated contributions. It does not mount
 another Host owner, create an Account store, copy the generated namespace, or
 introduce a feature-specific carrier.
 
-The semantic Account port carries only detached `AccountView`, profile and
-wallet DTOs, safe attempt ids/phases/error codes, and per-operation
-`AccountClientMetadata`. Token, grant payload, PKCE material, Platform session,
-Cookie, and Host service objects never cross it. Account profile and balance are
+The Account port also never carries a Cookie. Account profile and balance are
 independent reads; `null`, a returned `failed` outcome, and a Remote failure
 remain distinct.
 
@@ -2409,24 +2402,17 @@ guidance are owned by
 
 ## Agent composition policy
 
-Two independent communication preferences are parsed once and read live at each
-agent-composition assembly:
-
-- `ProgressUpdatesState = off | milestones | frequent` (default `milestones`);
-- `ResponseStyleState = default | concise | explanatory` (default `default`).
-
-`/settings` applies the runtime choice first and then performs the serialized
-whole-document write; a failed save does not undo the live choice. Sections
-register in a fixed order (progress updates 80, response style 81, Focus 90,
-tool guidance 100+), and providers read the live state each assembly. Focus
-suppresses the effective progress section for every cadence while leaving the
-saved cadence untouched (restored on exit); response style stays active.
-
-Locality: the preference state and rendering are Client-local; the Host-side
-agent composition consumes the parsed values. Authority:
-`src/domain/communication/policy.ts`, `src/domain/communication/focus.ts`,
-`src/app/direct/system-prompt.ts`. Proof: `test/app/communication-policy.test.ts`
-(Focus suppression + pinned section registration).
+The model-facing communication policy is owned by
+[Per-Turn TUI prompt policy and session-view presence](#per-turn-tui-prompt-policy-and-session-view-presence)
+above. It is independent of transcript presentation: an eligible Focus Turn
+suppresses progress text without mutating the saved cadence, while response
+style remains independent. The canonical Profile schema owns persisted
+preferences. `/settings` applies the local runtime choice first, then serializes
+its persistence; a failed save does not undo the live choice. The shared prompt
+installer owns section registration, before the tool guidance band (100+).
+The public Direct `composeAgent` compatibility helper retains its live-display
+policy when no per-Turn policy is supplied; it is not the production
+Split/Direct Turn authority.
 
 ## Session artifact reads: archive vs official Markdown
 
