@@ -1455,6 +1455,31 @@ directory, `HOME` or a default Workspace, and the pre-selection publishes no
 Session and stops no owner — so a refusal leaves the current Session, its draft
 and any running Turn untouched.
 
+Remote explicit `/new` and Folder New use a discriminated
+workspace-new-conversation lifecycle request. The command captures the official
+Connection generation at the gesture; the Remote adapter resolves the Workspace
+and, in that same operation,
+reads one complete `workspace.follow` baseline (including the archive set) and one
+raw `session.list` result. A failed or partial read never becomes an empty
+candidate set. Candidates are considered in raw official Session-list item order
+and must be main-origin, unarchived members with the canonical header cwd,
+`blank === true`, and no known different preset. The first eligible id is sent as
+the official create's optional reuse candidate; with none, `sessionId` is omitted.
+The Host may return that candidate or another actual identity, and only the
+returned identity is retained and committed. Every explicit New dispatches exactly
+one official create. The original capture/lifetime/scope is rechecked before
+owner mapping and after wrapper transfer. A returned exact binding keeps the
+current generation, drafts, attachments, recall and ingress, restores deferred
+recalls, and still refreshes the live catalog. A different binding opens the
+actual returned identity before publication and follows ordinary
+publish-new-before-release-old; no old owner uses first-publication ordering
+without a target-idle wait. Only real replacement clears outgoing unpinned stores,
+and post-commit degradation never rolls the committed owner back. The raw proof
+and generation capture are operation-local and never serialized or cached.
+Every dispatched create is one-shot: rejection, published-with-error and
+indeterminate outcomes keep their distinct truth and are never retried
+automatically.
+
 An ordinary create naming an unknown WorkspaceId is refused before publication.
 A create that published and then failed to attach its membership reports the
 real published identity (`published-with-error`), and a create dispatched
@@ -1486,8 +1511,11 @@ shared owner registry + presentation bundle) and one real runner fiber. The
 runner adopts the pre-built Remote selection by identity; the Client bootstrap
 never constructs a second Backend, owner registry or presentation graph. A
 mounted Session is committed to the visible surface only through the official
-`retain()` reference, `ready` AND `openState === 'open'`; `ready` alone is not
-an open history.
+`retain()` reference. Explicit open/resume additionally requires `ready` AND
+`openState === 'open'`; `ready` alone is not an open history. Create adoption is
+the official navigation exception: it commits the returned identity after reference
+acquisition without awaiting initial history readiness, while the existing
+publication-to-ingress fence catches events that arrive before subscription.
 
 Disposal is one reverse chain, owned by `LocalClientHandle.dispose()`: runner
 surface (TUI state + the owned `tuiMainView` reference + session retirement +
@@ -1625,9 +1653,13 @@ workspace/question/approval store and keeps no cross-session cache.
   a closed Presenter is not.
 - **Roster observation.** The owner advances its monotonic `listRevision` only
   on a SEMANTIC roster change (membership/order/title/preset/cwd/format/
-  `updatedAt` as actually painted); a projection batch, a search page, a repaint
-  or an Activity update never advances it, and an unchanged official
-  notification restarts neither the projection batch nor the content search.
+  `updatedAt` and the tri-state `blank` fact as actually painted); a projection
+  batch, a search page, a repaint or an Activity update never advances it, and an
+  unchanged official notification restarts neither the projection batch nor the
+  content search. A blank-only change re-derives visibility and prunes accepted
+  search/selection state synchronously, but does not itself trigger a projection
+  batch or Host search. Remote maps the official list row's `blank` bit as a
+  tri-state semantic fact; absent stays unknown rather than becoming false.
   A reader that already owns an official observable list (Remote's
   `ISessions.list`) exposes the optional internal `SessionReader.observableList`
   snapshot/subscribe face; the owner then subscribes and NEVER polls: the

@@ -361,6 +361,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     /** Whether a captured navigation identity still owns the visible surface. */
     isNavigationCurrent: ApplicationSessionRuntime['isNavigationCurrent']
     transitionTo: TuiCommandRunner['transitionTo']
+    transitionToActualId?: TuiCommandRunner['transitionToActualId']
   }
   /** The status owner seams the runner delegates to. */
   readonly status: {
@@ -476,7 +477,7 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
   refreshLiveCatalog(agent: ExactAgent): Promise<void>
   /** Refresh the live owner's catalog by SESSION id (the Remote branch:
    *  the coordinator target wraps the id; no Direct Agent is resolved). */
-  refreshLiveCatalogById(sessionId: string): Promise<void>
+  refreshLiveCatalogById(sessionId: string): Promise<CatalogRefreshOutcome | undefined>
   /** Is a slash name advertised by the CURRENT completion list? */
   wasAdvertisedClaim(name: string): boolean
   /** Does the CURRENT effective host catalog claim this line? (The
@@ -974,15 +975,15 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   const refreshLiveCatalogById = async (
     sessionId: string,
     source: CatalogRefreshSource = 'live-session',
-  ): Promise<void> => {
+  ): Promise<CatalogRefreshOutcome | undefined> => {
     const refresh = catalogRefreshRequest
-    if (refresh === undefined) return
+    if (refresh === undefined) return undefined
     // The by-id owner refresh is the Live Session START/SWITCH/STARTUP entry;
     // it is explicitly owner-initiated, so a failed private invalidation stream
     // is re-established here as well. Passive `skills/change` invalidations go
     // through the coalescing gate below and never re-arm.
     deps.catalog.skills.rearmSkillsChange?.()
-    await refresh({
+    return await refresh({
       source,
       target: { kind: 'agent', key: deps.ownership.generation() },
       agent: remoteCatalogTargetOf(sessionId),
@@ -1779,6 +1780,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         return result
       },
       transitionTo: (steps) => deps.session.transitionTo(steps),
+      ...(deps.session.transitionToActualId === undefined ? {} : { transitionToActualId: deps.session.transitionToActualId }),
       currentPreset: deps.presets.current,
       sessionBlank: deps.presets.blank,
       // PR D2: the command surface's generic refresh is UI-only (a

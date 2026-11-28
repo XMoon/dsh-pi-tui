@@ -21,9 +21,12 @@
  * @module @xmoon76/dsh-pi-tui/tui/presentation/session-workspace-view
  */
 
-import type {
-  SessionBrowserAnswerEligibility,
-  SessionBrowserRow,
+import {
+  classifySessionBrowserRow,
+  type SessionBrowserAnswerEligibility,
+  type SessionBrowserPending,
+  type SessionBrowserPriority,
+  type SessionBrowserRow,
 } from '../../app/command/session-browser-presentation.ts'
 import { sanitizedPhysicalLine } from './lines.ts'
 import type {
@@ -42,27 +45,11 @@ export type SessionWorkspaceScope =
   | { readonly kind: 'unassigned' }
 
 /** Priority inside one official Workspace group; never a global group axis. */
-export type SessionWorkspacePriority = 'needs' | 'working' | 'recent'
+export type SessionWorkspacePriority = SessionBrowserPriority
 export type SessionWorkspaceGroup = SessionWorkspacePriority
 
-/** One row's truthful pending fact.
- *
- *  - `question`/`approval`/`plan-review` are real Host pending kinds that this
- *    Client proved it can answer;
- *  - `none` is a PROVED absence (both official sources readable and empty);
- *  - `unknown`/`unavailable`/`denied` name why no kind is proven;
- *  - `unverified` is a reviewed pending candidate without THIS Client's
- *    answerability proof — visible, never answerable, never idle.
- */
-export type SessionWorkspacePending =
-  | 'question'
-  | 'approval'
-  | 'plan-review'
-  | 'none'
-  | 'unknown'
-  | 'unavailable'
-  | 'denied'
-  | 'unverified'
+/** One row's truthful pending fact. */
+export type SessionWorkspacePending = SessionBrowserPending
 
 /** The official Workspace membership of one listed Session. `ambiguous` is a
  *  Session in two or more official Workspaces: it is never guessed into one and
@@ -339,41 +326,6 @@ function inScope(
   }
 }
 
-/** Whether the Client-root eligibility proves THIS Client may answer the
- *  pending candidate the Host reported for `sessionId`. */
-function provedAnswerable(
-  fact: SessionActivityFact,
-  eligibility: readonly SessionBrowserAnswerEligibility[] | undefined,
-): boolean {
-  if (fact.attentionSourceState !== 'known') return false
-  if (fact.attention === 'approval') {
-    return eligibility?.some(entry => entry.sessionId === fact.sessionId && entry.kind === 'approval') === true
-  }
-  if (fact.attention !== 'question' && fact.attention !== 'plan-review') return false
-  if (eligibility?.some(entry => entry.sessionId === fact.sessionId && entry.kind === 'question') === true) return true
-  // A `continued` Question is not a forwarded token: its official proof is the
-  // `active` projection minus the inbox's queued replies, and the answer is
-  // re-authorized by the existing QuestionInteractionPort after the user cuts
-  // into the Session. It still requires THIS composition's answer capability.
-  return eligibility !== undefined && (fact.continuedQuestionCallIds?.length ?? 0) > 0
-}
-
-function classifyPending(
-  activity: SessionActivityFact | undefined,
-  eligibility: readonly SessionBrowserAnswerEligibility[] | undefined,
-): { readonly pending: SessionWorkspacePending; readonly answerable: boolean } {
-  if (activity === undefined) return { pending: 'unknown', answerable: false }
-  const { attention, attentionSourceState } = activity
-  if (attention === 'none') {
-    return { pending: attentionSourceState === 'known' ? 'none' : attentionSourceState, answerable: false }
-  }
-  if (attention === 'unknown') {
-    return { pending: attentionSourceState === 'known' ? 'unknown' : attentionSourceState, answerable: false }
-  }
-  const answerable = provedAnswerable(activity, eligibility)
-  return { pending: answerable ? attention : 'unverified', answerable }
-}
-
 /** Build the ONE view of one frame. Every input is an official fact or the
  *  previous pure ordering; nothing here reads, writes or invents a Session. */
 export function buildSessionWorkspaceView(input: SessionWorkspaceViewInput): SessionWorkspaceView {
@@ -393,15 +345,16 @@ export function buildSessionWorkspaceView(input: SessionWorkspaceViewInput): Ses
   const classified: SessionWorkspaceRowFact[] = []
   for (const row of roster) {
     const activity = activityById.get(row.id)
-    const { pending, answerable } = classifyPending(activity, input.answerEligibility)
+    const classification = classifySessionBrowserRow(row, activity, input.answerEligibility)
+    if (!classification.browseEligible) continue
     const fact: SessionWorkspaceRowFact = {
       sessionId: row.id,
-      priority: answerable ? 'needs' : activity?.running === true ? 'working' : 'recent',
-      group: answerable ? 'needs' : activity?.running === true ? 'working' : 'recent',
-      pending,
-      running: activity?.running,
-      answerable,
-      source: activity?.attentionSourceState ?? 'unknown',
+      priority: classification.priority,
+      group: classification.priority,
+      pending: classification.pending,
+      running: classification.running,
+      answerable: classification.answerable,
+      source: classification.source,
       membership: workspaceMembershipOf(input.workspaces, row.id, input.workspaceBaselineProven),
     }
     rowsById.set(row.id, fact)
@@ -447,12 +400,10 @@ export function buildSessionWorkspaceView(input: SessionWorkspaceViewInput): Ses
     return { groups: legacyGroups, listIds: legacyListIds, rowsById, outsideAttention: { kind: 'none' }, currentWorkspaceId, nextCreateWorkspaceId: input.nextCreateWorkspaceId, workspaceBaselineProven: false }
   }
 
-
   const listIds = classified
     .filter(fact => inScope(fact, input.scope, currentWorkspaceId, input.workspaceBaselineProven))
     .sort(orderOf)
     .map(fact => fact.sessionId)
-
 
   const groups: SessionWorkspaceGroupView[] = []
   if (input.workspaceBaselineProven) {
@@ -467,11 +418,11 @@ export function buildSessionWorkspaceView(input: SessionWorkspaceViewInput): Ses
     const unassigned = classified.filter(fact => fact.membership.kind === 'unassigned').sort(orderOf).map(fact => fact.sessionId)
     if (ambiguous.length > 0) groups.push({ workspaceId: 'ambiguous', title: 'Membership ambiguous', path: '', ids: ambiguous })
     if (unassigned.length > 0) groups.push({ workspaceId: 'unassigned', title: 'Unassigned', path: '', ids: unassigned })
-  const priorityWorkspaceId = currentWorkspaceId ?? input.nextCreateWorkspaceId
-  if (priorityWorkspaceId !== undefined) {
-    const priorityIndex = groups.findIndex(group => group.workspaceId === priorityWorkspaceId)
-    if (priorityIndex > 0) groups.unshift(...groups.splice(priorityIndex, 1))
-  }
+    const priorityWorkspaceId = currentWorkspaceId ?? input.nextCreateWorkspaceId
+    if (priorityWorkspaceId !== undefined) {
+      const priorityIndex = groups.findIndex(group => group.workspaceId === priorityWorkspaceId)
+      if (priorityIndex > 0) groups.unshift(...groups.splice(priorityIndex, 1))
+    }
   }
   let outsideAttention: SessionWorkspaceOutsideAttention = { kind: 'none' }
   if (input.scope.kind !== 'all' && input.scope.kind !== 'pending') {

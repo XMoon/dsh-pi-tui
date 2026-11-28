@@ -669,7 +669,7 @@ export class SessionWorkspacePanel implements Component {
       if (page === undefined || !this.inspectorPagePainted) return undefined
       const listed = page.origin === 'search'
         ? this.snapshot.searchResults.some(result => result.row.id === page.sessionId)
-        : this.snapshot.rows.some(row => row.id === page.sessionId)
+        : this.view().listIds.includes(page.sessionId)
       return listed ? { sessionId: page.sessionId, origin: page.origin } : undefined
     }
     if (this.searchMode) {
@@ -884,6 +884,10 @@ export class SessionWorkspacePanel implements Component {
         : {}),
       ...(priorIdOrder === undefined ? {} : { priorIdOrder }),
     })
+  }
+
+  private visibleSessionCount(view: SessionWorkspaceView = this.frameView()): number {
+    return view.groups.reduce((count, group) => count + group.ids.length, 0)
   }
 
   /** The groups to paint: ALWAYS the live classification. An Activity update
@@ -2154,7 +2158,7 @@ export class SessionWorkspacePanel implements Component {
       return { line: fit(`${color.textStrong('Session Inspector')}${color.textMuted(shortId)}`, width), regions: [] }
     }
     const title = this.chooserMode() ? 'Choose workspace' : 'Sessions'
-    const left = `${color.textStrong(title)}${color.textMuted(` · ${this.snapshot.rows.length}`)}`
+    const left = `${color.textStrong(title)}${color.textMuted(` · ${this.visibleSessionCount()}`)}`
     if (this.directoryEntryActive || this.focus === 'reader') {
       // The inline path editor and the Reader each own the keyboard: no visible
       // or clickable / Search target may enter another presentation behind them.
@@ -2869,6 +2873,7 @@ export class SessionWorkspacePanel implements Component {
     const row = result?.row
       ?? (origin === 'browse' ? this.snapshot.rows.find(candidate => candidate.id === sessionId) : undefined)
     if (row === undefined) return undefined
+    if (origin === 'browse' && !this.frameView().listIds.includes(sessionId)) return undefined
     return buildSessionInspectorView({
       row,
       fact: this.frameView().rowsById.get(sessionId),
@@ -3411,6 +3416,8 @@ export class SessionWorkspacePanel implements Component {
       push('session persistence unavailable')
     } else if (!this.searchMode && snapshot.listState === 'empty') {
       push('No readable sessions')
+    } else if (!this.searchMode && snapshot.listState === 'ready' && this.visibleSessionCount() === 0) {
+      push('No visible sessions')
     } else if (!this.searchMode && snapshot.listState === 'loading') {
       push('Loading sessions…')
     }

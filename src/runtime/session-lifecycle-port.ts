@@ -29,12 +29,12 @@
 
 import type { OperationOwnership, WriteError } from './write-outcome.ts'
 
-/** One ordinary create request. The Host owns the durable header shape; these
- * are the only ordinary semantic inputs the TUI supplies. The durable working
- * directory is NOT a request input: a Session is created in a Host Workspace,
- * and the Host resolves that Workspace's canonical path itself. `signal` is
- * client-local and never serialized. */
-export interface CreateSessionRequest {
+/** One ordinary fresh create request. The Host owns the durable header shape;
+ * these are the only ordinary semantic inputs the TUI supplies. The durable
+ * working directory is NOT a request input: a Session is created in a Host
+ * Workspace, and the Host resolves that Workspace's canonical path itself.
+ * `signal` is client-local and never serialized. */
+export interface FreshCreateSessionRequest {
   /** The pre-generated identity for an ordinary fresh Session. */
   sessionId: string
   /** Official Host Workspace identity the new Session belongs to. Mandatory:
@@ -45,7 +45,32 @@ export interface CreateSessionRequest {
   agentPreset?: string
   /** Client-local creation cancellation; never serialized. */
   signal?: AbortSignal
+  /** Discriminant for the Remote explicit-New branch. */
+  capture?: undefined
 }
+
+/** One Client-local Remote explicit-New operation. The capture pins the official
+ * Connection generation at the user gesture; the adapter keeps the matching
+ * Workspace/raw-list proof only for this operation. Neither object crosses the
+ * wire. */
+export interface WorkspaceNewConversationCapture {
+  readonly generation: unknown
+  /** Client-local recheck of the captured Connection generation. */
+  isCurrent?(): boolean
+}
+
+/** Remote explicit New asks the official create operation to reuse the first
+ * eligible blank Session in the resolved Workspace, or create a fresh Session
+ * when none is eligible. The Host's returned identity is authoritative. */
+export interface WorkspaceNewConversationRequest {
+  workspaceId: string
+  agentPreset?: string
+  signal?: AbortSignal
+  capture: WorkspaceNewConversationCapture
+  sessionId?: undefined
+}
+
+export type CreateSessionRequest = FreshCreateSessionRequest | WorkspaceNewConversationRequest
 
 /** One CLIENT-LOCAL workspace pre-selection intent. Resolving it never creates
  * a Session and never moves the current surface: it only asks the Host which
@@ -174,9 +199,18 @@ export interface SessionHandle {
 
 /** The session LIFECYCLE domain port. */
 export interface SessionLifecycle {
+  /** Capture the Remote explicit-New operation at the user gesture. Direct and
+   * other consumers return undefined and keep the ordinary fresh-create path. */
+  captureWorkspaceNewConversation?(): WorkspaceNewConversationCapture | undefined
   /** Resolve ONE Host Workspace for a later create. Pre-selection only: it
-   *  publishes no Session, moves no surface and cancels no owner. */
-  resolveWorkspace(intent: WorkspaceSelectionIntent, signal?: AbortSignal): Promise<ResolvedWorkspaceSelection>
+   * publishes no Session, moves no surface and cancels no owner. When a Remote
+   * explicit-New capture is supplied, the same operation also proves the raw
+   * roster/membership facts later consumed by create. */
+  resolveWorkspace(
+    intent: WorkspaceSelectionIntent,
+    signal?: AbortSignal,
+    capture?: WorkspaceNewConversationCapture,
+  ): Promise<ResolvedWorkspaceSelection>
   create(request: CreateSessionRequest): Promise<CreateResult>
   open(request: OpenSessionRequest): Promise<OpenResult>
   fork(request: ForkSessionRequest): Promise<ForkResult>

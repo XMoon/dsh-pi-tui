@@ -12,6 +12,7 @@ import {
   type RemoteLifecycleSessions,
   type RemoteWorkspaceNamespaceLike,
   type RemoteWorkspaceViewLike,
+  type RemoteSessionListRowLike,
 } from '../../../src/runtime/remote/session-lifecycle-remote.ts'
 import type { RemoteReadResult } from '../../../src/runtime/remote/session-reader-remote.ts'
 import type { RemoteSessionReferenceLike, TuiSessionReferenceSource } from '../../../src/runtime/remote/session-reference.ts'
@@ -35,15 +36,17 @@ function harness() {
     follows: 0,
     followDisposals: 0,
     sessionLists: 0,
+    projectionRefreshes: [] as string[],
   }
   const catalogued = new Set<string>()
   const generations = new Map<string, {
     readonly id: string
     readonly session: {
-      getSnapshot(): { readonly openState: 'cold' | 'loading' | 'open' | 'error' | undefined; readonly openError: unknown }
+      getSnapshot(): { readonly openState: 'cold' | 'loading' | 'open' | 'error' | undefined; readonly openError: unknown; readonly blank: boolean }
     }
   }>()
   const counts = new Map<string, number>()
+  const blankBits = new Map<string, boolean>()
   let generation: { id: number } | undefined = { id: 1 }
   let createResult: string | undefined
   let createError: unknown
@@ -65,11 +68,11 @@ function harness() {
   let workspaceCreateReply: RemoteReadResult<{ readonly workspace: RemoteWorkspaceViewLike; readonly created: boolean }> | undefined
   let workspaceCreateFailure: unknown
   let workspaceCreateHook: (() => void) | undefined
-  let followFrames: Array<{ readonly type: string; readonly value?: { readonly items: readonly RemoteWorkspaceViewLike[] } }> | undefined
+  let followFrames: Array<{ readonly type: string; readonly value?: { readonly items: readonly RemoteWorkspaceViewLike[]; readonly archivedSessionIds?: readonly string[] } }> | undefined
   let followFailure: unknown
   let followHook: (() => void) | undefined
-  let sessionListRows: { readonly sessionId: string; readonly cwd?: string }[] = []
-  let sessionListReply: RemoteReadResult<{ readonly items: readonly { readonly sessionId: string; readonly cwd?: string }[] }> | undefined
+  let sessionListRows: RemoteSessionListRowLike[] = []
+  let sessionListReply: RemoteReadResult<{ readonly items: readonly RemoteSessionListRowLike[] }> | undefined
   let sessionListFailure: unknown
   let sessionListHook: (() => void) | undefined
   const sessions: RemoteLifecycleSessions = {
@@ -82,6 +85,9 @@ function harness() {
       const id = createResult ?? String(options.sessionId)
       catalogued.add(id)
       return id
+    },
+    refreshProjections: async (sessionId: string) => {
+      calls.projectionRefreshes.push(sessionId)
     },
     fork: async options => {
       calls.forks.push(options)
@@ -103,7 +109,7 @@ function harness() {
       if (!generations.has(target)) {
         generations.set(target, {
           id: target,
-          session: { getSnapshot: () => ({ openState, openError }) },
+          session: { getSnapshot: () => ({ openState, openError, blank: blankBits.get(target) ?? true }) },
         })
       }
       let live = true
@@ -173,7 +179,7 @@ function harness() {
     },
     follow: (signal) => {
       calls.follows += 1
-      const frames = followFrames ?? [{ type: 'baseline', value: { items: workspaceRows } }]
+      const frames = followFrames ?? [{ type: 'baseline', value: { items: workspaceRows, archivedSessionIds: [] } }]
       let disposed = false
       const iterator = (async function* () {
         signal?.throwIfAborted()
@@ -231,7 +237,7 @@ function harness() {
     setFollowFrames: (frames: typeof followFrames) => { followFrames = frames },
     setFollowFailure: (error: unknown) => { followFailure = error },
     setFollowHook: (hook: () => void) => { followHook = hook },
-    setSessionListRows: (rows: { readonly sessionId: string; readonly cwd?: string }[]) => { sessionListRows = rows },
+    setSessionListRows: (rows: RemoteSessionListRowLike[]) => { sessionListRows = rows },
     setSessionListReply: (reply: typeof sessionListReply) => { sessionListReply = reply },
     setSessionListFailure: (error: unknown) => { sessionListFailure = error },
     setSessionListHook: (hook: () => void) => { sessionListHook = hook },
@@ -245,6 +251,207 @@ test('ordinary create names the official WorkspaceId on the one official ClientS
   assert.deepEqual(h.calls.creates, [{ workspaceId: 'ws-a', sessionId: 'session-a' }])
 })
 
+test('workspace New selects the first eligible official blank in raw Session-list order', async () => {
+  const h = harness()
+  h.setWorkspaceRows([{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['session-b', 'session-c'] }])
+  h.setSessionListRows([
+    { sessionId: 'session-c', cwd: '/ws/a', blank: true },
+    { sessionId: 'session-b', cwd: '/ws/a', blank: true },
+  ])
+  h.setCreateResult('session-host-chosen')
+  const capture = h.lifecycle.captureWorkspaceNewConversation()
+  assert.ok(capture !== undefined)
+  await h.lifecycle.resolveWorkspace({ kind: 'workspace-id', workspaceId: 'ws-a' }, undefined, capture)
+  const result = await h.lifecycle.create({ workspaceId: 'ws-a', capture, agentPreset: 'minimal' })
+  assert.equal(result.outcome.kind, 'created')
+  assert.deepEqual(h.calls.creates, [{ workspaceId: 'ws-a', sessionId: 'session-c', agentPreset: 'minimal' }])
+  assert.deepEqual(h.calls.retains, [{ target: 'session-host-chosen', source: 'tuiMainView' }])
+  assert.deepEqual(h.calls.projectionRefreshes, ['session-c'])
+  assert.equal(h.calls.follows, 1)
+  assert.equal(h.calls.sessionLists, 1)
+})
+
+test('workspace New skips nonblank, subagent, archived, nonmember, wrong-cwd and known different-preset rows', async () => {
+  const h = harness()
+  h.setWorkspaceRows([{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['false', 'unknown', 'child', 'archived', 'wrong-cwd', 'preset', 'empty-preset', 'eligible'] }])
+  h.setFollowFrames([{ type: 'baseline', value: { items: [{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['false', 'unknown', 'child', 'archived', 'wrong-cwd', 'preset', 'empty-preset', 'eligible'] }], archivedSessionIds: ['archived'] } }])
+  h.setSessionListRows([
+    { sessionId: 'false', cwd: '/ws/a', blank: false },
+    { sessionId: 'unknown', cwd: '/ws/a' },
+    { sessionId: 'child', cwd: '/ws/a', blank: true, origin: 'subagent' },
+    { sessionId: 'archived', cwd: '/ws/a', blank: true },
+    { sessionId: 'foreign', cwd: '/ws/a', blank: true },
+    { sessionId: 'wrong-cwd', cwd: '/ws/other', blank: true },
+    { sessionId: 'preset', cwd: '/ws/a', blank: true, projections: { values: { agentPreset: 'other' } } },
+    { sessionId: 'empty-preset', cwd: '/ws/a', blank: true, projections: { values: { agentPreset: '' } } },
+    { sessionId: 'eligible', cwd: '/ws/a', blank: true },
+  ])
+  h.setCreateResult('session-created')
+  const capture = h.lifecycle.captureWorkspaceNewConversation()
+  assert.ok(capture !== undefined)
+  await h.lifecycle.resolveWorkspace({ kind: 'workspace-id', workspaceId: 'ws-a' }, undefined, capture)
+  const result = await h.lifecycle.create({ workspaceId: 'ws-a', capture, agentPreset: 'minimal' })
+  assert.equal(result.outcome.kind, 'created')
+  assert.deepEqual(h.calls.creates, [{ workspaceId: 'ws-a', sessionId: 'eligible', agentPreset: 'minimal' }])
+})
+
+test('workspace New omits sessionId when no eligible blank exists', async () => {
+  const h = harness()
+  h.setWorkspaceRows([{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: [] }])
+  h.setSessionListRows([])
+  h.setCreateResult('session-fresh')
+  const capture = h.lifecycle.captureWorkspaceNewConversation()
+  assert.ok(capture !== undefined)
+  await h.lifecycle.resolveWorkspace({ kind: 'workspace-id', workspaceId: 'ws-a' }, undefined, capture)
+  const result = await h.lifecycle.create({ workspaceId: 'ws-a', capture })
+  assert.equal(result.outcome.kind, 'created')
+  assert.deepEqual(h.calls.creates, [{ workspaceId: 'ws-a' }])
+})
+
+test('workspace New dispatches one Host create for an exact current binding', async () => {
+  const h = harness()
+  const first = await h.lifecycle.create({ workspaceId: 'ws-a', sessionId: 'session-b' })
+  if (first.outcome.kind !== 'created') throw new Error('unreachable')
+  h.setWorkspaceRows([{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['session-b'] }])
+  h.setSessionListRows([{ sessionId: 'session-b', cwd: '/ws/a', blank: true }])
+  const capture = h.lifecycle.captureWorkspaceNewConversation()
+  assert.ok(capture !== undefined)
+  await h.lifecycle.resolveWorkspace({ kind: 'workspace-id', workspaceId: 'ws-a' }, undefined, capture)
+  const result = await h.lifecycle.create({ workspaceId: 'ws-a', capture })
+  assert.equal(result.outcome.kind, 'created')
+  if (result.outcome.kind !== 'created') throw new Error('unreachable')
+  assert.deepEqual(h.calls.creates, [
+    { workspaceId: 'ws-a', sessionId: 'session-b' },
+    { workspaceId: 'ws-a', sessionId: 'session-b' },
+  ])
+  assert.deepEqual(h.calls.retains, [
+    { target: 'session-b', source: 'tuiMainView' },
+    { target: 'session-b', source: 'tuiMainView' },
+  ])
+  assert.equal(result.outcome.handle.client?.bindingIdentity, first.outcome.handle.client?.bindingIdentity)
+  assert.deepEqual(h.calls.projectionRefreshes, [])
+  assert.deepEqual(h.calls.releases, [])
+})
+
+test('workspace New always lets the Host decide for a retained blank binding', async () => {
+  const h = harness()
+  const first = await h.lifecycle.create({ workspaceId: 'ws-a', sessionId: 'session-b' })
+  if (first.outcome.kind !== 'created') throw new Error('unreachable')
+  h.setWorkspaceRows([{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['session-b'] }])
+  h.setSessionListRows([{ sessionId: 'session-b', cwd: '/ws/a', blank: true }])
+  const capture = h.lifecycle.captureWorkspaceNewConversation()
+  assert.ok(capture !== undefined)
+  await h.lifecycle.resolveWorkspace({ kind: 'workspace-id', workspaceId: 'ws-a' }, undefined, capture)
+  h.setCreateResult('session-host-chosen')
+  const result = await h.lifecycle.create({ workspaceId: 'ws-a', capture })
+  assert.equal(result.outcome.kind, 'created')
+  assert.deepEqual(h.calls.creates, [
+    { workspaceId: 'ws-a', sessionId: 'session-b' },
+    { workspaceId: 'ws-a', sessionId: 'session-b' },
+  ])
+  assert.deepEqual(h.calls.retains, [
+    { target: 'session-b', source: 'tuiMainView' },
+    { target: 'session-host-chosen', source: 'tuiMainView' },
+  ])
+  assert.deepEqual(h.calls.projectionRefreshes, ['session-b'])
+  assert.notEqual(first.outcome.handle.session.id, 'session-host-chosen')
+})
+
+test('workspace New does not reuse a same-id replacement binding', async () => {
+  const h = harness()
+  const first = await h.lifecycle.create({ workspaceId: 'ws-a', sessionId: 'session-b' })
+  if (first.outcome.kind !== 'created') throw new Error('unreachable')
+  first.outcome.handle.client?.release()
+  h.setWorkspaceRows([{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['session-b'] }])
+  h.setSessionListRows([{ sessionId: 'session-b', cwd: '/ws/a', blank: true }])
+  const capture = h.lifecycle.captureWorkspaceNewConversation()
+  assert.ok(capture !== undefined)
+  await h.lifecycle.resolveWorkspace({ kind: 'workspace-id', workspaceId: 'ws-a' }, undefined, capture)
+  const result = await h.lifecycle.create({ workspaceId: 'ws-a', capture })
+  assert.equal(result.outcome.kind, 'created')
+  assert.equal(h.calls.creates.length, 2, 'the replacement binding must go through the official create')
+  assert.equal(h.calls.retains.length, 2)
+  if (result.outcome.kind !== 'created') throw new Error('unreachable')
+  assert.notEqual(result.outcome.handle.client?.bindingIdentity, first.outcome.handle.client?.bindingIdentity)
+})
+
+test('workspace New generation rollover before dispatch creates nothing', async () => {
+  const h = harness()
+  h.setWorkspaceRows([{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['session-b'] }])
+  h.setSessionListRows([{ sessionId: 'session-b', cwd: '/ws/a', blank: true }])
+  const capture = h.lifecycle.captureWorkspaceNewConversation()
+  assert.ok(capture !== undefined)
+  h.setGeneration(2)
+  await assert.rejects(h.lifecycle.resolveWorkspace({ kind: 'workspace-id', workspaceId: 'ws-a' }, undefined, capture), WorkspaceSelectionError)
+  const result = await h.lifecycle.create({ workspaceId: 'ws-a', capture })
+  assert.deepEqual(result, { ownership: 'superseded', outcome: { kind: 'cancelled' } })
+  assert.deepEqual(h.calls.creates, [])
+})
+
+test('workspace New source-session fallback reuses one raw list and proves the adopted Workspace with a complete baseline', async () => {
+  const h = harness()
+  h.setFollowFrames([{ type: 'baseline', value: { items: [], archivedSessionIds: [] } }])
+  h.setSessionListRows([{ sessionId: 'session-historical', cwd: '/ws/historical', blank: true }])
+  h.setWorkspaceCreateReply({
+    ok: true,
+    value: {
+      workspace: { workspaceId: 'ws-historical', path: '/ws/historical', title: 'Historical', sessionIds: [] },
+      created: true,
+    },
+  })
+  h.setFollowHook(() => {
+    if (h.calls.follows === 1) {
+      h.setFollowFrames([{ type: 'baseline', value: {
+        items: [{ workspaceId: 'ws-historical', path: '/ws/historical', title: 'Historical', sessionIds: ['session-historical'] }],
+        archivedSessionIds: [],
+      } }])
+    }
+  })
+  const capture = h.lifecycle.captureWorkspaceNewConversation()
+  assert.ok(capture !== undefined)
+  const resolved = await h.lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: 'session-historical' }, undefined, capture)
+  assert.deepEqual(resolved, { workspaceId: 'ws-historical', path: '/ws/historical' })
+  const result = await h.lifecycle.create({ workspaceId: 'ws-historical', capture })
+  assert.equal(result.outcome.kind, 'created')
+  assert.deepEqual(h.calls.creates, [{ workspaceId: 'ws-historical', sessionId: 'session-historical' }])
+  assert.equal(h.calls.follows, 2)
+  assert.equal(h.calls.sessionLists, 1)
+  assert.deepEqual(h.calls.workspaceCreates, ['/ws/historical'])
+})
+
+test('workspace New source-session fallback refuses when the adopted Workspace has no complete baseline proof', async () => {
+  const h = harness()
+  h.setFollowFrames([{ type: 'baseline', value: { items: [], archivedSessionIds: [] } }])
+  h.setSessionListRows([{ sessionId: 'session-historical', cwd: '/ws/historical', blank: true }])
+  h.setWorkspaceCreateReply({
+    ok: true,
+    value: {
+      workspace: { workspaceId: 'ws-historical', path: '/ws/historical', title: 'Historical', sessionIds: [] },
+      created: true,
+    },
+  })
+  const capture = h.lifecycle.captureWorkspaceNewConversation()
+  assert.ok(capture !== undefined)
+  await assert.rejects(h.lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: 'session-historical' }, undefined, capture), WorkspaceSelectionError)
+  const result = await h.lifecycle.create({ workspaceId: 'ws-historical', capture })
+  assert.equal(result.outcome.kind, 'rejected')
+  assert.deepEqual(h.calls.creates, [])
+  assert.equal(h.calls.follows, 2)
+  assert.equal(h.calls.sessionLists, 1)
+})
+
+test('workspace New raw read failure cannot fall back to the ready Client snapshot', async () => {
+  const h = harness()
+  h.setWorkspaceRows([{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['session-b'] }])
+  h.setSessionListRows([{ sessionId: 'session-b', cwd: '/ws/a', blank: true }])
+  h.setSessionListFailure(new Error('raw list failed'))
+  const capture = h.lifecycle.captureWorkspaceNewConversation()
+  assert.ok(capture !== undefined)
+  await assert.rejects(h.lifecycle.resolveWorkspace({ kind: 'workspace-id', workspaceId: 'ws-a' }, undefined, capture), WorkspaceSelectionError)
+  const result = await h.lifecycle.create({ workspaceId: 'ws-a', capture })
+  assert.equal(result.outcome.kind, 'rejected')
+  assert.deepEqual(h.calls.creates, [])
+})
 test('an explicit preset rides the SAME single official ClientSessions.create call', async () => {
   const h = harness()
   h.setCreateResult('session-remote')

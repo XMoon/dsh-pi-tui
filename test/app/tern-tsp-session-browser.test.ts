@@ -941,6 +941,55 @@ test('native Browser flat fallback keeps all listed Sessions, then a global card
   assert.equal(m.fatals.length, 0)
 })
 
+test('native flat fallback filters quiet blanks and revokes Details/action/Inspector targets', async (t) => {
+  const rows = [
+    row('session-current', { title: 'Current visible', blank: false }),
+    row('session-quiet', { title: 'Quiet blank', blank: true }),
+    row('session-unknown', { title: 'Unknown visible' }),
+  ]
+  const m = await mounted(t, reader({ list: async () => rows }), false)
+  const { pane } = m
+  assert.deepEqual(items(pane).map(entry => entry.id), ['session:session-current', 'session:session-unknown'],
+    'all flat fallback item paths consume the eligible corpus')
+
+  const pickerId = picker(pane)!.id
+  sendActivate(pane, 'session:session-quiet', pickerId)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(m.resumeIntents.length, 0, 'a hidden flat-fallback row cannot be activated')
+
+  sendSelect(pane, 'session:session-unknown', pickerId)
+  await waitUntil('the unknown row is selected', () => props(pane).selected === 'session:session-unknown')
+  sendPickerAction(pane, 'details', BROWSER)
+  await waitUntil('Details opens for the eligible row', () => details(pane) !== undefined)
+
+  m.publishSnapshot({
+    listState: 'ready',
+    rows: [rows[0]!, { ...rows[2]!, blank: true, title: 'Unknown now quiet' }],
+    query: '',
+    resumePending: false,
+    searchState: 'idle',
+    searchResults: [],
+    hasMore: false,
+    listRevision: 2,
+  })
+  await waitUntil('the hidden Details target exits', () => details(pane) === undefined)
+  assert.equal(props(pane).selected, 'session:session-current', 'selection re-anchors on an eligible survivor')
+  assert.notEqual(m.inspectorSelections.at(-1)?.sessionId, 'session-unknown', 'the hidden target is not reported')
+
+  m.publishSnapshot({
+    listState: 'ready',
+    rows: rows.map(entry => ({ ...entry, blank: true })),
+    query: '',
+    resumePending: false,
+    searchState: 'idle',
+    searchResults: [],
+    hasMore: false,
+    listRevision: 3,
+  })
+  await waitUntil('the filtered-empty native state', () => props(pane).empty === 'No visible sessions')
+  assert.equal(props(pane).state, 'ready', 'filtered-empty does not fabricate a Host empty/error state')
+})
+
 test('Current keyboard Enter closes the native Browser with no Resume intent', async (t) => {
   const m = await mounted(t)
   const { pane } = m

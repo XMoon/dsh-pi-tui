@@ -424,7 +424,12 @@ export interface TuiCommandRunner {  ctx: Context
     /** Resolve ONE Host Workspace before a create (WS-2): pre-selection only,
      *  so a bad directory / unknown Workspace / offline Host refuses BEFORE any
      *  owner stop, draft flush or Session dispatch. */
-    resolveWorkspace(intent: WorkspaceSelectionIntent, signal?: AbortSignal): Promise<ResolvedWorkspaceSelection>
+    resolveWorkspace(
+      intent: WorkspaceSelectionIntent,
+      signal?: AbortSignal,
+      capture?: import('./runtime/session-lifecycle-port.ts').WorkspaceNewConversationCapture,
+    ): Promise<ResolvedWorkspaceSelection>
+    captureWorkspaceNewConversation?(): import('./runtime/session-lifecycle-port.ts').WorkspaceNewConversationCapture | undefined
     create(options: CreateSessionRequest): Promise<SessionHandle>
     open(options: OpenSessionRequest): Promise<SessionHandle>
   }
@@ -650,13 +655,23 @@ export interface TuiCommandRunner {  ctx: Context
    * this transaction and must run it inside {@link withSessionTransition}.
    */
   transitionTo<T>(steps: {
-    /** The child's pre-generated session identity (mandatory). */
+    /** The child's pre-generated session identity. */
     target: { id: string; header?: { cwd?: string } }
     prepare?: () => Promise<void> | void
     /** See `TransitionSteps.onOldOwnerQuiesced`. */
     onOldOwnerQuiesced?: () => void
     create: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string; error?: unknown }>
+  /** Remote explicit New commits only the Host-returned identity, so no
+   * candidate-owned opening id is supplied. */
+  transitionToActualId?<T>(steps: {
+    target: { header?: { cwd?: string } }
+    prepare?: () => Promise<void> | void
+    onOldOwnerQuiesced?: () => void
+    /** Revalidate the original explicit-New operation at commit. */
+    isCommitCurrent?: () => boolean
+    create: () => Promise<T>
+  }): Promise<{ ok: true; next: T; ownerReplaced?: boolean; degraded?: boolean } | { ok: false; message: string; error?: unknown }>
   /** The preset the live agent runs on, when the deployment composes one. */
   currentPreset(): string | undefined
   /** The Host turn-boundary authority's blank state for the live Session

@@ -1551,6 +1551,18 @@ class C1Model extends LlmAdapter {
     const afterTool = Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool'
     const token = `${this.scenario}-${sessionId}`
 
+    // Shared two-Session scenes seed the first Session with a plain accepted
+    // Turn so a later explicit New cannot reuse it as a blank. This fixture-only
+    // marker must precede every scenario branch; otherwise a question/approval
+    // scenario would open a modal during scene setup.
+    if (phaseText.includes('c1-scene-seed') && afterTool !== true) {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: `c1-scene-seed answer ${token}` }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `c1-scene-seed answer ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
     // ACP v1 system prompt append: record the exact model-facing system facts
     // of the real request (both channels), then answer with ordinary text. The
     // markers are case-owned literals; no prompt text selects a behavior.

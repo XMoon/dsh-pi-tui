@@ -39,6 +39,9 @@ export interface SessionSummary {
   parentSession?: string
   /** Subagent children carry the `sub` marker. */
   origin?: 'subagent'
+  /** Official Client summary blank bit. Absent means unknown; false is a
+   *  proven non-blank value and is preserved verbatim. */
+  blank?: boolean
   /** Host-authoritative on-disk format state of this row, passed through
    * verbatim from the official Client list entry (`formatStatus`). It is a
    * READ-ONLY state label: `migration-required` means the official reader

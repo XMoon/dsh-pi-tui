@@ -124,8 +124,7 @@ export async function composeRemoteApplicationStage(input: {
       ...(input.onQualification === undefined ? {} : { onQualification: input.onQualification }),
     })
     // ONE owner registry shared by owners + retirement (never constructed
-    // independently — that would create a second owner truth). The SAME
-    // official Connection generation source fences the owner mutation replies.
+    // independently — that would create a second owner truth).
     ownerServices = createRemoteSessionOwnerServices(
       input.client.sessions,
       input.client.connection.generation,

@@ -1389,7 +1389,7 @@ export function applyRunnerWithRuntime(
         // three `publishOwner` seams in app/session/runtime.ts).
         retireStaleHistorySeat: () => surface.retireStaleHistorySeat(),
         setCompletionOwner: (identity) => surface.setCompletionOwner(identity),
-        initLiveSession: (owner) => {
+        initLiveSession: (owner, readiness) => {
           // PR3-B B3 (findings C/F6): the committed owner takes the
           // presentation BEFORE its first frame. A replaced subject's live
           // Question form AND live approval prompt are withdrawn from the modal
@@ -1404,22 +1404,31 @@ export function applyRunnerWithRuntime(
             // ingress — never a Direct Agent read. Absent remote sources
             // (a non-Remote selection without a Direct attachment) stay the
             // M3-2 staging no-op.
-            if (remoteSources === undefined) return Promise.resolve()
+            if (remoteSources === undefined) {
+              readiness?.notReady('remote live surface sources are unavailable')
+              return Promise.resolve()
+            }
             const sessionId = selectedRuntime.owners.sessionId(owner)
-            return initRemoteLiveSurface(sessionId)
+            return initRemoteLiveSurface(sessionId, readiness)
           }
           return presentation.initLiveSession(agent)
         },
-        refreshLiveCatalog: (owner) => {
+        refreshLiveCatalog: (owner, readiness) => {
           const agent = directAgentOfOwner(owner)
           // PR4 §2.2: the Remote branch refreshes the catalog through the
           // command source keyed by the committed session id (the coordinator
           // target wraps it; no Direct Agent exists to resolve).
           if (agent === undefined) {
             const sessionId = selectedRuntime.owners.sessionId(owner)
-            return sessionId === undefined
-              ? Promise.resolve()
-              : command.refreshLiveCatalogById(sessionId)
+            if (sessionId === undefined) {
+              readiness?.notReady('committed Remote owner has no session id')
+              return Promise.resolve()
+            }
+            return command.refreshLiveCatalogById(sessionId).then(outcome => {
+              if (outcome !== undefined && outcome.kind !== 'applied') {
+                readiness?.notReady(`catalog refresh ${outcome.kind}`)
+              }
+            })
           }
           return command.refreshLiveCatalog(agent)
         },
@@ -2527,7 +2536,10 @@ export function applyRunnerWithRuntime(
     /** The newest init attempt: an older in-flight init bails before it installs
      *  an ingress, so two attempts can never become two publishers. */
     let remoteInitAttempt = 0
-    const initRemoteLiveSurface = async (sessionId: string): Promise<void> => {
+    const initRemoteLiveSurface = async (
+      sessionId: string,
+      readiness?: { notReady(reason: string): void },
+    ): Promise<void> => {
       if (remoteSources === undefined || cleanedUp) return
       const attempt = ++remoteInitAttempt
       disposeRemoteLiveSurface()
@@ -2553,6 +2565,7 @@ export function applyRunnerWithRuntime(
       // retry instead (plan §2.2/§2.5: an explicit not-ready state completed by
       // a real signal, never a poll).
       if (hydrate === undefined) {
+        readiness?.notReady('remote live hydration was not committed')
         const liveGeneration = remoteSources.commandSource.connectionGeneration()
         if (liveGeneration === undefined) {
           // The transport is absent right now: wait for the OFFICIAL generation.
@@ -3119,6 +3132,7 @@ export function applyRunnerWithRuntime(
         // second epoch counter.
         isNavigationCurrent: (expected) => sessionRuntime.isNavigationCurrent(expected),
         transitionTo: (steps) => sessionRuntime.transitionTo(steps),
+        transitionToActualId: (steps) => sessionRuntime.transitionTo(steps),
       },
       status: {
         forceContextMeasurement: () => status.forceContextMeasurement(),
@@ -3611,7 +3625,8 @@ export function applyRunnerWithRuntime(
       // The /new pre-selection: the SAME backend lifecycle port resolves the
       // Host Workspace. This bridge adds no second Workspace owner and no
       // composition-root registry query.
-      resolveWorkspace: (intent, signal) => backend.sessionLifecycle.resolveWorkspace(intent, signal),
+      resolveWorkspace: (intent, signal, capture) => backend.sessionLifecycle.resolveWorkspace(intent, signal, capture),
+      captureWorkspaceNewConversation: () => backend.sessionLifecycle.captureWorkspaceNewConversation?.(),
       create: async (options) => requireCreated(await backend.sessionLifecycle.create({ ...options, signal })),
       open: async (options) => requireOpened(await backend.sessionLifecycle.open({ ...options, signal })),
     }

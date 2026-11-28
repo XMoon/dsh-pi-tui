@@ -277,6 +277,64 @@ test('same title/cwd/age rows keep distinct ids, and a subagent child never ente
   assert.equal(built.rowsById.has('session-child'), false)
 })
 
+test('known quiet blanks are hidden while proved Needs/Working blanks remain active', () => {
+  const rows = [
+    row('session-current-blank', 7_000, { blank: true }),
+    row('session-other-blank', 6_000, { blank: true }),
+    row('session-needs-blank', 5_000, { blank: true }),
+    row('session-working-blank', 4_000, { blank: true }),
+    row('session-started', 3_000, { blank: false }),
+    row('session-unknown', 2_000),
+  ]
+  const workspaces = [workspace('ws-current', rows.map(entry => entry.id))]
+  const built = view({
+    rows,
+    workspaces,
+    proven: true,
+    currentSessionId: 'session-current-blank',
+    activity: [
+      question('session-needs-blank'),
+      activity('session-working-blank', { running: true, attention: 'none', attentionSourceState: 'known' }),
+      activity('session-started', { attention: 'none', attentionSourceState: 'known' }),
+      activity('session-unknown', { attention: 'none', attentionSourceState: 'known' }),
+    ],
+    eligibility: [live('session-needs-blank')],
+  })
+
+  assert.equal(built.currentWorkspaceId, 'ws-current')
+  assert.deepEqual(built.listIds, [
+    'session-needs-blank', 'session-working-blank', 'session-started', 'session-unknown',
+  ])
+  assert.equal(built.rowsById.has('session-current-blank'), false)
+  assert.equal(built.rowsById.has('session-other-blank'), false)
+  assert.equal(built.groups[0]?.ids.length, 4, 'the visible corpus, not the raw roster, owns the group count')
+
+  const visible = visibleWorkspaceBrowserRows(
+    built,
+    { expanded: new Map(), historyLimit: new Map([['ws-current', 1]]) },
+    'session-current-blank',
+    'session-current-blank',
+  )
+  assert.ok(!visible.some(entry => entry.kind === 'session' && entry.sessionId === 'session-current-blank'),
+    'neither selected nor current can force a quiet blank back into the tree')
+  assert.equal(visible.find(entry => entry.kind === 'folder')?.total, 4,
+    'quiet blanks never consume a Workspace quota/count')
+  assert.deepEqual(visible.filter(entry => entry.kind === 'session').map(entry => entry.sessionId), [
+    'session-needs-blank', 'session-working-blank', 'session-started',
+  ], 'active exceptions bypass history quotas; ordinary history remains watermarked')
+})
+
+test('flat fallback preserves official order after blank admission', () => {
+  const built = view({
+    rows: [
+      row('session-quiet', 5_000, { blank: true }),
+      row('session-started', 4_000, { blank: false }),
+      row('session-unknown', 3_000),
+    ],
+  })
+  assert.deepEqual(built.listIds, ['session-started', 'session-unknown'])
+})
+
 test('the official Workspace membership is proved, ambiguous or unassigned — never guessed', () => {
   const workspaces = [
     workspace('ws-a', ['session-a', 'session-ambiguous']),

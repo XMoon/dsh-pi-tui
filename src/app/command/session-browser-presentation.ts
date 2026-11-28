@@ -14,6 +14,88 @@ export type SessionBrowserRow = SessionSummary & {
   readonly workspace?: SessionBrowserWorkspaceMetadata
 }
 
+export type SessionBrowserPriority = 'needs' | 'working' | 'recent'
+export type SessionBrowserPending =
+  | 'question'
+  | 'approval'
+  | 'plan-review'
+  | 'none'
+  | 'unknown'
+  | 'unavailable'
+  | 'denied'
+  | 'unverified'
+
+export interface SessionBrowserRowClassification {
+  readonly priority: SessionBrowserPriority
+  readonly pending: SessionBrowserPending
+  readonly running: boolean | undefined
+  readonly answerable: boolean
+  readonly source: SessionActivityFact['attentionSourceState']
+  readonly browseEligible: boolean
+  readonly searchEligible: boolean
+}
+
+/** Whether the Client-root eligibility proves THIS Client may answer the
+ * pending candidate the Host reported for `sessionId`. */
+function provedAnswerable(
+  fact: SessionActivityFact,
+  eligibility: readonly SessionBrowserAnswerEligibility[] | undefined,
+): boolean {
+  if (fact.attentionSourceState !== 'known') return false
+  if (fact.attention === 'approval') {
+    return eligibility?.some(entry => entry.sessionId === fact.sessionId && entry.kind === 'approval') === true
+  }
+  if (fact.attention !== 'question' && fact.attention !== 'plan-review') return false
+  if (eligibility?.some(entry => entry.sessionId === fact.sessionId && entry.kind === 'question') === true) return true
+  // A `continued` Question is not a forwarded token: its official proof is the
+  // `active` projection minus the inbox's queued replies, and the answer is
+  // re-authorized by the existing QuestionInteractionPort after the user cuts
+  // into the Session. It still requires THIS composition's answer capability.
+  return eligibility !== undefined && (fact.continuedQuestionCallIds?.length ?? 0) > 0
+}
+
+function classifyPending(
+  activity: SessionActivityFact | undefined,
+  eligibility: readonly SessionBrowserAnswerEligibility[] | undefined,
+): { readonly pending: SessionBrowserPending; readonly answerable: boolean } {
+  if (activity === undefined) return { pending: 'unknown', answerable: false }
+  const { attention, attentionSourceState } = activity
+  if (attention === 'none') {
+    return { pending: attentionSourceState === 'known' ? 'none' : attentionSourceState, answerable: false }
+  }
+  if (attention === 'unknown') {
+    return { pending: attentionSourceState === 'known' ? 'unknown' : attentionSourceState, answerable: false }
+  }
+  const answerable = provedAnswerable(activity, eligibility)
+  return { pending: answerable ? attention : 'unverified', answerable }
+}
+
+/** The ONE pure Session Browser admission/classification policy.
+ *
+ * `activity` must be the exact accepted sample for this row and roster
+ * revision. Search deliberately does not use Activity: every known blank is
+ * excluded from an ordinary query, while Browse retains a proved Needs/Working
+ * row as a real active-session exception. */
+export function classifySessionBrowserRow(
+  row: Pick<SessionBrowserRow, 'id' | 'origin' | 'blank'>,
+  activity: SessionActivityFact | undefined,
+  eligibility: readonly SessionBrowserAnswerEligibility[] | undefined,
+): SessionBrowserRowClassification {
+  const exactActivity = activity?.sessionId === row.id ? activity : undefined
+  const { pending, answerable } = classifyPending(exactActivity, eligibility)
+  const working = exactActivity?.running === true
+  const normal = row.origin !== 'subagent'
+  return {
+    priority: answerable ? 'needs' : working ? 'working' : 'recent',
+    pending,
+    running: exactActivity?.running,
+    answerable,
+    source: exactActivity?.attentionSourceState ?? 'unknown',
+    browseEligible: normal && (row.blank !== true || answerable || working),
+    searchEligible: normal && row.blank !== true,
+  }
+}
+
 export type SessionBrowserListState = 'loading' | 'ready' | 'empty' | 'unavailable' | 'error'
 export type SessionBrowserSearchState = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
 

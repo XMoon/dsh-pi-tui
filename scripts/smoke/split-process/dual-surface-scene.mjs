@@ -118,6 +118,12 @@ export function createDualSurfaceSceneTools(context) {
       `${label} Client A opened Session Y`,
       120_000)
     const sessionY = aOpen.openSessionId
+    // Remote explicit New reuses the first eligible blank in a Workspace. Seed
+    // A's Session with one plain accepted Turn so a later explicit New (B's or
+    // A's own second create) cannot collapse both sides onto the same blank;
+    // the fixture marker bypasses scenario modals.
+    await submitPrompt(clientA, 'c1-scene-seed', `${label} A nonblank seed`)
+    await clientA.waitForScreen('c1-scene-seed answer', `${label} A seed settled`, 120_000)
     const { client: clientB, ready: bReady } = await startC1Client(
       `${label} B`,
       { ...clientEnv, ...bEnv },
@@ -137,6 +143,8 @@ export function createDualSurfaceSceneTools(context) {
       assert(typeof sessionX === 'string' && sessionX !== '',
         `${label} Client B published no Session identity`)
       assert(sessionX !== sessionY, `${label} A and B opened the SAME Session; the scene needs two`)
+      await submitPrompt(clientB, 'c1-scene-seed', `${label} B nonblank seed`)
+      await clientB.waitForScreen('c1-scene-seed answer', `${label} B seed settled`, 120_000)
     }
     assert(typeof sessionY === 'string' && sessionY !== '', `${label} Client A published no Session identity`)
     for (const [side, ready] of [['A', aReady], ['B', bReady]]) {
@@ -158,16 +166,18 @@ export function createDualSurfaceSceneTools(context) {
   const selectPaintedSessionRow = async (client, sessionId, label, timeoutMs = 60_000) => {
     const short = String(sessionId).replace(/^session[-_]/i, '').slice(0, 8)
     const deadline = Date.now() + timeoutMs
+    let lastFrame = []
     while (Date.now() < deadline) {
       const frame = await client.viewport()
+      lastFrame = frame
       const cursorIndex = frame.findIndex(line => line.startsWith('> '))
-      const targetIndex = frame.findIndex(line => line.includes(short))
+      const targetIndex = frame.findIndex(line => line.includes(short) && !/[▸▾]/u.test(line))
       if (cursorIndex >= 0 && targetIndex >= 0 && cursorIndex === targetIndex) return
       if (targetIndex >= 0) client.send(targetIndex < cursorIndex ? '\x1b[A' : '\x1b[B')
       else client.send('\x1b[B')
       await sleep(120)
     }
-    throw new SplitSmokeAssertionError(`${label}: the painted cursor never reached the ${short} row`)
+    throw new SplitSmokeAssertionError(`${label}: the painted cursor never reached the ${short} row; frame=${JSON.stringify(lastFrame)}`)
   }
 
   return {

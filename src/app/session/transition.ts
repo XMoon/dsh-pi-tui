@@ -45,7 +45,7 @@ import type { SessionScope } from './scope.ts'
  *  `ownership: "superseded"` or a published Session identity) instead of only
  *  a formatted message. */
 export type TransitionOutcome<T> =
-  | { ok: true; next: T }
+  | { ok: true; next: T; ownerReplaced?: boolean; degraded?: boolean }
   | { ok: false; message: string; error?: unknown }
 
 /**
@@ -129,8 +129,10 @@ export interface NavigationIntent {
 
 /** The caller-owned transition steps. */
 export interface TransitionSteps<T> {
-  /** The child's PRE-GENERATED session identity (mandatory). */
-  target: { id: string; header?: { cwd?: string } }
+  /** The child's identity when the caller knows it before create. Remote
+   * explicit New intentionally omits it: the Host's returned identity is the
+   * only committed target. */
+  target: { id?: string; header?: { cwd?: string } }
   /** ALL TUI-owned preflight — runs BEFORE the DSH boundary. A throw
    * aborts with zero side effects. */
   prepare?: () => Promise<void> | void
@@ -141,6 +143,9 @@ export interface TransitionSteps<T> {
    * "stop requested, completion unconfirmed" from "stopped, cannot resume".
    * An accepted stop request alone does NOT call this. */
   onOldOwnerQuiesced?: () => void
+  /** Actual-id handoff only: revalidate the original operation at the
+   *  synchronous pre-map commit boundary. Never re-capture a newer scope. */
+  isCommitCurrent?: () => boolean
   /** Create or resume the child. A rejection is NEVER retried: the old
    * session stays current and the caller may retry. */
   create: () => Promise<T>

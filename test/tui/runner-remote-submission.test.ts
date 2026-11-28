@@ -40,6 +40,7 @@ import { closeSync, ftruncateSync, mkdirSync, openSync, readFileSync, writeFileS
 import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { MessageId } from '@deepseek-ai/dsh-llm'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
 import { createInputMemoryRecall } from '../../src/client/history/memory-recall.ts'
 import { TuiApp } from '../../src/tui-app.ts'
@@ -1138,7 +1139,14 @@ test('a submit inside a session transition is refused, keeps the draft and dispa
   const presetId = 'm3-4-pr3-preset'
   const host = await mountHost(life, presetId)
   await host.harness.create(SessionId('pr3-transition-a'), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
-  await host.harness.create(SessionId('pr3-transition-b'), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const targetAgent = await host.harness.create(SessionId('pr3-transition-b'), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  // This proof is about the submission fence, not blank-session visibility:
+  // give B a real completed Turn so ordinary Browser search may list it.
+  targetAgent.followup({
+    id: MessageId('pr3-transition-b-seed'), role: 'user',
+    content: [{ type: 'text', text: 'target is no longer blank' }], source: { kind: 'user' },
+  })
+  await targetAgent.whenIdle()
   const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: 'pr3-transition-a', host })
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
   const notices = recordNotices(life, fixture)
@@ -1196,16 +1204,16 @@ test('a submit inside a session transition is refused, keeps the draft and dispa
   await waitFor('the transition fence notice', () => notices.includes(TRANSITION_FENCE_NOTICE), 10_000)
   assert.equal(app.getDraft(), 'fenced transition draft zeta',
     'the refused submit keeps the user draft in the editor')
-  assert.equal(hostUserRows(fixture, 'pr3-transition-a').length, 0,
+  assert.equal(hostUserRows(fixture, 'pr3-transition-a').some(row => row.includes('fenced transition draft zeta')), false,
     'a fenced submit dispatches nothing into the retired session')
-  assert.equal(hostUserRows(fixture, 'pr3-transition-b').length, 0,
+  assert.equal(hostUserRows(fixture, 'pr3-transition-b').some(row => row.includes('fenced transition draft zeta')), false,
     'a fenced submit dispatches nothing into the incoming session')
   releaseHydration?.()
   await waitFor('the switch transaction reports completion', () => switchReported(host, 'pr3-transition-a'), 20_000)
   await waitFor('the post-transition paint settled', () => fixture.vt.getViewport().join('').includes('pr3-transition-b'), 20_000)
-  assert.equal(hostUserRows(fixture, 'pr3-transition-b').length, 0,
+  assert.equal(hostUserRows(fixture, 'pr3-transition-b').some(row => row.includes('fenced transition draft zeta')), false,
     'a fenced submit is never dispatched later, once the transaction settles')
-  assert.equal(hostUserRows(fixture, 'pr3-transition-a').length, 0,
+  assert.equal(hostUserRows(fixture, 'pr3-transition-a').some(row => row.includes('fenced transition draft zeta')), false,
     'the retired session stays untouched after the settle')
   assert.equal([...recallOf(fixture)].includes('fenced transition draft zeta'), false,
     'a fenced/refused submit never enters the process recall')

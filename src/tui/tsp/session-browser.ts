@@ -1,13 +1,15 @@
 /** The internal native TSP Session Browser: read-only panel state and admission. */
 import { View, span, ui, type Key, type Node, type ScrollTo, type TspEvent } from '@stencil-hq/tern'
 import type { PickerAction, PickerGroup, PickerItem, PickerProps } from '@stencil-hq/tern'
-import type {
-  SessionBrowserPanelHandle,
-  SessionBrowserPanelRequest,
-  SessionBrowserPresentation,
-  SessionBrowserReadSnapshot,
-  SessionBrowserRow,
-  SessionBrowserSearchResult,
+import {
+  classifySessionBrowserRow,
+  type SessionBrowserAnswerEligibility,
+  type SessionBrowserPanelHandle,
+  type SessionBrowserPanelRequest,
+  type SessionBrowserPresentation,
+  type SessionBrowserReadSnapshot,
+  type SessionBrowserRow,
+  type SessionBrowserSearchResult,
 } from '../../app/command/session-browser-presentation.ts'
 import { sanitizeSessionSearchInput } from '../../domain/session/browser.ts'
 import {
@@ -153,6 +155,16 @@ function workspaceModel(panel: SessionBrowserPanel) {
   })
 }
 
+function eligibleBrowseRows(panel: SessionBrowserPanel): readonly SessionBrowserRow[] {
+  const snapshot = panel.snapshot
+  const activity = snapshot.workspace?.activityRosterRevision === snapshot.listRevision
+    ? snapshot.workspace.activity
+    : undefined
+  const activityById = new Map((activity ?? []).map(fact => [fact.sessionId, fact]))
+  return snapshot.rows.filter(row =>
+    classifySessionBrowserRow(row, activityById.get(row.id), snapshot.workspace?.answerEligibility).browseEligible)
+}
+
 function priorityWorkspaceId(panel: SessionBrowserPanel): string | undefined {
   const model = workspaceModel(panel)
   return model?.nextCreateWorkspaceId ?? model?.currentWorkspaceId
@@ -160,11 +172,11 @@ function priorityWorkspaceId(panel: SessionBrowserPanel): string | undefined {
 
 function browseRows(panel: SessionBrowserPanel): readonly { readonly row: SessionBrowserRow; readonly depth: number }[] {
   if (panel.snapshot.workspace === undefined) {
-    return panel.snapshot.rows.map(row => ({ row, depth: 0 }))
+    return eligibleBrowseRows(panel).map(row => ({ row, depth: 0 }))
   }
   const model = workspaceModel(panel)
   if (model === undefined || !model.workspaceBaselineProven) {
-    return panel.snapshot.rows.map(row => ({ row, depth: 0 }))
+    return eligibleBrowseRows(panel).map(row => ({ row, depth: 0 }))
   }
   const visible = visibleWorkspaceBrowserRows(model, {
     expanded: panel.expandedWorkspaces,
@@ -507,7 +519,9 @@ function emptyText(panel: SessionBrowserPanel): string {
   if (snapshot.listState === 'loading') return 'Loading persisted sessions…'
   if (snapshot.listState === 'unavailable') return 'No session listing capability is available.'
   if (snapshot.listState === 'error') return 'The session list could not be loaded.'
-  if (!queryMode(panel)) return snapshot.listState === 'empty' ? 'No persisted sessions are available.' : 'No sessions are available.'
+  if (!queryMode(panel)) return snapshot.listState === 'empty'
+    ? 'No persisted sessions are available.'
+    : eligibleBrowseRows(panel).length === 0 ? 'No visible sessions' : 'No sessions are available.'
   if (snapshot.searchState === 'loading') return 'Searching…'
   if (snapshot.searchState === 'unavailable') return 'No metadata matches; content search is unavailable.'
   if (snapshot.searchState === 'error') return 'No metadata matches; content search failed.'
@@ -559,7 +573,7 @@ function showMoreItem(group: { readonly workspaceId: string; readonly remaining:
 
 function visibleBrowseItems(panel: SessionBrowserPanel): PickerItem[] {
   const model = workspaceModel(panel)
-  if (model === undefined || !model.workspaceBaselineProven) return panel.snapshot.rows.map(row => rowItem(row, 0))
+  if (model === undefined || !model.workspaceBaselineProven) return eligibleBrowseRows(panel).map(row => rowItem(row, 0))
   const display = {
     expanded: new Map([...panel.expandedWorkspaces].map(([id, value]) => [id, value] as const)),
     historyLimit: panel.historyLimits,
@@ -577,7 +591,7 @@ function visibleBrowseItems(panel: SessionBrowserPanel): PickerItem[] {
 }
 function pickerLayerItems(panel: SessionBrowserPanel): readonly PickerItem[] {
   if (panel.snapshot.workspace?.baselineProven === true) return visibleBrowseItems(panel)
-  return panel.snapshot.rows.map(row => rowItem(row, 0))
+  return eligibleBrowseRows(panel).map(row => rowItem(row, 0))
 }
 
 function pickerLayer(panel: SessionBrowserPanel, nativeKv: boolean): Node {

@@ -296,6 +296,9 @@ export class DirectSessionLifecycle implements SessionLifecycle {
   }
 
   async create(request: CreateSessionRequest): Promise<CreateResult> {
+    if (request.capture !== undefined) {
+      return currentCreateRejected('session/workspace-new-conversation-unsupported', 'workspace new-conversation reuse is Remote-only')
+    }
     if (Boolean(request.signal?.aborted)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
     // The Workspace is resolved BEFORE any Agent work: its canonical Host path
     // is the durable Session cwd and an unknown identity never reaches

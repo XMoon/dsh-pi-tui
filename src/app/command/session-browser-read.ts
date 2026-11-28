@@ -11,20 +11,21 @@ import type {
   SessionReaderObservableList,
 } from '../../runtime/session-reader-port.ts'
 import { sanitizeSessionSearchInput, sessionRowMatchesQuery } from '../../domain/session/browser.ts'
-import type {
-  SessionBrowserAnswerEligibility,
-  SessionBrowserListState,
-  SessionBrowserPanelHandle,
-  SessionBrowserReadSnapshot,
-  SessionBrowserResumeIntent,
-  SessionBrowserRow,
-  SessionBrowserSearchResult,
-  SessionBrowserSearchState,
-  SessionBrowserPresentation,
-  SessionBrowserSubject,
-  SessionBrowserWorkspaceSnapshot,
-  SessionInspectorSelection,
-  SessionInspectorSnapshot,
+import {
+  classifySessionBrowserRow,
+  type SessionBrowserAnswerEligibility,
+  type SessionBrowserListState,
+  type SessionBrowserPanelHandle,
+  type SessionBrowserReadSnapshot,
+  type SessionBrowserResumeIntent,
+  type SessionBrowserRow,
+  type SessionBrowserSearchResult,
+  type SessionBrowserSearchState,
+  type SessionBrowserPresentation,
+  type SessionBrowserSubject,
+  type SessionBrowserWorkspaceSnapshot,
+  type SessionInspectorSelection,
+  type SessionInspectorSnapshot,
 } from './session-browser-presentation.ts'
 import type {
   ActivityObservation,
@@ -251,6 +252,12 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     }
   }
 
+  const browseEligibleRows = (panel: ActiveRead): SessionBrowserRow[] => {
+    const activityById = new Map((activityProvenanceOf(panel).activity ?? []).map(fact => [fact.sessionId, fact]))
+    return panel.rosterRows.filter(row =>
+      classifySessionBrowserRow(row, activityById.get(row.id), panel.answerEligibility).browseEligible)
+  }
+
   const workspaceSnapshotOf = (panel: ActiveRead): SessionBrowserWorkspaceSnapshot | undefined => {
     if (options.sessionWorkspaceFacts === undefined) return undefined
     return {
@@ -356,7 +363,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
    *  retained query (PiTUI keeps the query after Esc returns to Browse). */
   const inspectorSelectionValid = (panel: ActiveRead, selection: SessionInspectorSelection): boolean => {
     if (!panel.rosterRows.some(row => row.id === selection.sessionId)) return false
-    if (selection.origin === 'browse') return true
+    if (selection.origin === 'browse') return browseEligibleRows(panel).some(row => row.id === selection.sessionId)
     return panel.searchResults.some(result => result.row.id === selection.sessionId)
   }
 
@@ -647,8 +654,11 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     return workspace === undefined ? row : { ...row, workspace }
   })
 
+  const searchEligibleRows = (rows: readonly SessionBrowserRow[]): SessionBrowserRow[] =>
+    rows.filter(row => classifySessionBrowserRow(row, undefined, undefined).searchEligible)
+
   const localResults = (panel: ActiveRead): SessionBrowserSearchResult[] =>
-    panel.rows
+    searchEligibleRows(panel.rows)
       .filter((row) => sessionRowMatchesQuery(row, panel.query))
       .map((row) => ({ row, source: 'Metadata' }))
 
@@ -657,9 +667,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     query: string,
     page: SessionContentSearchPage,
   ): SessionBrowserSearchResult[] => {
-    const metadataRows = rows.filter((row) => sessionRowMatchesQuery(row, query))
+    const eligible = searchEligibleRows(rows)
+    const metadataRows = eligible.filter((row) => sessionRowMatchesQuery(row, query))
     const metadataIds = new Set(metadataRows.map((row) => row.id))
-    const rowById = new Map(rows.map((row) => [row.id, row]))
+    const rowById = new Map(eligible.map((row) => [row.id, row]))
     const contentById = new Map<string, string>()
     for (const item of page.items) {
       if (rowById.has(item.sessionId) && !contentById.has(item.sessionId)) {
@@ -679,6 +690,13 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     }
     return results
   }
+
+  const currentSearchResults = (panel: ActiveRead): SessionBrowserSearchResult[] =>
+    panel.query === ''
+      ? []
+      : panel.searchState === 'ready' && panel.searchPage !== undefined
+        ? mergeSearchPage(panel.rows, panel.query, panel.searchPage)
+        : localResults(panel)
 
   const applyWorkspaceFrame = (panel: ActiveRead, frame: WorkspaceFactsFrame): void => {
     switch (frame.type) {
@@ -717,11 +735,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.workspaceError = undefined
     panel.workspaceRevision += 1
     panel.rows = rowsWithWorkspaceMetadata(panel, panel.rosterRows)
-    if (panel.query !== '') {
-      acceptSearchResults(panel, panel.searchState === 'ready' && panel.searchPage !== undefined
-        ? mergeSearchPage(panel.rows, panel.query, panel.searchPage)
-        : localResults(panel))
-    }
+    if (panel.query !== '') acceptSearchResults(panel, currentSearchResults(panel))
     publish(panel)
   }
 
@@ -733,11 +747,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.workspaceError = message
     panel.workspaceRevision += 1
     panel.rows = rowsWithWorkspaceMetadata(panel, panel.rosterRows)
-    if (panel.query !== '') {
-      acceptSearchResults(panel, panel.searchState === 'ready' && panel.searchPage !== undefined
-        ? mergeSearchPage(panel.rows, panel.query, panel.searchPage)
-        : localResults(panel))
-    }
+    if (panel.query !== '') acceptSearchResults(panel, currentSearchResults(panel))
     publish(panel)
   }
 
@@ -916,12 +926,19 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
    *  Activity (running/pending) is NOT part of it: it travels the incremental
    *  observation channel, so a status update never bumps the roster revision,
    *  restarts projections or re-runs a content search. */
+  const rowMetadataSemanticsOf = (row: SessionBrowserRow): string => [
+    row.id, row.updatedAt, row.title ?? '', row.preset ?? '', row.presetKnown === true ? '1' : '0', row.cwd ?? '',
+    row.formatStatus ?? '', row.parentSession ?? '', row.origin ?? '',
+  ].join('\u0000')
+
+  const rosterMetadataSemanticsOf = (rows: readonly SessionBrowserRow[]): string => rows
+    .filter((row) => row.origin !== 'subagent')
+    .map(rowMetadataSemanticsOf)
+    .join('\u0001')
+
   const rosterSemanticsOf = (rows: readonly SessionBrowserRow[]): string => rows
     .filter((row) => row.origin !== 'subagent')
-    .map((row) => [
-      row.id, row.updatedAt, row.title ?? '', row.preset ?? '', row.presetKnown === true ? '1' : '0', row.cwd ?? '',
-      row.formatStatus ?? '', row.parentSession ?? '', row.origin ?? '',
-    ].join('\u0000'))
+    .map((row) => `${rowMetadataSemanticsOf(row)}\u0000${row.blank === undefined ? 'unknown' : row.blank ? 'true' : 'false'}`)
     .join('\u0001')
 
   /** Accept ONE official roster as this panel's ONLY listing: the subagent
@@ -931,7 +948,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
   const acceptRoster = (
     panel: ActiveRead,
     listed: readonly SessionBrowserRow[],
-  ): { readonly listedRows: readonly SessionBrowserRow[]; readonly changed: boolean } => {
+  ): { readonly listedRows: readonly SessionBrowserRow[]; readonly changed: boolean; readonly metadataChanged: boolean } => {
     // The official push row carries identity/running/cwd, but its projection
     // enrichment may be absent. Keep the accepted enriched title/preset for an
     // unchanged id: a status-only notification must never erase a label the
@@ -955,24 +972,20 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     // The FIRST accepted roster is always a real revision, including a truly
     // empty one (which must reach the distinct `empty` list state).
     const changed = panel.listRevision === 0 || semantics !== panel.rosterSemantics
+    const metadataChanged = panel.listRevision === 0
+      || rosterMetadataSemanticsOf(listedRows) !== rosterMetadataSemanticsOf(panel.rosterRows)
     panel.rosterSemantics = semantics
     panel.rosterRows = listedRows.filter((row) => row.origin !== 'subagent')
     panel.rows = rowsWithWorkspaceMetadata(panel, panel.rosterRows)
     panel.listState = panel.rows.length === 0 ? 'empty' : 'ready'
     panel.listError = undefined
     panel.refreshError = undefined
-    if (!changed) return { listedRows, changed }
+    if (!changed) return { listedRows, changed, metadataChanged }
     panel.listRevision += 1
-    panel.projectionGeneration += 1
-    // A presented search RESULT is a claim about one roster row: when the
-    // accepted roster no longer lists that Session, the result must disappear
-    // in the SAME publication. Waiting for the refreshed Host search (or a
-    // projection batch, or a search that never re-runs after an unavailable/
-    // error state) would leave a removed Session selectable and peekable.
-    if (panel.searchResults.length > 0) {
-      const live = new Set(panel.rows.map((row) => row.id))
-      acceptSearchResults(panel, panel.searchResults.filter((result) => live.has(result.row.id)))
-    }
+    if (metadataChanged) panel.projectionGeneration += 1
+    // Re-derive from the CURRENT rows and accepted Host page. A blank-only
+    // change prunes metadata/content hits without another search or projection.
+    if (panel.query !== '') acceptSearchResults(panel, currentSearchResults(panel))
     // A removed target can never keep a selected exact read alive. Clear it at
     // THIS acceptance boundary BEFORE the Activity observation can synchronously
     // publish, never waiting for the presenter's next frame.
@@ -981,7 +994,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     // BEFORE the presenter is notified; the observation publishes its
     // provisional running facts synchronously inside this call.
     panel.activityHandle?.setRoster(panel.rosterRows, panel.listRevision, panel.subject.currentSessionId)
-    return { listedRows, changed }
+    return { listedRows, changed, metadataChanged }
   }
 
   /** Re-arm the ONE pull-refresh timer. Only a COMPLETED read re-arms it, so
@@ -1023,14 +1036,13 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           scheduleRefresh(panel)
           return
         }
-        const { changed } = acceptRoster(panel, listed as readonly SessionBrowserRow[])
+        const { changed, metadataChanged } = acceptRoster(panel, listed as readonly SessionBrowserRow[])
         publish(panel)
         if (!isActive(panel)) return
-        if (changed) {
-          // A real roster delta owns its ONE enrichment chain (and its existing
-          // search policy): never start a second chain beside it.
+        if (metadataChanged) {
+          // A real metadata delta owns its ONE enrichment/search chain.
           applyRosterChange(panel, true)
-        } else if (panel.listRevision === revisionAtStart) {
+        } else if (!changed && panel.listRevision === revisionAtStart) {
           // An unchanged explicit/pull refresh still re-reads the accepted
           // metadata: the raw list can be unchanged while a projection (a
           // preset selected by another Client) moved. It retires any unfinished
@@ -1052,11 +1064,11 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     })
   }
 
-  /** The ONE post-accept work a SEMANTIC roster change triggers: enriched
-   *  labels and the content search of the current query generation. An
-   *  unchanged official roster does none of it. */
-  const applyRosterChange = (panel: ActiveRead, changed: boolean): void => {
-    if (!changed || !isActive(panel)) return
+  /** The ONE post-accept work a METADATA roster change triggers: enriched
+   *  labels and the content search of the current query generation. A
+   *  blank-only visibility change does none of it. */
+  const applyRosterChange = (panel: ActiveRead, metadataChanged: boolean): void => {
+    if (!metadataChanged || !isActive(panel)) return
     startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
     if (panel.query !== '' && panel.queryController !== undefined && panel.searchState === 'ready') {
       startSearch(panel, panel.queryGeneration)
@@ -1225,11 +1237,11 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     // later arrival of the same snapshot (the initial read settling after a
     // ready notification arrived first) only re-accepts enrichment.
     const firstAcceptance = panel.listRevision === 0
-    const { listedRows, changed } = acceptRoster(panel, listed)
+    const { listedRows, metadataChanged } = acceptRoster(panel, listed)
     if (!firstAcceptance) {
       publish(panel)
       if (!isActive(panel)) return
-      applyRosterChange(panel, changed)
+      applyRosterChange(panel, metadataChanged)
       return
     }
     const directMatch = panel.openOptions.directMatch
@@ -1514,7 +1526,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           ...(options.onListDirectory === undefined ? {} : { onListDirectory: options.onListDirectory }),
           onResumeIntent: (intent) => {
             if (intent.source === 'direct') return
-            requestResume(panel, intent, panel.rows)
+            requestResume(panel, intent, [
+              ...browseEligibleRows(panel),
+              ...panel.searchResults.map(result => result.row),
+            ])
           },
           onInspectorSelection: (sessionId) => { reportInspectorSelection(panel, sessionId) },
           onClose: () => retire(panel, false),

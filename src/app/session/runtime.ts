@@ -19,6 +19,7 @@ import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { WriteOutcome } from '../../runtime/session-writer-port.ts'
 import {
   LifecycleError,
+  clientOwnerOf,
   requireCreated,
   requireOpened,
   WorkspaceSelectionError,
@@ -29,7 +30,7 @@ import {
 } from '../../runtime/session-lifecycle-port.ts'
 import { createWorkspaceNextIntentOwner, type WorkspaceNextIntentCapture, type WorkspaceNextIntentOwner } from './workspace-next-intent.ts'
 import { isRewindIdentityCurrent, type RewindNavigationIdentity } from './navigation-identity.ts'
-import { runFirstSessionCommit, runForkCommit, runOrdinaryCommit, runResumeCommit } from './commit-order.ts'
+import { publishFirstSessionOwner, runFirstSessionCommit, runForkCommit, runOrdinaryCommit, runResumeCommit } from './commit-order.ts'
 import type {
   NavigationStopReceipt,
   SessionOwnerAccess,
@@ -48,6 +49,13 @@ import {
   type TransitionOutcome,
   type TransitionSteps,
 } from './transition.ts'
+
+/** Operation-local evidence sink for the post-publication readiness seams.
+ * The runtime owns the transition; the runner reports only what its real
+ * hydrate/catalog seams actually settled. Nothing here polls or retries. */
+export interface SessionReadinessSink {
+  notReady(reason: string): void
+}
 
 /** The runner-supplied surface operations the runtime drives. */
 export interface SessionRuntimeSurface {
@@ -70,8 +78,8 @@ export interface SessionRuntimeSurface {
   setCompletionOwner(identity: string | undefined): void
   // Post-commit surface work. These receive the opaque owner; the runner
   // resolves its own Direct attachment inside the provider.
-  initLiveSession(owner: SessionOwnerRef): Promise<void>
-  refreshLiveCatalog(owner: SessionOwnerRef): Promise<void>
+  initLiveSession(owner: SessionOwnerRef, readiness?: SessionReadinessSink): Promise<void>
+  refreshLiveCatalog(owner: SessionOwnerRef, readiness?: SessionReadinessSink): Promise<void>
   /** Report a committed switch (the runner logs it and adds its own Direct
    *  session detail). */
   reportSwitch(from: string | undefined, to: SessionOwnerRef): void
@@ -551,6 +559,17 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   const withNavigation = <T>(intent: NavigationIntent, task: () => Promise<T> | T): Promise<T> =>
     runNavigationGate(() => runNavigationTransition(intent, task))
 
+  /** The ONE first-owner publication body shared by ordinary first-session
+   *  creation and actual-id explicit New. The caller owns the later C-shape
+   *  quiesce/bump/init ordering. */
+  const publishFirstOwner = (childOwner: SessionOwnerRef, sessionId: string): string | undefined => {
+    core.setCurrentOwner(childOwner, sessionId)
+    deps.surface.bindInputRecallScope(sessionId)
+    deps.surface.beginInputHistoryScope(sessionId)
+    deps.surface.retireStaleHistorySeat()
+    return deps.owners.completionIdentity(childOwner)
+  }
+
   /**
    * Run one ordinary session transition/switch: quiesce (only when the backend
    * owns the replaced owner's Host lifecycle) the old owner, run the caller's
@@ -569,7 +588,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     const stopReceipt = navigationReceipt
     core.bumpNavigationEpoch()
     const from = core.currentSessionId()
-    const opening = deps.surface.beginOpening(steps.target.id)
+    const actualId = steps.target.id === undefined
+    let opening = steps.target.id === undefined ? undefined : deps.surface.beginOpening(steps.target.id)
+    let ownerReplaced = false
     // The OLD owner is captured at ADMISSION: the post-commit retirement must
     // retire exactly the owner this transition replaced.
     const oldOwner = core.owner()
@@ -590,8 +611,13 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     // fire-and-forget retirement).
     let preCommitRelease: Promise<void> | undefined
     let transitionCommitted = false
+    let postCommitFailed = false
+    const readinessFailures: string[] = []
+    const readinessSink: SessionReadinessSink = {
+      notReady: (reason) => { readinessFailures.push(reason) },
+    }
     try {
-      return await runTransitionTo<T>({
+      const outcome = await runTransitionTo<T>({
         quiesceOld: async () => {
           // A detach-client backend keeps the replaced Host Turn alive: the
           // admitted Client writers already drained in the barrier, the replaced
@@ -640,14 +666,64 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           if (idle === false) steps.onOldOwnerQuiesced?.()
         },
         commit: (next) => {
-          // Map the NEW owner BEFORE the commit section can throw: the commit
-          // ORDER stays fixed by `runOrdinaryCommit` (the generation reset runs
-          // BEFORE the new owner is published, so it observes the OLD owner),
-          // but a pre-publication seam failure must be able to release the
-          // acquired NEW owner exactly once instead of leaking its reference.
+          const nextHandle = next as SessionHandle
+          const commitCurrent = (): boolean => !deps.lifecycleSignal.aborted
+            && !deps.surface.isSurfaceDisposed()
+            && (steps.isCommitCurrent?.() ?? true)
+          if (actualId && !commitCurrent()) {
+            clientOwnerOf(nextHandle)?.release()
+            throw new LifecycleError('superseded', 'superseded',
+              `Session "${nextHandle.session.id}" was created, but the local surface was superseded — do not retry creation`,
+              nextHandle.session.id)
+          }
+          // Map the NEW owner ONCE. For actual-id New this happens only after
+          // the original operation still owns the captured scope/lifetime.
           const nextOwner = deps.owners.fromHandle(next as SessionHandle)
-          if (nextOwner === undefined) throw new Error('ordinary transition published a handle without an owned Session generation')
+          if (nextOwner === undefined) throw new Error('transition published a handle without an owned Session generation')
+          if (actualId && !commitCurrent()) {
+            if (nextOwner === oldOwner) {
+              // `fromHandle` transferred the wrapper to the still-current
+              // owner. Its normal retirement/exit path owns that reference.
+              throw new LifecycleError('superseded', 'superseded',
+                `Session "${nextHandle.session.id}" was created, but the local surface was superseded — do not retry creation`,
+                nextHandle.session.id)
+            }
+            preCommitRelease = deps.retirement.retire(nextOwner, 'transition').then(report => {
+              for (const failure of report.failures) {
+                deps.diag.error('pre-commit NEW owner release failed', {
+                  session: nextHandle.session.id,
+                  phase: failure.phase,
+                  error: failure.error,
+                })
+              }
+            })
+            throw new LifecycleError('superseded', 'superseded',
+              `Session "${nextHandle.session.id}" was created, but the local surface was superseded — do not retry creation`,
+              nextHandle.session.id)
+          }
+          const nextSessionId = deps.owners.sessionId(nextOwner)
+          committedOwner = nextOwner
+          committedSessionId = nextSessionId
+          if (oldOwner !== undefined && nextOwner === oldOwner) {
+            // Exact-binding reuse is not a replacement. Actual-id New restores
+            // deferred recalls; the existing fixed-target no-op keeps its
+            // historical committed-away settlement.
+            deps.surface.settlePendingQueueRecalls(!actualId)
+            transitionCommitted = true
+            return
+          }
+          ownerReplaced = oldOwner !== undefined
           try {
+            if (actualId) opening = deps.surface.beginOpening(nextSessionId)
+            if (actualId && oldOwner === undefined) {
+              publishFirstSessionOwner({
+                publishOwner: () => publishFirstOwner(nextOwner, nextSessionId),
+                setCompletionOwner: deps.surface.setCompletionOwner,
+              }, nextHandle)
+              transitionCommitted = true
+              core.bumpGeneration()
+              return
+            }
             runOrdinaryCommit({
               isSurfaceDisposed: deps.surface.isSurfaceDisposed,
               settlePendingQueueRecalls: deps.surface.settlePendingQueueRecalls,
@@ -660,7 +736,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                 // seamless (plain assignments only), so `runOrdinaryCommit`'s
                 // recall commit directly follows the true publication.
                 const identity = deps.owners.completionIdentity(nextOwner)
-                const sessionId = deps.owners.sessionId(nextOwner)
+                const sessionId = nextSessionId
                 committedOwner = nextOwner
                 committedSessionId = sessionId
                 // PR3-B §7.3 (F1): the active-draft drop rides the
@@ -726,7 +802,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                   // metadata throw — a re-read could reject this cleanup and
                   // mask the transition's real error.
                   deps.diag.error('pre-commit NEW owner release failed', {
-                    session: steps.target.id,
+                    session: nextSessionId,
                     phase: failure.phase,
                     error: failure.error,
                   })
@@ -740,6 +816,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               // retirement: the committed child stands, never a rollback
               // and never a skipped OLD release. The recalls were already
               // settled committed by the commit section.
+              transitionCommitted = true
               deps.diag.error('transition commit seam failed after publication (child committed)', {
                 to: committedSessionId,
                 error: safeErrorMessage(error),
@@ -754,6 +831,28 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // fast otherwise).
         const nextOwner = committedOwner
         if (nextOwner === undefined) throw new Error('committed transition child has no owned Session generation')
+        if (nextOwner === oldOwner) {
+          if (actualId) {
+            try {
+              await deps.surface.refreshLiveCatalog(nextOwner, readinessSink)
+            } catch (error) {
+              postCommitFailed = true
+              deps.diag.error('same-binding New catalog refresh failed', {
+                to: committedSessionId,
+                error: safeErrorMessage(error),
+              })
+            }
+            if (readinessFailures.length > 0) {
+              postCommitFailed = true
+              deps.diag.error('same-binding New readiness not confirmed', {
+                to: committedSessionId,
+                failures: readinessFailures,
+              })
+            }
+          }
+          return
+        }
+        const firstActualOwner = actualId && oldOwner === undefined
         // D2 durability checkpoint — the FIRST post-commit step, before the OLD
         // owner's retirement and before the abort-aware child quiesce. The
         // order is load-bearing: DSH's close drains what was appended but does
@@ -768,25 +867,27 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // it). A failure does NOT roll the child back or fail the transition:
         // it is recorded here, and the surface warns when it is still reachable.
         let committedDurabilityFailure: string | undefined
-        try {
-          await deps.retirement.flush(nextOwner)
-        } catch (error) {
-          // The failure is fixed HERE, before the next await: the OLD owner's
-          // retirement and the child quiesce are unbounded, and the exit
-          // watchdog may end the process before a later summary line. The
-          // diagnostic sink writes synchronously (`writeSync`), so the exact
-          // session id and the original error are captured in this same stack.
-          committedDurabilityFailure = safeErrorMessage(error)
-          deps.diag.error('committed session durability checkpoint failed', {
-            session: committedSessionId,
-            error: committedDurabilityFailure,
-          })
-          retired.push(`committed child flush: ${committedDurabilityFailure}`)
-          // Single user notice, also at the failure itself. A synchronous
-          // notify may re-enter the application (and even begin an exit), so
-          // nothing below may assume the surface stayed live.
-          if (!deps.surface.isSurfaceDisposed() && committedSessionId !== undefined) {
-            deps.surface.warnCommittedDurability(committedSessionId, committedDurabilityFailure)
+        if (!firstActualOwner) {
+          try {
+            await deps.retirement.flush(nextOwner)
+          } catch (error) {
+            // The failure is fixed HERE, before the next await: the OLD owner's
+            // retirement and the child quiesce are unbounded, and the exit
+            // watchdog may end the process before a later summary line. The
+            // diagnostic sink writes synchronously (`writeSync`), so the exact
+            // session id and the original error are captured in this same stack.
+            committedDurabilityFailure = safeErrorMessage(error)
+            deps.diag.error('committed session durability checkpoint failed', {
+              session: committedSessionId,
+              error: committedDurabilityFailure,
+            })
+            retired.push(`committed child flush: ${committedDurabilityFailure}`)
+            // Single user notice, also at the failure itself. A synchronous
+            // notify may re-enter the application (and even begin an exit), so
+            // nothing below may assume the surface stayed live.
+            if (!deps.surface.isSurfaceDisposed() && committedSessionId !== undefined) {
+              deps.surface.warnCommittedDurability(committedSessionId, committedDurabilityFailure)
+            }
           }
         }
         // Retire the OLD owner through the retirement port (which owns the
@@ -862,7 +963,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // arrives — so it must not wait for that child's idle. The lifecycle
           // check still runs: an exit during this phase owns the same
           // skip-the-surface-init behavior on BOTH backends.
-          const aborted = deps.retirement.navigationKind === 'detach-client'
+          const aborted = firstActualOwner || deps.retirement.navigationKind === 'detach-client'
             ? deps.lifecycleSignal.aborted
             : (await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)) === true
           if (aborted) {
@@ -876,6 +977,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
             // must still reach the diagnostics instead of dying with the early
             // return. An aborted lifecycle never proves a failure benign.
             if (retired.length > 0) {
+              postCommitFailed = true
               deps.diag.error('transition retire failed (child committed)', {
                 to: committedSessionId,
                 failures: retired,
@@ -887,7 +989,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           retired.push(`child whenIdle: ${safeErrorMessage(error)}`)
         }
         try {
-          await deps.surface.initLiveSession(nextOwner)
+          await deps.surface.initLiveSession(nextOwner, readinessSink)
         } catch (error) {
           retired.push(`surface rebuild: ${safeErrorMessage(error)}`)
         }
@@ -897,12 +999,16 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // failed attempt still returns a successful switch — the coordinator
         // warns and the transition commands keep re-validating).
         try {
-          await deps.surface.refreshLiveCatalog(nextOwner)
+          await deps.surface.refreshLiveCatalog(nextOwner, readinessSink)
         } catch (error) {
           retired.push(`catalog refresh: ${safeErrorMessage(error)}`)
         }
-        deps.surface.clearOpening(opening)
+        if (opening !== undefined) deps.surface.clearOpening(opening)
+        if (readinessFailures.length > 0) {
+          retired.push(...readinessFailures)
+        }
         if (retired.length > 0) {
+          postCommitFailed = true
           deps.diag.error('transition retire failed (child committed)', {
             to: committedSessionId,
             failures: retired,
@@ -911,13 +1017,14 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // The checkpoint failure (if any) was already diagnosed and notified at
         // the failure itself; the switch DID commit, so it is never reported as
         // a failed transition.
-        deps.surface.reportSwitch(from, nextOwner)
+        if (!firstActualOwner) deps.surface.reportSwitch(from, nextOwner)
       },
       recordFailure: (phase, error) => {
         deps.diag.error(`transition ${phase} failed`, { from, error: safeErrorMessage(error) })
-        deps.surface.clearOpening(opening)
+        if (opening !== undefined) deps.surface.clearOpening(opening)
       },
       }, steps)
+      return outcome.ok ? { ...outcome, ownerReplaced, degraded: postCommitFailed } : outcome
     } catch (error) {
       // The commit section started the exactly-once release of an acquired
       // but never-published NEW owner: AWAIT it before this transition
@@ -929,7 +1036,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       throw error
     } finally {
       if (!transitionCommitted) deps.surface.settlePendingQueueRecalls(false)
-      deps.surface.clearOpening(opening)
+      if (opening !== undefined) deps.surface.clearOpening(opening)
     }
   }
 
@@ -1597,24 +1704,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     const childOwner = deps.owners.fromHandle(handle)
     if (childOwner === undefined) throw new Error('first-session create published a handle without an owned Session generation')
     return runFirstSessionCommit({
-      publishOwner: () => {
-        core.setCurrentOwner(childOwner, deps.owners.sessionId(childOwner))
-        deps.surface.bindInputRecallScope(deps.owners.sessionId(childOwner))
-        // The editor-recall scope follows the same synchronous publication:
-        // the deferred first session's hydration reseeds ↕ recall afterwards,
-        // and the sessionless submission that CREATED it was accepted in the
-        // sessionless pool BEFORE this create — the seam ADOPTS those pending
-        // entries instead of clearing them, because their row is written under
-        // THIS Session and can therefore not be in the snapshot yet.
-        deps.surface.beginInputHistoryScope(deps.owners.sessionId(childOwner))
-        // Phase 3B / B3-B: the first published Session kills a sessionless
-        // History seat even though no id string moved (the capture's
-        // subject-undefined branch fails the moment an owner exists). The
-        // generation bump below would also catch it; retiring here keeps the
-        // commit's own first frame clean.
-        deps.surface.retireStaleHistorySeat()
-        return deps.owners.completionIdentity(childOwner)
-      },
+      publishOwner: () => publishFirstOwner(childOwner, deps.owners.sessionId(childOwner)),
       setCompletionOwner: deps.surface.setCompletionOwner,
       bumpGeneration: core.bumpGeneration,
       quiesceChild: async () => {

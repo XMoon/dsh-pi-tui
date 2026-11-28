@@ -179,10 +179,14 @@ export async function runSharedSessionInteractions(context) {
       assert(alive(hostBefore.hostPid), 'M5B the Host died while both Clients retained Session X')
 
       // B boots with that real row present. Its empty composer is given a REAL
-      // Up first; a boot file seed would put the seed text there and the
-      // original marker would append to it, so the unchanged exact occurrence
-      // below is the decisive negative (no transcript substring is used).
+      // Up first: the Remote process recall legitimately includes the Host
+      // accepted-history seed. Clear that recalled draft before the queue proof
+      // so this step isolates the shared Host inbox rather than the recall
+      // source; the exact marker below still proves A sees B's Host occurrence,
+      // never a Client-local optimistic echo.
       clientB.send('\x1b[A')
+      clientB.send('\x1b[F') // End: recalled draft may park the cursor at column 0.
+      clientB.send('\x15')
 
       // MB-02: B queues into the shared Host inbox while the Turn is held.
       // A never typed that text, so A's frame can only carry the Host

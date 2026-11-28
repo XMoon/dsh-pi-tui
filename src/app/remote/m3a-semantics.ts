@@ -342,7 +342,12 @@ export function createRemoteM3ASemantics(
     ),
     // The ONE Client Remote's official `session` namespace also carries the
     // fail-closed Session-list read the historical header fallback needs.
-    sessionLifecycle: new RemoteSessionLifecycle(sessions, generation, remote.workspace, remote.session),
+    sessionLifecycle: new RemoteSessionLifecycle(
+      sessions,
+      generation,
+      remote.workspace,
+      remote.session,
+    ),
     subagent: new RemoteSubagentPort(remote.subagents),
     catalog: {
       models: modelCatalog,

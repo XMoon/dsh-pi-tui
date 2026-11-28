@@ -243,6 +243,56 @@ test('projection enriches listed main rows and Host search merges in authoritati
   assert.deepEqual(searchQueries, ['NEEDLE'], 'equivalent canonical queries do not restart Host search')
 })
 
+test('a blank-only roster revision prunes accepted search without projection/search IO', async (t) => {
+  const presentation = new PresentationProbe()
+  let rows = [row('session-target', { title: 'Needle target', blank: false }), row('session-other')]
+  let projectionCalls = 0
+  let searchCalls = 0
+  const { owner, diag } = ownerFor(presentation, reader({
+    list: async () => rows,
+    projectionBatch: async () => { projectionCalls += 1; return new Map() },
+    search: async () => {
+      searchCalls += 1
+      return { items: [{ sessionId: 'session-target', snippet: 'needle excerpt' }], hasMore: false }
+    },
+  }))
+  t.after(() => { owner.dispose(); diag.dispose() })
+  owner.open({ initialQuery: 'needle' })
+  await waitUntil('the accepted blank-false search hit', () =>
+    presentation.latest()?.searchState === 'ready'
+    && presentation.latest()?.searchResults.some(result => result.row.id === 'session-target') === true)
+  await waitUntil('the initial projection batch', () => projectionCalls === 1)
+  const revision = presentation.latest()!.listRevision
+  const projectionsBefore = projectionCalls
+  const searchesBefore = searchCalls
+
+  rows = [row('session-target', { title: 'Needle target', blank: true }), row('session-other')]
+  owner.refresh()
+  await waitUntil('the blank-only revision', () => presentation.latest()!.listRevision > revision)
+  const snapshot = presentation.latest()!
+  assert.equal(snapshot.rows[0]?.blank, true, 'the full semantic roster retains the official fact')
+  assert.equal(snapshot.listState, 'ready', 'a nonempty raw roster is not relabelled empty')
+  assert.equal(snapshot.searchState, 'ready')
+  assert.deepEqual(snapshot.searchResults, [], 'the accepted hit disappears in the same publication')
+  assert.equal(projectionCalls, projectionsBefore, 'blank-only visibility does not re-project metadata')
+  assert.equal(searchCalls, searchesBefore, 'blank-only visibility does not start another Host search')
+})
+
+test('typed direct matching still resumes a hidden quiet blank from the full roster', async (t) => {
+  const presentation = new PresentationProbe()
+  const intents: SessionBrowserResumeIntent[] = []
+  const { owner, diag } = ownerFor(presentation, reader({
+    list: async () => [row('session-target', { blank: true })],
+  }), {
+    onResumeIntent: intent => { intents.push(intent) },
+  })
+  t.after(() => { owner.dispose(); diag.dispose() })
+  owner.open({ directMatch: { query: 'session-target', find: findSessionMatch } })
+  await waitUntil('the explicit hidden-id direct match', () => intents.length === 1)
+  assert.equal(intents[0]?.sessionId, 'session-target')
+  assert.equal(intents[0]?.source, 'direct')
+})
+
 test('Host content search is canonical, debounced, and canceled with its panel', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   t.after(() => t.mock.timers.reset())
@@ -1240,6 +1290,27 @@ test('INS-O4 a metadata-only roster revision keeps the cut; a removed target cle
   assert.equal(h.presentation.latest()?.inspector, undefined,
     'a late read of a removed target never repaints an exact Inspector cut')
   assert.equal(probe.states[0]!.probe.disposed, 1, 'the removed target source is released')
+})
+
+test('INS-O4b a quiet blank revokes Browse Inspector while the raw roster row remains', async (t) => {
+  const probe = new InspectorProbe()
+  const h = await inspectorOwner(t, probe)
+  h.request.onInspectorSelection!(browse(INS_A))
+  await waitUntil('the ready Browse Inspector cut', () => probe.states[0]?.probe.reads === 1)
+  probe.states[0]!.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 1) })
+  await waitUntil('the published Browse cut', () => h.presentation.latest()?.inspector?.state === 'ready')
+
+  probe.states[0]!.invalidate('changed')
+  await waitUntil('the held trailing read', () => probe.states[0]?.probe.reads === 2)
+  h.setRows([row(INS_A, { blank: true }), row(INS_B), row(INS_C)])
+  h.owner.refresh()
+  await waitUntil('the hidden target cleared', () => h.presentation.latest()?.inspector === undefined)
+  assert.ok(h.presentation.latest()?.rows.some(entry => entry.id === INS_A && entry.blank === true) === true,
+    'the semantic full roster still contains the now-quiet blank')
+  probe.states[0]!.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 9) })
+  await delay(50)
+  assert.equal(h.presentation.latest()?.inspector, undefined, 'the late cut cannot revive a hidden target')
+  assert.equal(probe.states[0]!.probe.disposed, 1, 'the hidden target source is released')
 })
 
 test('INS-O5 retire/dispose clears the timer/source and ignores the late settlement', async (t) => {

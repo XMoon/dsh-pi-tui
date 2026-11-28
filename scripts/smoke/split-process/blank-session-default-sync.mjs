@@ -124,31 +124,36 @@ async function waitForPresetBadge(client, target, badge, label) {
     label, 60_000)
 }
 
-async function setDefault(client) {
-  await openCatalog(client, 'UX-PR3 sync')
-  await waitForScreenText(client, 'Use session', 'UX-PR3 sync live action label')
+async function setDefault(client, preset, label = 'UX-PR3 sync', liveSession = true) {
+  await openCatalog(client, label)
+  if (liveSession) await waitForScreenText(client, 'Use session', `${label} live action label`)
   const catalog = await frameText(client)
-  const currentDefault = currentDefaultPreset(catalog, 'UX-PR3 sync')
-  const target = PRESETS.find(candidate => candidate.id !== currentDefault.id)
-  assert(target !== undefined, 'UX-PR3 sync no non-default built-in preset is available')
-  const selectedRow = await selectPreset(client, target, 'UX-PR3 sync')
-  assert(selectedRow !== undefined && !selectedRow.context.includes('[default]'),
-    `UX-PR3 sync target ${target.id} is already the default: ${JSON.stringify({ currentDefault: currentDefault.id, selectedRow })}`)
-  assert(!(await frameText(client)).includes('Already the default'),
-    `UX-PR3 sync target ${target.id} still exposes the disabled default action`)
+  const target = preset === undefined
+    ? PRESETS.find(candidate => candidate.id !== currentDefaultPreset(catalog, label).id)
+    : PRESETS.find(candidate => candidate.id === preset)
+  assert(target !== undefined, `${label} no built-in preset matches ${preset ?? 'a non-default target'}`)
+  const selectedRow = await selectPreset(client, target, label)
+  if (liveSession) {
+    assert(selectedRow !== undefined && !selectedRow.context.includes('[default]'),
+      `${label} target ${target.id} is already the default: ${JSON.stringify({ selectedRow })}`)
+    assert(!(await frameText(client)).includes('Already the default'),
+      `${label} target ${target.id} still exposes the disabled default action`)
+  }
   client.send('\t')
   await sleep(250)
   client.send('\t')
   await waitForCondition(async () => {
     const frame = await frameText(client)
     return frame.includes('Set default [Enter]') || frame.includes('Set [Enter]')
-  }, 'UX-PR3 sync Default focus', 60_000)
+  }, `${label} Default focus`, 60_000)
   client.send('\r')
-  await waitForScreenGone(client, 'Agent presets', 'UX-PR3 sync default write')
-  await waitForCondition(async () => {
-    const frame = (await frameText(client)).replace(/\s+/gu, ' ')
-    return frame.includes(`current blank session switched to ${target.id}`)
-  }, 'UX-PR3 sync notice', 120_000)
+  await waitForScreenGone(client, 'Agent presets', `${label} default write`)
+  if (liveSession) {
+    await waitForCondition(async () => {
+      const frame = (await frameText(client)).replace(/\s+/gu, ' ')
+      return frame.includes(`current blank session switched to ${target.id}`)
+    }, `${label} notice`, 120_000)
+  }
   return target
 }
 
@@ -201,6 +206,15 @@ export async function runBlankSessionDefaultSync(context) {
     await selectPreset(b, target, 'UX-PR3-SYNC restarted')
     await waitForPresetBadge(b, target, '[default]', 'UX-PR3-SYNC restarted Host default readback')
     await closeCatalog(b, 'UX-PR3-SYNC restarted Catalog')
+    // The split lane shares this packed Profile with later scenarios. Restore
+    // its standard baseline through the same real writer after the persistence
+    // proof so a later Session is not created with the minimal preset (which
+    // intentionally omits the ask-user tool required by the next case).
+    await setDefault(b, 'standard', 'UX-PR3-SYNC restore lane baseline default', false)
+    await openCatalog(b, 'UX-PR3-SYNC restored baseline readback')
+    await selectPreset(b, PRESETS[0], 'UX-PR3-SYNC restored baseline')
+    await waitForPresetBadge(b, PRESETS[0], '[default]', 'UX-PR3-SYNC restored Host default readback')
+    await closeCatalog(b, 'UX-PR3-SYNC restored baseline Catalog')
     await exitC1Client(b, 'UX-PR3-SYNC client B')
 
     context.trace?.('ux-pr3-blank-session-default-sync', {
@@ -210,6 +224,7 @@ export async function runBlankSessionDefaultSync(context) {
       sessionSwitched: true,
       statusReadback: target.id,
       hostRestartPersisted: true,
+      restoredLaneDefault: 'standard',
     })
     return { status: 'PASS' }
   } finally {

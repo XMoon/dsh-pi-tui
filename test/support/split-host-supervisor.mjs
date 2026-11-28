@@ -9383,11 +9383,22 @@ async function handlePublicDaemonInput(message) {
       throw new Error('INPUT_UNQUALIFIED: PUBLIC_DAEMON_INPUT press requires a non-empty key list')
     }
     body = () => handle.terminal.press(...input.keys)
+  } else if (input.type === 'mouseClick') {
+    if (!Number.isSafeInteger(input.x) || !Number.isSafeInteger(input.y) || input.x < 0 || input.y < 0) {
+      throw new Error('INPUT_UNQUALIFIED: PUBLIC_DAEMON_INPUT mouseClick requires non-negative integer coordinates')
+    }
+    body = async () => {
+      const size = await handle.terminal.getSize()
+      if (input.x >= size.cols || input.y >= size.rows) {
+        throw new Error('INPUT_UNQUALIFIED: PUBLIC_DAEMON_INPUT mouseClick coordinate is outside the current terminal')
+      }
+      await handle.terminal.mouse.click(input.x, input.y)
+    }
   } else if (input.type === 'submit') {
     if (input.text !== undefined && typeof input.text !== 'string') throw new Error('INPUT_UNQUALIFIED: PUBLIC_DAEMON_INPUT submit text must be a string')
     body = () => (input.text === undefined ? handle.terminal.submit() : handle.terminal.submit(input.text))
   } else {
-    throw new Error('INPUT_UNQUALIFIED: PUBLIC_DAEMON_INPUT type must be one of type/press/submit')
+    throw new Error('INPUT_UNQUALIFIED: PUBLIC_DAEMON_INPUT type must be one of type/press/mouseClick/submit')
   }
   await withProcessNativeOperation(`public-daemon-${String(input.type)}`, handle.launchId, body)
   return { ok: true }

@@ -284,6 +284,44 @@ test('a retained first-submit path enters Browser directly, submits once, and ex
   await h.paint()
   assert.equal(h.closes, 1, 'success returns through the existing chooser owner')
 })
+test('Browse counts and paints only eligible rows while preserving the Current Workspace marker', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  const rows = [
+    row(CURRENT, 4_000, { title: 'Quiet current blank', blank: true }),
+    row(OTHER, 3_000, { title: 'Quiet other blank', blank: true }),
+    row(THIRD, 2_000, { title: 'Started history', blank: false }),
+  ]
+  h.handle.setSnapshot(snapshot({
+    rows,
+    workspace: {
+      revision: 1,
+      state: 'ready',
+      facts: [{ workspaceId: 'ws-current', path: '/ws/project', title: 'Project', sessionIds: rows.map(entry => entry.id) }],
+      baselineProven: true,
+      activityRosterRevision: 1,
+      activity: rows.map(entry => fact(entry.id, { running: false, attention: 'none', attentionSourceState: 'known' })),
+      answerEligibility: [],
+    },
+  }))
+  await h.paint()
+  const view = h.view()
+  assert.ok(view.includes('Sessions · 1'), `the header counts the eligible corpus:\n${view}`)
+  assert.ok(view.includes('Started history'))
+  assert.ok(!view.includes('Quiet current blank') && !view.includes('Quiet other blank'))
+  assert.ok(view.includes('Project'), 'the real Current Workspace remains reachable with no visible current child')
+  assert.ok(!view.includes('No visible sessions'), 'one eligible row is not an empty corpus')
+})
+
+test('a ready nonempty roster with only quiet blanks reports No visible sessions', async () => {
+  const h = harness({ columns: 100, rows: 24 })
+  h.handle.setSnapshot(snapshot({ rows: [row(CURRENT, 3_000, { title: 'Quiet blank', blank: true })] }))
+  await h.paint()
+  const view = h.view()
+  assert.ok(view.includes('Sessions · 0'), `the header counts visible rows:\n${view}`)
+  assert.ok(view.includes('No visible sessions'), `filtered-empty is distinct from Host empty:\n${view}`)
+  assert.ok(!view.includes('No readable sessions'))
+})
+
 test('the browse list paints the header, current marker, and the Return verb', async () => {
   const h = harness()
   h.handle.setSnapshot(snapshot())
@@ -1851,6 +1889,56 @@ test('a Reader is pinned to its own Session and exits when that Session leaves t
   h.vt.sendInput('\r')
   await h.paint()
   assert.deepEqual(h.resumes, [], 'the Reader exit never resumes any Session')
+})
+
+test('a blank-only visibility change revokes the selected Reader and Inspector', async () => {
+  const reports: Array<import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined> = []
+  const h = harness({ columns: 100, rows: 24, onInspectorSelection: selection => { reports.push(selection) } })
+  const visibleRows = () => [
+    row(CURRENT, 3_000, { title: 'Current session', blank: false }),
+    row(OTHER, 2_000, { title: 'Other session', blank: false }),
+  ]
+  const hiddenRows = () => [
+    row(CURRENT, 3_000, { title: 'Current session', blank: false }),
+    row(OTHER, 2_000, { title: 'Other session', blank: true }),
+  ]
+  h.handle.setSnapshot(snapshot({ rows: visibleRows() }))
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  h.vt.sendInput(' ')
+  await h.paint()
+  assert.ok(h.view().includes('Transcript · other-se'), 'the visible target Reader opens')
+  const readSignal = h.reads[0]?.signal
+
+  h.handle.setSnapshot(snapshot({ rows: hiddenRows(), listRevision: 2 }))
+  await h.paint()
+  assert.ok(!h.view().includes('Transcript ·'), 'the hidden target Reader closes in the same repaint')
+  assert.equal(readSignal?.aborted, true, 'the hidden target Markdown read is aborted')
+  assert.ok(/^> .*Current session/m.test(h.view()), 'selection re-anchors on the eligible survivor')
+
+  h.dispose()
+  const inspectorHarness = harness({ columns: 100, rows: 24, onInspectorSelection: selection => { reports.push(selection) } })
+  inspectorHarness.handle.setSnapshot(snapshot({ rows: visibleRows() }))
+  await inspectorHarness.paint()
+  inspectorHarness.vt.sendInput('\x1b[B')
+  await inspectorHarness.paint()
+  inspectorHarness.vt.sendInput('\x1bOQ')
+  await inspectorHarness.paint()
+  assert.ok(inspectorHarness.view().includes('Session Inspector · other-se'),
+    `the visible target Inspector opens:\n${inspectorHarness.view()}`)
+  inspectorHarness.handle.setSnapshot(snapshot({
+    rows: hiddenRows(),
+    listRevision: 4,
+    inspector: { sessionId: OTHER, state: 'ready', refreshing: false, data: {
+      sessionId: OTHER, asOfSeq: 1, stats: { turns: 1, steps: 1, llmMs: 1, toolMs: 0 },
+    } },
+  }))
+  await inspectorHarness.paint()
+  assert.ok(!inspectorHarness.view().includes('Session Inspector'), 'the hidden target Inspector page closes')
+  assert.ok(!inspectorHarness.view().includes('Other session'), 'no hidden target identity remains painted')
+  assert.notDeepEqual(reports.at(-1), { sessionId: OTHER, origin: 'browse' }, 'the hidden target is not reported')
+  assert.deepEqual(inspectorHarness.resumes, [], 'revocation never resumes the hidden row')
 })
 
 test('a Reader opened from search results also exits when its target leaves the results', async () => {
