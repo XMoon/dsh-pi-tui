@@ -36,6 +36,7 @@ function harness() {
     follows: 0,
     followDisposals: 0,
     sessionLists: 0,
+    projectionRefreshes: [] as string[],
   }
   const catalogued = new Set<string>()
   const generations = new Map<string, {
@@ -84,6 +85,9 @@ function harness() {
       const id = createResult ?? String(options.sessionId)
       catalogued.add(id)
       return id
+    },
+    refreshProjections: async (sessionId: string) => {
+      calls.projectionRefreshes.push(sessionId)
     },
     fork: async options => {
       calls.forks.push(options)
@@ -247,12 +251,12 @@ test('ordinary create names the official WorkspaceId on the one official ClientS
   assert.deepEqual(h.calls.creates, [{ workspaceId: 'ws-a', sessionId: 'session-a' }])
 })
 
-test('workspace New selects the first eligible official blank in Workspace order', async () => {
+test('workspace New selects the first eligible official blank in raw Session-list order', async () => {
   const h = harness()
   h.setWorkspaceRows([{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['session-b', 'session-c'] }])
   h.setSessionListRows([
-    { sessionId: 'session-b', cwd: '/ws/a', blank: true },
     { sessionId: 'session-c', cwd: '/ws/a', blank: true },
+    { sessionId: 'session-b', cwd: '/ws/a', blank: true },
   ])
   h.setCreateResult('session-host-chosen')
   const capture = h.lifecycle.captureWorkspaceNewConversation()
@@ -260,16 +264,17 @@ test('workspace New selects the first eligible official blank in Workspace order
   await h.lifecycle.resolveWorkspace({ kind: 'workspace-id', workspaceId: 'ws-a' }, undefined, capture)
   const result = await h.lifecycle.create({ workspaceId: 'ws-a', capture, agentPreset: 'minimal' })
   assert.equal(result.outcome.kind, 'created')
-  assert.deepEqual(h.calls.creates, [{ workspaceId: 'ws-a', sessionId: 'session-b', agentPreset: 'minimal' }])
+  assert.deepEqual(h.calls.creates, [{ workspaceId: 'ws-a', sessionId: 'session-c', agentPreset: 'minimal' }])
   assert.deepEqual(h.calls.retains, [{ target: 'session-host-chosen', source: 'tuiMainView' }])
+  assert.deepEqual(h.calls.projectionRefreshes, ['session-c'])
   assert.equal(h.calls.follows, 1)
   assert.equal(h.calls.sessionLists, 1)
 })
 
 test('workspace New skips nonblank, subagent, archived, nonmember, wrong-cwd and known different-preset rows', async () => {
   const h = harness()
-  h.setWorkspaceRows([{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['false', 'unknown', 'child', 'archived', 'wrong-cwd', 'preset', 'eligible'] }])
-  h.setFollowFrames([{ type: 'baseline', value: { items: [{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['false', 'unknown', 'child', 'archived', 'wrong-cwd', 'preset', 'eligible'] }], archivedSessionIds: ['archived'] } }])
+  h.setWorkspaceRows([{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['false', 'unknown', 'child', 'archived', 'wrong-cwd', 'preset', 'empty-preset', 'eligible'] }])
+  h.setFollowFrames([{ type: 'baseline', value: { items: [{ workspaceId: 'ws-a', path: '/ws/a', title: 'A', sessionIds: ['false', 'unknown', 'child', 'archived', 'wrong-cwd', 'preset', 'empty-preset', 'eligible'] }], archivedSessionIds: ['archived'] } }])
   h.setSessionListRows([
     { sessionId: 'false', cwd: '/ws/a', blank: false },
     { sessionId: 'unknown', cwd: '/ws/a' },
@@ -278,6 +283,7 @@ test('workspace New skips nonblank, subagent, archived, nonmember, wrong-cwd and
     { sessionId: 'foreign', cwd: '/ws/a', blank: true },
     { sessionId: 'wrong-cwd', cwd: '/ws/other', blank: true },
     { sessionId: 'preset', cwd: '/ws/a', blank: true, projections: { values: { agentPreset: 'other' } } },
+    { sessionId: 'empty-preset', cwd: '/ws/a', blank: true, projections: { values: { agentPreset: '' } } },
     { sessionId: 'eligible', cwd: '/ws/a', blank: true },
   ])
   h.setCreateResult('session-created')
@@ -323,6 +329,7 @@ test('workspace New dispatches one Host create for an exact current binding', as
     { target: 'session-b', source: 'tuiMainView' },
   ])
   assert.equal(result.outcome.handle.client?.bindingIdentity, first.outcome.handle.client?.bindingIdentity)
+  assert.deepEqual(h.calls.projectionRefreshes, [])
   assert.deepEqual(h.calls.releases, [])
 })
 
@@ -346,6 +353,7 @@ test('workspace New always lets the Host decide for a retained blank binding', a
     { target: 'session-b', source: 'tuiMainView' },
     { target: 'session-host-chosen', source: 'tuiMainView' },
   ])
+  assert.deepEqual(h.calls.projectionRefreshes, ['session-b'])
   assert.notEqual(first.outcome.handle.session.id, 'session-host-chosen')
 })
 
@@ -380,10 +388,10 @@ test('workspace New generation rollover before dispatch creates nothing', async 
   assert.deepEqual(h.calls.creates, [])
 })
 
-test('workspace New source-session fallback keeps one baseline/list proof and creates without a candidate', async () => {
+test('workspace New source-session fallback reuses one raw list and proves the adopted Workspace with a complete baseline', async () => {
   const h = harness()
-  h.setWorkspaceRows([])
-  h.setSessionListRows([{ sessionId: 'session-historical', cwd: '/ws/historical' }])
+  h.setFollowFrames([{ type: 'baseline', value: { items: [], archivedSessionIds: [] } }])
+  h.setSessionListRows([{ sessionId: 'session-historical', cwd: '/ws/historical', blank: true }])
   h.setWorkspaceCreateReply({
     ok: true,
     value: {
@@ -391,17 +399,45 @@ test('workspace New source-session fallback keeps one baseline/list proof and cr
       created: true,
     },
   })
-  h.setCreateResult('session-fresh')
+  h.setFollowHook(() => {
+    if (h.calls.follows === 1) {
+      h.setFollowFrames([{ type: 'baseline', value: {
+        items: [{ workspaceId: 'ws-historical', path: '/ws/historical', title: 'Historical', sessionIds: ['session-historical'] }],
+        archivedSessionIds: [],
+      } }])
+    }
+  })
   const capture = h.lifecycle.captureWorkspaceNewConversation()
   assert.ok(capture !== undefined)
   const resolved = await h.lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: 'session-historical' }, undefined, capture)
   assert.deepEqual(resolved, { workspaceId: 'ws-historical', path: '/ws/historical' })
   const result = await h.lifecycle.create({ workspaceId: 'ws-historical', capture })
   assert.equal(result.outcome.kind, 'created')
-  assert.deepEqual(h.calls.creates, [{ workspaceId: 'ws-historical' }])
-  assert.equal(h.calls.follows, 1)
+  assert.deepEqual(h.calls.creates, [{ workspaceId: 'ws-historical', sessionId: 'session-historical' }])
+  assert.equal(h.calls.follows, 2)
   assert.equal(h.calls.sessionLists, 1)
   assert.deepEqual(h.calls.workspaceCreates, ['/ws/historical'])
+})
+
+test('workspace New source-session fallback refuses when the adopted Workspace has no complete baseline proof', async () => {
+  const h = harness()
+  h.setFollowFrames([{ type: 'baseline', value: { items: [], archivedSessionIds: [] } }])
+  h.setSessionListRows([{ sessionId: 'session-historical', cwd: '/ws/historical', blank: true }])
+  h.setWorkspaceCreateReply({
+    ok: true,
+    value: {
+      workspace: { workspaceId: 'ws-historical', path: '/ws/historical', title: 'Historical', sessionIds: [] },
+      created: true,
+    },
+  })
+  const capture = h.lifecycle.captureWorkspaceNewConversation()
+  assert.ok(capture !== undefined)
+  await assert.rejects(h.lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: 'session-historical' }, undefined, capture), WorkspaceSelectionError)
+  const result = await h.lifecycle.create({ workspaceId: 'ws-historical', capture })
+  assert.equal(result.outcome.kind, 'rejected')
+  assert.deepEqual(h.calls.creates, [])
+  assert.equal(h.calls.follows, 2)
+  assert.equal(h.calls.sessionLists, 1)
 })
 
 test('workspace New raw read failure cannot fall back to the ready Client snapshot', async () => {

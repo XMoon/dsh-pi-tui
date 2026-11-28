@@ -116,8 +116,8 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   Folder `New session` action share the existing command-owned transaction. On
   Remote, one operation captures the Connection generation at the gesture, reads
   one complete Workspace baseline and one raw official Session list, and asks the
-  official `sessions.create` to reuse the first eligible blank in Workspace order
-  (or to create without a candidate when none is eligible). The Host's returned
+  official `sessions.create` to reuse the first eligible blank in raw Session-list
+  order (or to create without a candidate when none is eligible). The Host's returned
   identity is the only committed target. Reusing the exact current binding keeps
   the current owner, generation, draft, recall, attachments and ingress; a
   different actual identity follows the ordinary replacement commit. Direct keeps

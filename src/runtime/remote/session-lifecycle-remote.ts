@@ -136,6 +136,9 @@ export interface RemoteLifecycleSessions {
     target: RemoteSessionTarget,
     options: { readonly source: TuiSessionReferenceSource; readonly signal?: AbortSignal },
   ): RemoteSessionReferenceLike
+  /** Official Client projection refresh used after the Host declines a named
+   * blank candidate. The Client owns the best-effort reload and its diagnostics. */
+  refreshProjections(sessionId: string): Promise<void>
 }
 
 /** One official Host Session-list row (the `session.list` summary subset). */
@@ -340,7 +343,7 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
       if (intent.kind === 'host-path') {
         const adopted = await this.adoptHostPath(captured, intent.path, signal)
         baseline = await this.readWorkspaceBaseline(captured, signal, adopted.workspaceId)
-        workspace = baseline.items.find(item => item.workspaceId === adopted.workspaceId)
+        workspace = baseline.items.find(item => item.workspaceId === adopted.workspaceId && item.path === adopted.path)
         rows = await this.readSessionList(captured, signal)
       } else {
         baseline = await this.readWorkspaceBaseline(captured, signal)
@@ -358,8 +361,11 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
               throw new WorkspaceSelectionError('unavailable', `session "${intent.sessionId}" has no readable Host header directory`)
             }
             const adopted = await this.adoptHostPath(captured, headerPath, signal)
-            workspace = baseline.items.find(item => item.workspaceId === adopted.workspaceId)
-              ?? { workspaceId: adopted.workspaceId, path: adopted.path, title: '', sessionIds: [] }
+            workspace = baseline.items.find(item => item.workspaceId === adopted.workspaceId && item.path === adopted.path)
+            if (workspace === undefined) {
+              baseline = await this.readWorkspaceBaseline(captured, signal, adopted.workspaceId)
+              workspace = baseline.items.find(item => item.workspaceId === adopted.workspaceId && item.path === adopted.path)
+            }
           }
         }
       }
@@ -535,15 +541,14 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     proof: WorkspaceNewConversationProof,
     agentPreset: string | undefined,
   ): string | undefined {
-    const rows = new Map(proof.rows.map(row => [row.sessionId, row]))
+    const members = new Set(proof.workspace.sessionIds)
     const archived = new Set(proof.archivedSessionIds)
-    for (const sessionId of proof.workspace.sessionIds) {
-      const row = rows.get(sessionId)
-      if (row === undefined || row.blank !== true || row.origin === 'subagent' || archived.has(sessionId)) continue
-      if (row.cwd !== proof.workspace.path) continue
+    for (const row of proof.rows) {
+      if (row.blank !== true || row.origin === 'subagent' || archived.has(row.sessionId)) continue
+      if (row.cwd !== proof.workspace.path || !members.has(row.sessionId)) continue
       const listedPreset = row.projections?.values?.agentPreset
-      if (agentPreset !== undefined && typeof listedPreset === 'string' && listedPreset !== '' && listedPreset !== agentPreset) continue
-      return sessionId
+      if (agentPreset !== undefined && typeof listedPreset === 'string' && listedPreset !== agentPreset) continue
+      return row.sessionId
     }
     return undefined
   }
@@ -606,6 +611,11 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
           ...(candidateId === undefined && request.sessionId === undefined ? {} : { requestedSessionId: candidateId ?? request.sessionId }),
         },
       }
+    }
+    if (candidateId !== undefined && candidateId !== id && ownership() === 'current') {
+      void this.sessions.refreshProjections(candidateId).catch((reason: unknown) => {
+        console.warn('declined blank Session projection reload failed:', reason)
+      })
     }
     const handle: SessionHandle = { session: { id } }
     // The Host success is the authoritative publication. A navigation that was

@@ -1452,7 +1452,7 @@ Connection generation at the gesture; the Remote adapter resolves the Workspace
 and, in that same operation,
 reads one complete `workspace.follow` baseline (including the archive set) and one
 raw `session.list` result. A failed or partial read never becomes an empty
-candidate set. Candidates are considered in official Workspace membership order
+candidate set. Candidates are considered in raw official Session-list item order
 and must be main-origin, unarchived members with the canonical header cwd,
 `blank === true`, and no known different preset. The first eligible id is sent as
 the official create's optional reuse candidate; with none, `sessionId` is omitted.
