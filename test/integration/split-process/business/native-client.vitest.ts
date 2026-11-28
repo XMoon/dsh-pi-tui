@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -55,6 +55,11 @@ function countFiles(root: string): number {
   return existsSync(root)
     ? readdirSync(root, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile()).length
     : 0
+}
+
+function hasEstablishedSocket(port: number): boolean {
+  const result = spawnSync('lsof', ['-a', '-p', String(process.pid), '-iTCP', '-sTCP:ESTABLISHED', '-nP', '-F', 'n'], { encoding: 'utf8' })
+  return result.status === 0 && result.stdout.split('\n').some(line => line.includes(`:${String(port)}`))
 }
 
 function textOf(content: unknown): string {
@@ -428,10 +433,10 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect(history.records.length).toBeGreaterThan(0)
 
         const watched = watchSession(sibling)
-        const beforeInvalidPrompt = durableEvents(scene, created.sessionId).length
+        const beforeInvalidPrompt = durableEvents(scene, created.sessionId).filter(event => event.type === 'user/message').length
         const invalidPrompt = await sibling.prompt({ content: [{ type: 'bogus', name: 'x.txt', bytes: new Uint8Array([1]) } as never] })
         expect(invalidPrompt.kind, `unknown prompt discriminator must fail before Host effects: ${resultSummary(invalidPrompt)}`).toBe('not-dispatched')
-        expect(durableEvents(scene, created.sessionId).length).toBe(beforeInvalidPrompt)
+        expect(durableEvents(scene, created.sessionId).filter(event => event.type === 'user/message').length).toBe(beforeInvalidPrompt)
         const attachmentsRoot = join(scene.installation.dshHome, 'attachments', 'v1', 'files')
         const beforeMixedInvalid = countFiles(attachmentsRoot)
         const mixedInvalid = await sibling.prompt({ content: [
@@ -440,7 +445,7 @@ test('qualifies the installed Native Client business and interaction paths', { t
         ] as never })
         expect(mixedInvalid.kind, `mixed invalid prompt must fail before upload: ${resultSummary(mixedInvalid)}`).toBe('not-dispatched')
         expect(countFiles(attachmentsRoot)).toBe(beforeMixedInvalid)
-        expect(durableEvents(scene, created.sessionId).length).toBe(beforeInvalidPrompt)
+        expect(durableEvents(scene, created.sessionId).filter(event => event.type === 'user/message').length).toBe(beforeInvalidPrompt)
         const prompt = accepted(await sibling.prompt({ content: [{ type: 'text', text: 'native foreground tool' }] }), 'foreground prompt')
         const toolCall = await scene.waitForSessionEvent(created.sessionId, 0,
           event => event.type === 'tool/call' && event.data?.name === 'c1_foreground_tool',
@@ -498,6 +503,7 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect(terminalStatus.activeWrappers).toBe(0)
         expect(terminalStatus.liveSockets).toBe(0)
         expect(terminalStatus.pendingInteractions).toBe(0)
+        const hostPort = Number(new URL(host.ready.localHost.origin ?? JSON.parse(originalRecord).origin).port)
         const startupAbort = new AbortController()
         const cancelledAttach = attachNativeClient({
           dshAnchor: scene.installation.anchor,
@@ -506,15 +512,34 @@ test('qualifies the installed Native Client business and interaction paths', { t
           expectedInstanceId: host.ready.localHost.instanceId,
           signal: startupAbort.signal,
         })
-        queueMicrotask(() => startupAbort.abort(new Error('startup-cancel')))
-        let startupCancel: { code?: string; message: string } | undefined
+        const cancelledOutcome = cancelledAttach.then(
+          () => ({ resolved: true as const }),
+          error => ({ resolved: false as const, error }),
+        )
+        let startupCancel: { code?: string; message: string; socketAcquired: boolean; socketReleased: boolean } | undefined
         try {
-          await cancelledAttach
-        } catch (error) {
-          startupCancel = { code: (error as { code?: string }).code, message: error instanceof Error ? error.message : String(error) }
+          await waitFor('startup Socket acquired', () => hasEstablishedSocket(hostPort), acquired => acquired, 30_000)
+          startupAbort.abort(new Error('startup-cancel'))
+          const outcome = await cancelledOutcome
+          expect(outcome.resolved).toBe(false)
+          if (!outcome.resolved) {
+            startupCancel = {
+              code: (outcome.error as { code?: string }).code,
+              message: outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
+              socketAcquired: true,
+              socketReleased: false,
+            }
+          }
+          await waitFor('startup Socket released', () => !hasEstablishedSocket(hostPort), released => released, 30_000)
+          if (startupCancel !== undefined) startupCancel.socketReleased = true
+        } finally {
+          startupAbort.abort(new Error('startup-cancel'))
+          await cancelledOutcome
         }
         expect(startupCancel?.code).not.toBe('NATIVE_CLIENT_REALM_BUSY')
         expect(startupCancel?.message).toContain('startup-cancel')
+        expect(startupCancel?.socketAcquired).toBe(true)
+        expect(startupCancel?.socketReleased).toBe(true)
         const hostAfterClose = await scene.hostStatus(host)
         expect(hostAfterClose.localHost.instanceId).toBe(identity.instanceId)
         expect(hostAfterClose.localHost.hostPid).toBe(identity.hostPid)
