@@ -390,7 +390,7 @@ test('the production schema defaults mount fullscreen ON (§5.5)', () => {
   // row performs.
   const resolved = TuiConfigSchema({} as never) as unknown as TuiConfigRefs
   assert.equal(resolved.fullscreen.get(), 'on', 'a fresh profile mounts fullscreen on')
-  assert.equal(resolved.displayPreset.get(), 'full')
+  assert.equal(resolved.displayPreset.get(), 'compact', 'a fresh profile defaults to Compact')
   assert.equal(resolved.busyEnter.get(), 'queue')
   assert.equal(resolved.notificationMode.get(), 'unfocused')
   assert.equal(resolved.terminalProgress.get(), '9;4+7501', 'a fresh profile reports both protocols')
