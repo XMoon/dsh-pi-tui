@@ -65,6 +65,7 @@ import {
   inspectInstalledProfileScope,
   readInstalledDshVersion,
 } from './local-scope.ts'
+import { guardNativeContinuedGeneration } from './native-client-continued.ts'
 import { completeNativeClientRealm, reserveNativeClientRealm } from './native-client-realm.ts'
 import { nativePromptWriteFailure, nativeWriteFailure } from './native-client-write-result.ts'
 
@@ -2577,6 +2578,15 @@ function createNativeInteractionReceivers(
       if (!handle.isClosed) reconcileProjection(handle.sessionId, handle.bindingIdentity(), entry.value)
     }
   }
+
+  owned.push(guardNativeContinuedGeneration(
+    state.generation,
+    continuedByCall,
+    delivery => !state.closed && !disposed
+      && Object.is(delivery.generation, currentGeneration(state))
+      && currentBindingHandle(delivery.sessionId, delivery.binding) !== undefined,
+    reconcileAllContinued,
+  ))
 
   const syncHandles = (): void => {
     for (const [handle, entry] of projectionByHandle) {

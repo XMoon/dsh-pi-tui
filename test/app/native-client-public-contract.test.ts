@@ -32,6 +32,7 @@ import type {
   NativeSessionSummary,
 } from '../../src/app/remote-process/native-client.ts'
 import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '../../src/app/remote-process/native-client.ts'
+import { guardNativeContinuedGeneration } from '../../src/app/remote-process/native-client-continued.ts'
 import { completeNativeClientRealm, reserveNativeClientRealm } from '../../src/app/remote-process/native-client-realm.ts'
 import { nativePromptWriteFailure, nativeWriteFailure } from '../../src/app/remote-process/native-client-write-result.ts'
 import { classifyRemoteWriteFailure } from '../../src/runtime/remote/write-failure.ts'
@@ -226,6 +227,34 @@ test('service-reported cancellation after dispatch stays unknown with the prompt
     message: 'The official prompt call was cancelled after it entered the dispatch path.',
     requestId: 'request-1',
   })
+})
+
+test('continued Question generation rollover revokes stale callbacks before re-offer', () => {
+  let listener: (() => void) | undefined
+  const source = {
+    subscribe(next: () => void): () => void {
+      listener = next
+      return () => { listener = undefined }
+    },
+  }
+  const staleController = new AbortController()
+  const currentController = new AbortController()
+  const deliveries = new Map([
+    ['stale', { sessionId: 'session', callId: 'stale', generation: { id: 1 }, controller: staleController }],
+    ['current', { sessionId: 'session', callId: 'current', generation: { id: 2 }, controller: currentController }],
+  ])
+  let reoffers = 0
+  const dispose = guardNativeContinuedGeneration(source, deliveries,
+    delivery => delivery.callId === 'current',
+    () => { reoffers += 1 })
+  listener?.()
+  assert.equal(staleController.signal.aborted, true)
+  assert.equal(currentController.signal.aborted, false)
+  assert.equal(deliveries.has('stale'), false)
+  assert.equal(deliveries.has('current'), true)
+  assert.equal(reoffers, 1)
+  dispose()
+  assert.equal(listener, undefined)
 })
 
 test('separate module instances share the same Node-realm reservation', async () => {
