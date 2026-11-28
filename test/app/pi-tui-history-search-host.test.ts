@@ -19,8 +19,9 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { constants, zstdCompressSync } from 'node:zlib'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -29,7 +30,7 @@ import { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset, type SessionHeader
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PeerScope } from '@deepseek-ai/dsh-typert-protocol'
 import { createRemoteHostRuntime } from '../support/m3-inprocess/host-runtime.ts'
-import { createRemoteApplicationHostFixture } from '../support/remote-application-fixture.ts'
+import { createRemoteApplicationHostFixture, waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import {
   HISTORY_SEARCH_CURSOR_MAX_BYTES,
@@ -1522,8 +1523,10 @@ function mutableDeps(
     statCalls: () => number
     statIds: () => readonly string[]
     openCalls: () => number
+    openIds: () => readonly string[]
     observeCalls: () => number
     readCalls: () => number
+    readIds: () => readonly string[]
     closeCalls: () => number
   }
 } {
@@ -1544,6 +1547,8 @@ function mutableDeps(
   let readCalls = 0
   let closeCalls = 0
   const statIds: string[] = []
+  const openIds: string[] = []
+  const readIds: string[] = []
   const persistence: HistorySearchPersistenceLike = {
     identity: Symbol('mutable-persistence'),
     async list() {
@@ -1559,6 +1564,7 @@ function mutableDeps(
     },
     async open(id) {
       openCalls += 1
+      openIds.push(String(id))
       const candidate = sourceOf(String(id))
       if (candidate === undefined) throw new Error(`mutable persistence: unknown Session ${String(id)}`)
       return {
@@ -1566,6 +1572,7 @@ function mutableDeps(
         inheritedEventCount: candidate.inheritedEventCount ?? 0,
         async read(offset = 0, length = Number.MAX_SAFE_INTEGER) {
           readCalls += 1
+          readIds.push(String(id))
           const durable = candidate.durableEventCount ?? candidate.events.length
           return { events: candidate.events.slice(offset, Math.min(offset + length, durable)) }
         },
@@ -1599,8 +1606,10 @@ function mutableDeps(
       statCalls: () => statCalls,
       statIds: () => [...statIds],
       openCalls: () => openCalls,
+      openIds: () => [...openIds],
       observeCalls: () => observeCalls,
       readCalls: () => readCalls,
+      readIds: () => [...readIds],
       closeCalls: () => closeCalls,
     },
   }
@@ -7269,7 +7278,7 @@ test('a pre-upgrade v2 projection with a no-rpcId accepted input replays and min
   }
 })
 
-test('an early hit cannot publish ready while a later Session official read is still latched', async (t) => {
+test('an early hit and legacy omission cannot publish ready while a later Session official read is still latched', async (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-history-proof-latch-root-')
   const profileDir = life.tempDir('dsh-history-proof-latch-profile-')
@@ -7279,6 +7288,8 @@ test('an early hit cannot publish ready while a later Session official read is s
     header: testHeader('proof-session', '/repo/proof', { createdAt: 1_721_232_000_010 }),
   })
   const replaySource = proofSource(root, { header: testHeader('late-session', '/repo/late') })
+  const legacySource = legacyMutableSource(root, 'legacy-partial')
+  legacySource.header = testHeader('legacy-partial', '/repo/legacy-partial', { createdAt: 1_721_232_000_005 })
   const probe = proofAuthority(root)
   const hitRows: readonly HistoryOccurrenceInput[] = [
     { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/proof', content: 'mutable first', hasNonText: false },
@@ -7288,11 +7299,15 @@ test('an early hit cannot publish ready while a later Session official read is s
     { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/late', content: 'mutable first', hasNonText: false },
     { messageId: 'msg-2', firstEventSeq: 2, acceptedAt: 1002, effectiveCwd: '/repo/late-two', content: 'mutable second', hasNonText: false },
   ]
+  const legacyRows: readonly HistoryOccurrenceInput[] = [
+    { messageId: 'legacy-msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/legacy-partial', content: 'legacy partial old text', hasNonText: false },
+  ]
   seedColdProof(profileDir, hitSource, probe.authority, { occurrences: hitRows })
+  seedColdProof(profileDir, legacySource, probe.authority, { mint: false, occurrences: legacyRows })
   // A clean committed row from the previous incarnation exists for the
   // latched source too; it must stay unreadable until this round's terminal.
   seedColdProof(profileDir, replaySource, probe.authority, { mint: false, occurrences: lateRows })
-  const { deps, calls } = mutableDeps(hitSource, [replaySource])
+  const { deps, calls } = mutableDeps(hitSource, [legacySource, replaySource])
   const basePersistence = deps.sessionPersistence()!
   let latched = false
   let release = (): void => {}
@@ -7318,9 +7333,12 @@ test('an early hit cannot publish ready while a later Session official read is s
     const early = await service.search({ scope: 'all', query: 'mutable', limit: 25 }, new AbortController().signal)
     assert.equal(early.kind, 'partial', `an early hit must not publish ready: ${JSON.stringify(early)}`)
     if (early.kind !== 'partial') throw new Error('expected partial')
-    assert.deepEqual(early.progress, { settled: 1, total: 2 })
+    assert.deepEqual(early.progress, { settled: 1, total: 3 })
+    assert.equal('nextCursor' in early, false, 'a partial page never carries a cursor')
     assert.deepEqual(early.items.map(item => item.sessionId), ['proof-session', 'proof-session'])
     assert.equal(early.items.length, 2, 'only the proved terminal ID contributes rows')
+    assert.equal(indexOfService(service).checkpointOf('legacy-partial'), undefined,
+      'the legacy ID must already have reached its unreadable omission terminal')
     // Exact text is served from the same permit.
     const exact = await service.readText({
       sessionId: early.items[0]!.sessionId,
@@ -7339,6 +7357,16 @@ test('an early hit cannot publish ready while a later Session official read is s
       limit: 4096,
     }, new AbortController().signal)
     assert.equal(lateBefore.kind, 'loading')
+    const legacyBefore = await service.readText({
+      sessionId: 'legacy-partial',
+      messageId: 'legacy-msg-1',
+      contentSha256: sha256('legacy partial old text'),
+      offset: 0,
+      limit: 4096,
+    }, new AbortController().signal)
+    assert.equal(legacyBefore.kind, 'loading', 'an omitted legacy ID never receives a partial read permit')
+    const legacyRecallBefore = await service.readSessionRecall({ sessionId: 'legacy-partial' }, new AbortController().signal)
+    assert.deepEqual(legacyRecallBefore, { kind: 'loading' }, 'an omitted legacy ID has no fabricated empty recall')
     // The session-recall read follows the SAME per-ID permit: the proved ID is
     // readable before global ready, the latched/unverified ID is not an empty.
     const earlyRecall = await service.readSessionRecall({ sessionId: 'proof-session' }, new AbortController().signal)
@@ -7379,6 +7407,12 @@ test('an early hit cannot publish ready while a later Session official read is s
     assert.equal(lateRecall.kind, 'ready', JSON.stringify(lateRecall))
     if (lateRecall.kind !== 'ready') throw new Error('expected ready recall')
     assert.equal(lateRecall.items.length, 2)
+    const legacy = await service.search({ scope: 'session', sessionId: 'legacy-partial', query: 'legacy partial old text', limit: 10 }, new AbortController().signal)
+    assert.equal(legacy.kind, 'ready', JSON.stringify(legacy))
+    assert.ok(legacy.kind === 'ready' && legacy.items.length === 0)
+    assert.ok(!calls.statIds().includes('legacy-partial'))
+    assert.ok(!calls.openIds().includes('legacy-partial'))
+    assert.ok(!calls.readIds().includes('legacy-partial'))
     // A target with no verified checkpoint is NEVER a ready empty, even under
     // the (different) ready corpus.
     const absentRecall = await service.readSessionRecall({ sessionId: 'not-a-session' }, new AbortController().signal)
@@ -8507,5 +8541,933 @@ test('a real post-roster Session born during the held cold prewarm reaches ready
     release()
     if (rawPersistence !== undefined && originalOpen !== undefined) rawPersistence.open = originalOpen
     await wire.dispose()
+  }
+})
+
+const REAL_LEGACY_ID = 'history-real-legacy'
+const REAL_CURRENT_ID = 'history-real-current'
+const REAL_LEGACY_TEXT = 'real cold legacy unique text'
+const REAL_CURRENT_TEXT = 'real current control unique text'
+const REAL_LEGACY_CWD = '/repo/history-real-legacy'
+
+interface RealLegacyFixture {
+  readonly legacyPath: string
+  readonly legacyBytes: Buffer
+  readonly legacyFileSet: readonly string[]
+  readonly counters: {
+    list: () => number
+    stat: () => number
+    open: () => number
+    read: () => number
+    close: () => number
+  }
+  restore(): void
+}
+
+/** Seed the official rc.5 V3 restart fixture beside a real current control. */
+async function seedRealLegacyFixture(ctx: Context): Promise<RealLegacyFixture> {
+  const current = await ctx.sessionPersistence.create({
+    version: SESSION_FORMAT_VERSION,
+    id: SessionId(REAL_CURRENT_ID),
+    createdAt: 1,
+    cwd: REAL_LEGACY_CWD,
+    isSeeded: false,
+    delegationDepth: 0,
+  })
+  await current.append([{
+    type: 'agent/inbox/spliced',
+    seq: 0,
+    time: 1000,
+    data: {
+      target: 'next-turn',
+      start: 0,
+      inserted: [{
+        id: 'real-current-msg',
+        role: 'user',
+        source: { kind: 'user', rpcId: 'rpc-real-current' },
+        content: [{ type: 'text', text: REAL_CURRENT_TEXT }],
+      }],
+    },
+  }] as never)
+  await current.flush()
+  await current.close()
+
+  const currentStat = await ctx.sessionPersistence.stat(SessionId(REAL_CURRENT_ID))
+  assert.ok(currentStat?.location !== undefined)
+  assert.equal(currentStat.formatStatus, 'current')
+  const currentPath = currentStat.location.path
+  const projectDir = dirname(dirname(currentPath))
+  const suffix = currentPath.endsWith('.zstd') ? '.jsonl.zstd' : '.jsonl'
+  const legacyPath = join(projectDir, REAL_LEGACY_ID, `session.v3${suffix}`)
+  mkdirSync(dirname(legacyPath), { recursive: true })
+  const message = {
+    id: 'real-legacy-msg',
+    role: 'user',
+    source: { kind: 'user', rpcId: 'rpc-real-legacy' },
+    content: [{ type: 'text', text: REAL_LEGACY_TEXT }],
+  }
+  const rows = [
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'step/start', data: { turn: 1, step: 1 } },
+    { type: 'step/end', data: { turn: 1, step: 1 } },
+    { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, inserted: [message] } },
+    { type: 'turn/start', data: { turn: 2 } },
+    { type: 'user/message', data: message, surfaceOp: 'append' },
+    { type: 'session/title', data: { title: 'continue', source: { kind: 'fallback' }, messageSeqs: [5] } },
+    { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } },
+  ].map((event, seq) => ({ ...event, seq, time: seq + 10 }))
+  const header = { type: 'session', version: 3, id: REAL_LEGACY_ID, createdAt: 2, cwd: REAL_LEGACY_CWD, isSeeded: false, delegationDepth: 0 }
+  const first = `${JSON.stringify(header)}\n`
+  const body = `${rows.map(row => JSON.stringify(row)).join('\n')}\n`
+  const legacyBytes = currentPath.endsWith('.zstd')
+    ? Buffer.concat([
+        zstdCompressSync(Buffer.from(first), { params: { [constants.ZSTD_c_checksumFlag]: 1 } }),
+        zstdCompressSync(Buffer.from(body), { params: { [constants.ZSTD_c_checksumFlag]: 1 } }),
+      ])
+    : Buffer.from(first + body)
+  writeFileSync(legacyPath, legacyBytes)
+  const legacyFileSet = readdirSync(dirname(legacyPath)).sort()
+
+  const listed = await ctx.sessionPersistence.list()
+  const legacy = listed.find(row => String(row.header.id) === REAL_LEGACY_ID)
+  assert.ok(legacy !== undefined)
+  assert.equal(legacy.formatStatus, 'migration-required')
+  assert.equal(legacy.location?.kind, 'jsonl')
+  const reader = await ctx.sessionPersistence.open(SessionId(REAL_LEGACY_ID), 'read')
+  try {
+    assert.match(JSON.stringify((await reader.read()).events), new RegExp(REAL_LEGACY_TEXT, 'u'))
+  } finally {
+    await reader.close()
+  }
+  assert.deepEqual(readFileSync(legacyPath), legacyBytes)
+  assert.deepEqual(readdirSync(dirname(legacyPath)).sort(), legacyFileSet)
+
+  const raw = ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+  const originalList = raw.list
+  const originalStat = raw.stat
+  const originalOpen = raw.open
+  let listCalls = 0
+  let statCalls = 0
+  let openCalls = 0
+  let readCalls = 0
+  let closeCalls = 0
+  raw.list = async function (options) {
+    listCalls += 1
+    return originalList.call(this, options)
+  }
+  raw.stat = async function (id, options) {
+    if (String(id) === REAL_LEGACY_ID) statCalls += 1
+    return originalStat.call(this, id, options)
+  }
+  raw.open = async function (id, access, options) {
+    if (String(id) === REAL_LEGACY_ID) openCalls += 1
+    const handle = await originalOpen.call(this, id, access, options)
+    if (String(id) === REAL_LEGACY_ID) {
+      const originalRead = handle.read
+      const originalClose = handle.close
+      handle.read = async function (...args) {
+        readCalls += 1
+        return originalRead.apply(this, args)
+      }
+      handle.close = async function (...args) {
+        closeCalls += 1
+        return originalClose.apply(this, args)
+      }
+    }
+    return handle
+  }
+  return {
+    legacyPath,
+    legacyBytes,
+    legacyFileSet,
+    counters: {
+      list: () => listCalls,
+      stat: () => statCalls,
+      open: () => openCalls,
+      read: () => readCalls,
+      close: () => closeCalls,
+    },
+    restore: () => {
+      raw.list = originalList
+      raw.stat = originalStat
+      raw.open = originalOpen
+    },
+  }
+}
+
+test('a real cold legacy Session is excluded without per-ID IO and re-enters after official resume', async (t) => {
+  const life = testLifecycle(t)
+  let fixture: RealLegacyFixture | undefined
+  const wire = await historyHost(life, 'history-real-legacy-exclusion', async (ctx) => {
+    fixture = await seedRealLegacyFixture(ctx)
+  })
+  let handle: Awaited<ReturnType<Host['ctx']['agentLoop']['resume']>> | undefined
+  let disposeListener: (() => void) | undefined
+  try {
+    assert.ok(fixture !== undefined)
+    await waitForReady(wire, 'real legacy exclusion')
+    const legacy = await wire.search({ scope: 'session', sessionId: REAL_LEGACY_ID, query: REAL_LEGACY_TEXT, limit: 5 })
+    assert.equal(legacy.kind, 'ready', JSON.stringify(legacy))
+    assert.ok(legacy.kind === 'ready' && legacy.items.length === 0)
+    const current = await wire.search({ scope: 'session', sessionId: REAL_CURRENT_ID, query: REAL_CURRENT_TEXT, limit: 5 })
+    assert.equal(current.kind, 'ready', JSON.stringify(current))
+    assert.ok(current.kind === 'ready' && current.items.length === 1)
+    assert.deepEqual(
+      [fixture.counters.stat(), fixture.counters.open(), fixture.counters.read(), fixture.counters.close()],
+      [0, 0, 0, 0],
+    )
+    assert.deepEqual(readFileSync(fixture.legacyPath), fixture.legacyBytes)
+    assert.deepEqual(readdirSync(dirname(fixture.legacyPath)).sort(), fixture.legacyFileSet)
+
+    const beforeVerify = fixture.counters.list()
+    await verifyFullPass(wire.service())
+    assert.equal(fixture.counters.list(), beforeVerify + 1, 'one full pass performs one official list')
+    const legacyAgain = await wire.search({ scope: 'session', sessionId: REAL_LEGACY_ID, query: REAL_LEGACY_TEXT, limit: 5 })
+    assert.equal(legacyAgain.kind, 'ready', JSON.stringify(legacyAgain))
+    assert.ok(legacyAgain.kind === 'ready' && legacyAgain.items.length === 0)
+    assert.deepEqual(
+      [fixture.counters.stat(), fixture.counters.open(), fixture.counters.read(), fixture.counters.close()],
+      [0, 0, 0, 0],
+    )
+
+    let created = 0
+    disposeListener = wire.host.ctx.on('session/created', (session) => {
+      if (String((session as { id?: unknown }).id) === REAL_LEGACY_ID) created += 1
+    }, { global: true })
+    handle = await wire.host.ctx.agentLoop.resume(wire.host.ctx, {
+      resumeSessionId: SessionId(REAL_LEGACY_ID),
+      agentOptions: { provider: 'smoke', model: 'smoke' },
+    })
+    assert.equal(created, 1)
+    assert.ok(handle.agent.session.firstLiveSeq > 0)
+    assert.equal(wire.host.ctx.sessions.get(SessionId(REAL_LEGACY_ID)), handle.agent.session)
+    const stat = await wire.host.ctx.sessionPersistence.stat(SessionId(REAL_LEGACY_ID))
+    assert.equal(stat?.formatStatus, 'current')
+    assert.match(stat?.location?.path ?? '', /session\.v4\.jsonl(?:\.zstd)?$/u)
+
+    const restored = await waitForSettled(wire,
+      { scope: 'session', sessionId: REAL_LEGACY_ID, query: REAL_LEGACY_TEXT, limit: 5 },
+      'real legacy resume re-admission')
+    assert.equal(restored.kind, 'ready', JSON.stringify(restored))
+    assert.ok(restored.kind === 'ready' && restored.items.length === 1)
+    const item = restored.items[0]!
+    const recall = await wire.readSessionRecall({ sessionId: REAL_LEGACY_ID })
+    assert.equal(recall.kind, 'ready', JSON.stringify(recall))
+    assert.ok(recall.kind === 'ready' && recall.items.some(row => row.text === REAL_LEGACY_TEXT))
+    const body = await wire.readText({
+      sessionId: item.sessionId,
+      messageId: item.messageId,
+      contentSha256: item.contentSha256,
+      offset: 0,
+      limit: 4096,
+    })
+    assert.equal(body.kind, 'ready', JSON.stringify(body))
+    assert.ok(body.kind === 'ready' && body.chunk === REAL_LEGACY_TEXT)
+
+    await handle.dispose()
+    handle = undefined
+    await verifyFullPass(wire.service())
+    const afterDispose = await wire.search({ scope: 'session', sessionId: REAL_LEGACY_ID, query: REAL_LEGACY_TEXT, limit: 5 })
+    assert.equal(afterDispose.kind, 'ready', JSON.stringify(afterDispose))
+    assert.ok(afterDispose.kind === 'ready' && afterDispose.items.length === 1)
+  } finally {
+    disposeListener?.()
+    await handle?.dispose()
+    fixture?.restore()
+    await wire.dispose()
+  }
+})
+
+test('resuming an excluded Session during an open round schedules only one authoritative rebuild', async (t) => {
+  const life = testLifecycle(t)
+  let fixture: RealLegacyFixture | undefined
+  let seededList: HistorySearchPersistenceLike['list'] | undefined
+  let releaseList!: () => void
+  const listGate = new Promise<void>(resolve => { releaseList = resolve })
+  const wire = await historyHost(life, 'history-real-legacy-single-repair', async (ctx) => {
+    fixture = await seedRealLegacyFixture(ctx)
+    const raw = ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+    seededList = raw.list
+    raw.list = async function (options) {
+      await listGate
+      return seededList!.call(this, options)
+    }
+  })
+  let handle: Awaited<ReturnType<Host['ctx']['agentLoop']['resume']>> | undefined
+  const internals = wire.service() as unknown as {
+    commitWitness(witness: { readonly sessionId?: unknown }, action: () => void): Promise<unknown>
+  }
+  const originalCommit = internals.commitWitness
+  let releaseCurrent!: () => void
+  const currentGate = new Promise<void>(resolve => { releaseCurrent = resolve })
+  let markCurrent!: () => void
+  const currentStarted = new Promise<void>(resolve => { markCurrent = resolve })
+  let armed = true
+  internals.commitWitness = async function (witness, action) {
+    if (armed && witness.sessionId === REAL_CURRENT_ID) {
+      armed = false
+      markCurrent()
+      await currentGate
+    }
+    return originalCommit.call(this, witness, action)
+  }
+  const rawQuery = wire.host.ctx.sessionQuery
+  const originalObserve = rawQuery.observeSession
+  let legacyObserveCalls = 0
+  rawQuery.observeSession = function (id, options) {
+    if (String(id) === REAL_LEGACY_ID) legacyObserveCalls += 1
+    return originalObserve.call(this, id, options)
+  }
+  try {
+    releaseList()
+    await Promise.race([
+      currentStarted,
+      new Promise<never>((_, reject) => {
+        // Bounded failure deadline only; the candidate signal is the authoritative wake-up.
+        const timer = setTimeout(() => reject(new Error('current candidate did not reach the held writer')), 10_000)
+        currentStarted.finally(() => clearTimeout(timer))
+      }),
+    ])
+    const round = (wire.service() as unknown as {
+      coverageRound?: { readonly settled: Map<string, { readonly liveObject: object | undefined; readonly readable: boolean }> }
+    }).coverageRound
+    const legacySettled = round?.settled.get(REAL_LEGACY_ID)
+    assert.ok(legacySettled !== undefined, 'the legacy omission must settle before the held current candidate')
+    assert.equal(legacySettled.liveObject, undefined)
+    assert.equal(legacySettled.readable, false)
+    handle = await wire.host.ctx.agentLoop.resume(wire.host.ctx, {
+      resumeSessionId: SessionId(REAL_LEGACY_ID),
+      agentOptions: { provider: 'smoke', model: 'smoke' },
+    })
+    releaseCurrent()
+    await waitForReady(wire, 'single-repair legacy round')
+    const restored = await wire.search(
+      { scope: 'session', sessionId: REAL_LEGACY_ID, query: REAL_LEGACY_TEXT, limit: 5 })
+    assert.equal(restored.kind, 'ready', JSON.stringify(restored))
+    assert.ok(restored.kind === 'ready' && restored.items.length === 1)
+    assert.equal(legacyObserveCalls, 1, 'the same registration must not manufacture a second full rebuild')
+  } finally {
+    releaseList()
+    releaseCurrent()
+    rawQuery.observeSession = originalObserve
+    internals.commitWitness = originalCommit
+    const raw = wire.host.ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+    if (seededList !== undefined) raw.list = seededList
+    fixture?.restore()
+    await handle?.dispose()
+    await wire.dispose()
+  }
+})
+
+test('a legacy roster record superseded by resume and disposal preserves the current terminal without stale replay', async (t) => {
+  const life = testLifecycle(t)
+  let fixture: RealLegacyFixture | undefined
+  let seededList: HistorySearchPersistenceLike['list'] | undefined
+  const wire = await historyHost(life, 'history-real-legacy-stale-roster', async (ctx) => {
+    fixture = await seedRealLegacyFixture(ctx)
+    const raw = ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+    seededList = raw.list
+    raw.list = async function (options) {
+      const rows = await seededList!.call(this, options)
+      return [...rows].sort((left, right) => {
+        const leftCurrent = String(left.header.id) === REAL_CURRENT_ID
+        const rightCurrent = String(right.header.id) === REAL_CURRENT_ID
+        return leftCurrent === rightCurrent ? 0 : leftCurrent ? -1 : 1
+      })
+    }
+  })
+  await waitForReady(wire, 'stale-roster legacy exclusion')
+  const before = await wire.search({ scope: 'session', sessionId: REAL_LEGACY_ID, query: REAL_LEGACY_TEXT, limit: 5 })
+  assert.equal(before.kind, 'ready', JSON.stringify(before))
+  assert.ok(before.kind === 'ready' && before.items.length === 0)
+
+  const internals = wire.service() as unknown as {
+    reconcileOfficialSession(sessionId: string, ...args: unknown[]): Promise<unknown>
+    verifySources(): Promise<void>
+    readonly sessionRepairFlights: Map<string, unknown>
+    coverageRound?: { readonly settled: Map<string, { readonly liveObject: object | undefined; readonly readable: boolean }> }
+  }
+  const originalReconcile = internals.reconcileOfficialSession
+  let releaseCurrent!: () => void
+  const currentGate = new Promise<void>(resolve => { releaseCurrent = resolve })
+  let markCurrent!: () => void
+  const currentStarted = new Promise<void>(resolve => { markCurrent = resolve })
+  let armed = true
+  internals.reconcileOfficialSession = async function (sessionId, ...args) {
+    if (armed && sessionId === REAL_CURRENT_ID) {
+      armed = false
+      markCurrent()
+      await currentGate
+    }
+    return originalReconcile.call(this, sessionId, ...args)
+  }
+  let handle: Awaited<ReturnType<Host['ctx']['agentLoop']['resume']>> | undefined
+  let verify: Promise<void> | undefined
+  try {
+    verify = internals.verifySources()
+    await Promise.race([
+      currentStarted,
+      new Promise<never>((_, reject) => {
+        // Bounded failure deadline only; the held current candidate is the authoritative wake-up.
+        const timer = setTimeout(() => reject(new Error('current candidate did not hold the periodic round')), 10_000)
+        currentStarted.finally(() => clearTimeout(timer))
+      }),
+    ])
+    handle = await wire.host.ctx.agentLoop.resume(wire.host.ctx, {
+      resumeSessionId: SessionId(REAL_LEGACY_ID),
+      agentOptions: { provider: 'smoke', model: 'smoke' },
+    })
+    const index = indexOfService(wire.service())
+    await waitFor('legacy live repair terminal', () => {
+      const checkpoint = index.checkpointOf(REAL_LEGACY_ID)
+      const settled = internals.coverageRound?.settled.get(REAL_LEGACY_ID)
+      return checkpoint?.sourceState === 'live' && settled?.readable === true
+    }, 10_000)
+    await handle.dispose()
+    handle = undefined
+    await waitFor('legacy disposal terminal', () => {
+      const checkpoint = index.checkpointOf(REAL_LEGACY_ID)
+      const settled = internals.coverageRound?.settled.get(REAL_LEGACY_ID)
+      return checkpoint?.sourceState === 'persisted'
+        && checkpoint.dirty === false
+        && checkpoint.uncertainSources === 0
+        && !internals.sessionRepairFlights.has(REAL_LEGACY_ID)
+        && settled?.liveObject === undefined
+    }, 10_000)
+    assert.ok(fixture !== undefined)
+    const callsBeforeRelease = [
+      fixture.counters.stat(), fixture.counters.open(), fixture.counters.read(), fixture.counters.close(),
+    ]
+    releaseCurrent()
+    await verify
+    verify = undefined
+    await waitForReady(wire, 'stale-roster current terminal')
+    const restored = await wire.search({ scope: 'session', sessionId: REAL_LEGACY_ID, query: REAL_LEGACY_TEXT, limit: 5 })
+    assert.equal(restored.kind, 'ready', JSON.stringify(restored))
+    assert.ok(restored.kind === 'ready' && restored.items.length === 1)
+    const current = await wire.search({ scope: 'session', sessionId: REAL_CURRENT_ID, query: REAL_CURRENT_TEXT, limit: 5 })
+    assert.equal(current.kind, 'ready', JSON.stringify(current))
+    assert.ok(current.kind === 'ready' && current.items.length === 1)
+    assert.deepEqual(
+      [fixture.counters.stat(), fixture.counters.open(), fixture.counters.read(), fixture.counters.close()],
+      callsBeforeRelease,
+      'the stale legacy roster record must not start another official replay',
+    )
+  } finally {
+    releaseCurrent()
+    if (verify !== undefined) await verify
+    internals.reconcileOfficialSession = originalReconcile
+    const raw = wire.host.ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+    if (seededList !== undefined) raw.list = seededList
+    fixture?.restore()
+    await handle?.dispose()
+    await wire.dispose()
+  }
+})
+
+function legacyMutableSource(root: string, id: string): MutableOfficialSource {
+  const source = mutableSource('/repo/legacy', id)
+  return {
+    ...source,
+    formatStatus: 'migration-required',
+    location: { kind: 'jsonl', path: join(root, 'sessions', `${id}.jsonl.zstd`) },
+  }
+}
+
+test('a retained legacy projection and cursor are removed while current, unknown and non-JSONL sources replay normally', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-legacy-retained-root-')
+  const profileDir = life.tempDir('dsh-history-legacy-retained-profile-')
+  const legacyId = 'legacy-retained'
+  const legacy = legacyMutableSource(root, legacyId)
+  const authority = proofAuthority(root)
+  const legacyRows: readonly HistoryOccurrenceInput[] = [
+    { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/legacy', content: 'mutable first', hasNonText: false },
+    { messageId: 'msg-2', firstEventSeq: 2, acceptedAt: 1002, effectiveCwd: '/repo/legacy-two', content: 'mutable second', hasNonText: false },
+  ]
+  legacy.formatStatus = 'current'
+  legacy.revisionToken = 'rev-legacy-retained'
+  seedColdProof(profileDir, legacy, authority.authority, { occurrences: legacyRows })
+
+  const firstCtx = new Context()
+  const first = directService(firstCtx, {
+    ...mutableDeps(legacy).deps,
+    revisionAuthority: async () => authority.authority,
+  }, profileDir)
+  let oldItem: Extract<HistorySearchResponse, { kind: 'ready' }>['items'][number] | undefined
+  let oldCursor: string | undefined
+  try {
+    await waitDirectReady(first)
+    const before = await first.search({ scope: 'session', sessionId: legacyId, query: 'mutable', limit: 1 }, new AbortController().signal)
+    assert.equal(before.kind, 'ready', JSON.stringify(before))
+    assert.ok(before.kind === 'ready' && before.items.length === 1)
+    oldItem = before.items[0]
+    oldCursor = before.nextCursor ?? undefined
+  } finally {
+    await first.dispose()
+    await firstCtx.fiber.dispose()
+  }
+
+  legacy.formatStatus = 'migration-required'
+  const current = mutableSource('/repo/current', 'current-control')
+  current.formatStatus = 'current'
+  current.location = { kind: 'jsonl', path: join(root, 'sessions', 'current-control.jsonl.zstd') }
+  const unknown = mutableSource('/repo/unknown', 'unknown-control')
+  const nonJsonl = mutableSource('/repo/non-jsonl', 'non-jsonl-control')
+  nonJsonl.formatStatus = 'migration-required'
+  nonJsonl.location = { kind: 'other', path: join(root, 'sessions', 'non-jsonl-control.jsonl') }
+  const { deps, calls } = mutableDeps(legacy, [current, unknown, nonJsonl])
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  try {
+    await waitDirectReady(service)
+    for (const scope of [
+      { scope: 'all', query: 'mutable first', limit: 5 },
+      { scope: 'directory', cwd: '/repo/legacy', query: 'mutable first', limit: 5 },
+      { scope: 'session', sessionId: legacyId, query: 'mutable first', limit: 5 },
+    ] as const) {
+      const answer = await service.search(scope, new AbortController().signal)
+      assert.equal(answer.kind, 'ready', JSON.stringify(answer))
+      assert.ok(answer.kind === 'ready' && answer.items.every(item => item.sessionId !== legacyId))
+    }
+    assert.ok(oldItem !== undefined)
+    const oldBody = await service.readText({
+      sessionId: oldItem.sessionId,
+      messageId: oldItem.messageId,
+      contentSha256: oldItem.contentSha256,
+      offset: 0,
+      limit: 4096,
+    }, new AbortController().signal)
+    assert.equal(oldBody.kind, 'unavailable')
+    assert.ok(oldBody.kind === 'unavailable' && oldBody.reason === 'not-found')
+    const oldRecall = await service.readSessionRecall({ sessionId: legacyId }, new AbortController().signal)
+    assert.equal(oldRecall.kind, 'loading')
+    assert.ok(oldCursor !== undefined)
+    const stale = await service.search({
+      scope: 'session', sessionId: legacyId, query: 'mutable', limit: 1, cursor: oldCursor,
+    }, new AbortController().signal)
+    assert.equal(stale.kind, 'stale')
+
+    for (const [sessionId, cwd] of [
+      ['current-control', '/repo/current'],
+      ['unknown-control', '/repo/unknown'],
+      ['non-jsonl-control', '/repo/non-jsonl'],
+    ] as const) {
+      const answer = await service.search({ scope: 'session', sessionId, query: 'mutable first', limit: 5 }, new AbortController().signal)
+      assert.equal(answer.kind, 'ready', JSON.stringify(answer))
+      assert.ok(answer.kind === 'ready' && answer.items.length === 1)
+      assert.equal(answer.items[0]?.effectiveCwd, cwd)
+    }
+    assert.ok(!calls.statIds().includes(legacyId))
+    assert.ok(!calls.openIds().includes(legacyId))
+    assert.ok(!calls.readIds().includes(legacyId))
+    const index = indexOfService(service)
+    assert.equal(index.checkpointOf(legacyId), undefined)
+    assert.equal(index.sourceProofOf(legacyId), undefined)
+
+    const beforeVerify = calls.listCalls()
+    await verifyFullPass(service)
+    assert.equal(calls.listCalls(), beforeVerify + 1)
+    assert.ok(!calls.statIds().includes(legacyId))
+    assert.ok(!calls.openIds().includes(legacyId))
+    assert.ok(!calls.readIds().includes(legacyId))
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a mounted periodic pass deletes a retained legacy projection behind the incomplete barrier and invalidates its cursor', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-legacy-periodic-root-')
+  const profileDir = life.tempDir('dsh-history-legacy-periodic-profile-')
+  const legacyId = 'legacy-periodic'
+  const legacy = legacyMutableSource(root, legacyId)
+  legacy.formatStatus = 'current'
+  legacy.revisionToken = 'rev-legacy-periodic'
+  const authority = proofAuthority(root)
+  seedColdProof(profileDir, legacy, authority.authority, {
+    occurrences: [
+      { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/legacy', content: 'mutable first', hasNonText: false },
+      { messageId: 'msg-2', firstEventSeq: 2, acceptedAt: 1002, effectiveCwd: '/repo/legacy-two', content: 'mutable second', hasNonText: false },
+    ],
+  })
+  const { deps, calls } = mutableDeps(legacy)
+  const ctx = new Context()
+  const service = directService(ctx, {
+    ...deps,
+    revisionAuthority: async () => authority.authority,
+  }, profileDir)
+  try {
+    await waitDirectReady(service)
+    const before = await service.search({ scope: 'session', sessionId: legacyId, query: 'mutable', limit: 1 }, new AbortController().signal)
+    assert.equal(before.kind, 'ready', JSON.stringify(before))
+    assert.ok(before.kind === 'ready' && before.items.length === 1)
+    const oldItem = before.items[0]!
+    const oldCursor = before.nextCursor
+    assert.ok(oldCursor !== undefined)
+
+    legacy.formatStatus = 'migration-required'
+    const index = indexOfService(service)
+    const originalDelete = index.deleteSession
+    let stateAtDelete: string | undefined
+    index.deleteSession = function (sessionId) {
+      if (sessionId === legacyId) {
+        stateAtDelete = (service as unknown as { readonly state: { readonly kind: string } }).state.kind
+      }
+      return originalDelete.call(this, sessionId)
+    }
+    const legacyIoBefore = [
+      calls.statIds().filter(id => id === legacyId).length,
+      calls.openIds().filter(id => id === legacyId).length,
+      calls.readIds().filter(id => id === legacyId).length,
+    ]
+    const beforeVerify = calls.listCalls()
+    await verifyFullPass(service)
+    assert.equal(calls.listCalls(), beforeVerify + 1)
+    assert.equal(stateAtDelete, 'incomplete', 'destructive deletion must first publish the incomplete barrier')
+    assert.deepEqual([
+      calls.statIds().filter(id => id === legacyId).length,
+      calls.openIds().filter(id => id === legacyId).length,
+      calls.readIds().filter(id => id === legacyId).length,
+    ], legacyIoBefore, 'periodic legacy exclusion must not perform per-ID official IO')
+
+    const empty = await service.search({ scope: 'session', sessionId: legacyId, query: 'mutable', limit: 1 }, new AbortController().signal)
+    assert.equal(empty.kind, 'ready', JSON.stringify(empty))
+    assert.ok(empty.kind === 'ready' && empty.items.length === 0)
+    const stale = await service.search({
+      scope: 'session', sessionId: legacyId, query: 'mutable', limit: 1, cursor: oldCursor,
+    }, new AbortController().signal)
+    assert.equal(stale.kind, 'stale')
+    const body = await service.readText({
+      sessionId: oldItem.sessionId,
+      messageId: oldItem.messageId,
+      contentSha256: oldItem.contentSha256,
+      offset: 0,
+      limit: 4096,
+    }, new AbortController().signal)
+    assert.equal(body.kind, 'unavailable')
+    assert.ok(body.kind === 'unavailable' && body.reason === 'not-found')
+    const recall = await service.readSessionRecall({ sessionId: legacyId }, new AbortController().signal)
+    assert.equal(recall.kind, 'loading')
+    assert.equal(index.checkpointOf(legacyId), undefined)
+    assert.equal(index.sourceProofOf(legacyId), undefined)
+    index.deleteSession = originalDelete
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('an all-legacy cold roster becomes ready without readable rows and re-enters after official current classification', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-legacy-all-root-')
+  const profileDir = life.tempDir('dsh-history-legacy-all-profile-')
+  const legacyId = 'legacy-all'
+  const legacy = legacyMutableSource(root, legacyId)
+  const { deps, calls } = mutableDeps(legacy)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  try {
+    await waitDirectReady(service)
+    const empty = await service.search({ scope: 'all', query: 'mutable first', limit: 5 }, new AbortController().signal)
+    assert.equal(empty.kind, 'ready', JSON.stringify(empty))
+    assert.ok(empty.kind === 'ready' && empty.items.length === 0)
+    const recall = await service.readSessionRecall({ sessionId: legacyId }, new AbortController().signal)
+    assert.equal(recall.kind, 'loading')
+    assert.deepEqual([calls.statIds(), calls.openIds(), calls.readIds()], [[], [], []])
+
+    await verifyFullPass(service)
+    assert.deepEqual([calls.statIds(), calls.openIds(), calls.readIds()], [[], [], []])
+
+    legacy.formatStatus = 'current'
+    await verifyFullPass(service)
+    const current = await service.search({ scope: 'session', sessionId: legacyId, query: 'mutable first', limit: 5 }, new AbortController().signal)
+    assert.equal(current.kind, 'ready', JSON.stringify(current))
+    assert.ok(current.kind === 'ready' && current.items.length === 1)
+    const item = current.items[0]!
+    const body = await service.readText({
+      sessionId: item.sessionId,
+      messageId: item.messageId,
+      contentSha256: item.contentSha256,
+      offset: 0,
+      limit: 4096,
+    }, new AbortController().signal)
+    assert.equal(body.kind, 'ready', JSON.stringify(body))
+    assert.ok(body.kind === 'ready' && body.chunk === 'mutable first')
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a live registration and accepted event during legacy exclusion veto the stale deletion and converge once', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-legacy-race-root-')
+  const profileDir = life.tempDir('dsh-history-legacy-race-profile-')
+  const legacyId = 'legacy-race'
+  const legacy = legacyMutableSource(root, legacyId)
+  seedColdProof(profileDir, legacy, proofAuthority(root).authority, {
+    mint: false,
+    occurrences: [
+      { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/legacy', content: 'mutable first', hasNonText: false },
+      { messageId: 'msg-2', firstEventSeq: 2, acceptedAt: 1002, effectiveCwd: '/repo/legacy-two', content: 'mutable second', hasNonText: false },
+    ],
+  })
+  const { deps } = mutableDeps(legacy)
+  const persistence = deps.sessionPersistence()
+  const originalList = persistence.list
+  let releaseList!: () => void
+  const listGate = new Promise<void>(resolve => { releaseList = resolve })
+  persistence.list = async function (options) {
+    await listGate
+    return originalList.call(this, options)
+  }
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    commitWitness(witness: { readonly sessionId?: unknown }, action: () => void): Promise<unknown>
+  }
+  const originalCommit = internals.commitWitness
+  let releaseCandidate!: () => void
+  const candidateGate = new Promise<void>(resolve => { releaseCandidate = resolve })
+  let markCandidate!: () => void
+  const candidateStarted = new Promise<void>(resolve => { markCandidate = resolve })
+  let armed = true
+  internals.commitWitness = async function (witness, action) {
+    if (armed && witness.sessionId === legacyId) {
+      armed = false
+      markCandidate()
+      await candidateGate
+    }
+    return originalCommit.call(this, witness, action)
+  }
+  try {
+    releaseList()
+    await Promise.race([
+      candidateStarted,
+      new Promise<never>((_, reject) => {
+        // Bounded failure deadline only; the candidate signal is the authoritative wake-up.
+        const timer = setTimeout(() => reject(new Error('legacy exclusion candidate did not reach the held writer')), 10_000)
+        candidateStarted.finally(() => clearTimeout(timer))
+      }),
+    ])
+    legacy.live = true
+    const liveObject = deps.sessions()!.get(legacyId)
+    assert.ok(liveObject !== undefined)
+    const accepted = {
+      type: 'agent/inbox/spliced',
+      seq: legacy.events.length,
+      time: 1003,
+      data: {
+        target: 'next-turn',
+        start: legacy.events.length,
+        inserted: [{
+          id: 'legacy-race-new',
+          role: 'user',
+          source: { kind: 'user', rpcId: 'rpc-legacy-race-new' },
+          content: [{ type: 'text', text: 'legacy race accepted row' }],
+        }],
+      },
+    }
+    legacy.events.push(accepted)
+    ctx.emit('session/created', liveObject as never)
+    ctx.emit('session/event', liveObject as never, accepted as never)
+    releaseCandidate()
+
+    await waitDirectReady(service)
+    const answer = await service.search({ scope: 'session', sessionId: legacyId, query: '', limit: 10 }, new AbortController().signal)
+    assert.equal(answer.kind, 'ready', JSON.stringify(answer))
+    assert.ok(answer.kind === 'ready' && answer.items.length === 3, JSON.stringify(answer))
+    assert.deepEqual(
+      new Set(answer.items.map(item => item.preview)),
+      new Set(['mutable first', 'mutable second', 'legacy race accepted row']),
+    )
+    const added = answer.items.find(item => item.preview === 'legacy race accepted row')
+    assert.ok(added !== undefined)
+    const body = await service.readText({
+      sessionId: added.sessionId,
+      messageId: added.messageId,
+      contentSha256: added.contentSha256,
+      offset: 0,
+      limit: 4096,
+    }, new AbortController().signal)
+    assert.equal(body.kind, 'ready', JSON.stringify(body))
+    assert.ok(body.kind === 'ready' && body.chunk === 'legacy race accepted row')
+    assert.equal(indexOfService(service).checkpointOf(legacyId)?.sourceState, 'live')
+  } finally {
+    releaseCandidate()
+    persistence.list = originalList
+    internals.commitWitness = originalCommit
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a provisional live legacy checkpoint vetoes exclusion until the durable source covers it', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-legacy-short-root-')
+  const profileDir = life.tempDir('dsh-history-legacy-short-profile-')
+  const legacyId = 'legacy-short'
+  const legacy = legacyMutableSource(root, legacyId)
+  legacy.formatStatus = 'current'
+  seedColdProof(profileDir, legacy, proofAuthority(root).authority, {
+    mint: false,
+    occurrences: [
+      { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/legacy', content: 'mutable first', hasNonText: false },
+      { messageId: 'msg-2', firstEventSeq: 2, acceptedAt: 1002, effectiveCwd: '/repo/legacy-two', content: 'mutable second', hasNonText: false },
+    ],
+  })
+  const { deps } = mutableDeps(legacy)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  try {
+    await waitDirectReady(service)
+    legacy.formatStatus = 'migration-required'
+    const during = indexOfService(service)
+    during.markSession({ sessionId: legacyId, sourceState: 'live', dirty: true })
+    legacy.durableEventCount = 1
+    await verifyFullPass(service)
+    const short = await waitDirectSettled(service)
+    assert.equal(short.kind, 'incomplete', JSON.stringify(short))
+    assert.equal(during.checkpointOf(legacyId)?.sourceState, 'live')
+    assert.equal(during.checkpointOf(legacyId)?.dirty, true)
+    assert.ok(during.occurrence(legacyId, 'msg-1') !== undefined)
+    assert.ok(during.occurrence(legacyId, 'msg-2') !== undefined)
+
+    legacy.durableEventCount = legacy.events.length
+    await verifyFullPass(service)
+    await waitDirectReady(service)
+    const recovered = await service.search({ scope: 'session', sessionId: legacyId, query: 'mutable first', limit: 5 }, new AbortController().signal)
+    assert.equal(recovered.kind, 'ready', JSON.stringify(recovered))
+    assert.ok(recovered.kind === 'ready' && recovered.items.length === 1)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a failed legacy deletion stays incomplete and recovers through the existing writer before exclusion retries', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-legacy-delete-failure-root-')
+  const profileDir = life.tempDir('dsh-history-legacy-delete-failure-profile-')
+  const legacyId = 'legacy-delete-failure'
+  const legacy = legacyMutableSource(root, legacyId)
+  seedColdProof(profileDir, legacy, proofAuthority(root).authority, {
+    mint: false,
+    occurrences: [
+      { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/legacy', content: 'mutable first', hasNonText: false },
+    ],
+  })
+  const { deps } = mutableDeps(legacy)
+  const persistence = deps.sessionPersistence()
+  const originalList = persistence.list
+  let releaseList!: () => void
+  const listGate = new Promise<void>(resolve => { releaseList = resolve })
+  persistence.list = async function (options) {
+    await listGate
+    return originalList.call(this, options)
+  }
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const index = indexOfService(service)
+  const originalDelete = index.deleteSession
+  let armed = true
+  index.deleteSession = function (sessionId) {
+    if (armed && sessionId === legacyId) {
+      armed = false
+      throw new Error('injected legacy deletion failure')
+    }
+    return originalDelete.call(this, sessionId)
+  }
+  try {
+    releaseList()
+    const failed = await waitDirectSettled(service)
+    assert.equal(failed.kind, 'incomplete', JSON.stringify(failed))
+    assert.ok(index.checkpointOf(legacyId) !== undefined, 'failed deletion must keep the derived checkpoint')
+
+    index.deleteSession = originalDelete
+    await verifyFullPass(service)
+    await waitDirectReady(service)
+    const replayed = await service.search({ scope: 'session', sessionId: legacyId, query: 'mutable first', limit: 5 }, new AbortController().signal)
+    assert.equal(replayed.kind, 'ready', JSON.stringify(replayed))
+    assert.ok(replayed.kind === 'ready' && replayed.items.length === 1,
+      'the existing authoritative replay must clear the writer fault before policy retries')
+
+    await verifyFullPass(service)
+    const excluded = await service.search({ scope: 'session', sessionId: legacyId, query: 'mutable first', limit: 5 }, new AbortController().signal)
+    assert.equal(excluded.kind, 'ready', JSON.stringify(excluded))
+    assert.ok(excluded.kind === 'ready' && excluded.items.length === 0)
+    assert.equal(index.checkpointOf(legacyId), undefined)
+  } finally {
+    releaseList()
+    persistence.list = originalList
+    index.deleteSession = originalDelete
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('cold legacy diagnostics report aggregate exclusion and checkpoint deletion counts without identity', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-legacy-diagnostics-root-')
+  const previousLog = process.env.DSH_PI_TUI_LOG
+  const previousLevel = process.env.DSH_PI_TUI_LOG_LEVEL
+  const run = async (label: string, retained: boolean): Promise<{ bootstrap: Record<string, string>; verify: Record<string, string>; log: string }> => {
+    const profileDir = life.tempDir(`dsh-history-legacy-diagnostics-${label}-profile-`)
+    const logPath = join(life.tempDir(`dsh-history-legacy-diagnostics-${label}-log-`), 'history.log')
+    const legacyId = `legacy-diagnostics-${label}`
+    const legacy = legacyMutableSource(root, legacyId)
+    if (retained) {
+      seedColdProof(profileDir, legacy, proofAuthority(root).authority, {
+        mint: false,
+        occurrences: [
+          { messageId: 'msg-1', firstEventSeq: 0, acceptedAt: 1000, effectiveCwd: '/repo/legacy', content: 'mutable first', hasNonText: false },
+        ],
+      })
+    }
+    process.env.DSH_PI_TUI_LOG = logPath
+    process.env.DSH_PI_TUI_LOG_LEVEL = 'debug'
+    const { deps } = mutableDeps(legacy)
+    const ctx = new Context()
+    const service = directService(ctx, deps, profileDir)
+    try {
+      await waitDirectReady(service)
+      await verifyFullPass(service)
+    } finally {
+      await service.dispose()
+      await ctx.fiber.dispose()
+    }
+    const log = readFileSync(logPath, 'utf8')
+    return {
+      bootstrap: diagnosticFields(log, 'history-search.bootstrap.end'),
+      verify: diagnosticFields(log, 'history-search.verify.end'),
+      log,
+    }
+  }
+  try {
+    const noRow = await run('no-row', false)
+    for (const phase of [noRow.bootstrap, noRow.verify]) {
+      assert.equal(phase.coldLegacyExcluded, '1')
+      assert.equal(phase.coldLegacyCheckpointsDeleted, '0')
+    }
+    assert.ok(!noRow.log.includes('legacy-diagnostics-no-row'))
+    assert.ok(!noRow.log.includes('mutable first'))
+    assert.ok(!noRow.log.includes(root))
+
+    const retained = await run('retained', true)
+    assert.equal(retained.bootstrap.coldLegacyExcluded, '1')
+    assert.equal(retained.bootstrap.coldLegacyCheckpointsDeleted, '1')
+    assert.equal(retained.verify.coldLegacyExcluded, '1')
+    assert.equal(retained.verify.coldLegacyCheckpointsDeleted, '0',
+      'a periodic pass must not double-count an already deleted checkpoint')
+    assert.ok(!retained.log.includes('legacy-diagnostics-retained'))
+    assert.ok(!retained.log.includes('mutable first'))
+    assert.ok(!retained.log.includes(root))
+  } finally {
+    if (previousLog === undefined) delete process.env.DSH_PI_TUI_LOG
+    else process.env.DSH_PI_TUI_LOG = previousLog
+    if (previousLevel === undefined) delete process.env.DSH_PI_TUI_LOG_LEVEL
+    else process.env.DSH_PI_TUI_LOG_LEVEL = previousLevel
   }
 })

@@ -404,6 +404,10 @@ interface HistorySearchPhaseCounters {
   sourceProofRevoked: number
   /** Index revocation count captured when the phase scope began. */
   sourceProofRevokedBase: number
+  /** Cold persisted-only legacy Sessions terminally excluded by product policy. */
+  coldLegacyExcluded: number
+  /** Excluded legacy Sessions whose derived checkpoint/rows were deleted. */
+  coldLegacyCheckpointsDeleted: number
 }
 
 /** O(1) disposal-verification counters; no Session id, content or path is retained. */
@@ -1325,6 +1329,135 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
   }
 
+  // ── cold legacy product-scope exclusion ────────────────────────────────
+
+  /** Whether any real accepted/repair/currentness obligation vetoes legacy exclusion. */
+  private hasColdLegacyExclusionVeto(sessionId: string, ignore?: HistoryCandidateWitness): boolean {
+    if (this.indexFaulted) return true
+    if (
+      this.pending.has(sessionId)
+      || this.heldPending.has(sessionId)
+      || this.droppedAccepted.has(sessionId)
+      || this.reconcilePending.has(sessionId)
+      || this.disposalRequests.has(sessionId)
+      || this.rebuildRequests.has(sessionId)
+    ) {
+      return true
+    }
+    const active = this.activeCandidates.get(sessionId)
+    if (active === undefined) return false
+    for (const candidate of active) {
+      if (candidate !== ignore) return true
+    }
+    return false
+  }
+
+  /** Hand a superseded legacy roster record to the existing exact-ID repair owner. */
+  private staleColdLegacyCandidate(sessionId: string): 'stale' {
+    const round = this.coverageRound
+    if (round !== undefined && this.roundSourceCurrent(round)) this.scheduleSessionRepair(sessionId, 'rebuild')
+    return 'stale'
+  }
+
+  /**
+   * Terminally exclude one cold persisted-only legacy Session from the derived
+   * index. The official list's positive format classification is the only
+   * source-format authority; the exact claim/witness and pre-list checkpoint
+   * cut fence the destructive terminal. An excluded ID is settled as unreadable
+   * round coverage, never as a replay/proof hit or an empty checkpoint.
+   */
+  private async tryExcludeColdLegacySession(
+    sessionId: string,
+    record: OfficialSession,
+    persistence: HistorySearchPersistenceLike,
+    sessions: HistorySearchSessionsLike,
+    deletionCut: ReadonlyMap<string, HistorySessionCheckpointRow>,
+    counters: HistorySearchPhaseCounters,
+  ): Promise<'excluded' | 'settled' | 'ineligible' | 'stale' | 'failed'> {
+    if (this.index === undefined) return 'ineligible'
+    if (record.live || record.formatStatus !== 'migration-required' || record.location?.kind !== 'jsonl') {
+      return 'ineligible'
+    }
+    const liveObject = sessions.get(sessionId)
+    if (liveObject !== undefined) return this.staleColdLegacyCandidate(sessionId)
+    const checkpoint = this.index.checkpointOf(sessionId)
+    if (checkpoint?.sourceState === 'live') return 'ineligible'
+    if (this.hasColdLegacyExclusionVeto(sessionId)) return this.staleColdLegacyCandidate(sessionId)
+    const round = this.coverageRound
+    if (round === undefined || !this.roundSourceCurrent(round)) return 'stale'
+    if (!sameCheckpoint(deletionCut.get(sessionId), checkpoint)) {
+      const settled = round.settled.get(sessionId)
+      if (
+        settled !== undefined
+        && settled.liveObject === liveObject
+        && checkpoint !== undefined
+        && (settled.readable || (checkpoint.sourceState === 'persisted' && !checkpoint.dirty && checkpoint.uncertainSources === 0))
+      ) {
+        return 'settled'
+      }
+      return this.staleColdLegacyCandidate(sessionId)
+    }
+
+    const witness = this.createWitness(sessionId, persistence, sessions, checkpoint, undefined, true)
+    let refused = false
+    let preserved = false
+    try {
+      const receipt = await this.commitWitness(witness, () => {
+        if (!this.roundSourceCurrent(round)) {
+          refused = true
+          return
+        }
+        if (
+          record.live
+          || record.formatStatus !== 'migration-required'
+          || record.location?.kind !== 'jsonl'
+          || sessions.get(sessionId) !== undefined
+          || this.hasColdLegacyExclusionVeto(sessionId, witness)
+        ) {
+          refused = true
+          return
+        }
+        const current = this.index?.checkpointOf(sessionId)
+        if (!sameCheckpoint(deletionCut.get(sessionId), current)) {
+          const settled = round.settled.get(sessionId)
+          preserved = settled !== undefined
+            && settled.liveObject === sessions.get(sessionId)
+            && current !== undefined
+            && (settled.readable || (current.sourceState === 'persisted' && !current.dirty && current.uncertainSources === 0))
+          refused = true
+          return
+        }
+        if (current?.sourceState === 'live') {
+          refused = true
+          return
+        }
+        if (current !== undefined) this.markRoundInvalidating()
+        if (current !== undefined) this.requireIndex().deleteSession(sessionId)
+        this.verifiedRevisions.delete(sessionId)
+        this.settleRoundSession(sessionId, undefined, round, false)
+      })
+      if (receipt === 'failed') return 'failed'
+      if (preserved) return 'settled'
+      if (refused || receipt === 'stale') {
+        if (!this.roundSourceCurrent(round)) {
+          this.invalidateCoverageBinding()
+        } else if (
+          sessions.get(sessionId) !== undefined
+          || this.hasColdLegacyExclusionVeto(sessionId, witness)
+          || !sameCheckpoint(deletionCut.get(sessionId), this.index?.checkpointOf(sessionId))
+        ) {
+          this.scheduleSessionRepair(sessionId, 'rebuild')
+        }
+        return 'stale'
+      }
+      counters.coldLegacyExcluded += 1
+      if (checkpoint !== undefined) counters.coldLegacyCheckpointsDeleted += 1
+      return 'excluded'
+    } finally {
+      this.releaseWitness(witness)
+    }
+  }
+
   // ── live observation ─────────────────────────────────────────────────────
 
   /** Whether the mounted index may keep preserving accepted input right now. */
@@ -1395,7 +1528,23 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     // A created/restored registration is a real source-identity producer even
     // when the restored preexisting history emits no session/event. Revoke only
     // this round's evidence; the existing per-ID repair owns re-proof.
-    this.revokeRoundSourceIdentity(sessionId, session as object)
+    const repairScheduled = this.revokeRoundSourceIdentity(sessionId, session as object)
+    const firstLiveSeq = (session as { readonly firstLiveSeq?: unknown }).firstLiveSeq
+    if (
+      remembered
+      && !repairScheduled
+      && this.index !== undefined
+      && this.index.checkpointOf(sessionId) === undefined
+      && this.deps.sessions()?.get(sessionId) === session
+      && typeof firstLiveSeq === 'number'
+      && Number.isSafeInteger(firstLiveSeq)
+      && firstLiveSeq > 0
+    ) {
+      // A restored non-empty seed emits no session/event for its prefix. Ask
+      // the existing point-repair owner for one authoritative live observation
+      // now; a fresh zero-seed Session keeps the ordinary path.
+      this.scheduleSessionRepair(sessionId, 'rebuild')
+    }
     if (!remembered) {
       this.diag.warn('history search observed a live Session without its immutable header', { category: 'source-uncertain' })
       this.markReconcileNeeded('source-uncertain', true)
@@ -2347,6 +2496,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       sourceProofMinted: 0,
       sourceProofRevoked: 0,
       sourceProofRevokedBase: 0,
+      coldLegacyExcluded: 0,
+      coldLegacyCheckpointsDeleted: 0,
     }
   }
 
@@ -2470,7 +2621,16 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       let drained: WriteReceipt = 'committed'
       const outcome = await this.withFullSessionOwnership(sessionId, async (claim) => {
         let replayOutcome: ReplayOutcome
-        if (authority !== undefined) {
+        const exclusion = await this.tryExcludeColdLegacySession(
+          sessionId, record, persistence, sessions, deletionCut, counters,
+        )
+        if (exclusion === 'excluded' || exclusion === 'settled') {
+          replayOutcome = 'complete'
+        } else if (exclusion === 'stale') {
+          replayOutcome = 'stale'
+        } else if (exclusion === 'failed') {
+          replayOutcome = 'failed'
+        } else if (authority !== undefined) {
           const reuse = await this.tryReuseSourceProof(
             sessionId, record, persistence, sessions, authority, counters,
           )
@@ -3140,6 +3300,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // repair is awaited, then this round claims the id in the single-flight
         // map. A repair requested during the claim is coalesced to the release.
         const result = await this.withFullSessionOwnership(sessionId, async () => {
+          const exclusion = await this.tryExcludeColdLegacySession(
+            sessionId, record, persistence, sessions, deletionCut, counters,
+          )
+          if (exclusion === 'excluded' || exclusion === 'settled') return 'complete'
+          if (exclusion !== 'ineligible') return exclusion
           const reconciled = await this.reconcileOfficialSession(
             sessionId, record, persistence, sessions, query, counters, authority,
           )
@@ -3726,6 +3891,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       sourceProofFailed: counters.sourceProofFailed,
       sourceProofMinted: counters.sourceProofMinted,
       sourceProofRevoked,
+      coldLegacyExcluded: counters.coldLegacyExcluded,
+      coldLegacyCheckpointsDeleted: counters.coldLegacyCheckpointsDeleted,
     })
   }
 
@@ -3826,14 +3993,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
    * different exact source identity. One affected ID; no synchronous official
    * I/O and no new listener/loop.
    */
-  private revokeRoundSourceIdentity(sessionId: string, liveObject: object | undefined): void {
+  private revokeRoundSourceIdentity(sessionId: string, liveObject: object | undefined): boolean {
     const round = this.coverageRound
     const settled = round?.settled.get(sessionId)
-    if (round === undefined || settled === undefined || settled.liveObject === liveObject) return
+    if (round === undefined || settled === undefined || settled.liveObject === liveObject) return false
     round.settled.delete(sessionId)
     this.markRoundInvalidating()
     this.reconcilePending.add(sessionId)
     this.scheduleSessionRepair(sessionId, 'rebuild')
+    return true
   }
 
   /**
