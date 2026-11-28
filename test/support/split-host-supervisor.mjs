@@ -26,7 +26,7 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { userInfo } from 'node:os'
@@ -199,11 +199,16 @@ let readJsonFile
 let processC1Work
 const SUPERVISOR_DIR = fileURLToPath(new URL('.', import.meta.url))
 const PROCESS_PTY_OWNER = fileURLToPath(new URL('./split-process-pty-owner.mjs', import.meta.url))
-const PROCESS_HOST_SCENARIOS = new Set(['long-turn', 'job'])
+const PROCESS_HOST_SCENARIOS = new Set([
+  'long-turn', 'job', 'question', 'approval-allow', 'approval-reject', 'foreground-tool',
+  'child', 'unowned-job', 'goal-armed', 'goal-round', 'maintenance', 'schedule',
+])
 const PROCESS_HOST_CRASH_SIGNALS = new Set(['SIGHUP', 'SIGKILL'])
 const PROCESS_CLIENT_HMR_MODES = new Set(['replace', 'mount-failure', 'hold'])
-const PROCESS_CLIENT_TERMINAL_MODES = new Set(['normal', 'sigint', 'hmr-failure', 'terminal-owner-loss'])
-const PROCESS_CLIENT_SIGNALS = new Set(['SIGUSR2', 'SIGINT', 'SIGTERM'])
+const PROCESS_CLIENT_TERMINAL_MODES = new Set(['normal', 'sigint', 'hmr-failure', 'terminal-owner-loss', 'business-kill'])
+const PROCESS_CLIENT_SIGNALS = new Set(['SIGUSR1', 'SIGUSR2', 'SIGINT', 'SIGTERM', 'SIGKILL'])
+const PROCESS_STARTUP_STOP_STAGES = new Set(['domain', 'surface', 'loader-gate', 'before-start'])
+const PROCESS_PEER_MODES = new Set(['peer-stale-question', 'peer-stale-approval'])
 let EXPECTED_PACKAGE_NAME
 let hostStatusSequence = 0
 /** The ONE native managed-service bridge state, or undefined for default/pilot scenes. */
@@ -718,6 +723,22 @@ function publicHostFacts(handle) {
     buildId: handle.buildId,
     entryRealpath: handle.entryRealpath,
     workRoot: handle.workRoot,
+    scenario: handle.scenario ?? null,
+    workloadRoot: handle.workloadRoot ?? null,
+    holdReleasePath: handle.holdReleasePath ?? null,
+    jobWorkRoot: handle.jobWorkRoot ?? null,
+    toolReleasePath: handle.toolReleasePath ?? null,
+    childReleasePath: handle.childReleasePath ?? null,
+    eligibilityBarrierPath: handle.eligibilityBarrierPath ?? null,
+    timedAfterBarrierPath: handle.timedAfterBarrierPath ?? null,
+    timedDuplicateBarrierPath: handle.timedDuplicateBarrierPath ?? null,
+    timedExpiredBarrierPath: handle.timedExpiredBarrierPath ?? null,
+    cancelAgentBarrierPath: handle.cancelAgentBarrierPath ?? null,
+    goalPatchPath: handle.goalPatchPath ?? null,
+    unownedJobArmPath: handle.unownedJobArmPath ?? null,
+    unownedJobReleasePath: handle.unownedJobReleasePath ?? null,
+    maintenanceReleasePath: handle.maintenanceReleasePath ?? null,
+    scheduleDeletePath: handle.scheduleDeletePath ?? null,
     startedAt: handle.startedAt,
     starttime: handle.starttime,
     closedAt: handle.closedAt,
@@ -1821,6 +1842,14 @@ function publicProcessClientFacts(handle) {
     hmr: handle.hmr ?? null,
     dropPromptAck: handle.dropPromptAck === true,
     terminal: handle.terminalMode ?? null,
+    startupStop: handle.startupStop ?? null,
+    expectedFailure: handle.expectedFailure ?? null,
+    privateRpcProof: handle.privateRpcProof === true,
+    holdSerialize: handle.holdSerialize === true,
+    serializeBarrierPath: handle.serializeBarrierPath ?? null,
+    invalidWorkspacePath: handle.invalidWorkspacePath === true,
+    workspaceIntentPath: handle.workspaceIntentPath ?? null,
+    businessKillSent: handle.businessKillSent === true,
     ownerPid: handle.owner?.pid ?? null,
     ownerBirth: handle.owner?.birth ?? null,
     ownerExit: handle.owner?.exit ?? null,
@@ -4742,6 +4771,18 @@ async function handleStartHost(message) {
   let workloadRoot
   let holdReleasePath
   let jobWorkRoot
+  let toolReleasePath
+  let childReleasePath
+  let eligibilityBarrierPath
+  let timedAfterBarrierPath
+  let timedDuplicateBarrierPath
+  let timedExpiredBarrierPath
+  let cancelAgentBarrierPath
+  let goalPatchPath
+  let unownedJobArmPath
+  let unownedJobReleasePath
+  let maintenanceReleasePath
+  let scheduleDeletePath
   if (scene.kind === 'process') {
     scenario = message.scenario
     crashSignal = message.crashSignal
@@ -4756,6 +4797,27 @@ async function handleStartHost(message) {
     }
     if (message.extraEnv !== undefined) {
       throw new Error('START_HOST: a process scene does not accept arbitrary extra environment')
+    }
+    const variants = {
+      holdTool: message.holdTool === true ? 'foreground-tool' : undefined,
+      holdChild: message.holdChild === true ? 'child' : undefined,
+      questionEligibility: message.questionEligibility === true ? 'question' : undefined,
+      timedQuestion: message.timedQuestion === true ? 'question' : undefined,
+      cancelAgent: message.cancelAgent === true ? 'approval-allow' : undefined,
+      goalArmed: message.goalArmed === true ? 'goal-armed' : undefined,
+      unownedJob: message.unownedJob === true ? 'unowned-job' : undefined,
+      maintenance: message.maintenance === true ? 'maintenance' : undefined,
+    }
+    for (const [name, requiredScenario] of Object.entries(variants)) {
+      if (message[name] !== undefined && message[name] !== true) {
+        throw new Error(`INPUT_UNQUALIFIED: START_HOST ${name} may only be true when set`)
+      }
+      if (requiredScenario !== undefined && scenario !== requiredScenario) {
+        throw new Error(`INPUT_UNQUALIFIED: START_HOST ${name} requires scenario ${requiredScenario}`)
+      }
+    }
+    if (message.questionEligibility === true && message.timedQuestion === true) {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST question eligibility and timed Question are separate fixed variants')
     }
     // A next generation is allowed only after the previous one is provably
     // stopped: a finished qualification attempt with its declared terminal, or
@@ -4841,6 +4903,46 @@ async function handleStartHost(message) {
         holdReleasePath = join(workloadRoot, 'long-turn.release')
         env.C1_HOLD_LONG_TURN = holdReleasePath
       }
+      if (message.holdTool === true) {
+        toolReleasePath = join(workloadRoot, 'tool.release')
+        env.C1_HOLD_TOOL = toolReleasePath
+      }
+      if (message.holdChild === true) {
+        childReleasePath = join(workloadRoot, 'child.release')
+        env.C1_HOLD_CHILD = childReleasePath
+      }
+      if (message.questionEligibility === true) {
+        eligibilityBarrierPath = join(workloadRoot, 'non-answering-peer.barrier')
+        env.C1_HAS_LIVE_CLIENT_PROBE = '1'
+        env.C1_NON_ANSWERING_PEER_PROBE = eligibilityBarrierPath
+      }
+      if (message.timedQuestion === true) {
+        env.SPLIT_PROCESS_EXTRA_PATCH = processC1Work.timedPatchPath
+        timedAfterBarrierPath = join(workloadRoot, 'after-timed.barrier')
+        timedDuplicateBarrierPath = join(workloadRoot, 'duplicate-answer.barrier')
+        timedExpiredBarrierPath = join(workloadRoot, 'expired-answer.barrier')
+        env.C1_TIMED_QUESTION = '1'
+        env.C1_HOLD_AFTER_TIMED = timedAfterBarrierPath
+        env.C1_ANSWER_PROBE_DUPLICATE = timedDuplicateBarrierPath
+        env.C1_ANSWER_PROBE_EXPIRED = timedExpiredBarrierPath
+      }
+      if (message.cancelAgent === true) {
+        cancelAgentBarrierPath = join(workloadRoot, 'approval-cancel.release')
+        env.C1_CANCEL_AGENT = cancelAgentBarrierPath
+      }
+      if (message.goalArmed === true) {
+        goalPatchPath = join(workloadRoot, 'goal-armed.patch.yml')
+        const basePatch = readFileSync(processC1Work.patchPath, 'utf8')
+        writeFileSync(goalPatchPath, `${basePatch}${basePatch.endsWith('\n') ? '' : '\n'}- id: goal-round-driver\n  disabled: true\n`, { mode: 0o600 })
+        env.SPLIT_PROCESS_EXTRA_PATCH = goalPatchPath
+      }
+      if (message.unownedJob === true) {
+        unownedJobArmPath = join(workloadRoot, 'unowned-job.arm')
+        unownedJobReleasePath = join(workloadRoot, 'unowned-job.release')
+        env.C1_UNOWNED_JOB_ARM = unownedJobArmPath
+      }
+      if (scenario === 'maintenance') maintenanceReleasePath = join(workloadRoot, 'maintenance.release')
+      if (scenario === 'schedule') scheduleDeletePath = join(workloadRoot, 'schedule.delete')
     }
   } else if (scene.kind === 'upgrade') {
     source = message.source ?? 'profile'
@@ -4927,6 +5029,18 @@ async function handleStartHost(message) {
     workloadRoot,
     holdReleasePath,
     jobWorkRoot,
+    toolReleasePath,
+    childReleasePath,
+    eligibilityBarrierPath,
+    timedAfterBarrierPath,
+    timedDuplicateBarrierPath,
+    timedExpiredBarrierPath,
+    cancelAgentBarrierPath,
+    goalPatchPath,
+    unownedJobArmPath,
+    unownedJobReleasePath,
+    maintenanceReleasePath,
+    scheduleDeletePath,
     child,
     records,
     workRoot,
@@ -5069,6 +5183,18 @@ async function handleStartHost(message) {
     workloadRoot: handle.workloadRoot ?? null,
     holdReleasePath: handle.holdReleasePath ?? null,
     jobWorkRoot: handle.jobWorkRoot ?? null,
+    toolReleasePath: handle.toolReleasePath ?? null,
+    childReleasePath: handle.childReleasePath ?? null,
+    eligibilityBarrierPath: handle.eligibilityBarrierPath ?? null,
+    timedAfterBarrierPath: handle.timedAfterBarrierPath ?? null,
+    timedDuplicateBarrierPath: handle.timedDuplicateBarrierPath ?? null,
+    timedExpiredBarrierPath: handle.timedExpiredBarrierPath ?? null,
+    cancelAgentBarrierPath: handle.cancelAgentBarrierPath ?? null,
+    goalPatchPath: handle.goalPatchPath ?? null,
+    unownedJobArmPath: handle.unownedJobArmPath ?? null,
+    unownedJobReleasePath: handle.unownedJobReleasePath ?? null,
+    maintenanceReleasePath: handle.maintenanceReleasePath ?? null,
+    scheduleDeletePath: handle.scheduleDeletePath ?? null,
     buildId: handle.buildId,
     scopeId: expectedScopeId,
     pgid: hostPgid(handle),
@@ -5492,6 +5618,23 @@ function assertProcessClientTerminalContract(handle, reason) {
     return
   }
   if (terminal.kind !== 'native') throw new Error(`${reason}: ${handle.label} has no native terminal fact`)
+  if (handle.expectedFailure === 'client-domain-module-absent') {
+    if (terminal.code !== 1 || terminal.signal !== null) {
+      throw new Error(`${reason}: ${handle.label} module-absence terminal ${JSON.stringify(terminal)} is not code 1 with no signal`)
+    }
+    return
+  }
+  if (handle.terminalMode === 'business-kill') {
+    if (handle.businessKillSent !== true) {
+      throw new Error(`${reason}: ${handle.label} has no successful business SIGKILL dispatch`)
+    }
+    const nativeSignal = terminal.code === null && terminal.signal === 'SIGKILL'
+    const wrapperExit = terminal.code === 137 && terminal.signal === null
+    if (!nativeSignal && !wrapperExit) {
+      throw new Error(`${reason}: ${handle.label} terminal ${JSON.stringify(terminal)} is neither native SIGKILL nor raw wrapper exit 137`)
+    }
+    return
+  }
   const expected = handle.terminalMode === 'sigint'
     ? { code: 130, signal: null }
     : handle.terminalMode === 'hmr-failure'
@@ -5835,6 +5978,97 @@ async function waitProcessPtyOwnerTerminal(handle, reason, timeoutMs = 20_000) {
   return true
 }
 
+function assertProcessClientBusinessLive(handle, business, label) {
+  if (business === undefined || processIdentityState(business.identity) !== 'alive') {
+    throw new Error(`${label}: the captured business Client identity is not fresh-live`)
+  }
+  const fresh = captureProcessClientIdentity(business.identity.pid, label, {
+    expectedEntry: handle.expectedEntry,
+    scratch: handle.scratch,
+  })
+  if (fresh.birth !== business.birth) {
+    throw new Error(`${label}: the business Client birth changed before admission`)
+  }
+}
+
+function assertProcessClientActiveHost(handle, label) {
+  const host = activeHost
+  if (host === undefined || handle.hostId !== host.hostId || host.exited
+    || host.child.exitCode !== null || host.child.signalCode !== null
+    || !pidAlive(host.child.pid) || !processGroupAlive(hostPgid(host)) || host.ready === undefined) {
+    throw new Error(`${label}: the same active ready Host is not live`)
+  }
+  if (handle.readyHost !== undefined) {
+    assertHostIdentityMatchesKernel(handle.readyHost, host.child.pid, `${label} ready Host`)
+    if (handle.readyHost.hostPid !== host.child.pid
+      || handle.readyHost.instanceId !== host.ready?.localHost?.instanceId) {
+      throw new Error(`${label}: the authenticated Host identity changed`)
+    }
+  }
+  return host
+}
+
+function assertProcessClientSignalHost(handle, signal, label) {
+  try {
+    assertProcessClientActiveHost(handle, label)
+    return
+  } catch (error) {
+    if (signal !== 'SIGTERM') throw error
+    const host = hosts.find(value => value.hostId === handle.hostId)
+    if (host?.finished !== true || host.terminal?.outcome !== 'business-crash'
+      || !PROCESS_HOST_CRASH_SIGNALS.has(host.terminal?.signal)
+      || host.ready?.localHost?.hostPid !== handle.readyHost?.hostPid) {
+      throw error
+    }
+  }
+}
+
+function releaseProcessClientBarrier(path, label) {
+  try {
+    writeFileSync(path, 'release\n', { mode: 0o600, flag: 'wx' })
+  } catch (error) {
+    if (error?.code === 'EEXIST') throw new Error(`${label}: the barrier was already released`)
+    throw error
+  }
+}
+
+async function completeProcessClientNativeTerminal(handle, expected, label) {
+  const exit = await withProcessNativeOperation('client-pready-terminal', handle.clientId,
+    () => waitForTerminalExit(handle.terminal, handle.label, 120_000))
+  if (exit.code !== expected.code || exit.signal !== expected.signal) {
+    throw new Error(`${label}: native exit ${JSON.stringify(exit)} is not ${JSON.stringify(expected)}`)
+  }
+  await withProcessNativeOperation('client-pready-close', handle.clientId, () => handle.terminal.closeQuiet())
+  await assertProcessClientQuiesced(handle, label)
+  handle.verifiedTerminal = { kind: 'native', code: exit.code, signal: exit.signal }
+  handle.exited = true
+  handle.exitResult = exit
+  handle.closed = true
+  handle.closedAt = now()
+  handle.closeFailure = undefined
+  syncProcessClientsReceipt()
+  writeReceipt({ phase: 'PROCESS_CLIENT_CLOSED' })
+  return exit
+}
+
+function assertDomainAbsenceClientEntry(label) {
+  if (scene.installFacts === undefined || processCandidate === undefined) {
+    throw new Error(`${label}: the pre-mutation installation facts are missing`)
+  }
+  const expected = realpathSync(scene.installFacts.entries.client)
+  const actual = realpathSync(expected)
+  const stat = lstatSync(actual)
+  if (actual !== expected || !stat.isFile() || stat.isSymbolicLink()
+    || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+    throw new Error(`${label}: the unaffected installed Client entry is not the same owned regular file`)
+  }
+  const rel = relative(scene.workDir, actual)
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
+    throw new Error(`${label}: the unaffected installed Client entry escapes the Scene`)
+  }
+  return { ...scene.installFacts, entries: { ...scene.installFacts.entries, client: actual } }
+}
+
 async function handleStartProcessClient(message) {
   requireProcessScene('START_PROCESS_CLIENT')
   assertLifecycleOpen('START_PROCESS_CLIENT')
@@ -5859,8 +6093,38 @@ async function handleStartProcessClient(message) {
   const hmr = message.hmr
   const dropPromptAck = message.dropPromptAck === true
   const terminalMode = message.terminal ?? 'normal'
+  const startupStop = message.startupStop
+  const expectedFailure = message.expectedFailure
+  const privateRpcProof = message.privateRpcProof === true
+  const holdSerialize = message.holdSerialize === true
+  const invalidWorkspacePath = message.invalidWorkspacePath === true
   const recoverFromHostId = message.recoverFromHostId
   const attachRecoveredHostId = message.attachRecoveredHostId
+  if (startupStop !== undefined && !PROCESS_STARTUP_STOP_STAGES.has(startupStop)) {
+    throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT unknown startup-stop stage ${JSON.stringify(startupStop)}`)
+  }
+  if (expectedFailure !== undefined && expectedFailure !== 'client-domain-module-absent') {
+    throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT unknown expected failure ${JSON.stringify(expectedFailure)}`)
+  }
+  for (const [name, value] of [['privateRpcProof', privateRpcProof], ['holdSerialize', holdSerialize], ['invalidWorkspacePath', invalidWorkspacePath]]) {
+    if (message[name] !== undefined && message[name] !== true) {
+      throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT ${name} may only be true when set`)
+    }
+  }
+  if (startupStop !== undefined && expectedFailure !== undefined) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT cannot combine startupStop and expectedFailure')
+  }
+  if ((startupStop !== undefined || expectedFailure !== undefined)
+    && (hmr !== undefined || dropPromptAck || terminalMode !== 'normal' || recoverFromHostId !== undefined || attachRecoveredHostId !== undefined)) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT pre-ready failure/stop excludes HMR, ACK drop, terminal modes and recovery')
+  }
+  if ((startupStop !== undefined || expectedFailure !== undefined)
+    && (privateRpcProof || holdSerialize || invalidWorkspacePath)) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT pre-ready failure/stop excludes serializer and invalid-workspace probes')
+  }
+  if (holdSerialize && invalidWorkspacePath) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT cannot hold serialization and probe an invalid Workspace at once')
+  }
   if (hmr !== undefined && !PROCESS_CLIENT_HMR_MODES.has(hmr)) {
     throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT unknown hmr mode ${JSON.stringify(hmr)}`)
   }
@@ -5885,6 +6149,19 @@ async function handleStartProcessClient(message) {
   if (terminalMode === 'terminal-owner-loss' && (hmr !== undefined || dropPromptAck)) {
     throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT terminal-owner-loss excludes HMR and ACK-drop modes')
   }
+  if (terminalMode === 'business-kill'
+    && (hmr !== undefined || dropPromptAck || startupStop !== undefined || expectedFailure !== undefined
+      || privateRpcProof || holdSerialize || invalidWorkspacePath)) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT business-kill excludes every other fault/probe mode')
+  }
+  if ((privateRpcProof || holdSerialize || invalidWorkspacePath)
+    && (hmr !== undefined || dropPromptAck || terminalMode !== 'normal'
+      || startupStop !== undefined || expectedFailure !== undefined)) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT private/serializer/Workspace probes require the ordinary ready terminal path')
+  }
+  if (privateRpcProof && holdSerialize) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT private RPC proof and serializer hold are mutually exclusive')
+  }
   if (hmr === 'hold' && terminalMode !== 'normal') {
     throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT HMR hold requires the normal terminal contract')
   }
@@ -5899,7 +6176,8 @@ async function handleStartProcessClient(message) {
   const attach = attachRecoveredHostId !== undefined
   if (recovery && attach) throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT cannot recover and attach at once')
   if (recovery || attach) {
-    if (hmr !== undefined || dropPromptAck || terminalMode !== 'normal') {
+    if (hmr !== undefined || dropPromptAck || terminalMode !== 'normal'
+      || privateRpcProof || holdSerialize || invalidWorkspacePath) {
       throw new Error('INPUT_UNQUALIFIED: a recovered-Host Client requires the ordinary terminal contract')
     }
     if (recovery && (typeof recoverFromHostId !== 'string' || recoverFromHostId === '')) {
@@ -5968,7 +6246,18 @@ async function handleStartProcessClient(message) {
       throw new Error('START_PROCESS_CLIENT: the ready Host is not this Scene scope')
     }
   }
-  const facts = assertProcessInstalledFacts('START_PROCESS_CLIENT')
+  const domainAbsence = expectedFailure === 'client-domain-module-absent'
+  if (domainAbsence && processInstallationMutation?.fault !== expectedFailure) {
+    throw codedInputError('INPUT_INSTALLATION_FAULT',
+      'START_PROCESS_CLIENT: client-domain-module-absent requires its registered installation fault')
+  }
+  if (!domainAbsence && processInstallationMutation !== undefined) {
+    throw codedInputError('INPUT_INSTALLATION_MUTATED',
+      `START_PROCESS_CLIENT: ${String(processInstallationMutation.fault)} does not admit this Client start`)
+  }
+  const facts = domainAbsence
+    ? assertDomainAbsenceClientEntry('START_PROCESS_CLIENT client-domain-module-absent')
+    : assertProcessInstalledFacts('START_PROCESS_CLIENT')
   const fallbackScratchBaseline = [...processFallbackScratchBaseline]
   const sequence = ++processClientSequence
   const clientDir = join(scene.workDir, 'process-clients', `${label}-${String(sequence)}`)
@@ -5979,6 +6268,14 @@ async function handleStartProcessClient(message) {
   writeFileSync(recordFile, '', { mode: 0o600, flag: 'wx' })
   const clientId = `split-process-client-${String(sequence)}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
   const holdBarrier = hmr === 'hold' ? join(clientDir, 'hmr-hold.barrier') : undefined
+  const startupBarrier = startupStop === undefined ? undefined : join(clientDir, `startup-${startupStop}.barrier`)
+  const serializeBarrierPath = holdSerialize ? join(clientDir, 'serialize-hold.barrier') : undefined
+  const workspaceIntentPath = invalidWorkspacePath ? join(clientDir, 'invalid-workspace') : undefined
+  for (const barrier of [holdBarrier, startupBarrier, serializeBarrierPath, workspaceIntentPath]) {
+    if (barrier !== undefined && existsSync(barrier)) {
+      throw new Error(`START_PROCESS_CLIENT: the Supervisor-allocated barrier already exists: ${barrier}`)
+    }
+  }
   // The reservation is durable BEFORE any native handle exists, so a Worker
   // death in any startup window remains owned by this process. The native
   // terminal/owner is attached only after the row is visible in the receipt.
@@ -6000,6 +6297,15 @@ async function handleStartProcessClient(message) {
     hmr,
     dropPromptAck,
     terminalMode,
+    startupStop,
+    startupBarrier,
+    expectedFailure,
+    privateRpcProof,
+    holdSerialize,
+    serializeBarrierPath,
+    invalidWorkspacePath,
+    workspaceIntentPath,
+    businessKillSent: false,
     holdBarrier,
     recoverFromHostId,
     attachRecoveredHostId,
@@ -6107,6 +6413,14 @@ async function handleStartProcessClient(message) {
     ...(hmr === 'mount-failure' ? { SPLIT_PROCESS_CLIENT_HMR_FAIL: '1' } : {}),
     ...(hmr === 'hold' ? { SPLIT_PROCESS_CLIENT_HMR_HOLD: `surface@${String(holdBarrier)}` } : {}),
     ...(dropPromptAck ? { SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK: '1' } : {}),
+    ...(startupStop === 'domain' || startupStop === 'surface'
+      ? { SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY: `${startupStop}@${String(startupBarrier)}` }
+      : {}),
+    ...(startupStop === 'loader-gate' ? { SPLIT_PROCESS_CLIENT_HOLD_STARTUP_GATE: startupBarrier } : {}),
+    ...(startupStop === 'before-start' ? { SPLIT_PROCESS_CLIENT_HOLD_BEFORE_START: startupBarrier } : {}),
+    ...(privateRpcProof ? { SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF: '1' } : {}),
+    ...(holdSerialize ? { SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE: serializeBarrierPath } : {}),
+    ...(invalidWorkspacePath ? { SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH: workspaceIntentPath } : {}),
   }
   let opened
   try {
@@ -6121,8 +6435,10 @@ async function handleStartProcessClient(message) {
       opened = { session: ownerRun.sessionId, shell_pid: ownerRun.shellPid }
     } else {
       opened = await withProcessNativeOperation('client-run', clientId, () => handle.terminal.run(
-        process.execPath,
-        [facts.entries.client],
+        terminalMode === 'business-kill' ? '/bin/sh' : process.execPath,
+        terminalMode === 'business-kill'
+          ? ['-c', '"$@"; status=$?; exit "$status"', 'split-process-business-kill', process.execPath, facts.entries.client]
+          : [facts.entries.client],
         { cwd, cols, rows, waitReady: false, env },
       ))
     }
@@ -6202,6 +6518,86 @@ async function handleStartProcessClient(message) {
   handle.businessPids = [started.pid]
   handle.businessIdentities = [business]
   syncProcessClientsReceipt()
+  if (startupStop !== undefined) {
+    const host = assertProcessClientActiveHost(handle, `${label} startup-stop ${startupStop}`)
+    const match = startupStop === 'domain' || startupStop === 'surface'
+      ? record => record?.m4b2s === 'qualification' && record.op === 'assembly-hold'
+        && record.stage === startupStop && record.barrier === startupBarrier
+      : startupStop === 'loader-gate'
+        ? record => record?.m4b2s === 'qualification' && record.op === 'startup-gate-hold'
+          && record.stage === 'loader-gate' && record.barrier === startupBarrier
+        : record => record?.m4a0 === 'qualification' && record.op === 'before-start-hold'
+          && record.pid === started.pid
+    const held = await waitForProcessClientRecord(handle, match, `${label} ${startupStop} hold`, 120_000)
+    if ((startupStop === 'domain' || startupStop === 'surface' || startupStop === 'loader-gate')
+      && held.barrier !== startupBarrier) {
+      throw new Error(`${label}: the hold record names another barrier`)
+    }
+    assertProcessClientBusinessLive(handle, business, `${label} startup-stop ${startupStop}`)
+    assertProcessClientActiveHost(handle, `${label} startup-stop ${startupStop}`)
+    if (processNativeOperations.size > 0) throw new Error(`${label}: a native operation is in flight before startup-stop`)
+    process.kill(started.pid, 'SIGTERM')
+    handle.signalIntents.push('SIGTERM')
+    appendNote('process-client-startup-stop-signalled', {
+      clientId, stage: startupStop, pid: started.pid, birth: business.birth,
+      hostPid: host.child.pid, hostInstanceId: host.ready.localHost.instanceId,
+    })
+    writeReceipt({})
+    const admitted = await waitForProcessClientRecord(handle,
+      record => record?.m4a0 === 'signal' && record.signal === 'SIGTERM' && record.pid === started.pid,
+      `${label} startup-stop SIGTERM admission`, 30_000)
+    if (admitted.pid !== started.pid) throw new Error(`${label}: startup-stop signal admission names another PID`)
+    releaseProcessClientBarrier(startupBarrier, `${label} startup-stop ${startupStop}`)
+    const exit = await completeProcessClientNativeTerminal(handle, { code: 0, signal: null }, `${label} startup-stop ${startupStop}`)
+    assertProcessClientTerminalContract(handle, `${label} startup-stop ${startupStop}`)
+    const terminalRecords = readOfficialClientRecords(handle.recordFile, handle.label)
+    if (terminalRecords.some(record => record?.m4a0 === 'failure' || record?.m4a0 === 'cleanup-failure' || record?.m4a0 === 'ready')) {
+      throw new Error(`${label}: startup-stop reported a failure, cleanup-failure or Ready`)
+    }
+    const closed = terminalRecords.find(record => record?.m4b2s === 'client-closed')
+    if (closed !== undefined) {
+      for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+        if (closed.owners?.[owner] !== 0) throw new Error(`${label}: startup-stop left ${owner} owner alive`)
+      }
+    }
+    return {
+      clientId, label, sessionId: handle.sessionId, stage: startupStop,
+      pid: started.pid, birth: business.birth,
+      hostPid: host.child.pid, hostInstanceId: host.ready.localHost.instanceId,
+      exit, terminal: handle.verifiedTerminal,
+    }
+  }
+  if (domainAbsence) {
+    const host = assertProcessClientActiveHost(handle, `${label} missing Client Domain module`)
+    const failure = await waitForProcessClientRecord(handle,
+      record => record?.m4a0 === 'failure' && record.pid === started.pid,
+      `${label} missing Client Domain module failure`, 120_000)
+    const moduleName = '@deepseek-ai/dsh-api-session-controller/client'
+    const diagnostic = [failure.error, failure.cause, failure.stack].filter(value => typeof value === 'string').join('\n')
+    if (!diagnostic.includes(processInstallationMutation.target)
+      && !diagnostic.includes(processInstallationMutation.resolvedEntry)
+      && !diagnostic.includes(processInstallationMutation.moduleSuffix)
+      && !diagnostic.includes(moduleName)) {
+      throw new Error(`${label}: the real failure does not name the missing Client Domain module`)
+    }
+    const records = readOfficialClientRecords(handle.recordFile, handle.label)
+    if (records.some(record => record?.m4a0 === 'ready')) throw new Error(`${label}: module absence published Ready`)
+    assertProcessClientActiveHost(handle, `${label} missing Client Domain module terminal`)
+    const exit = await completeProcessClientNativeTerminal(handle, { code: 1, signal: null }, `${label} missing Client Domain module`)
+    const terminalRecords = readOfficialClientRecords(handle.recordFile, handle.label)
+    if (terminalRecords.filter(record => record?.m4a0 === 'failure').length !== 1
+      || terminalRecords.some(record => record?.m4a0 === 'cleanup-failure' || record?.m4a0 === 'ready')) {
+      throw new Error(`${label}: module absence did not produce exactly one failure with no cleanup failure or Ready`)
+    }
+    return {
+      clientId, label, sessionId: handle.sessionId,
+      pid: started.pid, birth: business.birth,
+      hostPid: host.child.pid, hostInstanceId: host.ready.localHost.instanceId,
+      exit,
+      failure: { code: failure.code ?? null, phase: failure.phase ?? null, moduleAbsent: true },
+      terminal: handle.verifiedTerminal,
+    }
+  }
   if (terminalMode === 'terminal-owner-loss') {
     await processProbeHold('terminal-owner-client-opened-before-ack', {
       clientId,
@@ -6320,6 +6716,13 @@ async function handleStartProcessClient(message) {
     hmr: handle.hmr ?? null,
     dropPromptAck: handle.dropPromptAck === true,
     terminal: handle.terminalMode,
+    startupStop: handle.startupStop ?? null,
+    expectedFailure: handle.expectedFailure ?? null,
+    privateRpcProof: handle.privateRpcProof === true,
+    holdSerialize: handle.holdSerialize === true,
+    serializeBarrierPath: handle.serializeBarrierPath ?? null,
+    invalidWorkspacePath: handle.invalidWorkspacePath === true,
+    workspaceIntentPath: handle.workspaceIntentPath ?? null,
     holdBarrier: handle.holdBarrier ?? null,
     ownerPid: handle.owner?.pid ?? null,
     ownerBirth: handle.owner?.birth ?? null,
@@ -6433,7 +6836,9 @@ async function handleProcessClientState(message) {
   }
   const state = await withProcessNativeOperation('client-state', handle.clientId, () => handle.terminal.state())
   const openSessions = new Set(await openTuiSessions())
-  if (state.exited !== null && !handle.exited) {
+  const signalOnlyExit = handle.terminalMode === 'business-kill'
+    && state.exited === null && state.exit_signal === 'SIGKILL'
+  if ((state.exited !== null || signalOnlyExit) && !handle.exited) {
     handle.exited = true
     handle.exitResult = { code: state.exited, signal: state.exit_signal ?? null }
     handle.closedAt = handle.closedAt ?? now()
@@ -6445,7 +6850,7 @@ async function handleProcessClientState(message) {
     sessionId: handle.sessionId,
     shellPid: handle.shellPid,
     businessPids: handle.businessPids,
-    exited: state.exited !== null,
+    exited: state.exited !== null || signalOnlyExit,
     exitCode: state.exited,
     exitSignal: state.exit_signal ?? null,
     sessionListed: openSessions.has(handle.sessionId),
@@ -6474,9 +6879,20 @@ async function handleSignalProcessClient(message) {
   if (handle.readyAt === undefined || handle.businessIdentities.length === 0) {
     throw new Error('SIGNAL_PROCESS_CLIENT: the Client is not ready')
   }
-  if (signal === 'SIGUSR2') {
-    if (handle.hmr === undefined) throw new Error('SIGNAL_PROCESS_CLIENT: SIGUSR2 requires a declared HMR mode')
-    if (handle.hmrSignalled === true) throw new Error('SIGNAL_PROCESS_CLIENT: the one HMR replacement was already requested')
+  if (signal === 'SIGKILL') {
+    if (handle.terminalMode !== 'business-kill') throw new Error('SIGNAL_PROCESS_CLIENT: SIGKILL requires the declared business-kill terminal')
+    if (handle.businessKillSent === true) throw new Error('SIGNAL_PROCESS_CLIENT: the business SIGKILL was already sent')
+  } else if (signal === 'SIGUSR1') {
+    if (handle.terminalMode !== 'normal') throw new Error('SIGNAL_PROCESS_CLIENT: SIGUSR1 requires the ordinary terminal contract')
+    if (handle.signalIntents.includes('SIGUSR1')) throw new Error('SIGNAL_PROCESS_CLIENT: SIGUSR1 was already sent')
+  } else if (signal === 'SIGUSR2') {
+    if (handle.hmr === undefined && !handle.privateRpcProof && !handle.holdSerialize) {
+      throw new Error('SIGNAL_PROCESS_CLIENT: SIGUSR2 requires a declared HMR/private-RPC/serializer mode')
+    }
+    if ((handle.hmr !== undefined && handle.hmrSignalled === true)
+      || (handle.hmr === undefined && handle.holdSerialize && handle.signalIntents.includes('SIGUSR2'))) {
+      throw new Error('SIGNAL_PROCESS_CLIENT: the one SIGUSR2 replacement was already requested')
+    }
   } else if (signal === 'SIGINT') {
     if (handle.terminalMode !== 'sigint') throw new Error('SIGNAL_PROCESS_CLIENT: SIGINT requires the declared sigint terminal')
     if (handle.signalIntents.includes('SIGINT')) throw new Error('SIGNAL_PROCESS_CLIENT: SIGINT was already sent')
@@ -6485,10 +6901,36 @@ async function handleSignalProcessClient(message) {
     if (handle.signalIntents.includes('SIGTERM')) throw new Error('SIGNAL_PROCESS_CLIENT: SIGTERM was already sent')
   }
   const business = handle.businessIdentities[0]
-  if (business === undefined || processIdentityState(business.identity) !== 'alive') {
-    throw new Error('SIGNAL_PROCESS_CLIENT: the captured business Client identity is not alive')
+  if (signal === 'SIGKILL') {
+    // This is the destructive business boundary: every proof is synchronous and
+    // the final exact-PID kill has no await between its fence and signal effect.
+    assertProcessClientBusinessLive(handle, business, 'SIGNAL_PROCESS_CLIENT business-kill')
+    const host = assertProcessClientActiveHost(handle, 'SIGNAL_PROCESS_CLIENT business-kill')
+    if (host.ready.localHost.hostPid !== handle.readyHost.hostPid
+      || host.ready.localHost.instanceId !== handle.readyHost.instanceId) {
+      throw new Error('SIGNAL_PROCESS_CLIENT: the business-kill Host identity changed')
+    }
+    if (handle.exited || processNativeOperations.size > 0) {
+      throw new Error('SIGNAL_PROCESS_CLIENT: the business-kill Client is not in its live idle lifecycle')
+    }
+    try {
+      process.kill(business.identity.pid, 'SIGKILL')
+    } catch (error) {
+      throw new Error(`SIGNAL_PROCESS_CLIENT: business SIGKILL failed (${String(error?.code ?? 'unknown')})`)
+    }
+    handle.businessKillSent = true
+    handle.signalIntents.push(signal)
+    appendNote('process-client-business-kill-sent', {
+      clientId: handle.clientId, pid: business.identity.pid, birth: business.birth,
+      hostPid: host.child.pid, hostInstanceId: host.ready.localHost.instanceId,
+    })
+    writeReceipt({})
+    syncProcessClientsReceipt()
+    return { clientId: handle.clientId, signal, pid: business.identity.pid, birth: business.birth }
   }
-  if (signal === 'SIGUSR2') handle.hmrSignalled = true
+  assertProcessClientBusinessLive(handle, business, `SIGNAL_PROCESS_CLIENT ${signal}`)
+  assertProcessClientSignalHost(handle, signal, `SIGNAL_PROCESS_CLIENT ${signal}`)
+  if (signal === 'SIGUSR2' && handle.hmr !== undefined) handle.hmrSignalled = true
   handle.signalIntents.push(signal)
   appendNote('process-client-signalled', {
     clientId: handle.clientId,
@@ -6512,6 +6954,12 @@ async function handleSignalProcessClient(message) {
     if (record.pid !== business.identity.pid) {
       throw new Error(`SIGNAL_PROCESS_CLIENT: the ${signal} record came from another PID`)
     }
+  } else if (signal === 'SIGUSR1') {
+    const record = await waitForProcessClientRecord(handle,
+      value => value?.m4b2s === 'qualification' && value.op === 'drop-websocket'
+        && value.pid === business.identity.pid,
+      `${handle.label} SIGUSR1 mux drop`, 30_000)
+    if (record.pid !== business.identity.pid) throw new Error('SIGNAL_PROCESS_CLIENT: the mux-drop record came from another PID')
   }
   syncProcessClientsReceipt()
   return { clientId: handle.clientId, signal, pid: business.identity.pid, birth: business.birth }
@@ -6655,10 +7103,18 @@ async function handleCloseProcessClient(message) {
     let failure
     let exit
     try {
-      exit = await withProcessNativeOperation('client-close', handle.clientId, () => waitForTerminalExit(handle.terminal, handle.label, 120_000))
-      const expected = handle.terminalMode === 'sigint' ? 130 : handle.terminalMode === 'hmr-failure' ? 1 : 0
-      if (exit.code !== expected || exit.signal !== null) {
-        throw new Error(`CLOSE_PROCESS_CLIENT: ${handle.label} exited ${JSON.stringify(exit)}; the declared ${handle.terminalMode} path requires code ${String(expected)} and no signal`)
+      exit = await withProcessNativeOperation('client-close', handle.clientId,
+        () => waitForTerminalExit(handle.terminal, handle.label, 120_000,
+          handle.terminalMode === 'business-kill' ? { allowSignalOnly: true } : {}))
+      if (handle.terminalMode === 'business-kill') {
+        if (!((exit.code === null && exit.signal === 'SIGKILL') || (exit.code === 137 && exit.signal === null))) {
+          throw new Error(`CLOSE_PROCESS_CLIENT: ${handle.label} business-kill exit ${JSON.stringify(exit)} is not native SIGKILL or raw wrapper 137`)
+        }
+      } else {
+        const expected = handle.terminalMode === 'sigint' ? 130 : handle.terminalMode === 'hmr-failure' ? 1 : 0
+        if (exit.code !== expected || exit.signal !== null) {
+          throw new Error(`CLOSE_PROCESS_CLIENT: ${handle.label} exited ${JSON.stringify(exit)}; the declared ${handle.terminalMode} path requires code ${String(expected)} and no signal`)
+        }
       }
       if (handle.terminalMode === 'sigint') {
         const records = readOfficialClientRecords(handle.recordFile, handle.label)
@@ -6668,6 +7124,9 @@ async function handleCloseProcessClient(message) {
       }
       handle.verifiedTerminal = { kind: 'native', code: exit.code, signal: exit.signal }
       assertProcessClientTerminalContract(handle, 'CLOSE_PROCESS_CLIENT')
+      if (handle.terminalMode === 'business-kill') {
+        assertProcessClientActiveHost(handle, 'CLOSE_PROCESS_CLIENT business-kill')
+      }
     } catch (error) {
       failure = error
     }
@@ -6936,6 +7395,7 @@ function publicLaunchFacts(handle) {
     profile: handle.profile,
     alias: handle.alias ?? null,
     sessionId: handle.sessionId,
+    launchCwd: handle.launchCwd,
     shellPid: handle.shellPid,
     shellBirth: handle.shellIdentity?.birth ?? null,
     shellPgid: handle.shellIdentity?.identity.pgid ?? null,
@@ -7610,7 +8070,15 @@ function assertPublicLaunchInputs(message) {
   if (surface !== 'chat' && surface !== 'workspace') {
     throw new Error('INPUT_UNQUALIFIED: START_PUBLIC_DAEMON surface must be chat or workspace')
   }
-  return { label, profile, alias: message.alias, cols, rows, surface }
+  const ownWorkspace = message.ownWorkspace === true
+  if (message.ownWorkspace !== undefined && message.ownWorkspace !== true) {
+    throw new Error('INPUT_UNQUALIFIED: START_PUBLIC_DAEMON ownWorkspace may only be true when set')
+  }
+  if (ownWorkspace && (profile !== 'pi-tui' || message.alias !== undefined || message.backend !== 'daemon'
+    || surface !== 'chat' || message.replayCommand !== undefined)) {
+    throw new Error('INPUT_UNQUALIFIED: START_PUBLIC_DAEMON ownWorkspace requires one canonical daemon/chat launch without alias or replay')
+  }
+  return { label, profile, alias: message.alias, cols, rows, surface, ownWorkspace }
 }
 
 /**
@@ -7881,7 +8349,7 @@ function assertPublicColdPairInputs(message) {
     if (launch.profile !== undefined && launch.profile !== 'pi-tui') {
       throw new Error('INPUT_UNQUALIFIED: the cold pair only qualifies the canonical pi-tui profile')
     }
-    for (const key of ['alias', 'args', 'replayCommand', 'herdr', 'loaderDump']) {
+    for (const key of ['alias', 'args', 'replayCommand', 'herdr', 'loaderDump', 'ownWorkspace']) {
       if (launch[key] !== undefined) throw new Error(`INPUT_UNQUALIFIED: the cold pair does not accept ${key}`)
     }
     if (launch.surface !== undefined && launch.surface !== 'chat') {
@@ -8015,7 +8483,7 @@ async function startPublicLaunch(message, pair) {
   requireProcessScene('START_PUBLIC_DAEMON')
   assertLifecycleOpen('START_PUBLIC_DAEMON')
   requirePublicObservation('START_PUBLIC_DAEMON')
-  const { label, profile, alias, cols, rows, surface } = assertPublicLaunchInputs(message)
+  const { label, profile, alias, cols, rows, surface, ownWorkspace } = assertPublicLaunchInputs(message)
   if (processScope === undefined) throw new Error('START_PUBLIC_DAEMON: the process scope is not recorded')
   const sequence = ++publicLaunchSequence
   const launchDir = join(scene.workDir, 'public-launches', `${label}-${String(sequence)}`)
@@ -8031,6 +8499,7 @@ async function startPublicLaunch(message, pair) {
     backend: backend ?? null,
     sequence,
     launchedDir: launchDir,
+    launchCwd: scene.installation.profileDir,
     sessionId: null,
     terminal: undefined,
     shellPid: null,
@@ -8064,6 +8533,21 @@ async function startPublicLaunch(message, pair) {
   handle.settlement = Promise.withResolvers()
   try {
   syncPublicLaunchReceipt()
+  if (ownWorkspace) {
+    assertLifecycleOpen('START_PUBLIC_DAEMON ownWorkspace allocation')
+    const workspace = join(launchDir, 'workspace')
+    mkdirSync(workspace, { mode: 0o700 })
+    const canonical = realpathSync(workspace)
+    const stat = statSync(canonical)
+    const rel = relative(scene.workDir, canonical)
+    if (canonical !== workspace || !stat.isDirectory()
+      || (typeof process.getuid === 'function' && stat.uid !== process.getuid())
+      || (stat.mode & 0o777) !== 0o700 || rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
+      throw new Error('START_PUBLIC_DAEMON: the private launch workspace is not a canonical owned Scene directory')
+    }
+    handle.launchCwd = canonical
+    syncPublicLaunchReceipt()
+  }
   let aliasPath
   if (alias !== undefined) {
     aliasPath = join(scene.installation.dshHome, 'profiles', alias)
@@ -8164,7 +8648,7 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
       return handle.terminal.run(
         program,
         argv,
-        { cwd: scene.installation.profileDir, cols, rows, waitReady: false, env },
+        { cwd: handle.launchCwd, cols, rows, waitReady: false, env },
       )
     })
     if (opened.session !== handle.sessionId) {
@@ -8428,6 +8912,7 @@ function publicLaunchReturnFacts(handle) {
     profile: handle.profile,
     alias: handle.alias,
     sessionId: handle.sessionId,
+    launchCwd: handle.launchCwd,
     backend: handle.backend,
     shellPid: handle.shellPid,
     shellBirth: handle.shellIdentity?.birth ?? null,
@@ -10402,6 +10887,8 @@ const QUALIFICATION_CLIENT_MODES = new Set([
   'discovery-refusal',
   'identity-changed',
   'cross-home-seat-refusal',
+  'peer-stale-question',
+  'peer-stale-approval',
 ])
 
 /**
@@ -11025,7 +11512,7 @@ function qualificationClientEnv(mode, clientDir, scratch, barrierPath) {
   const env = {
     ...scene.installation.base.env,
     DSH_PI_TUI_ENTRY_RECORDS: '1',
-    SPLIT_PROCESS_CLIENT_MODE: 'qualification',
+    SPLIT_PROCESS_CLIENT_MODE: PROCESS_PEER_MODES.has(mode) ? 'peer' : 'qualification',
     SPLIT_PROCESS_DSH_ANCHOR: scene.installation.anchor,
     SPLIT_PROCESS_PROFILE: 'pi-tui',
     SPLIT_PROCESS_SCRATCH: scratch,
@@ -11498,6 +11985,64 @@ async function handleQualificationClientStatus(message) {
   return record
 }
 
+async function handlePeerSendStaleResult(message) {
+  requireKnownFields(message, ['entryId', 'kind'], 'PEER_SEND_STALE_RESULT')
+  requireProcessScene('PEER_SEND_STALE_RESULT')
+  assertLifecycleOpen('PEER_SEND_STALE_RESULT')
+  const handle = findQualificationClientById(message.entryId, 'PEER_SEND_STALE_RESULT')
+  const kind = message.kind
+  if (handle.kind !== 'qualification-client' || !PROCESS_PEER_MODES.has(handle.mode)
+    || handle.mode !== `peer-stale-${kind}` || (kind !== 'question' && kind !== 'approval')) {
+    throw new Error('INPUT_UNQUALIFIED: PEER_SEND_STALE_RESULT requires the matching stale-result Peer mode and kind')
+  }
+  if (handle.exited || handle.staleResultSent === true) throw new Error('PEER_SEND_STALE_RESULT: the Peer is terminal or already sent its one result')
+  if (handle.readyRecord?.phase !== 'peer-ready' || handle.readyRecord.mode !== 'peer') {
+    throw new Error('PEER_SEND_STALE_RESULT: the Peer has no real peer-ready record')
+  }
+  const host = requireReadyHost('PEER_SEND_STALE_RESULT')
+  if (handle.expectedHostId !== host.hostId
+    || handle.readyRecord.hostPid !== host.child.pid
+    || handle.readyRecord.hostInstanceId !== host.ready?.localHost?.instanceId) {
+    throw new Error('PEER_SEND_STALE_RESULT: the Peer is not bound to the same stable ready Host')
+  }
+  const records = handle.records ?? []
+  const interactions = records.map((record, index) => ({ record, index }))
+    .filter(({ record }) => record?.m4a0 === 'peer-interaction' && record.kind === kind)
+  const interaction = interactions.at(-1)
+  if (interactions.length !== 1 || interaction === undefined
+    || typeof interaction.record.peerKey !== 'string' || interaction.record.peerKey === '') {
+    throw new Error('PEER_SEND_STALE_RESULT: no unique real matching Peer interaction exists')
+  }
+  const event = kind === 'question' ? 'user-questions/request' : 'approval/request'
+  const frames = records.filter(record => record?.m4a0 === 'peer-frame' && record.event === event)
+  if (frames.length !== 1 || typeof frames[0].eventId !== 'string' || frames[0].eventId === ''
+    || typeof frames[0].clientId !== 'string' || frames[0].clientId === '') {
+    throw new Error('PEER_SEND_STALE_RESULT: the Peer frame is not one unique correlated event/client identity')
+  }
+  const eventId = frames[0].eventId
+  const clientId = frames[0].clientId
+  const value = kind === 'question'
+    ? { kind: 'result', value: { answers: [{ id: 'c1-question', selected: ['Cancel'] }] } }
+    : { kind: 'result', value: 'allowed-once' }
+  const before = records.length
+  handle.child.stdin.write(`${JSON.stringify({ op: 'peer-send-stale-result', eventId, clientId, value })}\n`)
+  handle.staleResultSent = true
+  appendNote('peer-stale-result-sent', { entryId: handle.entryId, kind, eventId, clientId })
+  writeReceipt({})
+  const started = Date.now()
+  let sent
+  for (;;) {
+    sent = (handle.records ?? []).slice(before).find(record => record?.m4a0 === 'peer-stale-result-sent'
+      && record.eventId === eventId && record.clientId === clientId)
+    if (sent !== undefined) break
+    if (handle.exited) throw new Error('PEER_SEND_STALE_RESULT: the Peer exited before its send receipt')
+    if (Date.now() - started >= 60_000) throw new Error('PEER_SEND_STALE_RESULT: timed out waiting for the actual send receipt')
+    await sleep(25)
+  }
+  if (sent.ok !== true) throw new Error(`PEER_SEND_STALE_RESULT: the official stale result RPC was not ok (${String(sent.errorCode ?? 'unknown')})`)
+  return sanitizeEntryRecord({ entryId: handle.entryId, kind, eventId, clientId, ok: true, response: sent })
+}
+
 async function handleSignalEntry(message) {
   requireKnownFields(message, ['entryId', 'signal'], 'SIGNAL_ENTRY')
   requireProcessScene('SIGNAL_ENTRY')
@@ -11559,9 +12104,12 @@ async function handleSignalEntry(message) {
   if (handle.declaredSignal === undefined && handle.kind === 'host-attempt') {
     throw codedInputError('INPUT_ENTRY_SIGNAL', 'SIGNAL_ENTRY: this Host attempt declared no stop signal')
   }
-  if (handle.kind === 'qualification-client' && handle.mode !== 'attach') {
+  if (handle.kind === 'qualification-client' && handle.mode !== 'attach' && !PROCESS_PEER_MODES.has(handle.mode)) {
     throw codedInputError('INPUT_ENTRY_SIGNAL',
       `SIGNAL_ENTRY: qualification Client mode ${String(handle.mode)} has a declared non-signal terminal`)
+  }
+  if (PROCESS_PEER_MODES.has(handle.mode) && signal !== 'SIGTERM') {
+    throw codedInputError('INPUT_ENTRY_SIGNAL', 'SIGNAL_ENTRY: a stale-result Peer admits only SIGTERM')
   }
   if (handle.kind === 'bootstrap-cli' || handle.kind === 'identity-witness') {
     throw codedInputError('INPUT_ENTRY_SIGNAL', `SIGNAL_ENTRY: ${entryKindLabel(handle)} is not a signal target`)
@@ -11711,6 +12259,8 @@ const QUALIFICATION_SUCCESS_MODES = new Set([
   'refresh-unresponsive-once',
   'client-bootstrap-drift',
   'discover-after-host-death',
+  'peer-stale-question',
+  'peer-stale-approval',
 ])
 
 async function validateQualificationClientTerminal(handle, exit) {
@@ -11770,8 +12320,12 @@ async function validateQualificationClientTerminal(handle, exit) {
     expect(exit.code === 0 && exit.signal === null, 'the live qualification Client did not exit 0 with no signal')
     expect(failure === undefined, 'the live qualification Client reported a failure record')
     if (mode === 'client-bootstrap-drift' || mode === 'refresh-unresponsive-once'
-      || mode === 'attach' || mode === 'discover-after-host-death') {
+      || mode === 'attach' || mode === 'discover-after-host-death'
+      || PROCESS_PEER_MODES.has(mode)) {
       expect(ready !== undefined, 'the successful qualification Client never reached Ready')
+    }
+    if (PROCESS_PEER_MODES.has(mode)) {
+      expect(ready.phase === 'peer-ready' && ready.mode === 'peer', 'the stale-result Peer did not reach real peer-ready')
     }
     return { outcome: 'normal-exit', readyEmitted: ready !== undefined, generationId: ready?.generationId ?? null }
   }
@@ -12261,7 +12815,8 @@ async function handleSetInstallationFault(message) {
     throw new Error('SET_INSTALLATION_FAULT: a scoped installation mutation is already active')
   }
   const fault = message.fault
-  if (fault !== 'host-runtime-absent' && fault !== 'host-bootstrap-absent' && fault !== 'client-bootstrap-drift') {
+  if (fault !== 'host-runtime-absent' && fault !== 'host-bootstrap-absent'
+    && fault !== 'client-bootstrap-drift' && fault !== 'client-domain-module-absent') {
     throw codedInputError('INPUT_INSTALLATION_FAULT', `SET_INSTALLATION_FAULT: unknown fault ${JSON.stringify(fault)}`)
   }
   if (processCandidate === undefined || scene.installFacts === undefined) {
@@ -12399,6 +12954,125 @@ async function handleSetInstallationFault(message) {
       throw error
     }
   }
+  if (fault === 'client-domain-module-absent') {
+    requireReadyHost('SET_INSTALLATION_FAULT client-domain-module-absent')
+    await assertNoLiveMutationConsumers({ allowStableHost: true, label: 'SET_INSTALLATION_FAULT client-domain-module-absent' })
+    const moduleName = '@deepseek-ai/dsh-api-session-controller/client'
+    const profileRequire = createRequire(scene.installation.anchor)
+    const resolvedEntry = profileRequire.resolve(moduleName)
+    const resolved = realpathSync(resolvedEntry)
+    const moduleSuffixAt = resolved.lastIndexOf('@deepseek-ai/dsh-api-session-controller/')
+    if (moduleSuffixAt < 0) throw new Error('SET_INSTALLATION_FAULT: the Client Domain module path is not the official package entry')
+    const moduleSuffix = resolved.slice(moduleSuffixAt)
+    const rel = relative(scene.workDir, resolved)
+    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
+      throw new Error('SET_INSTALLATION_FAULT: the Client Domain module resolves outside this Scene')
+    }
+    let current = scene.workDir
+    for (const component of rel.split(sep)) {
+      current = join(current, component)
+      const stat = lstatSync(current)
+      if (stat.isSymbolicLink() || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+        throw new Error('SET_INSTALLATION_FAULT: the Client Domain module chain is symlinked or not Scene-owned')
+      }
+      if (current !== resolved && !stat.isDirectory()) {
+        throw new Error('SET_INSTALLATION_FAULT: the Client Domain module parent is not a directory')
+      }
+    }
+    const targetStat = lstatSync(resolved)
+    if (!targetStat.isFile()) {
+      throw new Error('SET_INSTALLATION_FAULT: the Client Domain module is not a regular file')
+    }
+    const absent = `${resolved}.absent`
+    try {
+      lstatSync(absent)
+      throw new Error('SET_INSTALLATION_FAULT: the Client Domain rollback backup already exists')
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+    const original = { bytes: readFileSync(resolved), mode: targetStat.mode & 0o777, uid: targetStat.uid, gid: targetStat.gid }
+    const sha256 = createHash('sha256').update(original.bytes).digest('hex')
+    const mutation = {
+      ...base,
+      moduleName,
+      resolvedEntry,
+      moduleSuffix,
+      target: resolved,
+      absentPath: absent,
+      original,
+      sha256,
+      renamed: false,
+      restore: async () => {
+        // `renamed` tracks only the physical rename. Every call must verify the
+        // exact restored path, including compensation after a post-rename failure.
+        if (mutation.renamed) {
+          try {
+            lstatSync(resolved)
+            throw new Error('RESTORE_INSTALLATION: a foreign replacement occupies the original Client Domain path')
+          } catch (error) {
+            if (error?.code !== 'ENOENT') throw error
+          }
+          const backupStat = lstatSync(absent)
+          if (!backupStat.isFile() || backupStat.isSymbolicLink()
+            || backupStat.uid !== original.uid || backupStat.gid !== original.gid
+            || (backupStat.mode & 0o777) !== original.mode
+            || !readFileSync(absent).equals(original.bytes)) {
+            throw new Error('RESTORE_INSTALLATION: the Client Domain backup does not match the reserved bytes/mode')
+          }
+          renameSync(absent, resolved)
+          mutation.renamed = false
+        }
+        const restoredStat = lstatSync(resolved)
+        const restoredBytes = readFileSync(resolved)
+        // Fixed non-mutating negative: every restore call must re-run verification.
+        const observedMode = process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT === 'client-domain-restore-mode'
+          ? original.mode ^ 0o100
+          : restoredStat.mode & 0o777
+        if (!restoredStat.isFile() || restoredStat.isSymbolicLink()
+          || restoredStat.uid !== original.uid || restoredStat.gid !== original.gid
+          || observedMode !== original.mode
+          || !restoredBytes.equals(original.bytes)
+          || createHash('sha256').update(restoredBytes).digest('hex') !== sha256
+          || realpathSync(profileRequire.resolve(moduleName)) !== resolved) {
+          throw new Error('RESTORE_INSTALLATION: the restored Client Domain module failed bytes/mode/resolve verification')
+        }
+      },
+    }
+    processInstallationMutation = mutation
+    try {
+      renameSync(resolved, absent)
+      mutation.renamed = true
+      if (process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT === 'client-domain-set-fault-post-rename') {
+        throw new Error('SPLIT_VITEST_INTENTIONAL_FAILURE: Client Domain fault registration failed after rename')
+      }
+      let resolutionError
+      try {
+        profileRequire.resolve(moduleName)
+      } catch (error) {
+        resolutionError = error
+      }
+      if (resolutionError === undefined) {
+        throw new Error('SET_INSTALLATION_FAULT: the renamed Client Domain module is still resolvable')
+      }
+      writeReceipt({ installationMutation: {
+        fault, target: resolved, absentPath: absent, moduleName, sha256,
+        mode: original.mode, candidateSha256: processCandidate.candidateSha256, recordedAt: now(),
+      } })
+      appendNote('installation-mutation-committed', {
+        fault, target: resolved, absentPath: absent, moduleName, sha256,
+        candidateSha256: processCandidate.candidateSha256,
+      })
+      return { ...base, target: resolved, absentPath: absent, moduleName, sha256, mode: original.mode, resolverRefused: true }
+    } catch (error) {
+      try {
+        await mutation.restore()
+        processInstallationMutation = undefined
+      } catch (restoreError) {
+        appendNote('installation-mutation-rollback-failed', { fault, reason: boundedError(restoreError) })
+      }
+      throw error
+    }
+  }
   // client-bootstrap-drift: a stable live Host and no other qualification Client.
   requireReadyHost('SET_INSTALLATION_FAULT client-bootstrap-drift')
   await assertNoLiveMutationConsumers({ allowStableHost: true, label: 'SET_INSTALLATION_FAULT client-bootstrap-drift' })
@@ -12473,14 +13147,15 @@ async function handleSetInstallationFault(message) {
 async function restoreInstallationMutation({ compensating = false } = {}) {
   const mutation = processInstallationMutation
   if (mutation === undefined) throw new Error('RESTORE_INSTALLATION: no scoped installation mutation is active')
-  if (mutation.fault !== 'client-bootstrap-drift' && activeHost !== undefined) {
+  if (mutation.fault !== 'client-bootstrap-drift' && mutation.fault !== 'client-domain-module-absent'
+    && activeHost !== undefined) {
     throw new Error('RESTORE_INSTALLATION: the Host artifact mutation cannot be restored under a live Host')
   }
   if (!compensating) {
     if (hosts.some(handle => handle.mode !== undefined && handle.finished !== true && handle.acceptedHost !== true)) {
       throw new Error('RESTORE_INSTALLATION: a Host attempt is not finished')
     }
-    const allowStableHost = mutation.fault === 'client-bootstrap-drift'
+    const allowStableHost = mutation.fault === 'client-bootstrap-drift' || mutation.fault === 'client-domain-module-absent'
     await assertNoLiveMutationConsumers({ allowStableHost, label: 'RESTORE_INSTALLATION' })
     await assertClientSeatFree(scene.installation, processScope.scopeId, 'RESTORE_INSTALLATION')
     if (!allowStableHost) await assertSceneHostSeatFree('RESTORE_INSTALLATION')
@@ -12500,7 +13175,13 @@ async function restoreInstallationMutation({ compensating = false } = {}) {
   const fault = mutation.fault
   processInstallationMutation = undefined
   writeReceipt({ installationMutation: undefined })
-  appendNote('installation-mutation-restored', { fault, payloadHash: restored.payloadHash, buildId: restored.buildId })
+  appendNote('installation-mutation-restored', {
+    fault, payloadHash: restored.payloadHash, buildId: restored.buildId,
+    ...(mutation.moduleName === undefined ? {} : {
+      moduleName: mutation.moduleName, target: mutation.target, absentPath: mutation.absentPath,
+      sha256: mutation.sha256, mode: mutation.original.mode,
+    }),
+  })
   return {
     fault,
     payloadHash: restored.payloadHash,
@@ -13077,6 +13758,11 @@ async function dispatch(message) {
       }
       case 'QUALIFICATION_CLIENT_CONTROL': {
         const payload = await handleQualificationClientControl(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'PEER_SEND_STALE_RESULT': {
+        const payload = await handlePeerSendStaleResult(message)
         if (requestId !== undefined) reply(requestId, payload)
         break
       }

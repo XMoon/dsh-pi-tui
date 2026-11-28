@@ -429,6 +429,12 @@ function recordPromptFacts(options) {
     .map(textOf).join('\\n')
   const userText = [...(options.messages ?? [])].reverse()
     .find(message => message?.role === 'user')?.content
+  const userTexts = (options.messages ?? [])
+    .filter(message => message?.role === 'user')
+    .map(message => textOf(message.content).slice(-400))
+  const userMessageSources = (options.messages ?? [])
+    .filter(message => message?.role === 'user')
+    .map(message => message?.source?.kind ?? null)
   const allText = [options.system, ...(options.messages ?? [])
     .map(message => message.content)]
     .map(textOf).join('\\n')
@@ -451,6 +457,8 @@ function recordPromptFacts(options) {
     focusSection: systemText.includes('# Focus mode'),
     progressSection: systemText.includes('# Progress updates:'),
     userText: textOf(userText).slice(-400),
+    userTexts,
+    userMessageSources,
     responseSection: systemText.includes('# Response style:'),
     gitSection: systemText.includes('# Git attribution'),
   }) + '\n', { mode: 0o600 })

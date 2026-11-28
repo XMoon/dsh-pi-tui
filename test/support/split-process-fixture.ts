@@ -94,6 +94,24 @@ export interface SplitProcessScopeFacts {
   hostSeat: { kind: string; name?: string; path?: string }
 }
 
+export type ProcessHostScenario =
+  | 'long-turn' | 'job' | 'question' | 'approval-allow' | 'approval-reject'
+  | 'foreground-tool' | 'child' | 'unowned-job' | 'goal-armed' | 'goal-round'
+  | 'maintenance' | 'schedule'
+
+export interface StartProcessHostOptions {
+  scenario?: ProcessHostScenario
+  crashSignal?: 'SIGHUP' | 'SIGKILL'
+  holdTool?: true
+  holdChild?: true
+  questionEligibility?: true
+  timedQuestion?: true
+  cancelAgent?: true
+  goalArmed?: true
+  unownedJob?: true
+  maintenance?: true
+}
+
 export interface SplitProcessHostHandle {
   readonly hostId: string
   readonly entryId: string
@@ -108,6 +126,18 @@ export interface SplitProcessHostHandle {
   readonly workloadRoot?: string | null
   readonly holdReleasePath?: string | null
   readonly jobWorkRoot?: string | null
+  readonly toolReleasePath?: string | null
+  readonly childReleasePath?: string | null
+  readonly eligibilityBarrierPath?: string | null
+  readonly timedAfterBarrierPath?: string | null
+  readonly timedDuplicateBarrierPath?: string | null
+  readonly timedExpiredBarrierPath?: string | null
+  readonly cancelAgentBarrierPath?: string | null
+  readonly goalPatchPath?: string | null
+  readonly unownedJobArmPath?: string | null
+  readonly unownedJobReleasePath?: string | null
+  readonly maintenanceReleasePath?: string | null
+  readonly scheduleDeletePath?: string | null
   exited: boolean
   exitResult?: { code: number | null; signal: NodeJS.Signals | null }
 }
@@ -164,6 +194,36 @@ export interface SplitProcessClientExitFacts {
   ownerExit?: { code: number | null; signal: string | null } | null
 }
 
+export type ProcessClientTerminalMode = 'normal' | 'sigint' | 'hmr-failure' | 'terminal-owner-loss' | 'business-kill'
+export type ProcessStartupStopStage = 'domain' | 'surface' | 'loader-gate' | 'before-start'
+export type ProcessClientExpectedFailure = 'client-domain-module-absent'
+
+export interface SplitProcessClientStopFacts {
+  clientId: string
+  label: string
+  sessionId: string | null
+  stage: ProcessStartupStopStage
+  pid: number
+  birth: string
+  hostPid: number
+  hostInstanceId: string
+  exit: { code: number | null; signal: string | null }
+  terminal: SplitProcessClientTerminal
+}
+
+export interface SplitProcessClientFailureFacts {
+  clientId: string
+  label: string
+  sessionId: string | null
+  pid: number
+  birth: string
+  hostPid: number
+  hostInstanceId: string
+  exit: { code: number | null; signal: string | null }
+  failure: { code: string | null; phase: string | null; moduleAbsent: true }
+  terminal: SplitProcessClientTerminal
+}
+
 export interface SplitProcessClient {
   readonly clientId: string
   readonly label: string
@@ -194,13 +254,18 @@ export interface SplitProcessClient {
   /** Use the existing current-frame safe /exit path, then close. */
   exitGracefully(): Promise<void>
   /** Send one declared product signal to the real business Client PID. */
-  signal(signal: 'SIGUSR2' | 'SIGINT' | 'SIGTERM'): Promise<void>
+  signal(signal: 'SIGUSR1' | 'SIGUSR2' | 'SIGINT' | 'SIGTERM'): Promise<void>
   /** The ONE declared terminal-owner loss; returns the tagged verified fact. */
   loseTerminalOwner(): Promise<SplitProcessClientTerminal>
   /** Release the Supervisor-allocated HMR hold barrier exactly once. */
   releaseHmrHold(): void
   readonly holdBarrierPath: string | null
-  readonly terminalKind: 'normal' | 'sigint' | 'hmr-failure' | 'terminal-owner-loss'
+  readonly serializeBarrierPath: string | null
+  readonly terminalKind: ProcessClientTerminalMode
+  /** Send SIGKILL only to the exact live business PID of a business-kill Client. */
+  killBusiness(): Promise<{ pid: number; birth: string; signal: 'SIGKILL' }>
+  /** Release the Supervisor-allocated serializer hold exactly once. */
+  releaseSerializeHold(): void
 }
 
 export type PublicDaemonBackend = 'daemon' | 'direct' | '' | 'wire-local'
@@ -261,6 +326,7 @@ export interface PublicDaemonLaunchFacts {
   profile: string
   alias: string | null
   sessionId: string
+  launchCwd: string
   backend: PublicDaemonBackend | null
   shellPid: number | null
   shellBirth: string | null
@@ -293,6 +359,8 @@ export interface StartPublicDaemonOptions {
   herdr?: true
   /** Replay one captured Herdr resume argv through the installed bin PATH. */
   replayCommand?: string[]
+  /** Use one Supervisor-allocated private directory as the native launch cwd. */
+  ownWorkspace?: true
 }
 
 export interface PublicDaemonState {
@@ -339,6 +407,7 @@ export interface PublicDaemonLaunch {
   readonly profile: string
   readonly alias: string | null
   readonly sessionId: string
+  readonly launchCwd: string
   readonly backend: PublicDaemonBackend | null
   readonly shellPid: number | null
   readonly shellBirth: string | null
@@ -422,7 +491,12 @@ export interface StartProcessClientOptions {
   rows?: number
   hmr?: 'replace' | 'mount-failure' | 'hold'
   dropPromptAck?: true
-  terminal?: 'normal' | 'sigint' | 'hmr-failure' | 'terminal-owner-loss'
+  terminal?: ProcessClientTerminalMode
+  startupStop?: ProcessStartupStopStage
+  expectedFailure?: ProcessClientExpectedFailure
+  privateRpcProof?: true
+  holdSerialize?: true
+  invalidWorkspacePath?: true
   recoverFromHostId?: string
   attachRecoveredHostId?: string
 }
@@ -467,6 +541,8 @@ export type QualificationClientMode =
   | 'discovery-refusal'
   | 'identity-changed'
   | 'cross-home-seat-refusal'
+  | 'peer-stale-question'
+  | 'peer-stale-approval'
 
 export type DiscoveryRefusal =
   | 'registry-symlink'
@@ -548,7 +624,7 @@ export interface BootstrapCliFacts {
 }
 
 export interface InstallFaultFacts {
-  fault: 'host-runtime-absent' | 'host-bootstrap-absent' | 'client-bootstrap-drift'
+  fault: 'host-runtime-absent' | 'host-bootstrap-absent' | 'client-bootstrap-drift' | 'client-domain-module-absent'
   target: string
   payloadHashBefore: string
   buildIdBefore: string
@@ -595,13 +671,16 @@ export interface SplitProcessScene {
   readSupervisorReceipt(): Promise<SupervisorReceipt>
   /** Bounded typed Supervisor IPC, for boundary negatives on a real Scene. */
   request(type: string, payload: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, any>>
-  startHost(options?: {
-    scenario?: 'long-turn' | 'job'
-    crashSignal?: 'SIGHUP' | 'SIGKILL'
-  }): Promise<SplitProcessHostHandle>
+  startHost(options?: StartProcessHostOptions): Promise<SplitProcessHostHandle>
   hostStatus(host: SplitProcessHostHandle): Promise<Record<string, any>>
   stopHost(host: SplitProcessHostHandle): Promise<SplitProcessClientExitFacts>
   startClient(options: StartProcessClientOptions): Promise<SplitProcessClient>
+  /** Stop one real Client inside the same pre-ready start transaction. */
+  startClientStop(options: StartProcessClientOptions & { startupStop: ProcessStartupStopStage }): Promise<SplitProcessClientStopFacts>
+  /** Observe the exact installed Client Domain module-absence failure. */
+  startClientFailure(options: StartProcessClientOptions & { expectedFailure: ProcessClientExpectedFailure }): Promise<SplitProcessClientFailureFacts>
+  /** Send the fixed opposite stale result through one real authenticated Peer. */
+  sendStalePeerResult(handle: QualificationClientHandle, kind: 'question' | 'approval'): Promise<Record<string, any>>
   /** Start the REAL installed public CLI under a native PTY (Linux qualification). */
   startPublicDaemon(options: StartPublicDaemonOptions): Promise<PublicDaemonLaunch>
   /** Two real cold producers in one request; only daemon/chat/defaults. */
@@ -649,7 +728,7 @@ export interface SplitProcessScene {
   finishEntry(handle: EntryQualificationHandle | SplitProcessHostHandle): Promise<EntryTerminalFacts>
   acceptHostWinner(handle: HostAttemptHandle): Promise<SplitProcessHostHandle>
   runBootstrapCli(mode: 'inherited-host-role' | 'direct-help'): Promise<BootstrapCliFacts>
-  setInstallationFault(fault: 'host-runtime-absent' | 'host-bootstrap-absent' | 'client-bootstrap-drift'): Promise<InstallFaultFacts>
+  setInstallationFault(fault: 'host-runtime-absent' | 'host-bootstrap-absent' | 'client-bootstrap-drift' | 'client-domain-module-absent'): Promise<InstallFaultFacts>
   restoreInstallation(): Promise<void>
   startIdentityWitness(kind: 'live-non-host' | 'linux-zombie'): Promise<IdentityWitnessHandle>
   finishIdentityWitness(handle: IdentityWitnessHandle): Promise<void>
@@ -759,6 +838,14 @@ interface SupervisorReceipt {
     sessionId?: string
     scratch?: string
     terminal?: string
+    startupStop?: string | null
+    expectedFailure?: string | null
+    privateRpcProof?: boolean
+    holdSerialize?: boolean
+    serializeBarrierPath?: string | null
+    invalidWorkspacePath?: boolean
+    workspaceIntentPath?: string | null
+    businessKillSent?: boolean
     ownerPid?: number | null
     ownerBirth?: string | null
     ownerExit?: { code?: number | null; signal?: string | null } | null
@@ -776,6 +863,7 @@ interface SupervisorReceipt {
     profile?: string
     alias?: string | null
     sessionId?: string
+    launchCwd?: string
     shellPid?: number | null
     shellBirth?: string | null
     cli?: PublicProcessIdentity | null
@@ -799,7 +887,8 @@ class ProcessClient implements SplitProcessClient {
   readonly recordFile: string
   readonly ready: SplitProcessClientReady
   readonly holdBarrierPath: string | null
-  readonly terminalKind: 'normal' | 'sigint' | 'hmr-failure' | 'terminal-owner-loss'
+  readonly serializeBarrierPath: string | null
+  readonly terminalKind: ProcessClientTerminalMode
   readonly #scene: ProcessScene
   #closed = false
   #exitFacts: SplitProcessClientExitFacts | undefined
@@ -814,11 +903,20 @@ class ProcessClient implements SplitProcessClient {
     this.holdBarrierPath = payload.holdBarrier === null || payload.holdBarrier === undefined
       ? null
       : String(payload.holdBarrier)
+    this.serializeBarrierPath = payload.serializeBarrierPath === null || payload.serializeBarrierPath === undefined
+      ? null
+      : String(payload.serializeBarrierPath)
     this.terminalKind = (payload.terminal ?? 'normal') as ProcessClient['terminalKind']
   }
 
-  async signal(signal: 'SIGUSR2' | 'SIGINT' | 'SIGTERM'): Promise<void> {
+  async signal(signal: 'SIGUSR1' | 'SIGUSR2' | 'SIGINT' | 'SIGTERM'): Promise<void> {
     await this.#scene.clientRequest(this.clientId, 'SIGNAL_PROCESS_CLIENT', { signal })
+  }
+
+  async killBusiness(): Promise<{ pid: number; birth: string; signal: 'SIGKILL' }> {
+    return await this.#scene.clientRequest(this.clientId, 'SIGNAL_PROCESS_CLIENT', { signal: 'SIGKILL' }) as {
+      pid: number; birth: string; signal: 'SIGKILL'
+    }
   }
 
   async loseTerminalOwner(): Promise<SplitProcessClientTerminal> {
@@ -843,6 +941,16 @@ class ProcessClient implements SplitProcessClient {
     if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
       throw new Error(`${this.label}: the HMR hold barrier parent escapes the Scene root`)
     }
+    writeFileSync(path, 'release\n', { mode: 0o600, flag: 'wx' })
+  }
+
+  releaseSerializeHold(): void {
+    const path = this.serializeBarrierPath
+    if (path === null) throw new Error(`${this.label}: no Supervisor-allocated serializer hold barrier`)
+    const parent = realpathSync(dirname(path))
+    const rel = relative(this.#scene.workDir, parent)
+    assert(rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`),
+      `${this.label}: the serializer hold barrier parent escapes the Scene root`)
     writeFileSync(path, 'release\n', { mode: 0o600, flag: 'wx' })
   }
 
@@ -1011,6 +1119,7 @@ class PublicDaemon implements PublicDaemonLaunch {
   readonly profile: string
   readonly alias: string | null
   readonly sessionId: string
+  readonly launchCwd: string
   readonly backend: PublicDaemonBackend | null
   readonly shellPid: number | null
   readonly shellBirth: string | null
@@ -1037,6 +1146,7 @@ class PublicDaemon implements PublicDaemonLaunch {
     this.profile = String(payload.profile)
     this.alias = payload.alias === null || payload.alias === undefined ? null : String(payload.alias)
     this.sessionId = String(payload.sessionId)
+    this.launchCwd = String(payload.launchCwd)
     this.backend = (payload.backend ?? null) as PublicDaemonBackend | null
     this.shellPid = payload.shellPid === null || payload.shellPid === undefined ? null : Number(payload.shellPid)
     this.shellBirth = payload.shellBirth === null || payload.shellBirth === undefined ? null : String(payload.shellBirth)
@@ -1118,6 +1228,7 @@ class PublicDaemon implements PublicDaemonLaunch {
         profile: this.profile,
         alias: this.alias,
         sessionId: this.sessionId,
+        launchCwd: this.launchCwd,
         backend: this.backend,
         shellPid: this.shellPid,
         shellBirth: this.shellBirth,
@@ -1147,6 +1258,7 @@ class PublicDaemon implements PublicDaemonLaunch {
       profile: this.profile,
       alias: this.alias,
       sessionId: this.sessionId,
+      launchCwd: this.launchCwd,
       backend: this.backend,
       shellPid: this.shellPid,
       shellBirth: this.shellBirth,
@@ -1179,6 +1291,7 @@ class PublicDaemon implements PublicDaemonLaunch {
       profile: this.profile,
       alias: this.alias,
       sessionId: this.sessionId,
+      launchCwd: this.launchCwd,
       backend: this.backend,
       shellPid: this.shellPid,
       shellBirth: this.shellBirth,
@@ -1288,13 +1401,18 @@ class ProcessScene implements SplitProcessScene {
     return await this.request(type, { clientId, ...payload }, type === 'CLOSE_PROCESS_CLIENT' ? 240_000 : 120_000)
   }
 
-  async startHost(options: {
-    scenario?: 'long-turn' | 'job'
-    crashSignal?: 'SIGHUP' | 'SIGKILL'
-  } = {}): Promise<SplitProcessHostHandle> {
+  async startHost(options: StartProcessHostOptions = {}): Promise<SplitProcessHostHandle> {
     const payload = await this.request('START_HOST', {
       ...(options.scenario === undefined ? {} : { scenario: options.scenario }),
       ...(options.crashSignal === undefined ? {} : { crashSignal: options.crashSignal }),
+      ...(options.holdTool === undefined ? {} : { holdTool: options.holdTool }),
+      ...(options.holdChild === undefined ? {} : { holdChild: options.holdChild }),
+      ...(options.questionEligibility === undefined ? {} : { questionEligibility: options.questionEligibility }),
+      ...(options.timedQuestion === undefined ? {} : { timedQuestion: options.timedQuestion }),
+      ...(options.cancelAgent === undefined ? {} : { cancelAgent: options.cancelAgent }),
+      ...(options.goalArmed === undefined ? {} : { goalArmed: options.goalArmed }),
+      ...(options.unownedJob === undefined ? {} : { unownedJob: options.unownedJob }),
+      ...(options.maintenance === undefined ? {} : { maintenance: options.maintenance }),
     }, 600_000)
     const host: SplitProcessHostHandle = {
       hostId: String(payload.hostId),
@@ -1310,6 +1428,18 @@ class ProcessScene implements SplitProcessScene {
       workloadRoot: payload.workloadRoot ?? null,
       holdReleasePath: payload.holdReleasePath ?? null,
       jobWorkRoot: payload.jobWorkRoot ?? null,
+      toolReleasePath: payload.toolReleasePath ?? null,
+      childReleasePath: payload.childReleasePath ?? null,
+      eligibilityBarrierPath: payload.eligibilityBarrierPath ?? null,
+      timedAfterBarrierPath: payload.timedAfterBarrierPath ?? null,
+      timedDuplicateBarrierPath: payload.timedDuplicateBarrierPath ?? null,
+      timedExpiredBarrierPath: payload.timedExpiredBarrierPath ?? null,
+      cancelAgentBarrierPath: payload.cancelAgentBarrierPath ?? null,
+      goalPatchPath: payload.goalPatchPath ?? null,
+      unownedJobArmPath: payload.unownedJobArmPath ?? null,
+      unownedJobReleasePath: payload.unownedJobReleasePath ?? null,
+      maintenanceReleasePath: payload.maintenanceReleasePath ?? null,
+      scheduleDeletePath: payload.scheduleDeletePath ?? null,
       exited: false,
     }
     return host
@@ -1461,7 +1591,7 @@ class ProcessScene implements SplitProcessScene {
   }
 
   async setInstallationFault(
-    fault: 'host-runtime-absent' | 'host-bootstrap-absent' | 'client-bootstrap-drift',
+    fault: 'host-runtime-absent' | 'host-bootstrap-absent' | 'client-bootstrap-drift' | 'client-domain-module-absent',
   ): Promise<InstallFaultFacts> {
     return await this.request('SET_INSTALLATION_FAULT', { fault }, 180_000) as InstallFaultFacts
   }
@@ -1527,8 +1657,8 @@ class ProcessScene implements SplitProcessScene {
     return host.exitResult
   }
 
-  async startClient(options: StartProcessClientOptions): Promise<SplitProcessClient> {
-    const payload = await this.request('START_PROCESS_CLIENT', {
+  #processClientPayload(options: StartProcessClientOptions): Record<string, unknown> {
+    return {
       label: options.label,
       cwd: options.cwd,
       home: options.home,
@@ -1538,12 +1668,43 @@ class ProcessScene implements SplitProcessScene {
       ...(options.hmr === undefined ? {} : { hmr: options.hmr }),
       ...(options.dropPromptAck === undefined ? {} : { dropPromptAck: options.dropPromptAck }),
       ...(options.terminal === undefined ? {} : { terminal: options.terminal }),
+      ...(options.startupStop === undefined ? {} : { startupStop: options.startupStop }),
+      ...(options.expectedFailure === undefined ? {} : { expectedFailure: options.expectedFailure }),
+      ...(options.privateRpcProof === undefined ? {} : { privateRpcProof: options.privateRpcProof }),
+      ...(options.holdSerialize === undefined ? {} : { holdSerialize: options.holdSerialize }),
+      ...(options.invalidWorkspacePath === undefined ? {} : { invalidWorkspacePath: options.invalidWorkspacePath }),
       ...(options.recoverFromHostId === undefined ? {} : { recoverFromHostId: options.recoverFromHostId }),
       ...(options.attachRecoveredHostId === undefined ? {} : { attachRecoveredHostId: options.attachRecoveredHostId }),
-    }, 600_000)
+    }
+  }
+
+  async startClient(options: StartProcessClientOptions): Promise<SplitProcessClient> {
+    if (options.startupStop !== undefined || options.expectedFailure !== undefined) {
+      throw new Error('startClient: pre-ready stop/failure returns terminal-only facts; use startClientStop/startClientFailure')
+    }
+    const payload = await this.request('START_PROCESS_CLIENT', this.#processClientPayload(options), 600_000)
     const client = new ProcessClient(this, payload)
     this.#clients.push(client)
     return client
+  }
+
+  async startClientStop(
+    options: StartProcessClientOptions & { startupStop: ProcessStartupStopStage },
+  ): Promise<SplitProcessClientStopFacts> {
+    return await this.request('START_PROCESS_CLIENT', this.#processClientPayload(options), 600_000) as SplitProcessClientStopFacts
+  }
+
+  async startClientFailure(
+    options: StartProcessClientOptions & { expectedFailure: ProcessClientExpectedFailure },
+  ): Promise<SplitProcessClientFailureFacts> {
+    return await this.request('START_PROCESS_CLIENT', this.#processClientPayload(options), 600_000) as SplitProcessClientFailureFacts
+  }
+
+  async sendStalePeerResult(
+    handle: QualificationClientHandle,
+    kind: 'question' | 'approval',
+  ): Promise<Record<string, any>> {
+    return await this.request('PEER_SEND_STALE_RESULT', { entryId: handle.entryId, kind }, 90_000)
   }
 
   async startPublicDaemon(options: StartPublicDaemonOptions): Promise<PublicDaemonLaunch> {
@@ -1559,6 +1720,7 @@ class ProcessScene implements SplitProcessScene {
       ...(options.loaderDump === undefined ? {} : { loaderDump: options.loaderDump }),
       ...(options.herdr === undefined ? {} : { herdr: options.herdr }),
       ...(options.replayCommand === undefined ? {} : { replayCommand: options.replayCommand }),
+      ...(options.ownWorkspace === undefined ? {} : { ownWorkspace: options.ownWorkspace }),
     }, 600_000)
     const launch = new PublicDaemon(this, payload)
     this.#publicLaunches.push(launch)

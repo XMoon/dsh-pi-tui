@@ -674,6 +674,28 @@ Two further non-PTY contracts are fixed (Linux and macOS):
   must find no captured alias entry, because an unreadable unrelated PID cannot
   be a candidate when no producer ever existed.
 
+The Session write/recovery, shared-session interaction, prompt-policy and
+detached-turn continuity owners use only declared Supervisor operations. The
+Supervisor allocates private public-launch workspace directories,
+startup/serialization barriers and installation-mutation targets; typed
+process-Client `home`/`cwd` remain Worker-supplied and Scene-validated. The
+Worker never supplies arbitrary environment, PIDs, RPC names or result
+envelopes. A declared Client business `SIGKILL` is a single exact business-PID
+signal, never a process-group or Host signal. Pre-ready stops and module-absence
+failures return terminal-only facts; they never expose a half-ready Client
+handle. A stale authenticated Peer result is derived by the Supervisor from that
+Peer's actual interaction/frame identity and sent once through the existing
+official result route.
+
+Two fixed external Worker-kill selectors cover the added lifecycle risks:
+`--case p2a-client-domain-absent` at `client-opened-before-ack`, and
+`--case p2a-stale-question-peer` at `qualification-client-spawned`. Each selector
+is bound to one exact business test and independently proves its live checkpoint
+before the single Worker kill. The former also proves exact module restoration;
+the latter proves the real Peer terminal. They reuse the existing
+`ABORTED_CLEAN`/seat/root audit and add no generic selector. An unrun selector is
+`NOT_RUN`, never a pass.
+
 It requires two private inputs:
 
 - `SPLIT_VITEST_TMP_BASE`: an existing absolute canonical directory outside this

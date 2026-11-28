@@ -105,10 +105,23 @@ const PROCESS_AT_TARGETS = new Map([
 ])
 const PROCESS_MODES = ['process-worker-kill', 'process-main-signal']
 const CROSS_HOME_CASE = 'cross-home-seat-refusal'
-const CROSS_HOME_CASE_TARGET = {
-  file: 'test/integration/split-process/business/host-seat.vitest.ts',
-  title: 'refuses cross-home discovery for the same canonical profile while the Host seat is owned',
-}
+const PROCESS_CASE_TARGETS = new Map([
+  ['cross-home-seat-refusal', {
+    at: 'qualification-client-spawned',
+    file: 'test/integration/split-process/business/host-seat.vitest.ts',
+    title: 'refuses cross-home discovery for the same canonical profile while the Host seat is owned',
+  }],
+  ['p2a-client-domain-absent', {
+    at: 'client-opened-before-ack',
+    file: 'test/integration/split-process/business/session-write-recovery.vitest.ts',
+    title: 'refuses an absent installed Client Domain module and restores the same Host',
+  }],
+  ['p2a-stale-question-peer', {
+    at: 'qualification-client-spawned',
+    file: 'test/integration/split-process/business/detached-turn-recovery.vitest.ts',
+    title: 'ignores a stale authenticated question peer result',
+  }],
+])
 const VITEST_ENTRY = 'node_modules/vitest/vitest.mjs'
 const PROCESS_TARGET_FILE = 'test/integration/split-process/business/host-file-completion.vitest.ts'
 const PROCESS_SIBLING_FILE = 'test/integration/split-process/business/preset-defaults.vitest.ts'
@@ -469,6 +482,8 @@ let crossHomeProducerStart
 /** The exact primary Host PID/birth captured before the Worker kill. */
 let crossHomePrimaryPid
 let crossHomePrimaryBirth
+/** Exact T39 mutation reservation captured before the external Worker kill. */
+let p2aDomainMutation
 async function loadPublicObservation(receipt) {
   const anchor = receipt?.installation?.anchor
   if (typeof anchor !== 'string' || anchor === '') fail('the receipt carries no installed DSH anchor')
@@ -1246,9 +1261,10 @@ if (!PILOT_MODES.includes(mode) && !UPGRADE_MODES.includes(mode) && !PROCESS_MOD
   fail(`unknown --mode ${JSON.stringify(mode)}`)
 }
 if (probeCase !== undefined) {
-  if (probeCase !== CROSS_HOME_CASE) fail(`unknown --case ${JSON.stringify(probeCase)}`)
-  if (mode !== 'process-worker-kill' || at !== 'qualification-client-spawned') {
-    fail(`--case ${CROSS_HOME_CASE} requires --mode process-worker-kill --at qualification-client-spawned`)
+  const selected = PROCESS_CASE_TARGETS.get(probeCase)
+  if (selected === undefined) fail(`unknown --case ${JSON.stringify(probeCase)}`)
+  if (mode !== 'process-worker-kill' || at !== selected.at) {
+    fail(`--case ${probeCase} requires --mode process-worker-kill --at ${selected.at}`)
   }
 }
 if (mode === 'main-signal' && signal !== 'SIGINT' && signal !== 'SIGTERM') {
@@ -1396,7 +1412,7 @@ if (upgradeMode) {
       stdio: 'inherit',
     })
   }
-  const target = probeCase === CROSS_HOME_CASE ? CROSS_HOME_CASE_TARGET : PROCESS_AT_TARGETS.get(at)
+  const target = probeCase === undefined ? PROCESS_AT_TARGETS.get(at) : PROCESS_CASE_TARGETS.get(probeCase)
   child = spawn(process.execPath, [
     VITEST_ENTRY,
     'run',
@@ -1642,6 +1658,31 @@ try {
             fail('client-opened-before-ack: the registered shell is not the live kernel process')
           }
           if (client.readyAt !== undefined) fail('client-opened-before-ack: the Client already reached ready')
+          if (probeCase === 'p2a-client-domain-absent') {
+            const mutation = receipt.installationMutation
+            if (mutation?.fault !== 'client-domain-module-absent'
+              || mutation.moduleName !== '@deepseek-ai/dsh-api-session-controller/client'
+              || client.expectedFailure !== 'client-domain-module-absent') {
+              fail('p2a-client-domain-absent: the exact Client Domain mutation/target is not registered')
+            }
+            if (typeof mutation.target !== 'string' || typeof mutation.absentPath !== 'string'
+              || existsSync(mutation.target) || !existsSync(mutation.absentPath)) {
+              fail('p2a-client-domain-absent: the owned module target is not absent with its rollback backup present')
+            }
+            if (typeof mutation.sha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(mutation.sha256)
+              || sha256(mutation.absentPath) !== mutation.sha256) {
+              fail('p2a-client-domain-absent: the reserved module backup hash changed')
+            }
+            if (receipt.candidate?.sha256 !== sha256(requireEnv('SPLIT_VITEST_CANDIDATE_TGZ'))
+              || mutation.candidateSha256 !== receipt.candidate?.sha256) {
+              fail('p2a-client-domain-absent: the immutable candidate hash changed')
+            }
+            p2aDomainMutation = {
+              target: mutation.target, absentPath: mutation.absentPath, sha256: mutation.sha256,
+              mode: mutation.mode, candidateSha256: mutation.candidateSha256,
+              payloadHash: receipt.installFacts?.payloadHash, buildId: receipt.installFacts?.buildId,
+            }
+          }
         } else if (at === 'terminal-owner-client-opened-before-ack') {
           const client = (receipt.processClients ?? [])[0]
           if (client === undefined || client.shellPid === null || client.ownerPid === null) {
@@ -1771,6 +1812,21 @@ try {
             crossHomePrimaryBirth = host.birth
             crossHomeObservation = await loadPublicObservation(receipt)
             crossHomeExpectedEntry = realpathSync(receipt.installation.entries.host)
+          }
+          if (probeCase === 'p2a-stale-question-peer') {
+            const peer = clients.find(value => value.mode === 'peer-stale-question')
+            if (peer === undefined || identityLiveness(kernel, peer.pid, peer.birth) !== 'live') {
+              fail('p2a-stale-question-peer: the exact stale-question Peer identity is not live')
+            }
+            if (!Number.isInteger(peer.pgid) || !groupAlive(peer.pgid)) {
+              fail('p2a-stale-question-peer: the exact stale-question Peer group is not live')
+            }
+            if (peer.expected !== 'peer-stale-question' || peer.ready !== undefined) {
+              fail('p2a-stale-question-peer: the registered Peer mode/readiness is not the pre-ACK target')
+            }
+            if (host === undefined || identityLiveness(kernel, host.pid, host.birth) !== 'live') {
+              fail('p2a-stale-question-peer: the stable Host is not live at the Peer checkpoint')
+            }
           }
         } else if (at === 'identity-witness-spawned') {
           const helper = (receipt.qualificationHelpers ?? []).find(value => value.kind === 'identity-witness')
@@ -2366,6 +2422,21 @@ try {
     }
     if (probeCase === CROSS_HOME_CASE) {
       await assertCrossHomeProbeTerminal(receipt, kernel, crossHomeObservation)
+    }
+    if (probeCase === 'p2a-client-domain-absent') {
+      if (p2aDomainMutation === undefined) fail('p2a-client-domain-absent: no pre-kill mutation reservation was captured')
+      const restored = (receipt.notes ?? []).find(note => note?.event === 'installation-mutation-restored'
+        && note.detail?.fault === 'client-domain-module-absent')
+      if (restored === undefined || restored.detail?.target !== p2aDomainMutation.target
+        || restored.detail?.absentPath !== p2aDomainMutation.absentPath
+        || restored.detail?.sha256 !== p2aDomainMutation.sha256
+        || restored.detail?.mode !== p2aDomainMutation.mode
+        || restored.detail?.payloadHash !== p2aDomainMutation.payloadHash
+        || restored.detail?.buildId !== p2aDomainMutation.buildId
+        || receipt.candidate?.sha256 !== p2aDomainMutation.candidateSha256) {
+        fail('p2a-client-domain-absent: compensation did not prove exact module bytes/mode and pristine build restoration')
+      }
+      if (receipt.installationMutation !== undefined) fail('p2a-client-domain-absent: the mutation ledger is still active')
     }
     if (mode === 'process-worker-kill' && at === 'clients-ready') {
       if (siblingSnapshot === undefined) fail('the clients-ready sibling snapshot is missing')
