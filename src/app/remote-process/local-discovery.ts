@@ -1039,7 +1039,9 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
   throw new LocalScopeError('HOST_START_TIMEOUT', `local discovery: no ready Host registry appeared within ${String(REGISTRY_WAIT_TIMEOUT_MS / 1000)}s`)
 }
 
-/** Write one 0600 file through an exclusively-created same-directory temp file. */
+/** Publish through an exclusively-created same-directory temp file: POSIX mode
+ * 0600; on Windows a new file inherits the current-SID grant from the protected
+ * run directory, while an existing target is admitted by the shared predicate. */
 function writePrivateJsonFile(path: string, value: unknown): void {
   const text = `${JSON.stringify(value)}\n`
   const temp = join(dirname(path), `.${basename(path)}.${String(process.pid)}.${randomUUID()}.tmp`)

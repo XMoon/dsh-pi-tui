@@ -342,8 +342,9 @@ function prepareDiagnosticDirectory(env: NodeJS.ProcessEnv): string {
  * Windows diagnostic directory: the user-chosen DSH home and shared `logs`
  * directory are used as they are, including a legitimate junction/symlink that
  * resolves to an ordinary directory. Their owner-chosen ACL is NEVER modified.
- * Only the product-owned `pi-tui-client` child is created/reused with the
- * protected owner-only DACL; an unsafe existing child fails closed.
+ * Only the product-owned `pi-tui-client` child is managed: when newly created it
+ * receives a protected owner-only DACL; an existing child is reused only under
+ * the shared existing-object predicate, and an unsafe one fails closed.
  */
 function prepareWin32DiagnosticDirectory(env: NodeJS.ProcessEnv): string {
   const home = realpathSync(dshHome(env))
@@ -414,8 +415,9 @@ export function writeClientFatalDiagnostic(
     let info = fstatSync(fd)
     if (!info.isFile()) throw new DiagnosticWriteRefusal('EPERM')
     if (process.platform === 'win32') {
-      // ACL before bytes: a file that does not inherit the product directory's
-      // protected owner-only DACL is never written to.
+      // ACL before bytes: a new file must inherit the product directory's
+      // current-SID grant; the protected bit lives on the directory, not on the
+      // child file.
       if (win32PrivateFileStatus(target) !== 'private') throw new DiagnosticWriteRefusal('EPERM')
     } else {
       const uid = typeof process.getuid === 'function' ? process.getuid() : undefined

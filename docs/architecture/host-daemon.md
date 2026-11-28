@@ -40,10 +40,10 @@ profile path.
   0, is only a submitted request, never `Ready`.
 - **Windows is process-only, with kernel seats and a per-instance stop Event.**
   The Host and the short-lived management seat are `Global\` named mutexes
-  derived from the scope, created with a protected owner-only DACL; an already
-  existing named object is adopted only after its owner and DACL are proved, and
-  the same canonical profile under another DSH home competes for the same Host
-  seat.
+  derived from the scope: a newly created mutex receives a protected owner-only
+  DACL, while an already existing named object is adopted only after its current
+  owner SID and DACL are proved (ACE shape is not a boundary). The same canonical
+  profile under another DSH home competes for the same Host seat.
   `stop` opens the authenticated instance's exact process handle (token SID +
   creation FILETIME must match the registry), opens that instance's native stop
   Event, calls `SetEvent` once, and proves the original held handle terminal
@@ -537,9 +537,11 @@ state authority and the only mutation writer.
   neither. A live independent Host keeps the bounded/sanitized scope `host.log`
   tail; with no plist, no live Host and no retained launchd stream, `host.log`
   is the only remaining source. On Windows the only source is the scope
-  `host.log`; the file must be a non-reparse regular file with the product's
+  `host.log`; a newly created log inherits the current-SID-only grant from the
+  protected run directory, and an existing file is admitted with the product's
   private boundary (current owner SID, present DACL and no ordinary-account
-  grant beyond the current SID/System/Administrators), and a
+  grant beyond the current SID/System/Administrators). ACE count, protected bit
+  and inherited/explicit form are not part of that boundary; a
   foreign/public/final-reparse file is an explicit log-source failure rather
   than a guessed tail. A stale log from another process is
   never presented as the current record. Output is bounded and

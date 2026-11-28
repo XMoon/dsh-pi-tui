@@ -273,8 +273,10 @@ available on Windows over the same profile-scoped local endpoint (see
   directory is created and proved 0700; the Darwin Host seat
   uses the account-home root described below. On Windows the official home and
   profile must resolve to a local fixed NTFS path; the drive prefix is
-  canonicalized but the remaining filesystem case is preserved, and the
-  product-created run chain uses native protected owner-only DACLs. `scopeId` is
+  canonicalized but the remaining filesystem case is preserved. Directories and
+  named objects THIS product creates receive protected owner-only DACLs; files it
+  creates inside that chain inherit the current-SID-only grant without needing
+  the protected bit. `scopeId` is
   sha256 over the fixed domain `dsh-pi-tui/local-scope/1`, the decimal UID and
   the canonical profile path on POSIX, and over
   `dsh-pi-tui/local-scope/win32/1`, the canonical token SID and the canonical
@@ -316,9 +318,10 @@ available on Windows over the same profile-scoped local endpoint (see
   concurrently and share its exact PID/starttime/`instanceId`. Kernel release on
   process death is the only stale-seat recovery.
 - **Identity is authenticated, never registry-only.** The registry
-  (`instance.json`; a newly written POSIX file is 0600 and a Windows file
-  inherits the private owner-only DACL) is an unauthenticated hint
-  containing the scope, canonical profile path, `instanceId`, Host PID,
+  (`instance.json`; a newly written POSIX file is 0600, and a new Windows file
+  inherits the current-SID-only grant from the protected run directory) is an
+  unauthenticated hint containing the scope, canonical profile path, `instanceId`,
+  Host PID,
   loopback origin, the local protocol identity, installed bundle/DSH versions
   and the installed-build fingerprint. Its identity material is versioned by
   schema: Linux schema 1 carries the `/proc/<pid>/stat` starttime, macOS schema 2
@@ -377,19 +380,25 @@ available on Windows over the same profile-scoped local endpoint (see
   re-publishes both sides on the new operator.
 - **Secret boundary.** The launch token lives only in the Host process and its
   `launch.json` (a new POSIX file is written 0600 with an atomic
-  same-directory rename; on Windows it inherits the private owner-only DACL); the Client keeps its own Cookie in memory only. Neither token,
-  Cookie nor `connectUrl` may appear in the registry, stdout/stderr, logs, argv
-  or environment. New POSIX registry/launch files are 0600 and a new POSIX run directory is 0700;
-  on Windows the new files inherit the private owner-only DACL. An existing
-  POSIX user-chosen owner or mode is not a read policy and is never rewritten. The managed internal files still fail closed on a final-path
-  symlink (`O_NOFOLLOW`), a non-regular file, an oversized record, a malformed
-  schema, a registry/launch mismatch and any unauthenticated Host identity. On
-  Windows a newly created object receives the protected DACL, while an EXISTING
-  product object is admitted by its current owner SID, a present non-null DACL
-  and no grant to another ordinary account; ACE count, protected bit and
-  explicit-vs-inherited representation are ordinary representations, not a
-  security boundary. A foreign/public grant, a null/missing DACL and a final
-  reparse still fail closed.
+  same-directory rename; a new Windows file inherits the current-SID-only grant
+  from the protected run directory); the Client keeps its own Cookie in memory
+  only. Neither token, Cookie nor `connectUrl` may appear in the registry,
+  stdout/stderr, logs, argv or environment. New POSIX registry/launch files are
+  0600 and a new POSIX run directory is 0700; on Windows new files inherit that
+  current-SID-only grant, and an existing file is admitted by the shared
+  existing-object predicate below. An existing POSIX user-chosen owner or mode is
+  not a read policy and is never rewritten. The managed internal files still fail
+  closed on a final-path symlink (`O_NOFOLLOW`), a non-regular file, an oversized
+  record, a malformed schema, a registry/launch mismatch and any unauthenticated
+  Host identity. On Windows the distinction is by object origin: a NEW directory
+  or named object receives the protected self-only SDDL at creation; a NEW file
+  merely inherits the current SID's grant and need not carry the protected bit;
+  a LEGITIMATE EXISTING product object is admitted by its current owner SID, a
+  present non-null DACL and no grant to another ordinary account. ACE count,
+  order, protected bit and explicit-vs-inherited representation are ordinary ACL
+  representations, not a security boundary. A foreign/public grant, a
+  null/missing DACL, a final reparse and an ACE this reader cannot interpret
+  still fail closed.
 - **Lifecycle.** A Client exit, crash or HUP disposes only its own Client
   subtree, official transport and Client root; a `qualification` Client also
   releases its qualification-only Client seat, while a `surface` Client holds

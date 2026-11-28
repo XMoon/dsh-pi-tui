@@ -546,7 +546,7 @@ export function win32StopEventName(scopeId: string, instanceId: string): string 
   return `Global\\dsh-pi-tui-stop-${scopeId.slice(0, 24)}-${instanceId}`
 }
 
-/** Open one control-side per-instance stop event and verify its owner-only descriptor. */
+/** Open one control-side per-instance stop event and verify its existing-object private boundary. */
 export function openWin32StopSignal(scopeId: string, instanceId: string): Win32StopSignal {
   const load = loadBridge()
   if (!load.ok) throw new Error(`native win32: ${load.code}`)
@@ -761,7 +761,9 @@ export function win32PrivateFileStatus(path: string): 'missing' | 'private' | 'u
   return win32PrivateFileSafe(path) ? 'private' : 'unsafe'
 }
 
-/** Create one directory with a protected owner-only DACL; existing safe dirs are reused. */
+/** Create one directory with a protected owner-only DACL; an already existing
+ * directory is reused only after its current owner SID, DACL and child-inherit
+ * grants are proved. Created files inherit the SID grant without a protected bit. */
 export function ensureWin32PrivateDirectory(path: string): void {
   const load = loadBridge()
   if (!load.ok) throw new Error(`native win32: ${load.code}`)
