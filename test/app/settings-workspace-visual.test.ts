@@ -1876,6 +1876,34 @@ const assertRowWidths = (h: Harness, columns: number): void => {
   }
 }
 
+const cursorCellOf = (h: Harness, label: string, marker: '> ' | '  '): { readonly row: number; readonly col: number } => {
+  const plain = h.rowsPlain()
+  const row = plain.findIndex(line => {
+    const at = line.indexOf(label)
+    return at >= 2 && line.slice(at - 2, at) === marker
+  })
+  assert.ok(row >= 0, `the painted frame must contain ${JSON.stringify(label)} with its ${JSON.stringify(marker)} cursor prefix:\n${h.view()}`)
+  const col = cellIndexOf(h, row, label) - 2
+  assert.ok(col >= 0, `the ${JSON.stringify(label)} row must keep its two-cell cursor prefix`)
+  return { row, col }
+}
+
+const assertActiveCursorPrimary = (h: Harness, label: string): void => {
+  const { row, col } = cursorCellOf(h, label, '> ')
+  assert.equal(h.rowsPlain()[row]?.slice(col, col + 2), '> ', `the active ${JSON.stringify(label)} row keeps its exact cursor glyph`)
+  assert.equal(h.vt.getCellFgRgb(row, col), hexToRgb(currentPalette.primary),
+    `the active ${JSON.stringify(label)} cursor uses the live primary token`)
+  assert.equal(h.vt.getCellFgRgb(row, col + 2), hexToRgb(currentPalette.textStrong),
+    `the selected ${JSON.stringify(label)} label keeps its textStrong role`)
+}
+
+const assertPassiveCursorNotPrimary = (h: Harness, label: string): void => {
+  const { row, col } = cursorCellOf(h, label, '  ')
+  assert.equal(h.rowsPlain()[row]?.slice(col, col + 2), '  ', `the passive ${JSON.stringify(label)} row keeps its two-cell indent`)
+  assert.notEqual(h.vt.getCellFgRgb(row, col), hexToRgb(currentPalette.primary),
+    `the passive ${JSON.stringify(label)} row must not advertise active navigation ink`)
+}
+
 // ── A-01: the dedicated fullscreen workspace ───────────────────────────────
 
 test('/settings enters a dedicated fullscreen workspace: Settings chrome owns the frame, no editor row behind it', async () => {
@@ -2912,6 +2940,12 @@ test('the embedded Subagent tenant keeps its selection and Save bar inside every
     await settle(h)
     assert.match(h.view(), /Settings · Agent · Subagent settings/u, `${columns}x${rows}: the page identity stays visible`)
     assert.match(h.view(), /> Maximum depth/u, `${columns}x${rows}: the group browse keeps its selected field`)
+    if (columns === 120 || columns === 44) {
+      assertActiveCursorPrimary(h, 'Maximum depth')
+    }
+    if (columns === 120) {
+      assertPassiveCursorNotPrimary(h, 'Enabled')
+    }
     assertRowWidths(h, columns)
     assert.match(h.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u, `${columns}x${rows}: the Root-owned exit stays painted`)
     await key(h, '\x1b[B')
@@ -2962,6 +2996,15 @@ test('the real Settings Root row and delegated spans complete the Subagent point
   await settle(h)
   assert.match(h.view(), /Provider One/u)
   await clickPainted(h, 'Model One')
+  assertActiveCursorPrimary(h, 'Model One')
+  await clickPainted(h, 'Search [/]')
+  for (const character of 'Model One') await key(h, character)
+  assertPassiveCursorNotPrimary(h, 'Model One')
+  const passiveRoute = cursorCellOf(h, 'Model One', '  ')
+  assert.equal(h.vt.getCellFgRgb(passiveRoute.row, passiveRoute.col + 2), hexToRgb(currentPalette.textStrong),
+    'search keeps the retained route label selected without advertising active navigation ink')
+  await key(h, '\r') // Done: the retained route owns navigation again.
+  assertActiveCursorPrimary(h, 'Model One')
   await clickPainted(h, 'Add route [Enter]', true)
   await settle(h)
   assert.match(h.view(), /\[allowed\]/u)
@@ -14128,6 +14171,12 @@ test('the single-value Agent tenant keeps its geometry, input and Esc across the
       const shellFrame = shell.view()
       assert.match(shellFrame, /Settings · Tools · Shell execution/u, `${columns}x${rows} ${theme}: shell page identity`)
       assert.match(shellFrame, /Windows/u, `${columns}x${rows} ${theme}: the Host executor identity`)
+      if (columns === 120 || columns === 44) {
+        assertActiveCursorPrimary(shell, 'Command timeout')
+      }
+      if (columns === 120) {
+        assertPassiveCursorNotPrimary(shell, 'Output cap per stream')
+      }
       assert.match(shell.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u, `${columns}x${rows} ${theme}: shell Esc affordance`)
       await key(shell, '\r') // explicit Edit on the selected first field
       await shell.vt.waitForRender()
