@@ -2729,10 +2729,12 @@ test('sessionless explicit Remote New commits the first actual owner through the
     draftImageStoreForTest?: {
       add(input: { readonly recalledRef: { readonly attachmentId: string; readonly mediaType: 'image/png'; readonly bytes: number; readonly width: number; readonly height: number }; readonly mediaType: 'image/png'; readonly width: number; readonly height: number }): { readonly id: number; readonly placeholder: string }
       values(): readonly unknown[]
+      remove(id: number): boolean
     }
     draftFileStoreForTest?: {
       add(input: { readonly name: string; readonly byteLength: number; readonly source: { readonly type: 'recalled'; readonly ref: { readonly attachmentId: string; readonly name: string; readonly bytes: number } } }): { readonly id: number; readonly placeholder: string }
       values(): readonly unknown[]
+      remove(id: number): boolean
     }
   }
   assert.ok(app.draftImageStoreForTest !== undefined && app.draftFileStoreForTest !== undefined)
@@ -2757,7 +2759,8 @@ test('sessionless explicit Remote New commits the first actual owner through the
   }, 20_000)
   assert.ok(actualId !== undefined)
   assert.equal(calls.creates.length, 1)
-  assert.equal(calls.creates[0]?.sessionId, undefined, 'a sessionless first owner creates without a fabricated candidate id')
+  assert.deepEqual(calls.creates[0], { workspaceId: expectWorkspaceId(host, actualId), agentPreset: presetId },
+    'a sessionless first owner creates without a fabricated candidate id')
   assert.equal(sessions.retainInfo(SessionId(actualId)).getSnapshot().referenceCount, 1)
   assert.strictEqual(app.draftImageStoreForTest.values()[0], image, 'first-owner New preserves the staged image reference')
   assert.strictEqual(app.draftFileStoreForTest.values()[0], file, 'first-owner New preserves the staged file reference')
