@@ -382,11 +382,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private paintedConfirmation: { readonly identity: string; readonly blocked: boolean } | undefined
   /** The unconfirmed-leave warning whose complete body really painted. */
   private paintedWarning: { readonly identity: string; readonly blocked: boolean } | undefined
-  /** The normal Detail body verbs whose COMPLETE label really painted in the
-   *  LAST frame. A relocated secondary verb is admitted only while it is on
-   *  screen (body) or in the physical bar; the controller's own live checks
-   *  still decide whether it can run. */
-  private paintedDetailActions = new Set<McpBarAction>()
   /** The form field/input rows really painted by the CURRENT grant. */
   private formFieldRowsVisible = 0
   private formInputPainted = false
@@ -873,11 +868,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (!alreadyList) this.bumpRevision()
   }
 
-  /** Whether the LAST painted frame admits this normal-Detail semantic action
-   *  through a complete body label or a real physical-bar span. */
+  /** Whether the CURRENT painted frame admits this normal-Detail semantic
+   *  action through a complete body or physical-bar target. The frame identity
+   *  fence is the existing pointer currentness fence, so a stale A frame can
+   *  never authorise an action on a newly selected B subject. */
   private paintedActionAdmitted(action: McpBarAction): boolean {
-    return this.paintedDetailActions.has(action)
-      || this.lastBarSpans.some(span => span.action === action)
+    if (!this.pointerFrameCurrent()) return false
+    return this.paint?.targets.some(target => target.kind === 'action' && target.action === action) === true
   }
 
   /** The non-Esc Action-Bar spans this page's own bar really painted. The
@@ -1666,7 +1663,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const targets: McpPaintedTarget[] = []
     const lines: string[] = []
     this.paintedConfirmation = undefined
-    this.paintedDetailActions = new Set()
 
     if (bodyRows === 0) {
       this.formFieldRowsVisible = 0
@@ -2246,7 +2242,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         // neither a pointer target nor keyboard admission for it. The complete
         // verb remains reachable by the normal Detail scroll/short grant.
         if (action.width > width) continue
-        this.paintedDetailActions.add(action.action)
         targets.push({ kind: 'action', action: action.action, row, startCol, endCol: startCol + action.width })
       }
     }
@@ -2265,7 +2260,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (!this.focused || this.region !== 'detail') return { lines: [...lines, ...facts.diagnostics], actions: [] }
     // The body group carries every legal business verb exactly once; the
     // physical bar keeps only the primary alias and Back.
-    const body = this.detailActionSegments(snapshot).filter(segment => segment.action !== undefined && segment.action !== 'back')
+    const barSuppliesRefresh = this.detailBarSegments(snapshot)
+      .some(segment => segment.action === 'refresh')
+    const body = this.detailActionSegments(snapshot)
+      .filter(segment => segment.action !== undefined && segment.action !== 'back'
+        && !(barSuppliesRefresh && segment.action === 'refresh'))
     const actions: { line: number; action: McpBarAction; width: number }[] = []
     if (body.length > 0) {
       lines.push('')

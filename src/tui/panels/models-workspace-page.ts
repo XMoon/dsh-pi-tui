@@ -2144,9 +2144,7 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private protectedActionLayout(): boolean {
-    const activeAuth = this.view.kind === 'provider'
-      && (this.auth?.phase === 'starting' || this.auth?.phase === 'running')
-    return activeAuth
+    return this.pendingMutation()
       || this.view.kind === 'add-catalog'
       || this.view.kind === 'add-provider'
       || this.view.kind === 'review'

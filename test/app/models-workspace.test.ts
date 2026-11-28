@@ -3152,7 +3152,8 @@ test('a pending reference write names Esc wait on the clipped fallback', async (
   const { source } = fakeSource()
   source.setReference = () => new Promise<void>(resolve => { resolveWrite = resolve })
   source.describeReference = async () => ({ configured: true })
-  const page = openWith(source, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, 24)
+  const pendingRef = `ACME_${'X'.repeat(70)}`
+  const page = openWith(source, { view: 'reference', ref: pendingRef, label: 'Acme Gateway' }, 24)
   await flush()
   viewText(page)
   const idleIdentity = page.gestureIdentity()
@@ -3163,6 +3164,10 @@ test('a pending reference write names Esc wait on the clipped fallback', async (
   page.handleInput('\r')
   page.handleInput('\r')
   await flush()
+
+  const pendingFrame = viewText(page, 200)
+  assert.ok(pendingFrame.split('\n').some(line => line.includes(pendingRef)),
+    'the held pending reference keeps its full-width exact identity while the write settles')
 
   page.setBodyHeight(2)
   const rows = viewText(page).split('\n')

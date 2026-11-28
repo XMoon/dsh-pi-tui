@@ -1644,6 +1644,13 @@ test('a press armed against a stale painted bar frame is refused', async t => {
   await flushOwnedTurns()
   assert.equal((page as unknown as { pointerFrameCurrent: () => boolean }).pointerFrameCurrent(), false,
     'the painted frame is stale while B is already current')
+  // The SAME stale-frame fence applies to the relocated keyboard verb: the old
+  // A frame still shows Probe, but B is already the current subject.
+  h.vt.sendInput('p')
+  await frames(h.vt, 2)
+  await flushOwnedTurns()
+  assert.deepEqual(h.manager.probes, [], 'the stale frame never probes Host A')
+  assert.deepEqual(managerB.probes, [], 'the stale frame never probes Host B')
   // A press on the OLD painted span must not be recorded at all.
   sgrMouse(h, 'press', probe.col, probe.row)
   // The paint catches up, then the release resolves: nothing may run.

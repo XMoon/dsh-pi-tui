@@ -1499,8 +1499,11 @@ The page never infers a stored key from a route/profile.
   browse paints its real content first, then its existing action block, then
   pads to the ONE physical bar. Action rows and their targets come from the
   actually appended rows (never a `height − 1 − actions` guess), so a short page
-  keeps its actions near its facts. The picker, QuestionFlow, pending and
-  short/no-body fallbacks keep their specialised placement. Provider facts lead
+  keeps its actions near its facts. The picker, QuestionFlow and short/no-body
+  fallbacks keep their specialised placement. Clear/sign-out confirmation,
+  active browser authorization, pending writes and the add/review flows keep
+  their original pinned rows and full-width exact risk/identity copy; the
+  64/72 reading widths apply only to the normal browse. Provider facts lead
   with route/profile and the independent `Auth kind`/`Credential` presence;
   protocol/endpoint/models and the masked secret editor stay fully readable.
 - The read state is explicit: `Loading` (no authoritative rows yet), `Ready`,
@@ -1673,9 +1676,10 @@ The page never infers a stored key from a route/profile.
 - **Normal browse action flow.** The ordinary signed-in/signed-out page paints
   Status, the independent Profile and Balance first, then its existing action
   block and padding, with the normal Callback/source helper facts after the
-  account facts. `Usage`/`Top up` keep the official links and the sign-out
-  confirmation, running-task check, attempt URL/SSH and pending states keep
-  their specialised order.
+  account facts. `Usage`/`Top up` keep the official links. The sign-out
+  confirmation, running-task check, active attempt URL/SSH and pending states
+  keep their original pinned actions and full-width exact risk/identity copy;
+  the 64/72 reading widths apply only to the normal browse.
 - Wallet decimal strings are forwarded verbatim. `Usage` and `Top up` use the
   client-local HTTP(S) opener with the official `AccountView.links`; the page
   never receives a token or grant payload.
@@ -1777,10 +1781,12 @@ operable, else `Refresh [R]`. Every other admitted business verb is a complete
 label in the scrollable Detail body (`Probe`, `Restart`, `Edit`,
 `Enable/Disable`, `Delete`, `Reset`, `Refresh`), uses the SAME action sink
 exactly once, and only a really painted span is a pointer target. Shortcut keys
-for these relocated verbs use that same LAST-frame body/bar admission (a
-clipped or scrolled-out verb is inert until the existing Detail scroll reveals
-its complete label); the controller's live eligibility checks still decide
-whether it runs. Whole segments are dropped, never cut, and long diagnostics
+for these relocated verbs use that same LAST-frame body/bar admission and the
+existing pointer frame-currentness fence (a stale, clipped or scrolled-out verb
+is inert until the current Detail scroll reveals its complete label); the
+controller's live eligibility checks still decide whether it runs. If the
+physical bar already supplies Refresh as its primary, the body does not repeat
+it. Whole segments are dropped, never cut, and long diagnostics
 remain wrapped and reachable through the physical scroll.
 
 Probe and Restart require a current manager observation, a live (not retained)

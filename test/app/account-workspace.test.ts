@@ -582,6 +582,10 @@ test('Account normal browse follows content; the protected sign-out keeps its pi
   normal.page.onCellPress(2, oldPinned)
   normal.page.onCellClick(2, oldPinned)
   assert.equal(normal.state.calls.length, before, 'the old bottom row is not a business target')
+  clickPaintedAction(normal.page, 'Sign in')
+  await flush()
+  assert.ok(normal.state.calls.slice(before).includes('signIn'),
+    'the new action row reaches the existing Account sign-in sink')
   normal.page.dispose()
 
   const protectedState: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
