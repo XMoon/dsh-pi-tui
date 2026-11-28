@@ -308,6 +308,22 @@ export async function runWebCliM6({ installation, dshHome, trace }) {
     await anonymousPost.body?.cancel()
     assertExactLine(runCli(installation, ['web', 'status']), 'web=disabled', 'web status after anonymous POST')
 
+    const forgedGet = await requestFresh(`${record.origin}/api/pi-tui.web-control`, {
+      headers: { cookie: 'dsh_session=deadbeef' },
+    })
+    assert([401, 403].includes(forgedGet.status), `forged-Cookie GET was not refused: HTTP ${forgedGet.status}`)
+    const forgedGetText = await forgedGet.text()
+    assert(!/\benabled\b|\bdisabled\b|\btoken=/iu.test(forgedGetText), 'forged-Cookie GET projected Web state')
+    const forgedPost = await requestFresh(`${record.origin}/api/pi-tui.web-control`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: 'dsh_session=deadbeef' },
+      body: JSON.stringify({ schema: 1, instanceId, op: 'enable' }),
+    })
+    assert([401, 403].includes(forgedPost.status), `forged-Cookie POST was not refused: HTTP ${forgedPost.status}`)
+    const forgedPostText = await forgedPost.text()
+    assert(!/\benabled\b|\bdisabled\b|\btoken=/iu.test(forgedPostText), 'forged-Cookie POST projected Web state')
+    assertExactLine(runCli(installation, ['web', 'status']), 'web=disabled', 'web status after forged POST')
+
     assertExactLine(runCli(installation, ['web', 'enable']), 'web=enabled', 'web enable')
     assertExactLine(runCli(installation, ['web', 'status']), 'web=enabled', 'web status enabled')
     const afterEnable = statusFields(runCli(installation, ['daemon', 'status']))
@@ -341,6 +357,38 @@ export async function runWebCliM6({ installation, dshHome, trace }) {
     assert(index.status === 200, `the authenticated Web shell returned HTTP ${index.status}`)
     assert(indexBody.includes('__ModuleLoader__'), 'the authenticated Web shell carries no official module bootstrap')
     trace('m6-web-cli-url', { exchange: exchange.status, index: index.status, tokenPresent: true, tokenPersisted: false })
+
+    // DS-05: with Web really enabled, a legal `url` operation must still be
+    // refused without Owner admission. HTTP status alone is not enough: no
+    // response may carry the URL or its token.
+    const urlBody = JSON.stringify({ schema: 1, instanceId, op: 'url' })
+    for (const [label, headers] of [
+      ['anonymous', { 'content-type': 'application/json' }],
+      ['forged', { 'content-type': 'application/json', cookie: 'dsh_session=deadbeef' }],
+    ]) {
+      const urlProbe = await requestFresh(`${record.origin}/api/pi-tui.web-control`, {
+        method: 'POST',
+        headers,
+        body: urlBody,
+      })
+      assert([401, 403].includes(urlProbe.status), `DS-05 ${label} url POST was not refused: HTTP ${urlProbe.status}`)
+      const body = await urlProbe.text()
+      assert(!body.includes(token) && !/\btoken=/iu.test(body), `DS-05 ${label} url POST leaked credential material`)
+      assert(!/^https?:\/\//iu.test(body.trim()), `DS-05 ${label} url POST leaked an authenticated URL`)
+      assert(!/"(?:url|instanceId)"/iu.test(body), `DS-05 ${label} url POST projected a success payload`)
+      assertExactLine(runCli(installation, ['web', 'status']), 'web=enabled',
+        `DS-05 Web status after ${label} url POST`)
+    }
+    for (const [label, headers] of [
+      ['anonymous', {}],
+      ['forged', { cookie: 'dsh_session=deadbeef' }],
+    ]) {
+      const enabledStatusProbe = await requestFresh(`${record.origin}/api/pi-tui.web-control`, { headers })
+      assert([401, 403].includes(enabledStatusProbe.status),
+        `DS-05 ${label} GET while Web enabled returned HTTP ${enabledStatusProbe.status}`)
+      const enabledStatusText = await enabledStatusProbe.text()
+      assert(!/\benabled\b|\btoken=/iu.test(enabledStatusText), `DS-05 ${label} GET projected enabled Web state`)
+    }
 
     // A cross-site request carrying a real browser Cookie must still be refused
     // by the official Origin/Sec-Fetch fence and must not toggle Web.

@@ -400,6 +400,59 @@ export async function runAcpCli(context) {
     assert(disabledSummary.acp === 'disabled', `daemon status did not cross-check acp=disabled: ${JSON.stringify(disabledSummary)}`)
     trace('acp-cli-status-disabled', { hostPid, instance: instanceId.slice(0, 8), state: 'disabled' })
 
+    // DS-05: while the listener is really disabled, an anonymous or forged
+    // request carrying the SAME legal enable body must be refused at admission
+    // and must leave the authoritative listener state disabled. A GET status
+    // probe must not project any business state either.
+    const ownerCookie = await ownerCookieOf(dshHome, instanceId)
+    const authenticatedStatusProbe = await requestFresh(`${record.origin}${STATUS_ROUTE}`, {
+      headers: { cookie: ownerCookie },
+    }, 'ACP CLI')
+    assert(authenticatedStatusProbe.status === 200,
+      `DS-05 authenticated ACP status GET returned HTTP ${String(authenticatedStatusProbe.status)}`)
+    const disabledStatusPayload = JSON.parse(await assertSanitized(authenticatedStatusProbe, 'DS-05 authenticated ACP status GET'))
+    assert(disabledStatusPayload.schema === 1 && disabledStatusPayload.instanceId === instanceId,
+      'DS-05 authenticated ACP status did not echo the current instance')
+    assert(disabledStatusPayload.status?.state === 'disabled',
+      'DS-05 authenticated ACP status did not prove the disabled listener')
+    const legalEnableBody = JSON.stringify({ schema: 1, instanceId, op: 'enable' })
+    const anonymousEnable = await requestFresh(`${record.origin}${CONTROL_ROUTE}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: legalEnableBody,
+    }, 'ACP CLI')
+    assert([401, 403].includes(anonymousEnable.status),
+      `DS-05 anonymous ACP enable returned HTTP ${String(anonymousEnable.status)}`)
+    await assertSanitized(anonymousEnable, 'DS-05 anonymous ACP enable')
+    assertExactLine(await runCli(installation, ['acp', 'status']), 'acp=disabled',
+      'DS-05 ACP status after anonymous enable')
+    assert(!existsSync(socketPath), 'DS-05 anonymous enable bound the ACP socket')
+
+    const forgedEnable = await requestFresh(`${record.origin}${CONTROL_ROUTE}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: 'dsh_session=deadbeef' },
+      body: legalEnableBody,
+    }, 'ACP CLI')
+    assert([401, 403].includes(forgedEnable.status),
+      `DS-05 forged-Cookie ACP enable returned HTTP ${String(forgedEnable.status)}`)
+    await assertSanitized(forgedEnable, 'DS-05 forged-Cookie ACP enable')
+    assertExactLine(await runCli(installation, ['acp', 'status']), 'acp=disabled',
+      'DS-05 ACP status after forged enable')
+    assert(!existsSync(socketPath), 'DS-05 forged enable bound the ACP socket')
+
+    for (const [label, headers] of [
+      ['anonymous', {}],
+      ['forged', { cookie: 'dsh_session=deadbeef' }],
+    ]) {
+      const statusProbe = await requestFresh(`${record.origin}${STATUS_ROUTE}`, { headers }, 'ACP CLI')
+      assert([401, 403].includes(statusProbe.status),
+        `DS-05 ${label} ACP status GET returned HTTP ${String(statusProbe.status)}`)
+      const text = await assertSanitized(statusProbe, `DS-05 ${label} ACP status GET`)
+      assert(!/\b(?:enabled|disabled|changing|acp-socket)\b/u.test(text),
+        `DS-05 ${label} ACP status GET projected listener state`)
+    }
+    trace('ds05-acp-disabled-admission', { anonymousEnable: anonymousEnable.status, forgedEnable: forgedEnable.status, state: 'disabled' })
+
     // ── S03/S04: enable through the Owner-only route; status is a pure read ─
     assertExactLine(await runCli(installation, ['acp', 'enable']), 'acp=enabled', 'acp enable')
     assert(existsSync(socketPath), 'acp enable did not bind the profile ACP socket')
@@ -482,7 +535,7 @@ export async function runAcpCli(context) {
     await assertSanitized(anonymous, 'anonymous ACP control POST')
     assertExactLine(await runCli(installation, ['acp', 'status']), 'acp=enabled', 'acp status after anonymous POST')
 
-    const cookie = await ownerCookieOf(dshHome, instanceId)
+    const cookie = ownerCookie
     const authenticated = async (body, method = 'POST', label = 'authenticated ACP control') => {
       const response = await requestFresh(`${record.origin}${CONTROL_ROUTE}`, {
         method,
