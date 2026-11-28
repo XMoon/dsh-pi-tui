@@ -74,7 +74,7 @@ async function assertExpandedLocalShellFacts(client, marker, expectedFacts, labe
   assert(header >= 0, `${label} folded Shell card is visible`)
   const outcome = header + 2
   assert(folded[outcome]?.includes('to expand') === true, `${label} Shell card exposes its real disclosure action`)
-  const row = outcome + 1
+  const row = outcome
   client.mouseClick(3, row)
   try {
     await waitForCondition(async () => {

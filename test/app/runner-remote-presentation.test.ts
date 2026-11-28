@@ -5456,10 +5456,91 @@ test('M6 compatible cross-build: a startup Session Browser refusal keeps priorit
   }
 })
 
-test('the bootstrap Remote readiness producers report non-ready hydrate and catalog outcomes', () => {
-  const source = readFileSync(fileURLToPath(new URL('../../src/app/bootstrap.ts', import.meta.url)), 'utf8')
-  assert.ok(source.includes("readiness?.notReady('remote live hydration was not committed')"),
-    'an uncommitted Remote hydrate must feed the operation-local readiness sink')
-  assert.ok(source.includes('readiness?.notReady(`catalog refresh ${outcome.kind}`)'),
-    'a non-applied Remote catalog outcome must feed the same operation-local readiness sink')
+test('an uncommitted Remote hydrate becomes Session committed through the production bootstrap', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'rbs-1-not-ready-hydrate-preset'
+  const host = await mountRemotePresentationHost(life, presetId)
+  const diagnosticsPath = join(host.workRoot, 'r2-f3-hydrate-diag.log')
+  const previousLog = process.env.DSH_PI_TUI_LOG
+  process.env.DSH_PI_TUI_LOG = diagnosticsPath
+  life.defer(() => {
+    if (previousLog === undefined) delete process.env.DSH_PI_TUI_LOG
+    else process.env.DSH_PI_TUI_LOG = previousLog
+  })
+  const diagnosticsText = (): string => {
+    try { return readFileSync(diagnosticsPath, 'utf8') } catch { return '' }
+  }
+  const fixture = await mountRemoteRunner(life, {
+    presetId,
+    host,
+    productionSerializer: true,
+    beforeRunnerMount: presentation => {
+      const reader = presentation.presentationReader as { read(sessionId: string, signal?: AbortSignal): Promise<unknown> }
+      reader.read = async () => undefined
+    },
+  })
+  await waitFor('the sessionless composer is mounted', () => fixture.vt.getViewport().join('\n').includes('❯'), 20_000)
+  const before = new Set(host.ctx.sessions.list().map(session => String(session.id)))
+  const editor = mountedEditor(fixture)
+  editor.setDraft('/new')
+  editor.submitDraft()
+  let actualId: string | undefined
+  await waitFor('the committed but non-ready first owner is published', () => {
+    const created = host.ctx.sessions.list().map(session => String(session.id)).find(id => !before.has(id))
+    if (created === undefined) return false
+    actualId = created
+    return diagnosticsText().includes('remote live hydration was not committed')
+  }, 20_000)
+  assert.ok(actualId !== undefined)
+  assert.equal(fixture.aggregate.wire.client.sessions.binding(SessionId(actualId)) !== undefined, true,
+    'the committed Host identity is retained even though hydration was not committed')
 })
+
+for (const kind of ['failed', 'superseded'] as const) {
+  test(`a ${kind} Remote catalog outcome becomes Session committed through the production bootstrap`, async (t) => {
+    const life = testLifecycle(t)
+    const presetId = `rbs-1-not-ready-${kind}-catalog-preset`
+    const host = await mountRemotePresentationHost(life, presetId)
+    const diagnosticsPath = join(host.workRoot, `r2-f3-${kind}-diag.log`)
+    const previousLog = process.env.DSH_PI_TUI_LOG
+    process.env.DSH_PI_TUI_LOG = diagnosticsPath
+    life.defer(() => {
+      if (previousLog === undefined) delete process.env.DSH_PI_TUI_LOG
+      else process.env.DSH_PI_TUI_LOG = previousLog
+    })
+    const diagnosticsText = (): string => {
+      try { return readFileSync(diagnosticsPath, 'utf8') } catch { return '' }
+    }
+    const fixture = await mountRemoteRunner(life, {
+      presetId,
+      host,
+      productionSerializer: true,
+      beforeRunnerMount: presentation => {
+        const commandSource = presentation.commandSource as {
+          captureTransportToken(sessionId: string): unknown
+          isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+        }
+        if (kind === 'failed') {
+          commandSource.captureTransportToken = () => { throw new Error('controlled Remote catalog identity failure') }
+        } else {
+          commandSource.isTransportTokenCurrent = () => false
+        }
+      },
+    })
+    await waitFor('the sessionless composer is mounted', () => fixture.vt.getViewport().join('\n').includes('❯'), 20_000)
+    const before = new Set(host.ctx.sessions.list().map(session => String(session.id)))
+    const editor = mountedEditor(fixture)
+    editor.setDraft('/new')
+    editor.submitDraft()
+    let actualId: string | undefined
+    await waitFor(`the committed first owner reports ${kind} catalog readiness`, () => {
+      const created = host.ctx.sessions.list().map(session => String(session.id)).find(id => !before.has(id))
+      if (created === undefined) return false
+      actualId = created
+      return diagnosticsText().includes(`catalog refresh ${kind}`)
+    }, 20_000)
+    assert.ok(actualId !== undefined)
+    assert.equal(fixture.aggregate.wire.client.sessions.binding(SessionId(actualId)) !== undefined, true,
+      'a non-ready catalog must not roll back the committed Host identity')
+  })
+}
