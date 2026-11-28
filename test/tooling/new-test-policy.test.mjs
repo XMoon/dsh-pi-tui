@@ -6,8 +6,8 @@
  * review judgements — Contract First, Evidence Integrity, Ownership
  * First's judgement half, and Rule 4's narrow-fake rule (whether a fake
  * exposes more capability than its consumer USES depends on what the test is
- * trying to prove, which no static check can decide; `docs/guides/
- * code-review.md` §2 carries that question instead).
+ * trying to prove, which no static check can decide; the testing guide's
+ * Minimal Test Infrastructure rule leaves that decision to the reviewer).
  *
  * This suite proves the parts that ARE decidable:
  *

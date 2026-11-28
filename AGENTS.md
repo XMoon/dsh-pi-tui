@@ -32,50 +32,33 @@ before editing. Read subsystem docs only when the task touches that subsystem.
 
 ## Repository documentation policy (hard gate)
 
-Repository `docs/` contains ONLY durable, cross-version technical facts,
-current load-bearing architecture/behavior contracts, and reusable procedures.
-A contract may change between releases, but it must remain useful without
-being tied to one PR, milestone, run, branch SHA, or candidate version.
+Default to no new or expanded `docs/` content. The proposer must establish
+necessity under the [canonical documentation policy and unique owner index](docs/README.md).
+Read it before prescribing, writing or reviewing repository documentation.
 
-NEVER add or retain in `docs/`: implementation plans, milestone roadmaps,
-progress/TODO/debt trackers, PR/review/qualification ledgers, dated
-investigations, version-pinned measurements/screenshots/benchmarks, handoff
-notes, or generated/static copies of facts already owned by source, manifests,
-gates, tests, releases, or GitHub issues/PRs. Do not create `docs/archive`,
-`docs/history`, `docs/plans`, or `docs/evidence` as a workaround.
-
-`docs/README.md` is the canonical documentation policy and index. Each
-long-lived fact has ONE owning document. Source, tests, manifests and
-machine-generated inventories remain the authority for implementation state.
-Update a repository document only when that document's durable contract or
-reusable procedure actually changes. Do not update repo docs merely because
-a PR, milestone or review round progressed. Preserve unique load-bearing
-contracts before deleting or consolidating an existing document.
-
-**MANDATORY STOP / OWNER DECISION:** If ANY accepted plan, PR task, reviewer,
-checklist, or other instruction requires creating/updating a `docs/` artifact
-that violates this policy, STOP THE AFFECTED WORK BEFORE WRITING IT. Do not
-silently skip the required deliverable, rewrite the plan on your own, relocate
-the artifact to a different repository path, or self-approve an exception.
-Report the conflicting requirement, requested path/content, policy violation,
-current owner/source of truth, and one recommended compliant disposition;
-request explicit Owner adjudication. Resume only after the Owner resolves the
-conflict and the accepted plan/contract is amended. This rule applies even if
-the older plan called its documentation update MANDATORY or BLOCKING.
-
-Reviewers must treat violations or an unadjudicated documentation conflict
-as a blocker, not a cosmetic documentation comment.
+**MANDATORY STOP / OWNER DECISION:** If any instruction requires content that
+violates that policy, STOP THE AFFECTED WORK BEFORE WRITING IT and follow its
+Owner adjudication procedure. Do not self-waive or relocate a forbidden
+deliverable. Policy violations and unresolved documentation conflicts are
+merge blockers, not cosmetic review comments.
 
 ## Code review
 
-Before reviewing code changes, read `docs/guides/code-review.md` and pass it plus the
-applicable requirements/contracts to the reviewer. It supplements the generic
-review loop; subsystem contracts remain authoritative. PR acceptance is not
-stage closure or permission to merge.
+Review the full diff against the accepted requirements and applicable owning
+contracts indexed in `docs/README.md`. Supply those requirements and contracts
+to delegated reviewers. Assess the necessity of changes and tests before
+requesting additions, and require proportionate, truthful evidence. Follow
+the documentation policy, applicable subsystem acceptance requirements and
+any explicitly requested review workflow. PR acceptance is not stage closure
+or permission to merge.
 
 Before adding a surface or restyling one, read `docs/architecture/design-language.md`
 (the canonical TUI visual vocabulary, role→token table and governance) and walk
 its §11.2 checklist for any change that alters what a surface paints.
+For changed PiTui Fullscreen interactions, including interaction-only changes,
+apply `docs/architecture/overlay-focus.md` §7. For TSP-native changes, apply
+the evidence and acceptance rules in `docs/tsp/foundation.md` and the owning
+product contract.
 
 ## Naming and writing
 
@@ -372,8 +355,8 @@ policy above).
 * Pull requests use `.github/pull_request_template.md`. Keep the description
   proportional to the change, report only verified evidence, and update an
   owning Issue when one exists. The template summarizes applicable review
-  evidence; it does not replace `docs/guides/code-review.md`, authorize merge,
-  or imply stage closure.
+  evidence; it does not replace the applicable owning contracts, authorize
+  merge, or imply stage closure.
 
 ## Documentation map
 
