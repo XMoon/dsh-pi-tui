@@ -45,6 +45,7 @@ import {
   computeBuildId,
   inspectInstalledProfileScope,
   LocalScopeError,
+  materializeBuild,
   scopeFromInstalledProfile,
   type LocalScope,
 } from '../../src/app/remote-process/local-scope.ts'
@@ -91,7 +92,7 @@ function fixture(t: TestContext): Fixture {
   symlinkSync(packageRoot, join(profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui'))
   const anchor = join(anchorDir, 'package.json')
   writeFileSync(anchor, `${JSON.stringify({ name: '@deepseek-ai/dsh', version: DSH_VERSION })}\n`, { mode: 0o644 })
-  const scope = inspectInstalledProfileScope({ dshHome, profileDir, packageRoot, dshVersion: DSH_VERSION })
+  const scope = materializeBuild(inspectInstalledProfileScope({ dshHome, profileDir, packageRoot, dshVersion: DSH_VERSION }), packageRoot)
   mkdirSync(scope.dir, { recursive: true, mode: 0o700 })
   const base = collectUnitFacts({
     scope,

@@ -54,12 +54,13 @@ import { userInfo } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
-import { installedPackageRootFromEntry, LocalScopeError, type LocalScope } from './local-scope.ts'
+import { installedPackageRootFromEntry, LocalScopeError, materializeBuild, type LocalScope, type LocalScopeIdentity } from './local-scope.ts'
 import { win32PrivateFileStatus } from '../../runtime/native-process/win32.ts'
 import {
   inspectOwnedLaunchdUnit,
   startLaunchdService,
   type LaunchdAdapterDeps,
+  type LaunchdProfileFacts,
   type LaunchdUnitFacts,
 } from './local-host-launchd.ts'
 
@@ -91,7 +92,7 @@ export type SystemctlResult =
 
 /** The installed facts a managed Host start needs; the same shape the process fallback reads. */
 export interface HostStartOptions {
-  readonly scope: LocalScope
+  readonly scope: LocalScopeIdentity
   /** Installed `dist/local-host.mjs` of this same package. */
   readonly hostEntryPath: string
   /** Installed `@deepseek-ai/dsh/package.json` anchor. */
@@ -101,6 +102,14 @@ export interface HostStartOptions {
   /** The public start policy. Only `public` may consult an installed manager
    *  job; internal/peer/reexec launches keep the detached process path. */
   readonly hostStartPolicy?: 'public' | 'public-managed'
+  /** Command-local strict supplier invoked ONLY when a fresh definition must be
+   *  rendered. Read-only verbs leave it absent and never walk `dist`. */
+  readonly strictScope?: () => LocalScope
+}
+
+/** A start whose current build has already been strictly materialized. */
+export interface FullHostStartOptions extends HostStartOptions {
+  readonly scope: LocalScope
 }
 
 /** The validated facts ONE unit file is rendered from. */
@@ -393,8 +402,26 @@ export function inspectTrustedDshAnchor(path: string): string {
   return real
 }
 
+/** Validate the DSH install anchor and its exact runtime version once. */
+function readVerifiedDshAnchor(path: string, dshVersion: string): string {
+  const dshAnchor = inspectTrustedDshAnchor(path)
+  let manifest: unknown
+  try {
+    manifest = JSON.parse(readFileSync(dshAnchor, 'utf8'))
+  } catch (error) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the DSH anchor manifest is unreadable', error)
+  }
+  if (manifest === null || typeof manifest !== 'object' || (manifest as { readonly name?: unknown }).name !== '@deepseek-ai/dsh') {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the DSH anchor is not @deepseek-ai/dsh')
+  }
+  if ((manifest as { readonly version?: unknown }).version !== dshVersion) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the DSH anchor version does not match the installed runtime pin')
+  }
+  return dshAnchor
+}
+
 /** Collect and validate the exact installed facts one service definition is rendered from. */
-export function collectUnitFacts(options: HostStartOptions): UnitFacts {
+export function collectUnitFacts(options: FullHostStartOptions): UnitFacts {
   // The Node interpreter is a system executable: trust absolute + executable.
   const nodePath = inspectTrustedExecutable(process.execPath, 'node executable')
   // The Host entry and DSH anchor are installed package files. A legal package
@@ -405,19 +432,7 @@ export function collectUnitFacts(options: HostStartOptions): UnitFacts {
   }
   inspectOwnedRegular(options.hostEntryPath, 'Host entry')
   assertEntrySelfLocation(options.hostEntryPath, 'HOST_MANAGER_UNIT_CONFLICT', 'Host entry')
-  const dshAnchor = inspectTrustedDshAnchor(options.dshAnchor)
-  let manifest: unknown
-  try {
-    manifest = JSON.parse(readFileSync(dshAnchor, 'utf8'))
-  } catch (error) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the DSH anchor manifest is unreadable', error)
-  }
-  if (manifest === null || typeof manifest !== 'object' || (manifest as { readonly name?: unknown }).name !== '@deepseek-ai/dsh') {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the DSH anchor is not @deepseek-ai/dsh')
-  }
-  if ((manifest as { readonly version?: unknown }).version !== options.scope.dshVersion) {
-    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the DSH anchor version does not match the installed runtime pin')
-  }
+  const dshAnchor = readVerifiedDshAnchor(options.dshAnchor, options.scope.dshVersion)
   return {
     dshHome: options.scope.dshHome,
     profileRealpath: options.scope.profileRealpath,
@@ -438,7 +453,7 @@ export function collectUnitFacts(options: HostStartOptions): UnitFacts {
  * CURRENT install, so this path survives a package update where a frozen pnpm
  * store path does not.
  */
-function stableProfileHostEntry(scope: LocalScope): string {
+function stableProfileHostEntry(scope: LocalScopeIdentity): string {
   return join(scope.profileRealpath, 'node_modules', PROFILE_PACKAGE_NAME, ...PROFILE_HOST_ENTRY)
 }
 
@@ -448,7 +463,7 @@ function stableProfileHostEntry(scope: LocalScope): string {
  * launcher's real `createRequire` resolution result; a different real target
  * means this profile layout is not the official one and must not be written.
  */
-export function resolveStableProfileHostEntry(scope: LocalScope, installedHostEntryPath: string): string {
+export function resolveStableProfileHostEntry(scope: LocalScopeIdentity, installedHostEntryPath: string): string {
   const namedEntry = stableProfileHostEntry(scope)
   let installedReal: string
   let namedReal: string
@@ -819,7 +834,7 @@ function readUnitFileIdentity(filePath: string): {
 }
 
 /** Runtime directives belong to the user and systemd; only metadata proves scope. */
-function inspectUnitIdentity(content: string, scope: LocalScope): string {
+function inspectUnitIdentity(content: string, scope: LocalScopeIdentity): string {
   const lines = content.split('\n')
   if (readUnitMetadata(lines, 'X-DshPiTuiOwner') !== UNIT_OWNER_MARKER) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'managed Host: the unit is not owned by this product')
@@ -849,7 +864,7 @@ function assertUnitFileIdentity(unit: OwnedProfileUnit): void {
 }
 
 /** Inspect the exact Profile unit path, following a user-created configuration link. */
-export function inspectOwnedProfileUnit(scope: LocalScope, profile: string, unitDir?: string): OwnedProfileUnitInspection {
+export function inspectOwnedProfileUnit(scope: LocalScopeIdentity, profile: string, unitDir?: string): OwnedProfileUnitInspection {
   const dir = unitDir ?? inspectExistingUserUnitDir()
   if (dir === undefined) return { kind: 'none' }
   const unitName = buildUnitName(profile, scope.scopeId)
@@ -946,7 +961,7 @@ export async function stopOwnedProfileUnit(
  * independent Host is not unit-supervised and is never stopped by uninstall. The
  * caller owns the `daemon-reload` that follows.
  */
-export function uninstallOwnedProfileUnit(unit: OwnedProfileUnit, scope: LocalScope, profile: string): void {
+export function uninstallOwnedProfileUnit(unit: OwnedProfileUnit, scope: LocalScopeIdentity, profile: string): void {
   const current = inspectOwnedProfileUnit(scope, profile, unit.unitDir)
   if (current.kind !== 'owned' || current.filePath !== unit.filePath
     || current.device !== unit.device || current.inode !== unit.inode) {
@@ -1087,8 +1102,11 @@ export async function installProfileHostUnit(
   if (unit.kind === 'none') {
     // A FRESH unit launches the stable lexical Profile entry, never the frozen
     // physical store path the official resolution currently happens to expose.
+    const strictScope = options.strictScope?.()
+      ?? materializeBuild(options.scope, installedPackageRootFromEntry(pathToFileURL(options.hostEntryPath).href))
     const content = renderUnitContent(collectUnitFacts({
       ...options,
+      scope: strictScope,
       hostEntryPath: resolveStableProfileHostEntry(options.scope, options.hostEntryPath),
     }))
     // A fresh file may otherwise SHADOW a same-named unit the manager already
@@ -1505,10 +1523,32 @@ export async function startPublicHostCandidate(
 }
 
 /**
+ * Validate only the canonical DSH anchor and profile identity needed to read an
+ * installed LaunchAgent. This deliberately does not validate the current Node
+ * executable, Host entry or build: an owned historical plist must stay readable
+ * when its original package payload has been pruned.
+ */
+export function collectLaunchdProfileFacts(
+  scope: LocalScopeIdentity,
+  profile: string,
+  dshAnchor: string,
+): LaunchdProfileFacts {
+  return {
+    dshHome: scope.dshHome,
+    scopeDir: scope.dir,
+    profileRealpath: scope.profileRealpath,
+    profile,
+    scopeId: scope.scopeId,
+    profileIdentity: profileIdentityDigest(scope.profileRealpath),
+    dshAnchor: readVerifiedDshAnchor(dshAnchor, scope.dshVersion),
+  }
+}
+
+/**
  * Collect the same validated installed facts for BOTH manager renderers; the
  * profile identity digest is the shared canonical-profile owner.
  */
-function collectLaunchdUnitFacts(options: HostStartOptions): LaunchdUnitFacts {
+function collectLaunchdUnitFacts(options: FullHostStartOptions): LaunchdUnitFacts {
   const facts = collectUnitFacts(options)
   return {
     ...facts,
@@ -1528,7 +1568,7 @@ function collectLaunchdUnitFacts(options: HostStartOptions): LaunchdUnitFacts {
  * qualification/peer/manual/reexec policies never consider a manager job.
  */
 export async function startManagedHostCandidate(
-  options: HostStartOptions,
+  options: FullHostStartOptions,
   deps: HostManagerDeps = {},
 ): Promise<HostStartObservation> {
   if (process.platform === 'win32') {

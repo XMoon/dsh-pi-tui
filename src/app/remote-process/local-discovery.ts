@@ -32,6 +32,7 @@ import {
   readLinuxStarttime,
   readProcessStarttime,
   type LocalScope,
+  type LocalScopeIdentity,
 } from './local-scope.ts'
 import {
   readKernelProcess,
@@ -332,6 +333,12 @@ export function buildHostInstanceRecord(
   }
 }
 
+/** Identity facts needed to read and authenticate a live Host candidate. */
+export type LocalDiscoveryScope = Pick<
+  LocalScopeIdentity,
+  'dir' | 'scopeId' | 'profileRealpath' | 'dshVersion'
+>
+
 /** The two scope facts a record must echo; the build facts are judged separately. */
 interface RecordScope {
   readonly scopeId: string
@@ -582,7 +589,10 @@ export function sameLocalInstanceRecord(left: LocalInstanceRecord, right: LocalI
 }
 
 /** Can this Client speak the live Host's required local wire contract? */
-export function assertClientHostCompatible(record: LocalInstanceRecord, scope: LocalScope): void {
+export function assertClientHostCompatible(
+  record: LocalInstanceRecord,
+  scope: Pick<LocalScopeIdentity, 'dshVersion'>,
+): void {
   if (record.protocol !== LOCAL_PROTOCOL || record.dshVersion !== scope.dshVersion) {
     throw new LocalScopeError(
       'HOST_PROTOCOL_INCOMPATIBLE',
@@ -667,14 +677,14 @@ function readPrivateJsonFile(path: string, maxBytes: number, label: string): unk
  * Strictly read `<scope>/instance.json`. The record is an unauthenticated
  * candidate only; this function performs no liveness or build decision.
  */
-export function readLocalRecord(scope: LocalScope): LocalInstanceRecord | undefined {
+export function readLocalRecord(scope: LocalDiscoveryScope): LocalInstanceRecord | undefined {
   const value = readPrivateJsonFile(join(scope.dir, REGISTRY_FILE), MAX_REGISTRY_BYTES, 'instance.json')
   if (value === undefined) return undefined
   return parseRecord(value, scope)
 }
 
 /** Strictly read `<scope>/launch.json` after its registry candidate matched. */
-export function readLaunchMaterial(scope: LocalScope, record: LocalInstanceRecord): LocalLaunchMaterial {
+export function readLaunchMaterial(scope: Pick<LocalScopeIdentity, 'dir'>, record: LocalInstanceRecord): LocalLaunchMaterial {
   const value = readPrivateJsonFile(join(scope.dir, LAUNCH_FILE), MAX_LAUNCH_BYTES, 'launch.json')
   if (value === undefined) {
     throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'local discovery: instance.json has no matching launch.json')
@@ -965,7 +975,7 @@ export function readHostProcessIdentity(pid: number = process.pid): HostProcessI
  */
 export async function authenticateLocalHost(
   record: LocalInstanceRecord,
-  scope: LocalScope,
+  scope: Pick<LocalScopeIdentity, 'dir'>,
   signal?: AbortSignal,
 ): Promise<VerifiedLocalHost> {
   const launch = readLaunchMaterial(scope, record)

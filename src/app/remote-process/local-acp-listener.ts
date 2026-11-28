@@ -49,7 +49,7 @@ import {
   type SessionModeState,
 } from '@agentclientprotocol/sdk'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
-import { type LocalScope } from './local-scope.ts'
+import { type LocalScope, type LocalScopeIdentity } from './local-scope.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import { secureWin32AcpPipe } from '../../runtime/native-process/win32.ts'
 import { acpPipeAddress } from './local-acp-endpoint.ts'
@@ -1730,7 +1730,7 @@ export interface DarwinAcpSocketPaths {
  * @throws {LocalAcpError} `LOCAL_ACP_SOCKET_PATH_UNSUPPORTED` when a name exceeds
  *   the Darwin kernel path capacity.
  */
-export function darwinAcpSocketPaths(scope: LocalScope, uid: number): DarwinAcpSocketPaths {
+export function darwinAcpSocketPaths(scope: LocalScopeIdentity, uid: number): DarwinAcpSocketPaths {
   const privateRoot = join(DARWIN_SOCKET_PARENT, `${DARWIN_ROOT_PREFIX}${String(uid)}-${scope.scopeId.slice(0, DARWIN_SCOPE_PREFIX_HEX)}`)
   const publicPath = join(privateRoot, SOCKET_FILE)
   const privateBindPath = join(privateRoot, PRIVATE_DIR, SOCKET_FILE)

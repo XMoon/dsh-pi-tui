@@ -21,6 +21,7 @@ import {
   inspectInstalledProfileScope,
   LOCAL_PROTOCOL,
   LocalScopeError,
+  materializeBuild,
   readLinuxStarttime,
   type LocalScope,
 } from '../../src/app/remote-process/local-scope.ts'
@@ -109,7 +110,7 @@ function fixture(t: TestContext): Fixture {
     packageRoot,
     dshVersion: DSH_VERSION,
   }
-  const scope = inspectInstalledProfileScope({ dshHome: home, profileDir, packageRoot, dshVersion: DSH_VERSION })
+  const scope = materializeBuild(inspectInstalledProfileScope({ dshHome: home, profileDir, packageRoot, dshVersion: DSH_VERSION }), packageRoot)
   const unitDir = join(root, 'user-units')
   mkdirSync(unitDir, { recursive: true, mode: 0o700 })
   return {
@@ -442,6 +443,7 @@ function assertCode(result: { code: number; stdout: string; stderr: string }, co
 
 test('status with no Host and no unit reports stopped and never queries the manager', async t => {
   const fx = fixture(t)
+  symlinkSync(join(fx.profile.home, 'missing-payload.mjs'), join(fx.profile.packageRoot, 'dist', 'broken.mjs'))
   const systemctl = unitSystemctl(join(fx.unitDir, fx.unitName))
   assert.equal(existsSync(fx.scope.dir), false, 'the fixture must start without a run directory')
   const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
@@ -456,6 +458,7 @@ test('status with no Host and no unit reports stopped and never queries the mana
   assert.match(result.stdout, /^unit=none$/mu)
   assert.match(result.stdout, /^unit-state=not-found$/mu)
   assert.match(result.stdout, /^compatibility=none$/mu)
+  assert.doesNotMatch(result.stderr, /fingerprint unavailable/u, 'with no comparison target status performs no build walk')
   assert.match(result.stdout, /^acp=unavailable$/mu, 'no live Host can never prove the ACP listener state')
   assert.doesNotMatch(result.stdout, /^acp-socket=/mu, 'an unproven ACP state prints no endpoint')
   assert.equal(existsSync(fx.scope.dir), false, 'status must never create the scope run directory')
@@ -1261,6 +1264,22 @@ test('a different installed build is reported as other-build while a compatible 
   assert.match(result.stdout, /^compatibility=other-build$/mu)
 })
 
+test('a current-build fingerprint failure keeps an authenticated Host ready and reports unknown compatibility', async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  symlinkSync(join(fx.profile.home, 'missing-payload.mjs'), join(fx.profile.packageRoot, 'dist', 'broken.mjs'))
+  const result = await runDaemonControl({ verb: 'status' }, fx.profile, depsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+  }))
+  assertCode(result, 0)
+  assert.match(result.stdout, /^host=ready$/mu)
+  assert.match(result.stdout, /^compatibility=unknown$/mu)
+  assert.match(result.stderr, /^dsh-pi-tui daemon: warning: installed build fingerprint unavailable; compatibility is unknown\n$/mu)
+  assert.doesNotMatch(result.stderr, /missing-payload|\/Users\/|packageRoot/u, 'the diagnostic must not leak a private path or raw payload error')
+})
+
 test('a foreign or unsafe unit file is refused and still reports an authenticated Host', async t => {
   const fx = fixture(t)
   const unit = writeOwnedUnit(fx)
@@ -1876,6 +1895,25 @@ test('darwin install reuses an old-build owned plist byte-for-byte and never sto
     'install never starts or stops the job')
 })
 
+test('darwin install succeeds for the owned plist without inheriting an unrelated Host authentication failure', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
+  const fx = fixture(t)
+  const facts = launchdFactsOf(fx)
+  mkdirSync(join(fx.accountHome, 'Library', 'LaunchAgents'), { recursive: true, mode: 0o700 })
+  writeFileSync(launchdPlistPathOf(fx), renderLaunchdPlist(facts), { mode: 0o600 })
+  const record = darwinRecordOf(fx.scope)
+  const launchctl = fakeLaunchd(fx, { loaded: false })
+  const result = await runDaemonControl({ verb: 'install' }, fx.profile, darwinDepsOf(fx, {
+    launchctl: launchctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => { throw new Error('Host authentication failed') },
+  }))
+  assertCode(result, 0)
+  assert.equal(result.stderr, '', 'the successful plist command must not print the tolerated Host failure')
+  assert.match(result.stdout, /^host=unresponsive$/mu)
+  assert.match(result.stdout, /^instance=11111111$/mu)
+})
+
 test('darwin cold start migrates a loaded-but-idle old generated plist, then starts through launchd', { skip: process.platform !== 'darwin' ? 'the Darwin admin seat requires macOS' : false }, async t => {
   const fx = fixture(t)
   const facts = launchdFactsOf(fx)
@@ -2436,6 +2474,44 @@ test('darwin mutating verbs take the admin seat and another profile keeps its ow
 })
 
 // ── stop: explicit supervision only ─────────────────────────────────────────
+
+test('stop reaches the verified independent Host without requiring a current build fingerprint', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  symlinkSync(join(fx.profile.home, 'missing-payload.mjs'), join(fx.profile.packageRoot, 'dist', 'broken.mjs'))
+  let stopped = false
+  const signals: Array<{ readonly pid: number; readonly signal: NodeJS.Signals }> = []
+  const result = await runDaemonControl({ verb: 'stop' }, fx.profile, depsOf(fx, {
+    readRecord: () => stopped ? undefined : record,
+    inspectProcess: () => stopped ? 'dead' : 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    readStarttime: () => stopped ? undefined : record.hostStarttime,
+    kill: (pid, signal) => { signals.push({ pid, signal }); stopped = true },
+  }))
+  assertCode(result, 0)
+  assert.deepEqual(signals, [{ pid: record.hostPid, signal: 'SIGTERM' }])
+  assert.match(result.stdout, /^host=stopped$/mu)
+  assert.match(result.stdout, /^compatibility=none$/mu)
+  assert.doesNotMatch(result.stderr, /fingerprint unavailable/u, 'stop has no diagnostic comparison target after the Host is gone')
+})
+
+test('restart refuses a broken current build before signalling or replacing the live Host', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const record = recordOf(fx.scope)
+  symlinkSync(join(fx.profile.home, 'missing-payload.mjs'), join(fx.profile.packageRoot, 'dist', 'broken.mjs'))
+  let signals = 0
+  let ensured = 0
+  const result = await runDaemonControl({ verb: 'restart' }, fx.profile, depsOf(fx, {
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => ({ record, cookie: 'c', identity: record }),
+    kill: () => { signals += 1 },
+    ensureHost: async () => { ensured += 1; throw new Error('restart must refuse before starting') },
+  }))
+  assert.notEqual(result.code, 0)
+  assert.equal(signals, 0, 'a failed strict preflight must not stop the original Host')
+  assert.equal(ensured, 0, 'a failed strict preflight must not start a replacement')
+})
 
 test('stop with no live Host and no owned unit is an idempotent no-op', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
@@ -3024,8 +3100,9 @@ test('logs refuses an unavailable unit journal and never falls back to raw files
   assert.equal(fellBack, 0)
 })
 
-test('logs reads the scope host.log when no unit is installed', async t => {
+test('logs reads the scope host.log without materializing a broken current build', async t => {
   const fx = fixture(t)
+  symlinkSync(join(fx.profile.home, 'missing-payload.mjs'), join(fx.profile.packageRoot, 'dist', 'broken.mjs'))
   const result = await runDaemonControl({ verb: 'logs', lines: 5 }, fx.profile, depsOf(fx, {
     hostLogTail: async (path, lines) => {
       assert.equal(path, join(fx.scope.dir, 'host.log'))
@@ -3208,6 +3285,16 @@ test('a repeat install of the same unit is idempotent', { skip: process.platform
   assert.equal(existsSync(join(fx.unitDir, fx.unitName)), true)
 })
 
+test('install refuses a broken current build before writing a fresh unit', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  symlinkSync(join(fx.profile.home, 'missing-payload.mjs'), join(fx.profile.packageRoot, 'dist', 'broken.mjs'))
+  const systemctl = unitSystemctl(join(fx.unitDir, fx.unitName))
+  const result = await runDaemonControl({ verb: 'install' }, fx.profile, depsOf(fx, { systemctl: systemctl.run }))
+  assert.notEqual(result.code, 0)
+  assert.equal(existsSync(join(fx.unitDir, fx.unitName)), false, 'strict materialization failure must not write a definition')
+  assert.equal(systemctl.calls.some(args => args.includes('daemon-reload')), false, 'a failed fresh render commits no manager reload')
+})
+
 test('install reuses a verified other-build unit and leaves the unit and running Host unchanged', { skip: process.platform !== 'linux' }, async t => {
   const fx = fixture(t)
   const content = renderUnitContent({
@@ -3223,6 +3310,7 @@ test('install reuses a verified other-build unit and leaves the unit and running
   const path = join(fx.unitDir, fx.unitName)
   writeFileSync(path, content, { mode: 0o600 })
   const record = recordOf(fx.scope)
+  symlinkSync(join(fx.profile.home, 'missing-payload.mjs'), join(fx.profile.packageRoot, 'dist', 'broken.mjs'))
   const systemctl = unitSystemctl(path, { activeState: 'inactive', mainPid: 0 })
   const result = await runDaemonControl({ verb: 'install' }, fx.profile, depsOf(fx, {
     systemctl: systemctl.run,
@@ -3234,6 +3322,23 @@ test('install reuses a verified other-build unit and leaves the unit and running
   assert.equal(readFileSync(path, 'utf8'), content, 'a same-Profile other-build unit is byte-preserved by install')
   assert.equal(systemctl.calls.some(args => args.includes('daemon-reload')), false, 'an already loaded unit needs no reload')
   assert.match(result.stdout, /^instance=11111111$/mu, 'the running independent Host instance is unchanged')
+})
+
+test('install succeeds for the verified unit without inheriting an unrelated Host authentication failure', { skip: process.platform !== 'linux' }, async t => {
+  const fx = fixture(t)
+  const unit = writeOwnedUnit(fx)
+  const record = recordOf(fx.scope)
+  const systemctl = unitSystemctl(unit.path, { activeState: 'inactive', mainPid: 0 })
+  const result = await runDaemonControl({ verb: 'install' }, fx.profile, depsOf(fx, {
+    systemctl: systemctl.run,
+    readRecord: () => record,
+    inspectProcess: () => 'alive',
+    authenticate: async () => { throw new Error('Host authentication failed') },
+  }))
+  assertCode(result, 0)
+  assert.equal(result.stderr, '', 'the successful service-definition command must not print the tolerated Host failure')
+  assert.match(result.stdout, /^host=unresponsive$/mu)
+  assert.match(result.stdout, /^instance=11111111$/mu)
 })
 
 test('install refuses a foreign unit without overwriting it', { skip: process.platform !== 'linux' }, async t => {

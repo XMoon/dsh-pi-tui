@@ -328,7 +328,12 @@ stdout/stderr.
   never proves a Host is stopped.
   A missing Host with no unit conflict is `stopped` and exit 0; manager error,
   unsafe/foreign unit, incompatible protocol/DSH and unverifiable liveness are
-  nonzero and are never reported as `stopped`.
+  nonzero and are never reported as `stopped`. `compatibility` is a diagnostic
+   projection, not an admission gate: it is computed only when a live Host or an
+   owned service definition provides a recorded build to compare. If the current
+   package fingerprint is unavailable, status reports `compatibility=unknown`
+   with one fixed warning and preserves the real Host/manager/exit verdict. Logs
+   and the headless Web/ACP controls do not materialize the current build.
 - **start reuses before it creates.** `start` first authenticates and reuses a
   live compatible Host, so a warm start is idempotent on the same
   `instanceId` — including while the user manager is erroring: reuse needs no

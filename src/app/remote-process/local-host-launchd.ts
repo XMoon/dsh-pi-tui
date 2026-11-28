@@ -66,8 +66,8 @@ const LAUNCHD_STOP_POLL_MS = 100
 /** The fixed launchd job umask (0077 octal). */
 const LAUNCHD_UMASK = 0o077
 
-/** The validated installed facts one LaunchAgent plist is rendered from. */
-export interface LaunchdUnitFacts {
+/** The validated profile ownership/anchor facts one LaunchAgent can be read with. */
+export interface LaunchdProfileFacts {
   readonly dshHome: string
   /** The private profile scope run directory (`<dshHome>/run/dsh-pi-tui/<scopeId>`). */
   readonly scopeDir: string
@@ -76,10 +76,14 @@ export interface LaunchdUnitFacts {
   readonly scopeId: string
   /** The canonical-profile identity digest shared with the systemd unit metadata. */
   readonly profileIdentity: string
+  readonly dshAnchor: string
+}
+
+/** The full validated installed facts one NEW LaunchAgent plist is rendered from. */
+export interface LaunchdUnitFacts extends LaunchdProfileFacts {
   readonly buildId: string
   readonly nodePath: string
   readonly hostEntryPath: string
-  readonly dshAnchor: string
 }
 
 /** The one installed plist of a profile scope. */
@@ -161,7 +165,7 @@ export interface LaunchdAdapterDeps {
   readonly sleep?: (ms: number) => Promise<void>
   /** Test seam for a post-link ownership/decoder failure; production uses the
    *  real native inspection. */
-  readonly verifyInstalledUnit?: (facts: LaunchdUnitFacts) => LaunchdUnitInspection
+  readonly verifyInstalledUnit?: (facts: LaunchdProfileFacts) => LaunchdUnitInspection
 }
 
 /** The result of one explicit LaunchAgent install. */
@@ -355,7 +359,7 @@ export function resolveNamedLaunchdEntry(facts: LaunchdUnitFacts): string {
  * comments — belongs to the user and launchd, and is executed as written; the
  * caller proves the resulting Host through the official authentication.
  */
-export function assertLaunchdProfileAnchors(facts: LaunchdUnitFacts, content: string): void {
+export function assertLaunchdProfileAnchors(facts: LaunchdProfileFacts, content: string): void {
   const reject = (reason: string): never => {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', `launchd: the profile plist has a changed profile launch anchor (${reason}); refusing to bootstrap it`)
   }
@@ -380,7 +384,7 @@ export function assertLaunchdProfileAnchors(facts: LaunchdUnitFacts, content: st
 }
 
 /** The installed plist metadata of one owned unit (native top-level values). */
-function inspectLaunchdIdentity(content: string, facts: LaunchdUnitFacts, label: string): string {
+function inspectLaunchdIdentity(content: string, facts: LaunchdProfileFacts, label: string): string {
   const root = decodeLaunchdPlist(content)
   if (requirePlistString(root, 'Label') !== label) {
     throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the plist Label is not this profile scope')
@@ -555,7 +559,7 @@ function readLaunchdFileIdentity(filePath: string): {
  * hard ownership refusal. No directory is created and `launchctl` is not invoked.
  */
 export function inspectOwnedLaunchdUnit(
-  facts: LaunchdUnitFacts,
+  facts: LaunchdProfileFacts,
   deps: LaunchdAdapterDeps = {},
 ): LaunchdUnitInspection {
   const accountHome = resolveAccountHome(deps)
@@ -578,7 +582,7 @@ export function inspectOwnedLaunchdUnit(
 }
 
 /** Re-prove one owned plist's captured file identity before a mutation. */
-function assertLaunchdFileIdentity(unit: OwnedLaunchdUnit, facts: LaunchdUnitFacts, deps: LaunchdAdapterDeps): void {
+function assertLaunchdFileIdentity(unit: OwnedLaunchdUnit, facts: LaunchdProfileFacts, deps: LaunchdAdapterDeps): void {
   const inspected = inspectOwnedLaunchdUnit(facts, deps)
   if (inspected.kind !== 'owned'
     || inspected.unit.filePath !== unit.filePath
@@ -794,7 +798,7 @@ export async function inspectLaunchdService(
  * caller separately proves the real PID against the authenticated Host.
  */
 export function launchdServiceMatches(
-  facts: LaunchdUnitFacts,
+  facts: LaunchdProfileFacts,
   unit: OwnedLaunchdUnit,
   service: LaunchdLoadedService,
 ): boolean {
@@ -811,7 +815,7 @@ export function launchdServiceMatches(
 }
 
 /** The three official profile anchors of one loaded job environment. */
-function sameLaunchdProfileAnchors(facts: LaunchdUnitFacts, service: LaunchdLoadedService): boolean {
+function sameLaunchdProfileAnchors(facts: LaunchdProfileFacts, service: LaunchdLoadedService): boolean {
   return service.environment.DSH_HOME === facts.dshHome
     && service.environment.SPLIT_PROCESS_DSH_ANCHOR === facts.dshAnchor
     && service.environment.SPLIT_PROCESS_PROFILE === facts.profile
@@ -867,7 +871,7 @@ export function ensureLaunchdLogFile(path: string): void {
  * starts. An existing file is opened append-only and never chmodded/truncated;
  * a final symlink is refused (O_NOFOLLOW) and never followed.
  */
-function ensureLaunchdLogFiles(facts: LaunchdUnitFacts): void {
+function ensureLaunchdLogFiles(facts: LaunchdProfileFacts): void {
   const logs = launchdLogPaths(facts.scopeDir)
   ensureLaunchdLogFile(logs.stdout)
   ensureLaunchdLogFile(logs.stderr)
@@ -968,8 +972,10 @@ function rollbackNewLaunchdFile(installed: CreatedLaunchdFile, error: unknown): 
  * restarts a job and never creates the profile runtime scope.
  */
 export async function installLaunchdUnit(
-  facts: LaunchdUnitFacts,
+  facts: LaunchdProfileFacts,
   deps: LaunchdAdapterDeps = {},
+  /** Command-local strict supplier, invoked ONLY for a fresh plist. */
+  strictFacts?: () => LaunchdUnitFacts,
 ): Promise<LaunchdUnitInstall> {
   const accountHome = resolveAccountHome(deps)
   const label = buildLaunchdLabel(facts.scopeId)
@@ -1017,10 +1023,16 @@ export async function installLaunchdUnit(
   // directory, so an official profile package upgrade does not orphan the
   // generated path. This is the only place the named entry is resolved for a
   // new file; existing owned plists are never rewritten here.
-  const content = renderLaunchdPlist({ ...facts, hostEntryPath: resolveNamedLaunchdEntry(facts) })
+  const full = 'buildId' in facts && 'nodePath' in facts && 'hostEntryPath' in facts
+    ? facts as LaunchdUnitFacts
+    : strictFacts?.()
+  if (full === undefined) {
+    throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: a fresh plist requires the current installed build facts')
+  }
+  const content = renderLaunchdPlist({ ...full, hostEntryPath: resolveNamedLaunchdEntry(full) })
   const installed = installLaunchdFile({ dir, label, content })
   try {
-    const verify = deps.verifyInstalledUnit ?? ((current: LaunchdUnitFacts) => inspectOwnedLaunchdUnit(current, deps))
+    const verify = deps.verifyInstalledUnit ?? ((current: LaunchdProfileFacts) => inspectOwnedLaunchdUnit(current, deps))
     const verified = verify(facts)
     if (verified.kind !== 'owned') {
       throw new LocalScopeError('HOST_MANAGER_UNIT_CONFLICT', 'launchd: the installed profile plist could not be confirmed')
@@ -1055,7 +1067,7 @@ async function kickstartLaunchdJob(unit: OwnedLaunchdUnit, deps: LaunchdAdapterD
  * with no detached fallback). The manager request is never readiness.
  */
 export async function startLaunchdService(
-  facts: LaunchdUnitFacts,
+  facts: LaunchdProfileFacts,
   unit: OwnedLaunchdUnit,
   deps: LaunchdAdapterDeps = {},
 ): Promise<void> {
@@ -1139,7 +1151,7 @@ async function waitForLaunchdJobRemoved(unit: OwnedLaunchdUnit, deps: LaunchdAda
  * match the current profile plist is never booted out.
  */
 export async function stopLaunchdService(
-  facts: LaunchdUnitFacts,
+  facts: LaunchdProfileFacts,
   unit: OwnedLaunchdUnit,
   deps: LaunchdAdapterDeps = {},
   /** The authenticated live Host PID the caller verified, when one exists.
@@ -1193,7 +1205,7 @@ export async function stopLaunchdService(
  * credentials, `host.log` and the launchd private logs are never removed.
  */
 export async function uninstallLaunchdUnit(
-  facts: LaunchdUnitFacts,
+  facts: LaunchdProfileFacts,
   unit: OwnedLaunchdUnit,
   deps: LaunchdAdapterDeps = {},
   /** The authenticated live Host PID the caller verified, when one exists. */

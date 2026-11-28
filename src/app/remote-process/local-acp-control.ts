@@ -46,7 +46,7 @@ import {
   type LocalInstanceRecord,
   type VerifiedLocalHost,
 } from './local-discovery.ts'
-import { inspectInstalledProfileScope, type LocalScope } from './local-scope.ts'
+import { inspectInstalledProfileScope, type LocalScopeIdentity } from './local-scope.ts'
 
 /** POSIX-safe single-argument profile literal for the headless hints. */
 function shellQuoteProfile(profile: string): string {
@@ -103,9 +103,9 @@ class AcpControlError extends Error {
 /** Injectable OS/discovery seams; production omits every one of them. */
 export interface LocalAcpControlDeps {
   readonly platform?: NodeJS.Platform
-  readonly readRecord?: (scope: LocalScope) => LocalInstanceRecord | undefined
+  readonly readRecord?: (scope: LocalScopeIdentity) => LocalInstanceRecord | undefined
   readonly inspectProcess?: (record: LocalInstanceRecord) => 'alive' | 'dead'
-  readonly authenticate?: (record: LocalInstanceRecord, scope: LocalScope, signal?: AbortSignal) => Promise<VerifiedLocalHost>
+  readonly authenticate?: (record: LocalInstanceRecord, scope: LocalScopeIdentity, signal?: AbortSignal) => Promise<VerifiedLocalHost>
   /** Fresh kernel-identity recheck seam; production reads the platform kernel. */
   readonly assertKernelIdentity?: (record: LocalInstanceRecord) => void
   readonly fetch?: typeof fetch
@@ -240,7 +240,7 @@ async function callAcpControl(
 function assertReplyBelongsToAuthenticatedHost(
   verified: VerifiedLocalHost,
   reply: { readonly instanceId: string },
-  scope: LocalScope,
+  scope: LocalScopeIdentity,
   deps: LocalAcpControlDeps,
 ): void {
   if (reply.instanceId !== verified.identity.instanceId) {
@@ -257,7 +257,7 @@ function assertReplyBelongsToAuthenticatedHost(
  */
 function assertHostStillAuthenticated(
   verified: VerifiedLocalHost,
-  scope: LocalScope,
+  scope: LocalScopeIdentity,
   deps: LocalAcpControlDeps,
 ): void {
   const readRecord = deps.readRecord ?? readLocalRecord
