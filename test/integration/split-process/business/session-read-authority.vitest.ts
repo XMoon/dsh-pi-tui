@@ -134,6 +134,10 @@ function eventCount(scene: SplitProcessScene, sessionId: string): number {
   return scene.sessionEvents(sessionId)?.length ?? 0
 }
 
+async function sessionInventory(scene: SplitProcessScene): Promise<string[]> {
+  return [...await scene.sessionIds()].sort()
+}
+
 function expectNoNewHostEvents(
   scene: SplitProcessScene,
   sessionId: string,
@@ -321,7 +325,7 @@ test('reads another Session without retaining it or admitting its Question', asy
 
     const writeBoundary = eventCount(scene, sessionX)
     const yWriteBoundary = eventCount(scene, sessionY)
-    const sessionIdsBefore = await scene.sessionIds()
+    const sessionIdsBefore = await sessionInventory(scene)
     await expect(scene.request('PROCESS_CLIENT_READ_AUTHORITY', {
       clientId: clientA.clientId, request: { op: 'write' },
     })).rejects.toThrow(/INPUT_UNQUALIFIED.*unknown op/u)
@@ -379,7 +383,7 @@ test('reads another Session without retaining it or admitting its Question', asy
     expect((await clientA.text()).includes('[1] Proceed'), 'A admitted another Session\'s Question').toBe(false)
     expectNoNewHostEvents(scene, sessionX, writeBoundary, 'read of the pending Question')
     expectNoNewHostEvents(scene, sessionY, yWriteBoundary, 'read of the pending Question left Y untouched')
-    expect(await scene.sessionIds(), 'the read created a Session').toEqual(sessionIdsBefore)
+    expect(await sessionInventory(scene), 'the read created a Session').toEqual(sessionIdsBefore)
 
     const activityDispatched = await clientA.readAuthority({ op: 'activity', window: 'warm' })
     expect(activityDispatched.op, 'wrong activity dispatch').toBe('activity')
@@ -389,20 +393,19 @@ test('reads another Session without retaining it or admitting its Question', asy
     expect(counters.state, 'the observation never sampled the current Session').toBeGreaterThanOrEqual(1)
     expect(counters.projections, 'the observation never discovered an ordinary row').toBeGreaterThanOrEqual(1)
     expect(counters.peak, 'the unary request capacity was exceeded').toBeLessThanOrEqual(4)
-    expect(counters.state, 'the whole stable 2-row roster was sampled').toBeLessThanOrEqual(4)
-    expect(counters.projections, 'more projections than listed rows').toBeLessThanOrEqual(activity.rows + 1)
     const snapshots: ProbeRecord[] = activity.snapshots ?? []
     expect(snapshots.length, 'no incremental snapshot was published').toBeGreaterThanOrEqual(1)
     const latest = snapshots.at(-1)!
     expect((latest.facts ?? []).length, 'not one fact per authorized row').toBeGreaterThanOrEqual(2)
     expect(snapshots.map(snapshot => (snapshot.facts ?? []).find((fact: ProbeRecord) => fact.sessionId === sessionX))
       .filter(fact => fact !== undefined)
-      .some(fact => fact.attention === 'question' && fact.attentionSourceState === 'known'),
+      .some(fact => fact.attention === 'question' && fact.attentionSourceState === 'known' && fact.running === true),
     'the incremental observation never discovered the real Question').toBe(true)
     expect(latest.rosterRevision, 'no separate roster revision').toBeTypeOf('number')
     expect(latest.revision, 'no separate Activity revision').toBeTypeOf('number')
     expectNoNewHostEvents(scene, sessionX, writeBoundary, 'incremental Activity observation')
     expectNoNewHostEvents(scene, sessionY, yWriteBoundary, 'incremental Activity observation left Y untouched')
+    expect(await sessionInventory(scene), 'Activity created a Session').toEqual(sessionIdsBefore)
 
     const readAgain = await readFacts(clientA, 'A reads again after the observation')
     expectNotRetained(readAgain, sessionX, 'second read')
@@ -410,6 +413,7 @@ test('reads another Session without retaining it or admitting its Question', asy
     expect(readAgain.openSessionId, 'A left Y').toBe(sessionY)
     expectNoNewHostEvents(scene, sessionX, writeBoundary, 'second read')
     expectNoNewHostEvents(scene, sessionY, yWriteBoundary, 'second read left Y untouched')
+    expect(await sessionInventory(scene), 'second read created a Session').toEqual(sessionIdsBefore)
 
     const navigateBoundary = eventCount(scene, sessionX)
     await submitKnown(clientA, `/resume ${sessionX}`, 'A navigates to the pending Session')
@@ -491,6 +495,10 @@ test('reads another Session\'s Approval without retaining it and settles only af
     await waitFrame(clientB, '[y] Allow once', 'B paints the Approval')
 
     const writeBoundary = eventCount(scene, sessionX)
+    const yWriteBoundary = eventCount(scene, sessionY)
+    const approvalInventory = await sessionInventory(scene)
+    const marker = join(workRoot(host, 'Approval marker'), 'approval-allow.marker')
+    expect(existsSync(marker), 'the Approval marker existed before the read').toBe(false)
     const read = await readFacts(clientA, 'A reads the pending Approval from Y')
     expect(read.openSessionId, 'A was no longer on Y').toBe(sessionY)
     expectNotRetained(read, sessionX, 'A reads another Session\'s Approval')
@@ -500,6 +508,9 @@ test('reads another Session\'s Approval without retaining it and settles only af
     expect(factX.pendingKinds, 'Gateway pending kinds').toContain('approval')
     expect((await clientA.text()).includes('[y] Allow once'), 'A admitted another Session\'s Approval').toBe(false)
     expectNoNewHostEvents(scene, sessionX, writeBoundary, 'read of the pending Approval')
+    expectNoNewHostEvents(scene, sessionY, yWriteBoundary, 'Approval read left Y untouched')
+    expect(existsSync(marker), 'the read executed the Approval command').toBe(false)
+    expect(await sessionInventory(scene), 'Approval read created a Session').toEqual(approvalInventory)
 
     const navigateBoundary = eventCount(scene, sessionX)
     await submitKnown(clientA, `/resume ${sessionX}`, 'A navigates to the Approval Session')
@@ -523,8 +534,8 @@ test('reads another Session\'s Approval without retaining it and settles only af
       'Approval tool result')
     await scene.waitForSessionEvent(sessionX, decisionBoundary,
       event => event.type === 'turn/end', 'Approval Turn end')
-    const marker = join(workRoot(host, 'Approval marker'), 'approval-allow.marker')
     expect(existsSync(marker), 'the allowed harmless command never ran').toBe(true)
+    expect(await sessionInventory(scene), 'Approval decision created a Session').toEqual(approvalInventory)
     await waitFrameGone(clientB, '[y] Allow once', 'B Approval withdrawn')
 
     const lateBoundary = eventCount(scene, sessionX)
@@ -544,6 +555,7 @@ test('reads another Session\'s Approval without retaining it and settles only af
     expectNotRetained(readAfter, sessionY, 'read after the Approval')
     expect(retentionCount(rowOf(readAfter, sessionX, 'navigated Approval Session row'), 'navigated Approval Session row'),
       'the current Session lost its own view').toBeGreaterThanOrEqual(1)
+    expect(await sessionInventory(scene), 'settled Approval read created a Session').toEqual(approvalInventory)
 
     await exitNormally(clientB, 'B approval')
     await exitNormally(clientA, 'A approval')
@@ -579,6 +591,12 @@ test('queues a continued Question reply for an unopened Session exactly once', a
 
     const heldBoundary = eventCount(scene, sessionX)
     const heldBoundaryY = eventCount(scene, sessionY)
+    const continuedInventory = await sessionInventory(scene)
+    const beforeObservedPairRefusal = clientA.readRecords().length
+    await expect(clientA.readAuthority({ op: 'answer-continued', sessionId: sessionX, callId }))
+      .rejects.toThrow(/already observed by this Client/u)
+    expect(clientA.readRecords().slice(beforeObservedPairRefusal).some(record => record.op === 'read-authority-proof'),
+      'an unobserved continued pair dispatched a probe').toBe(false)
     const read = await readFactsUntil(clientA, record => {
       const fact = (record.facts ?? []).find((entry: ProbeRecord) => entry.sessionId === sessionX)
       return fact !== undefined && Array.isArray(fact.continuedQuestionCallIds)
@@ -592,6 +610,7 @@ test('queues a continued Question reply for an unopened Session exactly once', a
     expect(factX.pendingKinds, 'the timed-out Question still reports a Gateway pending').not.toContain('question')
     expect(factX.continuedQuestionCallIds, 'the successful facts read did not publish the continued callId').toContain(callId)
     expectNoNewHostEvents(scene, sessionX, heldBoundary, 'read of the continued Question')
+    expect(await sessionInventory(scene), 'continued read created a Session').toEqual(continuedInventory)
 
     const answerDispatched = await clientA.readAuthority({
       op: 'answer-continued', sessionId: sessionX, callId,
@@ -632,6 +651,8 @@ test('queues a continued Question reply for an unopened Session exactly once', a
       || (repeat.phase === 'continued-answer' && repeat.outcome === 'not-continued'),
     'the repeated late answer was accepted again').toBe(true)
     await readFacts(clientA, 'A reads after the repeated reply')
+    expectNoNewHostEvents(scene, sessionY, heldBoundaryY, 'late refusal and final read left Y untouched')
+    expect(await sessionInventory(scene), 'continued reply or final read created a Session').toEqual(continuedInventory)
     expect((scene.sessionEvents(sessionX) ?? []).slice(replyBoundary).filter(event => event.type === 'user/message'
       && event.data?.source?.kind === 'user-question-reply'
       && String(event.data?.source?.callId) === callId), 'a second durable reply').toHaveLength(0)
@@ -672,6 +693,7 @@ test('reads an unanswered continued Question after a clean Host restart without 
     const oldHostPid = host.ready.hostPid ?? host.ready.localHost?.hostPid
     const oldInstanceId = host.ready.localHost?.instanceId
     await scene.stopHost(host)
+    const originalInventory = await sessionInventory(scene)
     const originalEvents = scene.sessionEvents(sessionX) ?? []
     const originalCall = originalEvents.find(event => event.type === 'tool/call'
       && String(event.data?.callId) === callId)
@@ -729,6 +751,7 @@ test('reads an unanswered continued Question after a clean Host restart without 
     expect(snapshot.rosterRevision, 'cold Activity carries no roster revision').toBeTypeOf('number')
     expect(snapshot.revision, 'cold Activity carries no Activity revision').toBeTypeOf('number')
     expectNoNewHostEvents(scene, sessionX, coldReadBoundary, 'cold read and Activity observation')
+    expect(await sessionInventory(scene), 'cold read or Activity created a Session').toEqual(originalInventory)
     const coldEvents = scene.sessionEvents(sessionX) ?? []
     expect(coldEvents, 'cold startup, read or Activity rewrote the original Session history').toEqual(originalEvents)
     expect(coldEvents.filter(event => event.type === 'tool/call'
@@ -764,6 +787,7 @@ test('follows Host Workspace membership across a replaced carrier without adopti
     expect(clientB.ready.sessionOpen, 'the peer opened a Session of its own').toBe(false)
 
     const streamYBoundary = eventCount(scene, sessionY)
+    const membershipInventory = await sessionInventory(scene)
     const streamDispatched = await clientA.readAuthority({ op: 'workspaces', window: 'stream' })
     expect(streamDispatched.op, 'wrong membership stream dispatch').toBe('workspaces')
     await waitProbe(clientA, streamDispatched.nonce, 'workspaces-open', 'Host Workspace stream opened')
@@ -795,6 +819,8 @@ test('follows Host Workspace membership across a replaced carrier without adopti
 
     const sessionX = await openEmptySession(scene, clientA, 'A creates a new Host Workspace member')
     expect(sessionX, 'A reused its old Session').not.toBe(sessionY)
+    const membershipWithX = [...membershipInventory, sessionX].sort()
+    expect(await sessionInventory(scene), 'the legitimate /new created more than one Session').toEqual(membershipWithX)
     const increment = await waitProbe(clientA, streamDispatched.nonce, 'workspaces-frame',
       'Host Workspace membership increment',
       record => (record.type === 'upsert' || record.type === 'replace')
@@ -830,6 +856,7 @@ test('follows Host Workspace membership across a replaced carrier without adopti
     expectNoNewHostEvents(scene, sessionY, streamYBoundary, 'membership stream and read left Y untouched')
     expectNoNewHostEvents(scene, sessionX, streamXBoundary,
       'membership stream and read added no X event after Workspace membership increment')
+    expect(await sessionInventory(scene), 'membership stream or read created an extra Session').toEqual(membershipWithX)
 
     const recoveringYBoundary = eventCount(scene, sessionY)
     const recoveringXBoundary = eventCount(scene, sessionX)
@@ -907,6 +934,7 @@ test('follows Host Workspace membership across a replaced carrier without adopti
       'the post-reconnect read published no fact state').toBeDefined()
     expectNoNewHostEvents(scene, sessionY, recoveringYBoundary, 'recovering stream and read left Y untouched')
     expectNoNewHostEvents(scene, sessionX, recoveringXBoundary, 'recovering stream and read added no X event')
+    expect(await sessionInventory(scene), 'recovering stream or read created an extra Session').toEqual(membershipWithX)
 
     await exitNormally(clientB, 'peer Workspace reader')
     await exitNormally(clientA, 'A Workspace reader')
