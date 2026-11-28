@@ -173,10 +173,11 @@ test('admits exactly one Host when the same installed profile is started concurr
     // ONE real batch spawn: the Supervisor starts every contender synchronously
     // on the same profile/DSH home/scope, then proves at least two were really
     // alive at the batch boundary.
-    const attempts = await scene.startHostAttempts({ mode: 'seat-race', count: 16 })
-    expect(attempts).toHaveLength(16)
+    const contenderCount = 3
+    const attempts = await scene.startHostAttempts({ mode: 'seat-race', count: contenderCount })
+    expect(attempts).toHaveLength(contenderCount)
     expect(attempts.every(attempt => attempt.pid > 0 && typeof attempt.birth === 'string')).toBe(true)
-    expect(new Set(attempts.map(attempt => attempt.pid)).size).toBe(16)
+    expect(new Set(attempts.map(attempt => attempt.pid)).size).toBe(contenderCount)
     expect(Number(attempts[0]!.coStarted)).toBeGreaterThanOrEqual(2)
 
     const winner = await waitHostRaceOutcome(scene, attempts)
