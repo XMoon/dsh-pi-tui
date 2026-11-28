@@ -16,11 +16,28 @@
  */
 
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
 import type { HistorySearchResult, HistorySearchSource } from '../../src/client/history/search.ts'
+import type { RemoteHistoryOpenScope } from '../../src/client/history/remote-scope.ts'
+import {
+  createRemoteHistorySeat,
+  type RemoteHistorySeatOptions,
+} from '../../src/runtime/history-search-seat.ts'
+import type { HistorySearchReadPort } from '../../src/runtime/history-search-read-port.ts'
+import type {
+  HistoryReadTextRequest,
+  HistoryReadTextResponse,
+  HistorySearchItem,
+  HistorySearchRequest,
+  HistorySearchResponse,
+  HistorySessionRecallRequest,
+  HistorySessionRecallResponse,
+} from '../../src/runtime/history-search-dto.ts'
+import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -85,6 +102,8 @@ interface Harness {
   readonly searches: () => number
 }
 
+type MountedMouseApp = Pick<Harness, 'vt' | 'app'>
+
 /** The REAL app with a recording clipboard capability and an owned runner that
  *  really executes (so the payload chain stays real). The search source reads a
  *  mutable page, so a test can commit a DIFFERENT result set under the same
@@ -137,6 +156,141 @@ function startApp(rows: HistorySearchResult[], columns = 100, terminalRows = 30,
   return { vt, app, copied, notices, rows: page, writes, submitted, searches: () => searchCount }
 }
 
+const REMOTE_MOUSE_SESSION = 'ses_mouse'
+const REMOTE_MOUSE_GENERATION = 'remote-mouse-generation'
+const QUIET_DIAG: Diag = {
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  dispose: () => {},
+}
+
+const remoteSha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex')
+
+function remoteItem(index: number, text: string, preview = text.split('\n')[0] ?? text): HistorySearchItem {
+  return {
+    sessionId: REMOTE_MOUSE_SESSION,
+    messageId: `message-${String(index)}`,
+    firstEventSeq: index + 1,
+    acceptedAt: 10_000 - index,
+    effectiveCwd: '/work/a',
+    preview,
+    contentLength: text.length,
+    contentSha256: remoteSha256(text),
+    hasNonText: false,
+  }
+}
+
+/** The narrow structural Host read used by the mounted Remote journey. Only a
+ *  continuation can be held; exact-body reads remain ordinary immediate reads. */
+class RemoteTailReadPort implements HistorySearchReadPort {
+  readonly searchCalls: HistorySearchRequest[] = []
+  holdMore = false
+  private readonly firstPage: readonly HistorySearchItem[]
+  private readonly secondPage: readonly HistorySearchItem[]
+  private readonly texts = new Map<string, string>()
+  private pendingMore: (() => void) | undefined
+
+  constructor(items: readonly HistorySearchItem[], texts: readonly string[]) {
+    this.firstPage = items.slice(0, 25)
+    this.secondPage = items.slice(25)
+    assert.equal(this.firstPage.length, 25)
+    assert.equal(this.secondPage.length, 2)
+    assert.equal(texts.length, items.length)
+    for (const [index, item] of items.entries()) {
+      this.texts.set(`${item.sessionId}\u0000${item.messageId}`, texts[index]!)
+    }
+  }
+
+  async search(request: HistorySearchRequest, signal: AbortSignal): Promise<HistorySearchResponse> {
+    this.searchCalls.push(request)
+    if (request.cursor !== undefined && this.holdMore) {
+      this.holdMore = false
+      await new Promise<void>((resolve) => { this.pendingMore = resolve })
+    }
+    if (signal.aborted) throw new DOMException('aborted', 'AbortError')
+    if (request.cursor === undefined) {
+      return { kind: 'ready', generation: REMOTE_MOUSE_GENERATION, items: this.firstPage, nextCursor: 'cursor-25' }
+    }
+    assert.equal(request.cursor, 'cursor-25', 'the journey must not invent another continuation')
+    return { kind: 'ready', generation: REMOTE_MOUSE_GENERATION, items: this.secondPage, nextCursor: null }
+  }
+
+  async readText(request: HistoryReadTextRequest, signal: AbortSignal): Promise<HistoryReadTextResponse> {
+    if (signal.aborted) throw new DOMException('aborted', 'AbortError')
+    const text = this.texts.get(`${request.sessionId}\u0000${request.messageId}`)
+    if (text === undefined) return { kind: 'unavailable', reason: 'not-found' }
+    const chunk = text.slice(request.offset, request.offset + request.limit)
+    const nextOffset = request.offset + chunk.length < text.length ? request.offset + chunk.length : null
+    return { kind: 'ready', chunk, nextOffset, contentLength: text.length }
+  }
+
+  async readSessionRecall(
+    _request: HistorySessionRecallRequest,
+    signal: AbortSignal,
+  ): Promise<HistorySessionRecallResponse> {
+    if (signal.aborted) throw new DOMException('aborted', 'AbortError')
+    return { kind: 'ready', sessionId: REMOTE_MOUSE_SESSION, items: [] }
+  }
+
+  releaseMore(): void {
+    const release = this.pendingMore
+    this.pendingMore = undefined
+    assert.ok(release, 'the held continuation must exist before releaseMore()')
+    release()
+  }
+}
+
+const remoteTailText = [
+  'tail page first prompt',
+  ...Array.from({ length: 40 }, (_, index) => `tail detail line ${String(index).padStart(2, '0')}`),
+].join('\n')
+
+const freshRemoteScope = (): RemoteHistoryOpenScope => ({
+  initialScope: 'session',
+  directory: () => ({ available: false, reason: 'directory-unavailable' }),
+  isCurrent: () => true,
+  subscribe: () => () => {},
+  dispose: () => {},
+})
+
+type RemoteTailHarness = MountedMouseApp & {
+  readonly port: RemoteTailReadPort
+  readonly submitted: string[]
+  readonly exits: () => number
+}
+
+function startRemoteTailApp(): RemoteTailHarness {
+  const texts = [
+    ...Array.from({ length: 25 }, (_, index) => `first page prompt ${String(index).padStart(2, '0')}`),
+    remoteTailText,
+    'tail page second prompt',
+  ]
+  const items = texts.map((text, index) => remoteItem(index, text,
+    index === 25 ? 'tail page first prompt' : undefined))
+  const port = new RemoteTailReadPort(items, texts)
+  const vt = new VirtualTerminal(100, 30)
+  const submitted: string[] = []
+  let exits = 0
+  const app = new TuiApp(vt, {
+    onSubmit: (text: string) => { submitted.push(text) },
+    onExit: () => { exits += 1 },
+  }, {
+    captureHistoryScope: () => ({
+      sessionId: REMOTE_MOUSE_SESSION,
+      isCurrent: () => true,
+      remote: freshRemoteScope(),
+    }),
+    historySearchRead: port,
+    historySearchDiag: QUIET_DIAG,
+    historySeatFactory: (options: RemoteHistorySeatOptions) => createRemoteHistorySeat(options),
+  })
+  app.start()
+  startedApps.add(app)
+  return { vt, app, port, submitted, exits: () => exits }
+}
+
 /** Trigger one more debounced search over the CURRENT page (the tests use the
  *  real keystroke path, never a private hook). `settleMs` covers the panel's
  *  75ms debounce plus the file-read turn. */
@@ -154,7 +308,7 @@ const colOf = (vt: VirtualTerminal, row: number, needle: string): number => {
 }
 
 /** Enter Transcript Fullscreen and open History through the real Ctrl+R. */
-async function openFullscreenHistory(h: Harness): Promise<void> {
+async function openFullscreenHistory(h: MountedMouseApp): Promise<void> {
   h.app.setFullscreen(true)
   await h.vt.waitForRender()
   h.vt.sendInput('\x12')
@@ -638,7 +792,7 @@ const rowOfText = (vt: VirtualTerminal, needle: string): number =>
   rawView(vt).findIndex(line => line.includes(needle))
 
 /** One real SGR press+release on the FIRST painted cell of `text`. */
-async function clickPainted(h: Harness, text: string): Promise<void> {
+async function clickPainted(h: MountedMouseApp, text: string): Promise<void> {
   const row = rowOfText(h.vt, text)
   assert.ok(row >= 0, `the frame must paint '${text}':\n${view(h.vt)}`)
   const col = rawView(h.vt)[row]!.indexOf(text)
@@ -677,6 +831,156 @@ test('B3: a pure-mouse Scope → result → Use journey replaces the draft and n
   assert.deepEqual(h.submitted, [], 'Use must never submit the editor')
   assert.ok(rowOf(h.vt, 'Input History') < 0, 'accepting closes the History seat')
   await flush(2)
+})
+
+// This case proves the mounted headless SGR route over a structural Remote read
+// port. It is not a real Host/wire or physical-mouse qualification.
+test('Remote fullscreen mouse: tail wheel and tail click request one page each, narrow Use restores exact bytes, and Cancel preserves the draft', async () => {
+  const h = startRemoteTailApp()
+  const { vt, port } = h
+  const firstLabel = (index: number): string => `first page prompt ${String(index).padStart(2, '0')}`
+  const tailLabel = 'tail page first prompt'
+  const selectedLine = (): string => rawView(vt).find(line => line.startsWith('> ')) ?? ''
+  const useActionVisible = (): boolean => rawView(vt).some(line =>
+    line.includes('Use Selected [Enter]') || line.includes('Use [Enter]'))
+  const settleSelection = async (label: string): Promise<void> => {
+    await waitFor(() => selectedLine().includes(label) && useActionVisible(), `exact painted selection for ${label}`)
+    await vt.waitForRender()
+    await flush(2)
+  }
+
+  h.app.setDraft('keep this draft')
+  await vt.waitForRender()
+  await openFullscreenHistory(h)
+  await settleSelection(firstLabel(0))
+  assert.ok(rawView(vt).some(line => line.includes('[Current Session]')
+    && line.includes('All Directories')), `the Remote session scope must be distinguishable:\n${view(vt)}`)
+  assert.deepEqual(port.searchCalls[0], {
+    scope: 'session', sessionId: REMOTE_MOUSE_SESSION, query: '', limit: 25,
+  })
+
+  // A wheel whose pointer is at the visible list bottom only moves one real
+  // selection; the loaded tail is still far outside this viewport.
+  const previewRow = rowOf(vt, 'Preview ')
+  const visibleListBottom = rawView(vt).reduce((last, line, index) =>
+    index < previewRow && line.includes('first page prompt') ? index : last, -1)
+  assert.ok(visibleListBottom >= 0, `the first page must paint a real list:\n${view(vt)}`)
+  wheelDown(vt, visibleListBottom, 4)
+  await settleSelection(firstLabel(1))
+  assert.equal(port.searchCalls.length, 1, 'the visible viewport bottom must not request More')
+
+  let selectedIndex = 1
+  const wheelTo = async (target: number): Promise<void> => {
+    while (selectedIndex < target) {
+      const label = firstLabel(selectedIndex)
+      const listRow = rowOf(vt, label)
+      assert.ok(listRow >= 0, `the current result must be painted: ${label}\n${view(vt)}`)
+      wheelDown(vt, listRow, colOf(vt, listRow, label))
+      selectedIndex += 1
+      await settleSelection(firstLabel(selectedIndex))
+    }
+  }
+  await wheelTo(23)
+  assert.equal(port.searchCalls.length, 1, 'navigation before the loaded tail requests no More')
+
+  // Arm a real press, then wheel to the tail. The wheel revokes that gesture;
+  // its later release/click must not replay against the newly published frame.
+  const penultimateRow = rowOf(vt, firstLabel(23))
+  const penultimateCol = colOf(vt, penultimateRow, firstLabel(23))
+  press(vt, penultimateRow, penultimateCol)
+  await vt.waitForRender()
+  await flush(2)
+  port.holdMore = true
+  wheelDown(vt, penultimateRow, penultimateCol)
+  await waitFor(() => port.searchCalls.length === 2, 'the wheel-to-tail continuation request')
+  await vt.waitForRender()
+  await waitFor(() => view(vt).includes('Loading more…'), 'the painted pending More state')
+  assert.ok(selectedLine().includes(firstLabel(24)), 'the loaded tail stays selected while More is pending')
+  assert.deepEqual(port.searchCalls[1], {
+    scope: 'session', sessionId: REMOTE_MOUSE_SESSION, query: '', limit: 25, cursor: 'cursor-25',
+  })
+
+  release(vt, penultimateRow, penultimateCol)
+  await vt.waitForRender()
+  await flush(2)
+  const pendingTailRow = rowOf(vt, firstLabel(24))
+  wheelDown(vt, pendingTailRow, colOf(vt, pendingTailRow, firstLabel(24)))
+  await vt.waitForRender()
+  await flush(2)
+  assert.equal(port.searchCalls.length, 2, 'a stale release and pending wheel start no second request')
+  assert.ok(selectedLine().includes(firstLabel(24)), 'pending navigation keeps the selected tail')
+
+  port.releaseMore()
+  await waitFor(() => view(vt).includes('Results · 27 shown')
+    && selectedLine().includes(firstLabel(24)) && useActionVisible(), 'the appended page')
+  await vt.waitForRender()
+  await flush(2)
+  assert.equal(port.searchCalls.length, 2, 'the released continuation appends exactly once')
+
+  const appendedFirstRow = rowOf(vt, tailLabel)
+  assert.ok(appendedFirstRow >= 0, `the appended first row must be visible:\n${view(vt)}`)
+  wheelDown(vt, appendedFirstRow, colOf(vt, appendedFirstRow, tailLabel))
+  await settleSelection(tailLabel)
+  assert.equal(port.searchCalls.length, 2, 'selecting inside the exhausted appended page requests no More')
+
+  const previewHeading = (): string => rawView(vt).find(line =>
+    line.includes('Preview ') && line.includes('/')) ?? ''
+  const headingBefore = previewHeading()
+  assert.ok(headingBefore.includes('1-'), `the long exact Preview starts at its first row: ${headingBefore}`)
+  wheelDown(vt, rowOf(vt, 'Preview ') + 1, 4)
+  await vt.waitForRender()
+  await flush(2)
+  assert.notEqual(previewHeading(), headingBefore, 'the Preview wheel scrolls the exact Preview')
+  assert.ok(selectedLine().includes(tailLabel), 'the Preview wheel does not move the result selection')
+  assert.equal(port.searchCalls.length, 2, 'the Preview wheel never requests More')
+
+  // The same Remote exact-body action must survive the existing narrow Footer
+  // fallback, then write the editor without submitting.
+  vt.resize(44, 20)
+  await waitFor(() => selectedLine().includes(tailLabel)
+    && rawView(vt).some(line => line.includes('Use [Enter]')), 'the narrow Remote Use fallback')
+  await vt.waitForRender()
+  await clickPainted(h, 'Use [Enter]')
+  assert.equal(h.app.getDraft(), remoteTailText, 'pointer Use restores the exact multi-line Remote body')
+  assert.deepEqual(h.submitted, [], 'Use never submits the editor')
+  assert.ok(rowOf(vt, 'Input History') < 0, 'Use closes the History seat')
+
+  // Reopen with enough list rows to paint the tail beside the penultimate row,
+  // then let the real tail click own the continuation request.
+  vt.resize(80, 24)
+  await vt.waitForRender()
+  vt.sendInput('\x12')
+  await settleSelection(firstLabel(0))
+  assert.equal(port.searchCalls.length, 3, 'reopen starts one fresh first-page request')
+  assert.equal(port.searchCalls[2]?.cursor, undefined)
+  selectedIndex = 0
+  await wheelTo(23)
+  const reopenedTailRow = rowOf(vt, firstLabel(24))
+  assert.ok(reopenedTailRow >= 0, `the reopened tail must be painted:\n${view(vt)}`)
+  const reopenedTailCol = colOf(vt, reopenedTailRow, firstLabel(24))
+  port.holdMore = true
+  press(vt, reopenedTailRow, reopenedTailCol)
+  await waitFor(() => port.searchCalls.length === 4, 'the reopened tail-click continuation request')
+  await vt.waitForRender()
+  await waitFor(() => view(vt).includes('Loading more…'), 'the reopened pending More frame')
+  assert.deepEqual(port.searchCalls[3], {
+    scope: 'session', sessionId: REMOTE_MOUSE_SESSION, query: '', limit: 25, cursor: 'cursor-25',
+  })
+  release(vt, reopenedTailRow, reopenedTailCol)
+  await vt.waitForRender()
+  await flush(2)
+  assert.equal(port.searchCalls.length, 4, 'the tail release/click does not duplicate the press request')
+
+  await clickPainted(h, 'Cancel [Esc]')
+  assert.ok(rowOf(vt, 'Input History') < 0, 'pointer Cancel closes the pending Remote seat')
+  assert.equal(h.app.getDraft(), remoteTailText, 'pointer Cancel preserves the accepted draft')
+  assert.deepEqual(h.submitted, [], 'the complete pointer journey never submits')
+  assert.equal(h.exits(), 0, 'pointer Cancel never reaches application exit')
+  assert.equal(h.app.isDisposed(), false, 'pointer Cancel leaves the app alive')
+  port.releaseMore()
+  await flush(8)
+  assert.equal(h.app.getDraft(), remoteTailText, 'the cancelled continuation cannot rewrite the draft')
+  assert.equal(port.searchCalls.length, 4)
 })
 
 test('B3: the Footer Cancel closes the empty page and keeps the draft and the app alive', async () => {

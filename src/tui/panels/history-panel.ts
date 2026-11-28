@@ -860,9 +860,10 @@ export class HistoryPanel implements Component, Focusable {
         if (index === -1) return undefined
         this.gesture = { kind: 'result', generation: frame.generation, x: event.x, y: event.y, id: hit.id }
         if (this.remote !== undefined) {
-          // The shared owner is the selection authority: a More/refresh fence
-          // rejects the request and the painted selection never diverges.
-          this.remote.select(hit.id)
+          // The shared owner is the selection authority. A real result press may
+          // also repeat an explicitly failed body read, but a ready no-op press
+          // never restarts it; selecting the loaded tail may continue the page.
+          this.selectRemote(hit.id, true)
         } else if (this.state.selectedIndex !== index) {
           this.state.selectedIndex = index
           this.reanchorPreview()
@@ -1952,28 +1953,20 @@ export class HistoryPanel implements Component, Focusable {
 
   private moveSelection(data: string): void {
     const count = this.state.results.length
-    if (this.remote !== undefined && matchesKey(data, 'pageDown')) {
-      // PiTui keeps its accepted PgDn semantics: PgDn is the ONE keyboard
-      // More/Retry route, admitted by the same painted-frame/currentness
-      // predicate the Footer button uses. ArrowDown still wraps normally.
-      if (this.remoteRetryAvailable()) {
-        this.requestRetry()
-        return
-      }
-      // The last loaded row with older Host history (or a page already in
-      // flight): PgDn drives More instead of stepping past the page.
-      if (count > 0 && this.state.selectedIndex === count - 1
-        && (this.remoteMoreAvailable() || this.remoteView?.moreLoading === true)) {
-        this.requestMore()
-        return
-      }
+    const remote = this.remote !== undefined
+    if (remote && matchesKey(data, 'pageDown') && this.remoteRetryAvailable()) {
+      // Blocking/body Retry keeps its existing painted-frame admission and
+      // priority over ordinary result navigation.
+      this.requestRetry()
+      return
     }
     if (count === 0) return
     const index = this.state.selectedIndex
     let next: number
     if (matchesKey(data, 'up')) next = index === 0 ? count - 1 : index - 1
-    else if (matchesKey(data, 'down')) next = index === count - 1 ? 0 : index + 1
-    else {
+    else if (matchesKey(data, 'down')) {
+      next = remote ? Math.min(count - 1, index + 1) : index === count - 1 ? 0 : index + 1
+    } else {
       // The page step is the ACTUAL painted result-row count (never a hardcoded
       // six).
       const page = Math.max(1, this.plan(this.lastWidth()).listPage)
@@ -1981,13 +1974,34 @@ export class HistoryPanel implements Component, Focusable {
         ? Math.max(0, index - page)
         : Math.min(count - 1, index + page)
     }
-    if (this.remote !== undefined) {
+    if (remote) {
       const target = this.state.results[next]
-      if (target !== undefined) this.remote.select(target.id)
+      const explicitDown = matchesKey(data, 'down') || matchesKey(data, 'pageDown')
+      if (target !== undefined && (next !== index || explicitDown)) this.selectRemote(target.id)
       return
     }
     this.state.selectedIndex = next
     this.reanchorPreview()
+  }
+
+  /** Apply one admitted Remote navigation intent. Selection is committed first;
+   * the same synchronous stack then re-reads the live owner so a body publish,
+   * scope/query replacement, newer selection or occupied continuation cannot
+   * turn the intent into a stale or duplicate More request. */
+  private selectRemote(id: string, reselectFailedBody = false): void {
+    const seat = this.remote
+    if (seat === undefined || this.disposed || !this.tenantIsCurrent()) return
+    const before = seat.view()
+    if (before.moreLoading || (before.status !== 'ready' && before.status !== 'partial')) return
+    if (before.selectedId !== id || (reselectFailedBody && before.body.kind === 'failed')) {
+      seat.select(id)
+    }
+    const view = seat.view()
+    if (this.disposed || !this.tenantIsCurrent()
+      || view.serial !== before.serial || view.queryRevision !== before.queryRevision
+      || view.selectedId !== id || view.status !== 'ready' || !view.hasMore || view.moreLoading) return
+    if (view.rows.at(-1)?.id !== id) return
+    seat.more()
   }
 
   private movePreview(data: string): void {
@@ -2099,10 +2113,12 @@ export class HistoryPanel implements Component, Focusable {
       const index = this.state.selectedIndex
       const next = step < 0
         ? index === 0 ? count - 1 : index - 1
-        : index === count - 1 ? 0 : index + 1
+        : this.remote !== undefined
+          ? Math.min(count - 1, index + 1)
+          : index === count - 1 ? 0 : index + 1
       if (this.remote !== undefined) {
         const target = this.state.results[next]
-        if (target !== undefined) this.remote.select(target.id)
+        if (target !== undefined && (next !== index || step > 0)) this.selectRemote(target.id)
       } else {
         this.state.selectedIndex = next
         this.reanchorPreview()
@@ -2181,11 +2197,12 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   /**
-   * The ONE Remote More admission shared by PgDn at the tail and the
-   * painted Footer button. It requires the last painted frame to describe the
-   * CURRENT commit (generation), the selected identity to still be that painted
-   * row, and the live seat currentness — a stale frame, a mid-flight More or a
-   * repainted page can never fire a second request.
+   * The painted Footer's manual Remote More admission. It requires the last
+   * painted frame to describe the CURRENT commit (generation), the selected
+   * identity to still be that painted row, and the live seat currentness — a
+   * stale frame, a mid-flight More or a repainted page can never fire a second
+   * request. Keyboard/pointer tail navigation uses the live-seat admission in
+   * `selectRemote` instead; it must not wait for a repaint of its own selection.
    */
   private canRequestMore(): boolean {
     if (!this.tenantIsCurrent() || !this.remoteMoreAvailable()) return false
