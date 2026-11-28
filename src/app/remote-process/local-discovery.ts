@@ -1039,7 +1039,10 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
   throw new LocalScopeError('HOST_START_TIMEOUT', `local discovery: no ready Host registry appeared within ${String(REGISTRY_WAIT_TIMEOUT_MS / 1000)}s`)
 }
 
-/** Write one 0600 file through an exclusively-created same-directory temp file. */
+/** Publish through an exclusively-created same-directory temp file: POSIX mode
+ * 0600; on Windows a new file inherits its parent directory's ACL and must
+ * satisfy the shared private-file predicate; the file itself need not carry the
+ * protected bit. */
 function writePrivateJsonFile(path: string, value: unknown): void {
   const text = `${JSON.stringify(value)}\n`
   const temp = join(dirname(path), `.${basename(path)}.${String(process.pid)}.${randomUUID()}.tmp`)
@@ -1048,7 +1051,6 @@ function writePrivateJsonFile(path: string, value: unknown): void {
       throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} has a foreign or non-private existing target`)
     }
     let fd: number | undefined
-    let renamed = false
     try {
       fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
       if (win32PrivateFileStatus(temp) !== 'private') {
@@ -1059,16 +1061,9 @@ function writePrivateJsonFile(path: string, value: unknown): void {
       closeSync(fd)
       fd = undefined
       renameSync(temp, path)
-      renamed = true
-      if (win32PrivateFileStatus(path) !== 'private') {
-        throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} lost its private boundary`)
-      }
     } catch (error) {
       if (fd !== undefined) closeSync(fd)
       try { unlinkSync(temp) } catch { /* the temp file may not exist */ }
-      if (renamed) {
-        try { unlinkSync(path) } catch { /* the published file may already be gone */ }
-      }
       if (error instanceof LocalScopeError) throw error
       throw new LocalScopeError('LOCAL_FILE_UNSAFE', `local discovery: ${basename(path)} could not be written atomically`, error)
     }

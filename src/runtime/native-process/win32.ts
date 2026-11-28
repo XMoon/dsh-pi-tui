@@ -47,7 +47,6 @@ export interface Win32WaitOutcome {
 export interface Win32SecurityView {
   readonly ownerSid: string | null
   readonly daclPresent: boolean
-  readonly daclProtected: boolean
   readonly daclNull: boolean
   readonly aces: readonly { readonly sid: string; readonly mask: number; readonly type: number; readonly flags: number }[]
 }
@@ -114,6 +113,7 @@ interface Win32Bridge {
 const ERROR_INVALID_PARAMETER = 87
 const ERROR_ACCESS_DENIED = 5
 const ERROR_INVALID_HANDLE = 6
+const ERROR_ALREADY_EXISTS = 183
 const ERROR_INSUFFICIENT_BUFFER = 122
 const WAIT_OBJECT_0 = 0
 const WAIT_ABANDONED = 0x80
@@ -130,8 +130,11 @@ const PIPE_TYPE_BYTE = 0x00000000
 const PIPE_READMODE_BYTE = 0x00000000
 const PIPE_WAIT = 0x00000000
 const PIPE_UNLIMITED_INSTANCES = 255
-const FILE_ALL_ACCESS = 0x001f01ff
 const NETWORK_SID = 'S-1-5-2'
+const LOCAL_SYSTEM_SID = 'S-1-5-18'
+const BUILTIN_ADMINISTRATORS_SID = 'S-1-5-32-544'
+const ACCESS_ALLOWED_ACE_TYPE = 0
+const ACCESS_DENIED_ACE_TYPE = 1
 const INVALID_HANDLE_VALUE = 0xffffffffffffffffn as unknown as Win32Handle
 const READ_CONTROL = 0x00020000
 const FILE_READ_ATTRIBUTES = 0x80
@@ -150,7 +153,6 @@ const OWNER_SECURITY_INFORMATION = 0x1
 const DACL_SECURITY_INFORMATION = 0x4
 const PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
 const SE_DACL_PRESENT = 0x0004
-const SE_DACL_PROTECTED = 0x1000
 const SDDL_REVISION_1 = 1
 
 let loaded: { readonly ok: true; readonly bridge: Win32Bridge } | { readonly ok: false; readonly code: Win32NativeFailure } | undefined
@@ -410,7 +412,6 @@ function readSecurityInfo(handle: Win32Handle, objectType: number): Win32Securit
     return {
       ownerSid: ownerOffset === 0 ? null : parseSid(bytes, ownerOffset),
       daclPresent: (flags & SE_DACL_PRESENT) !== 0,
-      daclProtected: (flags & SE_DACL_PROTECTED) !== 0,
       daclNull: daclOffset === 0,
       aces,
     }
@@ -434,66 +435,55 @@ function securityAttributesForSddl(bridge: Win32Bridge, sddl: string): { readonl
   return { attributes, sd: sdPtr }
 }
 
-/** Check one SD is exactly the protected owner-only descriptor this product
- * creates for kernel objects and directories. */
-function isOwnerOnly(view: Win32SecurityView | undefined, sid: string): boolean {
-  return view !== undefined
-    && view.daclPresent
-    && view.daclProtected
-    && !view.daclNull
-    && view.ownerSid === sid
-    && view.aces.length === 1
-    && view.aces[0]?.sid === sid
+/**
+ * The ACL contract for an EXISTING private product object: owned by the current
+ * SID, with a present non-null DACL that grants only to the current SID or to
+ * LocalSystem / BUILTIN Administrators (outside the ordinary-account threat
+ * model). Deny ACEs never widen access. ACE count, order, protected bit and
+ * explicit-vs-inherited representation are ordinary ACL representations, not a
+ * security boundary. An ACE type this reader cannot interpret is not proof of
+ * safety, so it fails closed.
+ */
+function isOwnerPrivateAcl(view: Win32SecurityView | undefined, sid: string): boolean {
+  if (view === undefined || !view.daclPresent || view.daclNull || view.ownerSid !== sid) return false
+  for (const ace of view.aces) {
+    if (ace.type === ACCESS_DENIED_ACE_TYPE) continue
+    if (ace.type !== ACCESS_ALLOWED_ACE_TYPE) return false
+    if (ace.sid !== sid && ace.sid !== LOCAL_SYSTEM_SID && ace.sid !== BUILTIN_ADMINISTRATORS_SID) return false
+  }
+  return true
 }
 
-/** A product-created directory must also pass its owner-only ACE to ordinary
- * children. A protected owner-only DACL without OI/CI would leave a new file
- * with no inheritable grant at all; that is not a private directory for this
- * product. */
-function isOwnerOnlyContainer(view: Win32SecurityView | undefined, sid: string): boolean {
-  if (!isOwnerOnly(view, sid)) return false
-  const flags = view!.aces[0]!.flags
-  return (flags & OBJECT_INHERIT_ACE) !== 0 && (flags & CONTAINER_INHERIT_ACE) !== 0
-}
-
-/** A private file inherits the protected directory ACE; inheritance does not
- * set SE_DACL_PROTECTED on the child, so only the owner/ACE equality applies. */
-function isOwnerOnlyFile(view: Win32SecurityView | undefined, sid: string): boolean {
-  return view !== undefined
-    && view.daclPresent
-    && !view.daclNull
-    && view.ownerSid === sid
-    && view.aces.length === 1
-    && view.aces[0]?.sid === sid
+/** A private directory must additionally pass a current-SID grant to ordinary
+ * files and subdirectories. OI/CI can be distributed across multiple ACEs;
+ * inherit-only entries still express child inheritance and are not treated as
+ * proof of current-directory access. Actual OS access decides usability. */
+function isOwnerPrivateDirectoryAcl(view: Win32SecurityView | undefined, sid: string): boolean {
+  if (!isOwnerPrivateAcl(view, sid)) return false
+  let objectInherit = false
+  let containerInherit = false
+  for (const ace of view!.aces) {
+    if (ace.type !== ACCESS_ALLOWED_ACE_TYPE || ace.sid !== sid) continue
+    objectInherit ||= (ace.flags & OBJECT_INHERIT_ACE) !== 0
+    containerInherit ||= (ace.flags & CONTAINER_INHERIT_ACE) !== 0
+  }
+  return objectInherit && containerInherit
 }
 
 /** A held named mutex seat with one idempotent release. */
 class NamedMutexSeat implements Win32KernelSeat {
   private handle: Win32Handle | undefined
   private readonly bridge: Win32Bridge
-  private readonly sid: string
   private readonly name: string
 
-  constructor(bridge: Win32Bridge, handle: Win32Handle, sid: string, name: string) {
+  constructor(bridge: Win32Bridge, handle: Win32Handle, name: string) {
     this.bridge = bridge
     this.handle = handle
-    this.sid = sid
     this.name = name
   }
 
   assertCurrent(): void {
     if (this.handle === undefined) throw new Error(`native win32: seat ${this.name} is already closed`)
-    const view = readSecurityInfo(this.handle, SE_KERNEL_OBJECT)
-    if (!isOwnerOnly(view, this.sid)) throw new Error(`native win32: seat ${this.name} lost its owner-only descriptor`)
-    if (this.bridge.waitForSingleObject(this.handle, 0) !== WAIT_OBJECT_0) {
-      throw new Error(`native win32: seat ${this.name} is no longer held`)
-    }
-    // The wait above acquired one additional recursion level of the mutex this
-    // thread already owns. Release exactly that level so close() stays the one
-    // real release of the seat.
-    if (!this.bridge.releaseMutex(this.handle)) {
-      throw new Error(`native win32: seat ${this.name} could not release its currentness probe`)
-    }
   }
 
   async close(): Promise<void> {
@@ -507,8 +497,9 @@ class NamedMutexSeat implements Win32KernelSeat {
 
 /**
  * Acquire one named `Global\` mutex seat. `conflictCode` is thrown when another
- * live process holds it; a foreign/broad/wrong-type object is refused by the
- * descriptor and type checks instead of being adopted.
+ * live process holds it. A newly created object gets the supplied protected
+ * descriptor; only an already existing object needs its descriptor proved
+ * before this process adopts it.
  */
 export async function acquireWin32KernelSeat(name: string, conflictCode: 'HOST_ALREADY_OWNED' | 'CLIENT_ALREADY_ACTIVE' | 'DAEMON_CONTROL_BUSY'): Promise<Win32KernelSeat> {
   const load = loadBridge()
@@ -520,8 +511,9 @@ export async function acquireWin32KernelSeat(name: string, conflictCode: 'HOST_A
   let handle: Win32Handle | null
   let createError = 0
   try {
+    bridge.setLastError(0)
     handle = bridge.createMutexW(security.attributes, 0, name)
-    createError = handle === null ? lastError(bridge) : 0
+    createError = lastError(bridge)
   } finally {
     bridge.localFree(security.sd)
   }
@@ -531,13 +523,13 @@ export async function acquireWin32KernelSeat(name: string, conflictCode: 'HOST_A
     throw new Error(`native win32: the named seat could not be created (${String(createError)})`)
   }
   try {
-    if (!isOwnerOnly(readSecurityInfo(handle, SE_KERNEL_OBJECT), sid)) {
+    if (createError === ERROR_ALREADY_EXISTS && !isOwnerPrivateAcl(readSecurityInfo(handle, SE_KERNEL_OBJECT), sid)) {
       throw new Error('native win32: the named seat has a foreign or broad security descriptor')
     }
     const wait = bridge.waitForSingleObject(handle, 0)
     if (wait === WAIT_TIMEOUT) throw Object.assign(new Error('native win32: the named seat is already held'), { code: conflictCode })
     if (wait !== WAIT_OBJECT_0 && wait !== WAIT_ABANDONED) throw new Error(`native win32: the named seat wait failed (${String(wait)})`)
-    return new NamedMutexSeat(bridge, handle, sid, name)
+    return new NamedMutexSeat(bridge, handle, name)
   } catch (error) {
     bridge.closeHandle(handle)
     throw error
@@ -554,7 +546,7 @@ export function win32StopEventName(scopeId: string, instanceId: string): string 
   return `Global\\dsh-pi-tui-stop-${scopeId.slice(0, 24)}-${instanceId}`
 }
 
-/** Open one control-side per-instance stop event and verify its owner-only descriptor. */
+/** Open one control-side per-instance stop event and verify its existing-object private boundary. */
 export function openWin32StopSignal(scopeId: string, instanceId: string): Win32StopSignal {
   const load = loadBridge()
   if (!load.ok) throw new Error(`native win32: ${load.code}`)
@@ -567,7 +559,7 @@ export function openWin32StopSignal(scopeId: string, instanceId: string): Win32S
     if (code === 5) throw new Error('native win32: the stop event is owned by another account')
     throw new Error(`native win32: the stop event is unavailable (${String(code)})`)
   }
-  if (!isOwnerOnly(readSecurityInfo(handle, SE_KERNEL_OBJECT), sid)) {
+  if (!isOwnerPrivateAcl(readSecurityInfo(handle, SE_KERNEL_OBJECT), sid)) {
     bridge.closeHandle(handle)
     throw new Error('native win32: the stop event has a foreign or broad security descriptor')
   }
@@ -608,12 +600,13 @@ export function createWin32StopWaiter(scopeId: string, instanceId: string): Win3
   try {
     bridge.setLastError(0)
     stopHandle = bridge.createEventW(security.attributes, 0, 0, eventName)
-    createError = stopHandle === null ? lastError(bridge) : 0
-    stopExists = stopHandle !== null && lastError(bridge) === 183
+    createError = lastError(bridge)
+    stopExists = stopHandle !== null && createError === ERROR_ALREADY_EXISTS
+    // The cancellation wakeup has no cross-process consumer. Keep it unnamed
+    // with default (non-inheritable) security attributes: no second Global name,
+    // no separate descriptor and no stale-object branch.
     bridge.setLastError(0)
-    // The cancellation wakeup has no cross-process consumer. Keep it unnamed:
-    // no second Global name, stale-object branch or accidental public handle.
-    cancelHandle = bridge.createEventW(security.attributes, 0, 0, null)
+    cancelHandle = bridge.createEventW(null, 0, 0, null)
     cancelError = cancelHandle === null ? lastError(bridge) : 0
   } finally {
     bridge.localFree(security.sd)
@@ -627,11 +620,6 @@ export function createWin32StopWaiter(scopeId: string, instanceId: string): Win3
     if (stopHandle !== null && stopHandle !== undefined) bridge.closeHandle(stopHandle)
     if (cancelHandle !== null && cancelHandle !== undefined) bridge.closeHandle(cancelHandle)
     throw new Error(`native win32: the per-instance stop event could not be created (${String(stopHandle === null ? createError : cancelError)})`)
-  }
-  if (!isOwnerOnly(readSecurityInfo(stopHandle, SE_KERNEL_OBJECT), sid) || !isOwnerOnly(readSecurityInfo(cancelHandle, SE_KERNEL_OBJECT), sid)) {
-    bridge.closeHandle(stopHandle)
-    bridge.closeHandle(cancelHandle)
-    throw new Error('native win32: the per-instance stop event has a foreign descriptor')
   }
   // Qualification-only failure injection: exercises the production Host's
   // publication guard without inventing a second native waiter. Production
@@ -730,7 +718,7 @@ function openExistingPath(path: string): Win32Handle | undefined {
   return handle === null || handle === undefined ? undefined : handle
 }
 
-/** Verify one existing product directory is a real, non-reparse, owner-only object. */
+/** Verify one existing product directory is a real, non-reparse, private object. */
 export function win32PrivateDirectorySafe(path: string): boolean {
   const attributes = win32FileAttributes(path)
   if (attributes === undefined || !attributes.directory || attributes.reparse) return false
@@ -738,13 +726,13 @@ export function win32PrivateDirectorySafe(path: string): boolean {
   if (handle === undefined) return false
   try {
     const sid = win32CurrentTokenSid()
-    return sid !== undefined && isOwnerOnlyContainer(readSecurityInfo(handle, SE_FILE_OBJECT), sid)
+    return sid !== undefined && isOwnerPrivateDirectoryAcl(readSecurityInfo(handle, SE_FILE_OBJECT), sid)
   } finally {
     closeWin32Handle(handle)
   }
 }
 
-/** Verify one existing product file is a real, non-reparse, owner-only object. */
+/** Verify one existing product file is a real, non-reparse, private object. */
 export function win32PrivateFileSafe(path: string): boolean {
   const attributes = win32FileAttributes(path)
   if (attributes === undefined || attributes.directory || attributes.reparse) return false
@@ -752,7 +740,7 @@ export function win32PrivateFileSafe(path: string): boolean {
   if (handle === undefined) return false
   try {
     const sid = win32CurrentTokenSid()
-    return sid !== undefined && isOwnerOnlyFile(readSecurityInfo(handle, SE_FILE_OBJECT), sid)
+    return sid !== undefined && isOwnerPrivateAcl(readSecurityInfo(handle, SE_FILE_OBJECT), sid)
   } finally {
     closeWin32Handle(handle)
   }
@@ -773,7 +761,11 @@ export function win32PrivateFileStatus(path: string): 'missing' | 'private' | 'u
   return win32PrivateFileSafe(path) ? 'private' : 'unsafe'
 }
 
-/** Create one directory with a protected owner-only DACL; existing safe dirs are reused. */
+/** Create one directory with a protected owner-only DACL; an already existing
+ * directory is reused only after its current owner SID, DACL and child-inherit
+ * grants are proved. Created files inherit the directory's ACL and are checked
+ * by the shared private-file predicate; the file itself need not carry the
+ * protected bit. */
 export function ensureWin32PrivateDirectory(path: string): void {
   const load = loadBridge()
   if (!load.ok) throw new Error(`native win32: ${load.code}`)
@@ -789,34 +781,14 @@ export function ensureWin32PrivateDirectory(path: string): void {
   } finally {
     bridge.localFree(security.sd)
   }
-  if (created) {
-    if (!win32PrivateDirectorySafe(path)) throw new Error('native win32: the created private directory did not retain its owner-only descriptor')
-    return
-  }
-  if (createError !== 183) throw new Error(`native win32: the private directory could not be created (${String(createError)})`)
-  if (!win32PrivateDirectorySafe(path)) throw new Error('native win32: an existing private directory is not owner-only')
+  if (created) return
+  if (createError !== ERROR_ALREADY_EXISTS) throw new Error(`native win32: the private directory could not be created (${String(createError)})`)
+  if (!win32PrivateDirectorySafe(path)) throw new Error('native win32: an existing private directory is not private')
 }
 
 /** A valid Win32 handle; `CreateNamedPipeW` reports failure as INVALID_HANDLE_VALUE. */
 function validWin32Handle(handle: Win32Handle | null): handle is Win32Handle {
   return handle !== null && handle !== undefined && handle !== INVALID_HANDLE_VALUE
-}
-
-/**
- * Whether one read-back descriptor is exactly the product ACP pipe boundary:
- * a protected DACL owned by the current user with one NETWORK deny and one
- * current-SID allow ACE, both carrying full file/pipe access. This is the
- * descriptor written by {@link secureWin32AcpPipe}; it is not a general ACL
- * policy engine and never inspects another user's objects.
- */
-function isProtectedAcpPipe(view: Win32SecurityView | undefined, sid: string): boolean {
-  if (view === undefined || !view.daclPresent || !view.daclProtected || view.daclNull) return false
-  if (view.ownerSid !== sid || view.aces.length !== 2) return false
-  const deny = view.aces.find(ace => ace.type === 1 && ace.sid === NETWORK_SID)
-  const allow = view.aces.find(ace => ace.type === 0 && ace.sid === sid)
-  return deny !== undefined && allow !== undefined
-    && (deny.mask & FILE_ALL_ACCESS) === FILE_ALL_ACCESS
-    && (allow.mask & FILE_ALL_ACCESS) === FILE_ALL_ACCESS
 }
 
 /** Create ONE auxiliary instance handle on an existing pipe name for DACL work. */
@@ -840,15 +812,15 @@ function createAcpPipeAuxiliary(bridge: Win32Bridge, pipeName: string): Win32Han
 
 /**
  * Apply the one-shot owner-only + local-only DACL to an already-created Node
- * Named Pipe listener, then prove it through a FRESH auxiliary instance.
+ * Named Pipe listener.
  *
  * The auxiliary instance is never connected, accepted or read; it only carries
  * the WRITE_DAC access needed for `SetSecurityInfo`, and it is closed before
- * this function returns. The verified descriptor is a property of the named
- * pipe object and therefore constrains the Node server's subsequent instances.
- * Any failure throws: callers must not report the listener enabled.
+ * this function returns. `SetSecurityInfo` on the named pipe object constrains
+ * the Node server's subsequent instances; a successful return is the commit
+ * point. Any failure throws: callers must not report the listener enabled.
  */
-export function secureWin32AcpPipe(pipeName: string): Win32SecurityView {
+export function secureWin32AcpPipe(pipeName: string): void {
   const load = loadBridge()
   if (!load.ok) throw new Error(`native win32: ${load.code}`)
   const bridge = load.bridge
@@ -889,16 +861,5 @@ export function secureWin32AcpPipe(pipeName: string): Win32SecurityView {
     }
   } finally {
     bridge.closeHandle(writeAux)
-  }
-
-  const verifyAux = createAcpPipeAuxiliary(bridge, pipeName)
-  try {
-    const view = readSecurityInfo(verifyAux, SE_KERNEL_OBJECT)
-    if (view === undefined || !isProtectedAcpPipe(view, sid)) {
-      throw new Error('native win32: the ACP named-pipe descriptor is not the protected owner-only/NETWORK-deny descriptor')
-    }
-    return view
-  } finally {
-    bridge.closeHandle(verifyAux)
   }
 }

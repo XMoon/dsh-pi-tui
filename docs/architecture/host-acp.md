@@ -169,12 +169,12 @@ profile's independent `autoStart` preference enables it (see below).
     owner-only DACL `D:P(D;;GA;;;NU)(A;;GA;;;<current-SID>)` via
     `ConvertStringSecurityDescriptorToSecurityDescriptorW` and
     `SetSecurityInfo(SE_FILE_OBJECT, DACL|PROTECTED_DACL)`; the auxiliary
-    instance never accepts, reads or listens, and is closed immediately. The
-    resulting pipe object descriptor (verified with `GetSecurityInfo` on a fresh
-    auxiliary instance using `SE_KERNEL_OBJECT`) admits the current OS user only
-    and denies the NETWORK SID; the endpoint name is not a credential. The
-    descriptor is enforced for the Node server's subsequent instances, not
-    audited per connection. The Node/libuv first instance necessarily exists
+    instance never accepts, reads or listens, and is closed immediately. A
+    successful `SetSecurityInfo` is the commit point: no second auxiliary
+    instance or descriptor read-back is created. The applied pipe-object DACL
+    admits the current OS user only and denies the NETWORK SID; the endpoint name
+    is not a credential. Windows enforces that descriptor for the Node server's
+    subsequent instances, not an application-side per-connection audit. The Node/libuv first instance necessarily exists
     with the process default DACL between `net.Server.listen` and the one-shot
     DACL write; the accept gate destroys every socket accepted in that window
     before it enters the connection registry, receives ACP bytes, or takes a
@@ -287,9 +287,10 @@ profile's independent `autoStart` preference enables it (see below).
     product's connection-local capacity policy, not an ACP v1 limit; a ninth
     `session/new|resume` is refused before any Host Session is created.
   - `session/new` treats the request `cwd` as a proposal only: the cwd SHAPE is
-    the Host OS standard absolute path (a rooted POSIX path, or a local Windows
-    drive path such as `C:\...`/`C:/...`; UNC/device/relative paths are invalid
-    params), and the Host Workspace Controller validates/realpaths it into a
+    the Host OS standard absolute path (a rooted POSIX path, or on Windows an
+    ordinary drive path such as `C:\...`/`C:/...` or an ordinary UNC path such as
+    `\\server\share\...`; root-relative, device-namespace and relative paths are
+    invalid params), and the Host Workspace Controller validates/realpaths it into a
     `workspaceId`, the Host Session Controller creates ONE Session in that
     Workspace, and the official `resolveAgent` borrows the live Agent. The client cwd never becomes a Host
     directory authority, and one request performs exactly one creation (never
@@ -1122,9 +1123,11 @@ initialized is refused before the handler runs.
   standard absolute cwd are rows. A row that cannot prove an absolute cwd is
   omitted rather than represented by a fabricated entry.
 - Filtering: an omitted or null `cwd` lists every authorized root; a supplied
-  `cwd` must be the Host OS standard absolute path with no NUL (rooted POSIX or
-  a local Windows drive path; UNC/device/relative is rejected) and selects
-  exactly the rows carrying that canonical cwd string.
+  `cwd` must be the Host OS standard absolute path with no NUL (rooted POSIX, or
+  on Windows an ordinary drive or UNC path; root-relative, device-namespace and
+  relative paths are rejected) and selects exactly the rows carrying that
+  canonical cwd string. Acceptance only admits a path proposal; the official
+  Workspace/Skill authority decides whether it can actually be opened.
 - Ordering: `(updatedAt DESC, sessionId UTF8 ASC)` — never locale-dependent.
 - Pagination: a fixed page of **50** rows. `nextCursor` is the canonical
   Base64URL encoding of the compact JSON array

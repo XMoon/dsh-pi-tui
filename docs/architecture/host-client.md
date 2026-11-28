@@ -249,7 +249,8 @@ remain unsupported because no Windows service manager owns the Host. The kernel 
 authority is platform-owned: Linux uses abstract AF_UNIX sockets for the Host
 Singleton and the qualification-only Client seat; macOS uses `O_EXLOCK`-held
 seat files, re-proved by inode and directory identity before Ready; Windows uses
-purpose-derived `Global\` named mutexes with protected owner-only DACLs. The
+purpose-derived `Global\` named mutexes created with a protected owner-only DACL
+and adopts an existing named object only after proving its owner and DACL. The
 macOS Host seat lives under the OS account home, while the qualification-only
 Client seat stays in the private scope directory. A real `surface` Client
 automatically discovers or starts the local Host, then completes the internal
@@ -272,8 +273,11 @@ available on Windows over the same profile-scoped local endpoint (see
   directory is created and proved 0700; the Darwin Host seat
   uses the account-home root described below. On Windows the official home and
   profile must resolve to a local fixed NTFS path; the drive prefix is
-  canonicalized but the remaining filesystem case is preserved, and the
-  product-created run chain uses native protected owner-only DACLs. `scopeId` is
+  canonicalized but the remaining filesystem case is preserved. Directories and
+  named objects THIS product creates receive protected owner-only DACLs; files
+  created inside a legitimate private directory inherit that directory's ACL and
+  are admitted by the shared existing-object predicate below. A new file need not
+  itself carry the protected bit. `scopeId` is
   sha256 over the fixed domain `dsh-pi-tui/local-scope/1`, the decimal UID and
   the canonical profile path on POSIX, and over
   `dsh-pi-tui/local-scope/win32/1`, the canonical token SID and the canonical
@@ -284,8 +288,9 @@ available on Windows over the same profile-scoped local endpoint (see
 - **Single Host seat, qualification-only Client seat.** The Host holds one
   platform kernel claim from before the profile Context exists until process
   termination: one abstract socket on Linux, one `O_EXLOCK` file descriptor on
-  macOS, one purpose-derived `Global\` named mutex with a protected owner-only
-  DACL on Windows. On macOS the Host seat file is
+  macOS, one purpose-derived `Global\` named mutex on Windows (created with a
+  protected owner-only DACL; an existing object is adopted only after its owner
+  and DACL are proved). On macOS the Host seat file is
   `<real account home>/.dsh-pi-tui/run/<scopeId>/seat-host-<scopeId>.lock`
   (file mode 0600; the `run` and per-scope directories are created and proved
   0700). The account home is the real `os.userInfo().homedir` for the effective
@@ -314,9 +319,11 @@ available on Windows over the same profile-scoped local endpoint (see
   concurrently and share its exact PID/starttime/`instanceId`. Kernel release on
   process death is the only stale-seat recovery.
 - **Identity is authenticated, never registry-only.** The registry
-  (`instance.json`; a newly written POSIX file is 0600 and a Windows file
-  inherits the private owner-only DACL) is an unauthenticated hint
-  containing the scope, canonical profile path, `instanceId`, Host PID,
+  (`instance.json`; a newly written POSIX file is 0600, and a new Windows file
+  inherits its parent directory's ACL and is admitted by the shared
+  existing-object predicate below) is an
+  unauthenticated hint containing the scope, canonical profile path, `instanceId`,
+  Host PID,
   loopback origin, the local protocol identity, installed bundle/DSH versions
   and the installed-build fingerprint. Its identity material is versioned by
   schema: Linux schema 1 carries the `/proc/<pid>/stat` starttime, macOS schema 2
@@ -375,13 +382,27 @@ available on Windows over the same profile-scoped local endpoint (see
   re-publishes both sides on the new operator.
 - **Secret boundary.** The launch token lives only in the Host process and its
   `launch.json` (a new POSIX file is written 0600 with an atomic
-  same-directory rename; on Windows it inherits the private owner-only DACL); the Client keeps its own Cookie in memory only. Neither token,
-  Cookie nor `connectUrl` may appear in the registry, stdout/stderr, logs, argv
-  or environment. New POSIX registry/launch files are 0600 and a new POSIX run directory is 0700;
-  on Windows the new files inherit the private owner-only DACL. An existing
-  POSIX user-chosen owner or mode is not a read policy and is never rewritten. The managed internal files still fail closed on a final-path
-  symlink (`O_NOFOLLOW`), a non-regular file, an oversized record, a malformed
-  schema, a registry/launch mismatch and any unauthenticated Host identity.
+  same-directory rename; a new Windows file inherits its parent directory's ACL
+  and is admitted by the shared existing-object predicate below); the Client
+  keeps its own Cookie in memory
+  only. Neither token, Cookie nor `connectUrl` may appear in the registry,
+  stdout/stderr, logs, argv or environment. New POSIX registry/launch files are
+  0600 and a new POSIX run directory is 0700; on Windows new files inherit their
+  parent directory's ACL and are admitted by the shared existing-object predicate
+  below. An existing POSIX user-chosen owner or mode is
+  not a read policy and is never rewritten. The managed internal files still fail
+  closed on a final-path symlink (`O_NOFOLLOW`), a non-regular file, an oversized
+  record, a malformed schema, a registry/launch mismatch and any unauthenticated
+  Host identity. On Windows the distinction is by object origin: a NEW directory
+  or named object receives the protected self-only SDDL at creation; a NEW file
+  inherits its parent directory's ACL and need not carry the protected bit;
+  a LEGITIMATE EXISTING product object is admitted by its current owner SID, a
+  present non-null DACL and no grant to another ordinary account (LocalSystem and
+  BUILTIN Administrators remain allowed). ACE count,
+  order, protected bit and explicit-vs-inherited representation are ordinary ACL
+  representations, not a security boundary. A foreign/public grant, a
+  null/missing DACL, a final reparse and an ACE this reader cannot interpret
+  still fail closed.
 - **Lifecycle.** A Client exit, crash or HUP disposes only its own Client
   subtree, official transport and Client root; a `qualification` Client also
   releases its qualification-only Client seat, while a `surface` Client holds

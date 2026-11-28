@@ -25,6 +25,7 @@
  */
 
 import { constants as bufferConstants } from 'node:buffer'
+import { win32 as win32Path } from 'node:path'
 import type { PlanEntry, PlanEntryStatus, SessionUpdate } from '@agentclientprotocol/sdk'
 import type { AcpStoredFileRef, AcpStoredImageRef } from './local-acp-session-view.ts'
 
@@ -837,14 +838,22 @@ export function readSessionListRequest(params: {
 }
 
 /**
- * A standard absolute path for THIS Host OS: a rooted POSIX path, or a local
- * Windows drive path (`C:\...` / `C:/...`). A UNC/device path is not part of
- * this product's supported local domain and stays outside the ACP cwd shape;
- * the official Workspace Controller remains the authority for the proposal.
+ * A standard absolute path PROPOSAL for THIS Host OS: a rooted POSIX path, or
+ * on Windows an ordinary drive absolute (`C:\...` / `C:/...`) or ordinary UNC
+ * absolute (`\\server\share\...`). A UNC path is only a path proposal here; the
+ * official Workspace/Skill authority decides whether it can actually be used.
+ * Root-relative, drive-relative and Win32 device namespaces (`\\?\`, `\\.\`)
+ * are not ordinary absolute paths and stay outside the ACP cwd shape.
  */
 export function isAbsolutePath(value: unknown, platform: NodeJS.Platform = process.platform): value is string {
   if (typeof value !== 'string' || value.length === 0 || value.includes('\u0000')) return false
-  return platform === 'win32' ? /^[A-Za-z]:[\\/]/u.test(value) : value.startsWith('/')
+  if (platform !== 'win32') return value.startsWith('/')
+  if (!win32Path.isAbsolute(value)) return false
+  const root = win32Path.parse(value).root
+  if (/^[A-Za-z]:[\\/]$/u.test(root)) return true
+  if (!/^[\\/]{2}/u.test(root)) return false
+  const parts = root.slice(2).split(/[\\/]/u).filter(part => part.length > 0)
+  return parts.length === 2 && parts[0] !== '?' && parts[0] !== '.' && parts[1] !== ''
 }
 
 /** The structural official image attachment of one committed image block. */

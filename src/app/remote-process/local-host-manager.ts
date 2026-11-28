@@ -1603,15 +1603,20 @@ export function spawnHostCandidate(options: HostStartOptions): HostStartObservat
   let fd: number | undefined
   try {
     let logFlags = constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND
+    let win32LogMissing = false
     if (process.platform === 'win32') {
-      if (win32PrivateFileStatus(logPath) === 'unsafe') {
+      const status = win32PrivateFileStatus(logPath)
+      if (status === 'unsafe') {
         throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'managed Host: the existing Host log is not a private regular file')
       }
+      win32LogMissing = status === 'missing'
     } else {
       logFlags |= constants.O_NOFOLLOW
     }
     fd = openSync(logPath, logFlags, 0o600)
-    if (process.platform === 'win32' && win32PrivateFileStatus(logPath) !== 'private') {
+    // Only a newly created log needs its inherited private boundary proved
+    // before spawn; an already proven existing target is not re-verified.
+    if (win32LogMissing && win32PrivateFileStatus(logPath) !== 'private') {
       throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'managed Host: the Host log did not inherit a private boundary')
     }
     const env = hostCandidateEnvironment(options)
