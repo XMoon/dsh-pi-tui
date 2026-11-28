@@ -77,39 +77,17 @@ product contract.
 
 ### Source module placement
 
-Before adding a production module, identify the layer that owns its state/lifetime/IO.
+Before adding a production module, read
+[the ownership map and source-placement contract](docs/architecture/overview.md#ownership-map).
+Choose the layer by its state, lifecycle and IO authority, not the feature noun.
 
-- `src/app/**` — application lifecycle, orchestration, currentness and owner composition.
-- `src/runtime/**` — semantic ports/contracts plus Direct/Remote backend adapters.
-- `src/domain/**` — transport/UI-neutral semantic models, policies, folds and derived state.
-- `src/client/**` — Client-local non-TUI platform capabilities such as local media,
-  clipboard, artifact IO and Client-local path completion.
-- `src/tui/**` — terminal rendering, pickers, panels, commands and interaction.
-- `src/extension/**` — public extension compatibility boundary.
+Do not add ordinary root features/helpers: the closed root ledger and
+architecture gate own the allowed entries. Do not create a parallel feature tree
+where a canonical owner exists, move code only for visual symmetry, or hide
+cross-layer dependencies behind a generic Context/Services bag.
 
-A feature may span several layers when the responsibilities differ: file completion
-owns neutral query/ranking/discovery policy in `domain/file-completion/**`, the
-Client-local filesystem capability in `client/file-completion/**`, the terminal
-trigger/presentation in `tui/file-completion/**` and the Direct Host WORKSPACE
-compatibility IO in `runtime/direct/file-completion/**`. Do not recreate the retired
-mixed `src/file-completion/**` directory.
-
-Do not add an ordinary new root feature/helper (`src/*.ts`, `*.tsx`, `*.mts`,
-`*.cts`). Root modules are limited to documented entries/facades/compatibility
-islands guarded by the architecture gate; the gate scans all four extensions.
-
-Choose placement by the owning layer, not by the feature noun. A domain may appear in
-multiple layers when the responsibilities differ (for example `app/command/**` owns
-application command execution while `tui/commands/**` owns terminal slash-command
-presentation).
-
-Do not create a parallel root feature tree when a canonical owner layer exists, do not
-move code only for visual symmetry, and do not hide cross-layer dependencies behind a
-generic Context/Services bag.
-
-When placement is ambiguous, stop before creating the file and identify the state owner,
-lifecycle owner, IO authority, primary callers and forbidden dependencies. Read
-`docs/architecture/overview.md` for the complete taxonomy and dependency direction.
+When placement is ambiguous, stop before creating the file and identify the
+state owner, lifecycle owner, IO authority, primary callers and forbidden dependencies.
 
 ### Vendored pi-tui
 
@@ -360,11 +338,6 @@ policy above).
 
 ## Documentation map
 
-- `docs/README.md` — the documentation policy and the complete index.
-- `docs/architecture/` — ownership/Host-client, session and failure contracts, surface behavior, transcript/terminal output, keybindings, input history and the design language.
-- `docs/extensions/` — the public extension tiers/API and authoring guidance.
-- `docs/tsp/` — the experimental TSP renderer, product boundary and TSP surfaces.
-- `docs/guides/` — development, review, release, testing and compatibility procedures.
+Use [docs/README.md](docs/README.md) as the sole documentation policy and index.
 
-Read only the owning document for the subsystem you touch; `docs/README.md` maps
-every long-lived document. Do not create a second documentation map here.
+Read only the owning document for the subsystem you touch.
