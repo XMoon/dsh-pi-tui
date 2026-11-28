@@ -9,7 +9,7 @@
  * - the explicit `Set default` writes the real Profile Config owner and, after
  *   that write is confirmed, switches THAT exact still-blank Session through
  *   the existing Host selection path;
- * - `/preset status` reads the switched Session preset back;
+ * - the reopened live Catalog reads the switched Session preset back;
  * - an INDEPENDENT Host restart plus a NEW Client reads the persisted
  *   `[default]` back from the Host roster.
  *
@@ -26,7 +26,12 @@ import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForCondition, waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
-const PRESET_ORDER = ['standard', 'ptc', 'minimal', 'cordis']
+const PRESETS = [
+  { id: 'standard', label: 'Standard mode' },
+  { id: 'ptc', label: 'PTC mode' },
+  { id: 'minimal', label: 'Minimal mode' },
+  { id: 'cordis', label: 'Creator mode' },
+]
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -77,36 +82,60 @@ async function openCatalog(client, label) {
   }, `${label} live Catalog hydrated`, 120_000)
 }
 
+function presetRow(frame, preset) {
+  const lines = frame.split('\n')
+  const index = lines.findIndex(line => line.includes(`${preset.label} (${preset.id})`))
+  if (index < 0) return undefined
+  const line = lines[index]
+  const next = lines[index + 1] ?? ''
+  const wrappedBadge = /\[(?:default|current|next session)\]/u.test(next)
+    && !PRESETS.some(candidate => next.includes(`${candidate.label} (${candidate.id})`))
+  return { line, context: wrappedBadge ? `${line}\n${next}` : line }
+}
+
+function currentDefaultPreset(frame, label) {
+  const lines = frame.split('\n')
+  const badgeIndexes = lines.flatMap((line, index) => line.includes('[default]') ? [index] : [])
+  assert(badgeIndexes.length === 1, `${label}: expected exactly one default badge`)
+  const badgeIndex = badgeIndexes[0]
+  for (const index of [badgeIndex, badgeIndex - 1]) {
+    const line = lines[index]
+    if (line === undefined) continue
+    const preset = PRESETS.find(candidate => line.includes(`${candidate.label} (${candidate.id})`))
+    if (preset !== undefined) return preset
+  }
+  throw new SplitSmokeAssertionError(`${label}: the default badge has no recognized built-in row`)
+}
+
 async function selectPreset(client, target, label) {
-  for (const char of target) {
+  for (const char of `(${target.id})`) {
     client.send(char)
     await sleep(50)
   }
   await waitForCondition(async () => {
-    const frame = await frameText(client)
-    return frame.split('\n').some(line => line.includes('>') && line.includes(target))
+    const row = presetRow(await frameText(client), target)
+    return row?.line.includes('>') === true
   }, `${label} target selection`, 60_000)
+  return presetRow(await frameText(client), target)
+}
+
+async function waitForPresetBadge(client, target, badge, label) {
+  await waitForCondition(async () => presetRow(await frameText(client), target)?.context.includes(badge) === true,
+    label, 60_000)
 }
 
 async function setDefault(client) {
   await openCatalog(client, 'UX-PR3 sync')
   await waitForScreenText(client, 'Use session', 'UX-PR3 sync live action label')
   const catalog = await frameText(client)
-  const catalogLines = catalog.split('\n')
-  const defaultIndex = catalogLines.findIndex(line => line.includes('[default]'))
-  const defaultContext = defaultIndex < 0
-    ? ''
-    : catalogLines.slice(Math.max(0, defaultIndex - 1), defaultIndex + 2).join(' ')
-  const currentDefault = /\(([^()]+)\)/u.exec(defaultContext)?.[1]
-  const target = PRESET_ORDER.find(candidate => candidate !== currentDefault)
+  const currentDefault = currentDefaultPreset(catalog, 'UX-PR3 sync')
+  const target = PRESETS.find(candidate => candidate.id !== currentDefault.id)
   assert(target !== undefined, 'UX-PR3 sync no non-default built-in preset is available')
-  await selectPreset(client, target, 'UX-PR3 sync')
-  const selected = await frameText(client)
-  assert(!selected.includes('Already the default'),
-    `UX-PR3 sync target ${target} is already the default: ${JSON.stringify({ currentDefault, defaultContext, selected: selected.slice(-2000) })}`)
-  const targetLine = selected.split('\n').find(line => line.includes('>') && line.includes(target))
-  assert(targetLine !== undefined && !targetLine.includes('[default]'),
-    'UX-PR3 sync target still carries the default badge')
+  const selectedRow = await selectPreset(client, target, 'UX-PR3 sync')
+  assert(selectedRow !== undefined && !selectedRow.context.includes('[default]'),
+    `UX-PR3 sync target ${target.id} is already the default: ${JSON.stringify({ currentDefault: currentDefault.id, selectedRow })}`)
+  assert(!(await frameText(client)).includes('Already the default'),
+    `UX-PR3 sync target ${target.id} still exposes the disabled default action`)
   client.send('\t')
   await sleep(250)
   client.send('\t')
@@ -118,7 +147,7 @@ async function setDefault(client) {
   await waitForScreenGone(client, 'Agent presets', 'UX-PR3 sync default write')
   await waitForCondition(async () => {
     const frame = (await frameText(client)).replace(/\s+/gu, ' ')
-    return frame.includes(`current blank session switched to ${target}`)
+    return frame.includes(`current blank session switched to ${target.id}`)
   }, 'UX-PR3 sync notice', 120_000)
   return target
 }
@@ -157,8 +186,7 @@ export async function runBlankSessionDefaultSync(context) {
     // Host-authoritative Session fact (never from the closed panel's notice).
     await openCatalog(a, 'UX-PR3-SYNC current readback')
     await selectPreset(a, target, 'UX-PR3-SYNC current')
-    await waitForCondition(async () => (await frameText(a)).includes('[current]'),
-      'UX-PR3-SYNC current preset readback', 60_000)
+    await waitForPresetBadge(a, target, '[current]', 'UX-PR3-SYNC current preset readback')
     await closeCatalog(a, 'UX-PR3-SYNC current Catalog')
     await exitC1Client(a, 'UX-PR3-SYNC client A')
 
@@ -171,17 +199,16 @@ export async function runBlankSessionDefaultSync(context) {
     assert(bReady.sessionOpen === false, 'UX-PR3-SYNC client B is not sessionless')
     await openCatalog(b, 'UX-PR3-SYNC restart readback')
     await selectPreset(b, target, 'UX-PR3-SYNC restarted')
-    await waitForCondition(async () => (await frameText(b)).includes('[default]'),
-      'UX-PR3-SYNC restarted Host default readback', 60_000)
+    await waitForPresetBadge(b, target, '[default]', 'UX-PR3-SYNC restarted Host default readback')
     await closeCatalog(b, 'UX-PR3-SYNC restarted Catalog')
     await exitC1Client(b, 'UX-PR3-SYNC client B')
 
     context.trace?.('ux-pr3-blank-session-default-sync', {
       candidate: context.candidateSha256,
       blankSessionCreated: true,
-      configSaved: target,
+      configSaved: target.id,
       sessionSwitched: true,
-      statusReadback: target,
+      statusReadback: target.id,
       hostRestartPersisted: true,
     })
     return { status: 'PASS' }
