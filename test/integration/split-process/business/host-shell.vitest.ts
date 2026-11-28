@@ -14,8 +14,9 @@
  * real OS kernel identities.
  */
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, join, relative, sep } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
 
@@ -152,14 +153,19 @@ async function submitShellCommand(
   await client.press('Enter')
 }
 
+function contentText(content: unknown): string {
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((part: Record<string, any>) => part?.type === 'text' && typeof part.text === 'string')
+    .map((part: Record<string, any>) => String(part.text))
+    .join('\n')
+}
+
 function userMessageText(event: SessionEvent): string | undefined {
   if (event.type !== 'user/message') return undefined
   const data = event.data as Record<string, any> | undefined
   if (data?.source?.kind !== 'user' || !Array.isArray(data.content)) return undefined
-  return data.content
-    .filter((part: Record<string, any>) => part?.type === 'text' && typeof part.text === 'string')
-    .map((part: Record<string, any>) => String(part.text))
-    .join('\n')
+  return contentText(data.content)
 }
 
 function humanUserTexts(events: readonly SessionEvent[]): string[] {
@@ -167,6 +173,17 @@ function humanUserTexts(events: readonly SessionEvent[]): string[] {
     const text = userMessageText(event)
     return text === undefined ? [] : [text]
   })
+}
+
+function markerInDurableUserSink(events: readonly SessionEvent[], marker: string): boolean {
+  for (const event of events) {
+    const data = event.data as Record<string, any> | undefined
+    if (event.type === 'user/message' && contentText(data?.content).includes(marker)) return true
+    if (event.type === 'agent/inbox/spliced' && Array.isArray(data?.inserted)) {
+      if (data.inserted.some((msg: Record<string, any>) => contentText(msg?.content).includes(marker))) return true
+    }
+  }
+  return false
 }
 
 async function waitForCompletedUserShellTurn(
@@ -185,32 +202,41 @@ async function waitForCompletedUserShellTurn(
     },
     `${label}: durable human shell user/message`,
   )
-  const eventsAfterUser = scene.sessionEvents(sessionId) ?? []
-  const userIndex = eventsAfterUser.findIndex(event => event.seq === userEvent.seq)
-  const turnStart = await scene.waitForSessionEvent(
+  const userSeq = userEvent.seq
+  expect(userSeq, `${label}: durable user sequence`).toBeTypeOf('number')
+  const eventsAtUser = scene.sessionEvents(sessionId) ?? []
+  const turnStart = eventsAtUser
+    .filter(event => event.type === 'turn/start'
+      && typeof (event.data as Record<string, any>)?.turn === 'number'
+      && typeof event.seq === 'number'
+      && event.seq < userSeq!)
+    .at(-1)
+  expect(turnStart, `${label}: enclosing turn/start before user/message`).toBeDefined()
+  const turn = (turnStart!.data as Record<string, any>).turn as number
+  const endedBeforeUser = eventsAtUser.some(event => event.type === 'turn/end'
+    && (event.data as Record<string, any>)?.turn === turn
+    && typeof event.seq === 'number'
+    && event.seq <= userSeq!)
+  expect(endedBeforeUser, `${label}: enclosing turn ${String(turn)} was already ended before user/message`).toBe(false)
+  const assistantEvent = await scene.waitForSessionEvent(
     sessionId,
-    afterIndex,
-    event => event.type === 'turn/start' && typeof (event.data as Record<string, any>)?.turn === 'number',
-    `${label}: turn/start`,
+    0,
+    event => event.type === 'assistant/message'
+      && (event.data as Record<string, any>)?.turn === turn
+      && typeof event.seq === 'number'
+      && event.seq > userSeq!,
+    `${label}: assistant/message for turn ${String(turn)} after user/message`,
   )
-  const turn = (turnStart.data as Record<string, any>).turn as number
-  const startIndex = Math.min(
-    userIndex,
-    (scene.sessionEvents(sessionId) ?? []).findIndex(event => event.seq === turnStart.seq),
-  )
+  const assistantSeq = assistantEvent.seq!
   await scene.waitForSessionEvent(
     sessionId,
-    startIndex + 1,
-    event => event.type === 'assistant/message' && (event.data as Record<string, any>)?.turn === turn,
-    `${label}: assistant/message for turn ${String(turn)}`,
-  )
-  await scene.waitForSessionEvent(
-    sessionId,
-    startIndex + 1,
+    0,
     event => event.type === 'turn/end'
       && (event.data as Record<string, any>)?.turn === turn
-      && (event.data as Record<string, any>)?.reason?.kind === 'completed',
-    `${label}: turn/end completed for turn ${String(turn)}`,
+      && (event.data as Record<string, any>)?.reason?.kind === 'completed'
+      && typeof event.seq === 'number'
+      && event.seq > assistantSeq,
+    `${label}: turn/end completed for turn ${String(turn)} after assistant/message`,
   )
   return { userEvent, userText: userMessageText(userEvent)! }
 }
@@ -413,7 +439,7 @@ test('executes Host shell modes and bounds results under the selected execution 
     await waitForLocalShellSettled(clientA, signalMarker, '[signal SIGTERM]', 'bypass !! folded restoration')
     const eventsAfterSignal = scene.sessionEvents(bypassSessionId) ?? []
     expect(humanUserTexts(eventsAfterSignal)).toHaveLength(humanCountBeforeSignal)
-    expect(eventsAfterSignal.some(e => JSON.stringify(e.data ?? {}).includes(signalMarker))).toBe(false)
+    expect(markerInDurableUserSink(eventsAfterSignal, signalMarker)).toBe(false)
     expect([...await scene.sessionIds()].sort()).toEqual(sessionsBeforeSignal)
 
     // A4. Live multiline Tab completion via bracketed paste (ENTRY_GATE fact 1)
@@ -504,14 +530,28 @@ test('executes Host shell modes and bounds results under the selected execution 
     expect(largeResult).not.toContain(largeBegin)
     expect(largeResult).toContain('[exit 0]')
     expect(Buffer.byteLength(largeResult, 'utf8')).toBeLessThan(200 * 1024)
-    const spillPaths = [...largeResult.matchAll(/(\/[^\s)\]]+\.(?:log|txt|out|err))/gu)].map(match => match[1]!)
-    for (const spillPath of spillPaths) {
-      if (!existsSync(spillPath)) continue
+    const spillMatches = [...largeResult.matchAll(/^(stdout|stderr) spill \(Host-local\): (.+)$/gmu)]
+    const hostTmpRoot = realpathSync(scene.installation.base.env.TMPDIR ?? tmpdir())
+    const expectedSpillPrefix = `dsh-subprocess-${String(bypassHostPid)}-`
+    for (const match of spillMatches) {
+      const stream = match[1]!
+      const spillPath = match[2]!.trim()
+      expect(existsSync(spillPath), `${stream} spill locator must exist: ${spillPath}`).toBe(true)
       const realSpill = realpathSync(spillPath)
+      const spillStat = lstatSync(realSpill)
+      expect(spillStat.isFile() && !spillStat.isSymbolicLink(), `${stream} spill must be a regular file`).toBe(true)
+      if (typeof process.getuid === 'function') {
+        expect(spillStat.uid, `${stream} spill must be owned by current user`).toBe(process.getuid())
+      }
+      const inScene = !relative(scene.workDir, realSpill).startsWith(`..${sep}`) && relative(scene.workDir, realSpill) !== '..'
+      const inHostSubprocessTmp = !relative(hostTmpRoot, realSpill).startsWith(`..${sep}`)
+        && basename(realSpill).startsWith(expectedSpillPrefix)
+      expect(inScene || inHostSubprocessTmp, `${stream} spill must belong to this Host/Scene: ${realSpill}`).toBe(true)
       expect(relative(canonicalClientCwd, realSpill).startsWith(`..${sep}`)).toBe(true)
       expect(relative(canonicalClientHome, realSpill).startsWith(`..${sep}`)).toBe(true)
       const spillBody = readFileSync(realSpill, 'utf8')
-      expect(spillBody.includes(largeStdoutTail) || spillBody.includes(largeStderrTail)).toBe(true)
+      const expectedTail = stream === 'stdout' ? largeStdoutTail : largeStderrTail
+      expect(spillBody).toContain(expectedTail)
     }
 
     // A6. Bypass outside-workspace positive control (ENTRY_GATE fact 2 prerequisite)
@@ -606,7 +646,7 @@ test('executes Host shell modes and bounds results under the selected execution 
     expect(readFileSync(sandboxAllowedFile, 'utf8')).toBe(`${sandboxAllowMarker}\n`)
     const eventsAfterAllow = scene.sessionEvents(sandboxSessionId) ?? []
     expect(humanUserTexts(eventsAfterAllow)).toHaveLength(humanCountBeforeSandboxShell)
-    expect(eventsAfterAllow.some(e => JSON.stringify(e.data ?? {}).includes(sandboxAllowMarker))).toBe(false)
+    expect(markerInDurableUserSink(eventsAfterAllow, sandboxAllowMarker)).toBe(false)
 
     // B3. `!!` sandbox deny against positively writable outside sibling
     const sandboxDenyMarker = 'SHELL_SANDBOX_DENY_MARKER'
@@ -629,7 +669,7 @@ test('executes Host shell modes and bounds results under the selected execution 
     expect(existsSync(allowedByBypass)).toBe(true)
     const eventsAfterDeny = scene.sessionEvents(sandboxSessionId) ?? []
     expect(humanUserTexts(eventsAfterDeny)).toHaveLength(humanCountBeforeSandboxShell)
-    expect(eventsAfterDeny.some(e => JSON.stringify(e.data ?? {}).includes(sandboxDenyMarker))).toBe(false)
+    expect(markerInDurableUserSink(eventsAfterDeny, sandboxDenyMarker)).toBe(false)
 
     await sandboxClient.exitGracefully()
     const sandboxStatusAfter = await scene.hostStatus(sandboxHost)
@@ -741,10 +781,12 @@ test('keeps Host shell cancellation, Session scope and carrier uncertainty isola
       'stale result refusal notice',
       30_000,
     )
-    expect(humanUserTexts(scene.sessionEvents(sourceSessionId) ?? [])).toHaveLength(beforeStaleS)
-    expect(humanUserTexts(scene.sessionEvents(targetSessionId) ?? [])).toHaveLength(beforeStaleT)
-    expect(humanUserTexts(scene.sessionEvents(sourceSessionId) ?? []).some(t => t.includes(staleFinishMarker))).toBe(false)
-    expect(humanUserTexts(scene.sessionEvents(targetSessionId) ?? []).some(t => t.includes(staleFinishMarker))).toBe(false)
+    const sourceAfterStale = scene.sessionEvents(sourceSessionId) ?? []
+    const targetAfterStale = scene.sessionEvents(targetSessionId) ?? []
+    expect(humanUserTexts(sourceAfterStale)).toHaveLength(beforeStaleS)
+    expect(humanUserTexts(targetAfterStale)).toHaveLength(beforeStaleT)
+    expect(markerInDurableUserSink(sourceAfterStale, staleFinishMarker)).toBe(false)
+    expect(markerInDurableUserSink(targetAfterStale, staleFinishMarker)).toBe(false)
 
     // Return Client A to source Session S and prove editor is live
     const statusBeforeReturn = clientA.readRecords().filter(r => r.m4b2s === 'surface-status').length
@@ -805,8 +847,8 @@ test('keeps Host shell cancellation, Session scope and carrier uncertainty isola
     await waitForKernelProcessTerminal(dropIdentity, 'carrier drop Bash')
     expect(readFileSync(dropCounter, 'utf8')).toBe('x')
     expect(existsSync(dropFinish)).toBe(false)
-    expect(humanUserTexts(scene.sessionEvents(sourceSessionId) ?? []).some(t => t.includes(dropMarker))).toBe(false)
-    expect(humanUserTexts(scene.sessionEvents(targetSessionId) ?? []).some(t => t.includes(dropMarker))).toBe(false)
+    expect(markerInDurableUserSink(scene.sessionEvents(sourceSessionId) ?? [], dropMarker)).toBe(false)
+    expect(markerInDurableUserSink(scene.sessionEvents(targetSessionId) ?? [], dropMarker)).toBe(false)
 
     // ── 3. Concurrent cancellation isolation ────────────────────────────────
     const cancelAStart = join(canonicalWorkspace, 'cancel-a-start')
@@ -856,6 +898,8 @@ test('keeps Host shell cancellation, Session scope and carrier uncertainty isola
     await waitForLocalShellSettled(clientA, cancelAMarker, 'aborted', 'client A aborted card')
     await waitForKernelProcessTerminal(identityA, 'client A Bash after Esc')
     expect(existsSync(cancelAFinish)).toBe(false)
+    expect(markerInDurableUserSink(scene.sessionEvents(sourceSessionId) ?? [], cancelAMarker)).toBe(false)
+    expect(markerInDurableUserSink(scene.sessionEvents(targetSessionId) ?? [], cancelAMarker)).toBe(false)
 
     // Client B's Bash must still be live after Client A's Esc cancellation
     expect(sameKernelProcess(identityB, readKernelProcess(identityB.pid))).toBe('same')
@@ -875,9 +919,13 @@ test('keeps Host shell cancellation, Session scope and carrier uncertainty isola
     expect(clientBText).toContain(cancelBStderr)
     expect(clientBText).toContain('[exit 0]')
 
-    // Final non-leak & non-replay assertions
-    expect(humanUserTexts(scene.sessionEvents(sourceSessionId) ?? []).some(t => t.includes(cancelAFinishMarker))).toBe(false)
-    expect(humanUserTexts(scene.sessionEvents(targetSessionId) ?? []).some(t => t.includes(cancelAFinishMarker))).toBe(false)
+    // Final non-leak & non-replay assertions across both Sessions
+    const finalSourceEvents = scene.sessionEvents(sourceSessionId) ?? []
+    const finalTargetEvents = scene.sessionEvents(targetSessionId) ?? []
+    for (const forbidden of [staleFinishMarker, dropMarker, cancelAMarker, cancelAFinishMarker]) {
+      expect(markerInDurableUserSink(finalSourceEvents, forbidden), `source Session leaked ${forbidden}`).toBe(false)
+      expect(markerInDurableUserSink(finalTargetEvents, forbidden), `target Session leaked ${forbidden}`).toBe(false)
+    }
     expect(readFileSync(dropCounter, 'utf8')).toBe('x')
 
     await clientA.exitGracefully()

@@ -958,34 +958,25 @@ attempt, then the probe releases compensation; the final receipt is
 A receipt that claims a signal attempt, loses the live target, or does not
 complete the compensation is not this negative control's pass.
 
-Additional reusable contracts shared by the `split-process-business` and
+Additional reusable rules shared by the `split-process-business` and
 `split-process-optional` projects:
 
-- **Bounded bracketed paste (`client.paste(text)`):** delivered through
-  `PROCESS_CLIENT_INPUT` (`type: 'paste'`) by framing non-empty UTF-8 text
-  (<= 64 KiB, no `ESC` or `NUL`) as `\x1b[200~…\x1b[201~` on the native
-  terminal's `write(data)` binding. No generic raw-write API is exposed to
-  Workers, and plain `type`/`Enter` is never a substitute for clipboard paste.
-- **Typed Host workloads, official readback and native shell/sandbox
-  prerequisites:** Host scenarios are fixed allowlisted literals whose fixture
-  overlays, directories and env vars are derived exclusively by the Supervisor
-  (no arbitrary Worker env, path or raw-byte injection). Attachment proofs read
-  stored bytes back through the Host's own official Attachment Store
-  (`readFileStream` / `readImage`) from exact durable Session blocks. Native
-  two-OS shell/sandbox qualification requires a non-root user, real full POSIX
-  sandbox enforcement, and a canonical private 0700 run root outside the
-  checkout and outside OS temp (`TMPDIR`/`TMP`/`TEMP`) so the outside-workspace
-  sibling target is genuinely outside both the Session workspace and temp.
-- **History read-authority and the `split-process-optional` tier:** on
-  history-enabled Hosts, `readAuthorityProof: true` arms
-  `SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST` (mutually exclusive with
-  `SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF`) and admits only typed
-  `history-search` (with Supervisor-owned canonical directory targets, never
-  raw `cwd`), `history-read-text` (fixed chunk limit 16) and
-  `history-session-recall` operations over the same single-nonce `SIGUSR2`
-  settlement contract. `split-process-optional` is an explicit opt-in project
-  run separately from `split-process-business`; an unrun optional lane is
-  `NOT_VERIFIED`, and passing it does not by itself retire separate legacy
+- **Bounded bracketed paste (`client.paste(text)`):** accepts only non-empty
+  UTF-8 text (<= 64 KiB, no `ESC` or `NUL`). Workers receive no generic
+  raw-write API, and plain `type`/`Enter` is never a substitute for clipboard
+  paste.
+- **Native shell/sandbox prerequisites and Store readback:** Host workloads are
+  fixed allowlisted scenarios with Supervisor-derived directories and no Worker
+  path, env or raw-byte injection. Attachment proofs verify stored bytes via the
+  Host's official Attachment Store (`readFileStream` / `readImage`). Two-OS
+  shell/sandbox qualification requires a non-root user, real full POSIX sandbox
+  enforcement, and a canonical private 0700 run root outside the checkout and
+  outside OS temp (`TMPDIR`/`TMP`/`TEMP`) so the outside-workspace sibling
+  target is genuinely outside both the Session workspace and temp.
+- **History typed reads and `split-process-optional`:** history reads use typed
+  Supervisor-owned directory targets (never raw `cwd` or generic RPC).
+  `split-process-optional` is run separately from `split-process-business`; an
+  unrun optional lane is `NOT_VERIFIED`, and passing it does not retire legacy
   cold-proof-hit or sentinel qualifications.
 
 This Project is not the release full lane. `smoke:split-process` and

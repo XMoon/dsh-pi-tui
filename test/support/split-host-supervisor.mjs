@@ -4955,17 +4955,17 @@ async function handleStartHost(message) {
       env.WORKSPACE_COMPLETION_HOST = 'host-fixture'
       delete env.WORKSPACE_COMPLETION_CLIENT
     }
-    if (scenario !== undefined) {
-      const earlierDedicated = hosts.some(previous => PROCESS_DEDICATED_SCENARIOS.has(previous.scenario))
-      if (hosts.length > 0 && (earlierDedicated || PROCESS_DEDICATED_SCENARIOS.has(scenario))) {
-        const allowedCrossGen = hosts.length === 1 && (
-          (hosts[0].scenario === 'shell-execution' && scenario === 'shell-sandbox')
-          || (hosts[0].scenario === 'history-search' && scenario === 'history-queue')
-        )
-        if (!allowedCrossGen) {
-          throw new Error(`INPUT_UNQUALIFIED: START_HOST does not allow transitioning from ${String(hosts.at(-1)?.scenario)} to ${scenario}`)
-        }
+    const earlierDedicated = hosts.some(previous => PROCESS_DEDICATED_SCENARIOS.has(previous.scenario))
+    if (hosts.length > 0 && (earlierDedicated || (scenario !== undefined && PROCESS_DEDICATED_SCENARIOS.has(scenario)))) {
+      const allowedCrossGen = hosts.length === 1 && (
+        (hosts[0].scenario === 'shell-execution' && scenario === 'shell-sandbox')
+        || (hosts[0].scenario === 'history-search' && scenario === 'history-queue')
+      )
+      if (!allowedCrossGen) {
+        throw new Error(`INPUT_UNQUALIFIED: START_HOST does not allow transitioning from ${String(hosts.at(-1)?.scenario)} to ${String(scenario)}`)
       }
+    }
+    if (scenario !== undefined) {
       const fixtureKind = scenario === 'shell-execution' || scenario === 'shell-sandbox' || scenario === 'shell-lifecycle'
         ? 'shell-policy'
         : scenario === 'client-file-upload' || scenario === 'host-command-attachments'

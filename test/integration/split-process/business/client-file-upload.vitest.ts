@@ -143,26 +143,26 @@ function contentText(content: unknown): string {
     .join('')
 }
 
-function findDurableAttachmentMessages(
+function findMarkerUserMessages(
   scene: SplitProcessScene,
   sessionId: string,
   marker: string,
-  kind: 'file' | 'image',
-): Array<{ event: SessionEvent; block: Record<string, any>; text: string }> {
-  const events = scene.sessionEvents(sessionId) ?? []
-  const matches: Array<{ event: SessionEvent; block: Record<string, any>; text: string }> = []
-  for (const event of events) {
-    if (event.type !== 'user/message') continue
-    const data = event.data as Record<string, any> | undefined
-    if (data?.source?.kind !== 'user' || !Array.isArray(data.content)) continue
-    const text = contentText(data.content)
-    if (!text.includes(marker)) continue
-    const block = data.content.find(
-      (candidate: Record<string, any>) => candidate?.type === kind && candidate.attachment?.attachmentId !== undefined,
-    )
-    if (block !== undefined) matches.push({ event, block, text })
-  }
-  return matches
+): SessionEvent[] {
+  return (scene.sessionEvents(sessionId) ?? []).filter(
+    event => event.type === 'user/message' && contentText((event.data as Record<string, any>)?.content).includes(marker),
+  )
+}
+
+function markerInDurableInbox(
+  scene: SplitProcessScene,
+  sessionId: string,
+  marker: string,
+): boolean {
+  return (scene.sessionEvents(sessionId) ?? []).some(event => {
+    if (event.type !== 'agent/inbox/spliced') return false
+    const inserted = (event.data as Record<string, any>)?.inserted
+    return Array.isArray(inserted) && inserted.some((msg: Record<string, any>) => contentText(msg?.content).includes(marker))
+  })
 }
 
 async function waitForCompletedAttachmentTurn(
@@ -187,32 +187,41 @@ async function waitForCompletedAttachmentTurn(
     },
     `${label}: durable ${kind} user/message`,
   )
-  const events = scene.sessionEvents(sessionId) ?? []
-  const userIndex = events.findIndex(event => event.seq === userEvent.seq)
-  const turnStart = await scene.waitForSessionEvent(
+  const userSeq = userEvent.seq
+  expect(userSeq, `${label}: durable user sequence`).toBeTypeOf('number')
+  const eventsAtUser = scene.sessionEvents(sessionId) ?? []
+  const turnStart = eventsAtUser
+    .filter(event => event.type === 'turn/start'
+      && typeof (event.data as Record<string, any>)?.turn === 'number'
+      && typeof event.seq === 'number'
+      && event.seq < userSeq!)
+    .at(-1)
+  expect(turnStart, `${label}: enclosing turn/start before user/message`).toBeDefined()
+  const turn = (turnStart!.data as Record<string, any>).turn as number
+  const endedBeforeUser = eventsAtUser.some(event => event.type === 'turn/end'
+    && (event.data as Record<string, any>)?.turn === turn
+    && typeof event.seq === 'number'
+    && event.seq <= userSeq!)
+  expect(endedBeforeUser, `${label}: enclosing turn ${String(turn)} already ended before user/message`).toBe(false)
+  const assistantEvent = await scene.waitForSessionEvent(
     sessionId,
-    afterIndex,
-    event => event.type === 'turn/start' && typeof (event.data as Record<string, any>)?.turn === 'number',
-    `${label}: turn/start`,
+    0,
+    event => event.type === 'assistant/message'
+      && (event.data as Record<string, any>)?.turn === turn
+      && typeof event.seq === 'number'
+      && event.seq > userSeq!,
+    `${label}: assistant/message for turn ${String(turn)} after user/message`,
   )
-  const turn = (turnStart.data as Record<string, any>).turn as number
-  const startIndex = Math.min(
-    userIndex,
-    (scene.sessionEvents(sessionId) ?? []).findIndex(event => event.seq === turnStart.seq),
-  )
+  const assistantSeq = assistantEvent.seq!
   await scene.waitForSessionEvent(
     sessionId,
-    startIndex + 1,
-    event => event.type === 'assistant/message' && (event.data as Record<string, any>)?.turn === turn,
-    `${label}: assistant/message`,
-  )
-  await scene.waitForSessionEvent(
-    sessionId,
-    startIndex + 1,
+    0,
     event => event.type === 'turn/end'
       && (event.data as Record<string, any>)?.turn === turn
-      && (event.data as Record<string, any>)?.reason?.kind === 'completed',
-    `${label}: turn/end completed`,
+      && (event.data as Record<string, any>)?.reason?.kind === 'completed'
+      && typeof event.seq === 'number'
+      && event.seq > assistantSeq,
+    `${label}: turn/end completed for turn ${String(turn)} after assistant/message`,
   )
   const data = userEvent.data as Record<string, any>
   const block = (data.content as Record<string, any>[]).find(
@@ -352,7 +361,7 @@ test('uploads Client bytes through prompt, skill and image intake without bindin
       'file',
       'prompt 8MiB upload',
     )
-    expect(findDurableAttachmentMessages(scene, sessionA, promptMarker, 'file')).toHaveLength(1)
+    expect(findMarkerUserMessages(scene, sessionA, promptMarker)).toHaveLength(1)
     expect(durablePrompt.block.attachment.name).toBe(sharedFileName)
     expect(durablePrompt.block.attachment.bytes).toBe(clientASource.byteLength)
 
@@ -423,7 +432,7 @@ test('uploads Client bytes through prompt, skill and image intake without bindin
       'image',
       'image PNG upload',
     )
-    expect(findDurableAttachmentMessages(scene, sessionA, imageMarker, 'image')).toHaveLength(1)
+    expect(findMarkerUserMessages(scene, sessionA, imageMarker)).toHaveLength(1)
     requestAttachmentProbe(probeDir, sessionA, imageMarker)
     const probeImage = await waitForC1WorkEvent(
       host.workloadRoot!,
@@ -456,7 +465,8 @@ test('uploads Client bytes through prompt, skill and image intake without bindin
       frame => splitFrame(frame).composer.includes('[file #') && splitFrame(frame).composer.includes(changedMarker),
       'changed-source restored draft',
     )
-    expect(findDurableAttachmentMessages(scene, sessionA, changedMarker, 'file')).toHaveLength(0)
+    expect(findMarkerUserMessages(scene, sessionA, changedMarker)).toHaveLength(0)
+    expect(markerInDurableInbox(scene, sessionA, changedMarker)).toBe(false)
     await clientA.press('Ctrl+U')
     await waitForFrame(clientA, frame => !splitFrame(frame).composer.includes('[file #'), 'changed-source draft cleared')
 
@@ -500,7 +510,7 @@ test('uploads Client bytes through prompt, skill and image intake without bindin
       'file',
       'client B cold first prompt upload',
     )
-    expect(findDurableAttachmentMessages(scene, sessionB, markerB, 'file')).toHaveLength(1)
+    expect(findMarkerUserMessages(scene, sessionB, markerB)).toHaveLength(1)
     requestAttachmentProbe(probeDir, sessionB, markerB)
     const probeB = await waitForC1WorkEvent(
       host.workloadRoot!,
@@ -516,10 +526,17 @@ test('uploads Client bytes through prompt, skill and image intake without bindin
     expect(probeB.sha256).toBe(clientBSha256)
     expect(probeB.sha256).not.toBe(hostPoisonSha256)
 
-    // Cross-session isolation and final changed-source absence cut
-    expect(findDurableAttachmentMessages(scene, sessionA, changedMarker, 'file')).toHaveLength(0)
-    expect(findDurableAttachmentMessages(scene, sessionA, markerB, 'file')).toHaveLength(0)
-    expect(findDurableAttachmentMessages(scene, sessionB, promptMarker, 'file')).toHaveLength(0)
+    // Cross-session isolation and final occurrence/changed-source cuts (unfiltered by source/attachment shape)
+    expect(findMarkerUserMessages(scene, sessionA, promptMarker)).toHaveLength(1)
+    expect(findMarkerUserMessages(scene, sessionA, skillMarker)).toHaveLength(1)
+    expect(findMarkerUserMessages(scene, sessionA, imageMarker)).toHaveLength(1)
+    expect(findMarkerUserMessages(scene, sessionA, changedMarker)).toHaveLength(0)
+    expect(markerInDurableInbox(scene, sessionA, changedMarker)).toBe(false)
+    expect(findMarkerUserMessages(scene, sessionA, markerB)).toHaveLength(0)
+    expect(markerInDurableInbox(scene, sessionA, markerB)).toBe(false)
+    expect(findMarkerUserMessages(scene, sessionB, markerB)).toHaveLength(1)
+    expect(findMarkerUserMessages(scene, sessionB, promptMarker)).toHaveLength(0)
+    expect(markerInDurableInbox(scene, sessionB, promptMarker)).toBe(false)
 
     await clientA.exitGracefully()
     await clientB.exitGracefully()

@@ -417,12 +417,32 @@ test('delivers ordered Host command attachments once and refuses unsupported or 
     expect((lifecycleB.run.data as Record<string, any>)?.name).toBe('files')
     expect((lifecycleB.done.data as Record<string, any>)?.kind).toBe('success')
 
-    // Final negative & isolation cuts
+    // Final negative, zero-prompt-fallback & isolation cuts
+    const hasMarkerInUserSink = (events: readonly SessionEvent[], marker: string): boolean => events.some(event => {
+      const data = event.data as Record<string, any> | undefined
+      if (event.type === 'user/message' && JSON.stringify(data?.content ?? []).includes(marker)) return true
+      if (event.type === 'agent/inbox/spliced' && Array.isArray(data?.inserted)) {
+        return data.inserted.some((msg: Record<string, any>) => JSON.stringify(msg?.content ?? []).includes(marker))
+      }
+      return false
+    })
     const finalSessionAEvents = scene.sessionEvents(sessionA) ?? []
+    const finalSessionBEvents = scene.sessionEvents(sessionB) ?? []
+    expect(hasMarkerInUserSink(finalSessionAEvents, mixedMarker)).toBe(false)
+    expect(hasMarkerInUserSink(finalSessionBEvents, markerB)).toBe(false)
+    expect(finalSessionAEvents.filter(e => e.type === 'command/run' && (e.data as Record<string, any>)?.commandId === mixedProof.commandId)).toHaveLength(1)
+    expect(finalSessionAEvents.filter(e => e.type === 'command/done' && (e.data as Record<string, any>)?.commandId === mixedProof.commandId)).toHaveLength(1)
+    expect(finalSessionBEvents.filter(e => e.type === 'command/run' && (e.data as Record<string, any>)?.commandId === proofB.commandId)).toHaveLength(1)
+    expect(finalSessionBEvents.filter(e => e.type === 'command/done' && (e.data as Record<string, any>)?.commandId === proofB.commandId)).toHaveLength(1)
+    expect(
+      readC1WorkEvents(host.workloadRoot!).filter(
+        e => e.kind === 'cfr-command-invocation' && typeof e.args === 'string' && e.args.includes(markerB),
+      ),
+    ).toHaveLength(1)
     expect(finalSessionAEvents.some(e => JSON.stringify(e.data ?? {}).includes(undeclaredMarker))).toBe(false)
     expect(finalSessionAEvents.some(e => JSON.stringify(e.data ?? {}).includes(changedMarker))).toBe(false)
     expect(finalSessionAEvents.some(e => JSON.stringify(e.data ?? {}).includes(markerB))).toBe(false)
-    expect((scene.sessionEvents(sessionB) ?? []).some(e => JSON.stringify(e.data ?? {}).includes(mixedMarker))).toBe(false)
+    expect(finalSessionBEvents.some(e => JSON.stringify(e.data ?? {}).includes(mixedMarker))).toBe(false)
     expect(readC1WorkEvents(host.workloadRoot!).some(e => e.kind === 'cfr-command-invocation' && e.command === 'no-files')).toBe(false)
     expect(
       readC1WorkEvents(host.workloadRoot!).some(

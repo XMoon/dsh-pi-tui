@@ -190,35 +190,46 @@ async function waitForConsumedTurn(
   const userEvent = await scene.waitForSessionEvent(
     sessionId,
     0,
-    event => event.type === 'user/message' && (event.data as Record<string, any>)?.id === messageId,
+    event => event.type === 'user/message'
+      && (event.data as Record<string, any>)?.id === messageId
+      && (event.data as Record<string, any>)?.source?.kind === 'user',
     `${label}: consumed user/message ${messageId}`,
   )
-  const events = scene.sessionEvents(sessionId) ?? []
-  const userIndex = events.findIndex(event => event.seq === userEvent.seq)
-  const priorTurnStart = events
-    .slice(0, userIndex + 1)
-    .findLast(event => event.type === 'turn/start' && typeof (event.data as Record<string, any>)?.turn === 'number')
-  const turnStart = priorTurnStart ?? await scene.waitForSessionEvent(
+  const userSeq = userEvent.seq
+  expect(userSeq, `${label}: consumed user/message seq`).toBeTypeOf('number')
+  const eventsAtUser = scene.sessionEvents(sessionId) ?? []
+  const turnStart = eventsAtUser
+    .filter(event => event.type === 'turn/start'
+      && typeof (event.data as Record<string, any>)?.turn === 'number'
+      && typeof event.seq === 'number'
+      && event.seq < userSeq!)
+    .at(-1)
+  expect(turnStart, `${label}: enclosing turn/start before consumed user/message`).toBeDefined()
+  const turn = (turnStart!.data as Record<string, any>).turn as number
+  const endedBeforeUser = eventsAtUser.some(event => event.type === 'turn/end'
+    && (event.data as Record<string, any>)?.turn === turn
+    && typeof event.seq === 'number'
+    && event.seq <= userSeq!)
+  expect(endedBeforeUser, `${label}: enclosing turn ${String(turn)} already ended before user/message`).toBe(false)
+  const assistantEvent = await scene.waitForSessionEvent(
     sessionId,
-    userIndex + 1,
-    event => event.type === 'turn/start' && typeof (event.data as Record<string, any>)?.turn === 'number',
-    `${label}: turn/start`,
+    0,
+    event => event.type === 'assistant/message'
+      && (event.data as Record<string, any>)?.turn === turn
+      && typeof event.seq === 'number'
+      && event.seq > userSeq!,
+    `${label}: assistant/message for turn ${String(turn)} after user/message`,
   )
-  const turn = (turnStart.data as Record<string, any>).turn as number
-  const startIndex = (scene.sessionEvents(sessionId) ?? []).findIndex(event => event.seq === turnStart.seq)
+  const assistantSeq = assistantEvent.seq!
   await scene.waitForSessionEvent(
     sessionId,
-    startIndex + 1,
-    event => event.type === 'assistant/message' && (event.data as Record<string, any>)?.turn === turn,
-    `${label}: assistant/message`,
-  )
-  await scene.waitForSessionEvent(
-    sessionId,
-    startIndex + 1,
+    0,
     event => event.type === 'turn/end'
       && (event.data as Record<string, any>)?.turn === turn
-      && (event.data as Record<string, any>)?.reason?.kind === 'completed',
-    `${label}: turn/end completed`,
+      && (event.data as Record<string, any>)?.reason?.kind === 'completed'
+      && typeof event.seq === 'number'
+      && event.seq > assistantSeq,
+    `${label}: turn/end completed for turn ${String(turn)} after assistant/message`,
   )
 }
 
@@ -914,11 +925,12 @@ test('keeps accepted input identities through peer search, recall, queue changes
       'Session Q long-turn held',
     )
 
-    // Queue target: inserted -> edited -> removed (same itemId); index keeps original accepted text once, edited text 0
+    // Queue target: inserted -> edited -> removed (same itemId); index keeps original first accepted source identity once, edited text 0
     await waitForFrame(freshClient, frame => (composerDraftOf(frame) ?? '') === '', 'composer empty while turn held')
     await freshClient.type('hsp-queue-target')
     await waitForFrame(freshClient, frame => splitFrame(frame).composer.includes('hsp-queue-target'), 'queue target draft')
     await freshClient.press('Enter')
+    const targetAccepted = await waitForAcceptedOccurrence(scene, sessionQ, 'hsp-queue-target', new Set(), 'queue target first accepted source')
     const targetInserted = await waitForExtraProof(
       extraProof2,
       event => event.kind === 'queue-inserted' && event.sessionId === sessionQ,
@@ -934,16 +946,23 @@ test('keeps accepted input identities through peer search, recall, queue changes
       event => event.kind === 'queue-removed' && event.sessionId === sessionQ && event.itemId === targetInserted.itemId,
       'queue target removed',
     )
+    expect(String(targetInserted.itemId)).toBe(targetAccepted.messageId)
     expect(targetEdited.itemId).toBe(targetInserted.itemId)
     expect(targetRemoved.itemId).toBe(targetInserted.itemId)
 
     const targetSearch = await waitForIndexedMessage(
       freshClient,
       { op: 'history-search', scope: 'session', sessionId: sessionQ, query: 'hsp-queue-target', limit: 25 },
-      String(targetInserted.itemId),
+      targetAccepted.messageId,
       'queue target original text indexed once',
     )
     expect(targetSearch.items).toHaveLength(1)
+    expect(targetSearch.items[0]!.sessionId).toBe(sessionQ)
+    expect(targetSearch.items[0]!.messageId).toBe(targetAccepted.messageId)
+    expect(targetSearch.items[0]!.firstEventSeq).toBe(targetAccepted.firstEventSeq)
+    expect(targetSearch.items[0]!.acceptedAt).toBe(targetAccepted.acceptedAt)
+    expect(targetSearch.items[0]!.contentLength).toBe(targetAccepted.text.length)
+    expect(targetSearch.items[0]!.contentSha256).toBe(createHash('sha256').update(targetAccepted.text, 'utf8').digest('hex'))
     const editedSearch = await historySearchReady(
       freshClient,
       { op: 'history-search', scope: 'session', sessionId: sessionQ, query: 'hsp-queue-edited', limit: 25 },
@@ -951,11 +970,12 @@ test('keeps accepted input identities through peer search, recall, queue changes
     )
     expect(editedSearch.items).toHaveLength(0)
 
-    // Queue steer: inserted -> steered -> released & consumed (same itemId, count remains 1)
+    // Queue steer: inserted -> steered -> released & consumed (same itemId & first accepted source facts, count remains 1)
     await waitForFrame(freshClient, frame => (composerDraftOf(frame) ?? '') === '', 'composer empty before steer')
     await freshClient.type('hsp-queue-steer')
     await waitForFrame(freshClient, frame => splitFrame(frame).composer.includes('hsp-queue-steer'), 'queue steer draft')
     await freshClient.press('Enter')
+    const steerAccepted = await waitForAcceptedOccurrence(scene, sessionQ, 'hsp-queue-steer', new Set(), 'queue steer first accepted source')
     const steerInserted = await waitForExtraProof(
       extraProof2,
       event => event.kind === 'queue-steer-inserted' && event.sessionId === sessionQ,
@@ -966,13 +986,19 @@ test('keeps accepted input identities through peer search, recall, queue changes
       event => event.kind === 'queue-steered' && event.sessionId === sessionQ && event.itemId === steerInserted.itemId,
       'queue steered',
     )
+    expect(String(steerInserted.itemId)).toBe(steerAccepted.messageId)
+    const steerSha256 = createHash('sha256').update(steerAccepted.text, 'utf8').digest('hex')
     const steerBeforeRelease = await waitForIndexedMessage(
       freshClient,
       { op: 'history-search', scope: 'session', sessionId: sessionQ, query: 'hsp-queue-steer', limit: 25 },
-      String(steerInserted.itemId),
+      steerAccepted.messageId,
       'steered occurrence indexed before release',
     )
     expect(steerBeforeRelease.items).toHaveLength(1)
+    expect(steerBeforeRelease.items[0]!.firstEventSeq).toBe(steerAccepted.firstEventSeq)
+    expect(steerBeforeRelease.items[0]!.acceptedAt).toBe(steerAccepted.acceptedAt)
+    expect(steerBeforeRelease.items[0]!.contentLength).toBe(steerAccepted.text.length)
+    expect(steerBeforeRelease.items[0]!.contentSha256).toBe(steerSha256)
 
     writeFileSync(host2.holdReleasePath!, 'release\n', { mode: 0o600 })
     await waitForC1WorkEvent(
@@ -980,13 +1006,18 @@ test('keeps accepted input identities through peer search, recall, queue changes
       event => event.kind === 'long-turn-released' && event.sessionId === sessionQ,
       'Session Q long-turn released',
     )
-    await waitForConsumedTurn(scene, sessionQ, String(steerInserted.itemId), 'steered message consumed and settled')
+    await waitForConsumedTurn(scene, sessionQ, steerAccepted.messageId, 'steered message consumed and settled')
     const steerAfterConsume = await historySearchReady(
       freshClient,
       { op: 'history-search', scope: 'session', sessionId: sessionQ, query: 'hsp-queue-steer', limit: 25 },
       'steered occurrence remains count=1 after consume',
     )
-    expect(steerAfterConsume.items.map(i => i.messageId)).toEqual([String(steerInserted.itemId)])
+    expect(steerAfterConsume.items).toHaveLength(1)
+    expect(steerAfterConsume.items[0]!.messageId).toBe(steerAccepted.messageId)
+    expect(steerAfterConsume.items[0]!.firstEventSeq).toBe(steerAccepted.firstEventSeq)
+    expect(steerAfterConsume.items[0]!.acceptedAt).toBe(steerAccepted.acceptedAt)
+    expect(steerAfterConsume.items[0]!.contentLength).toBe(steerAccepted.text.length)
+    expect(steerAfterConsume.items[0]!.contentSha256).toBe(steerSha256)
 
     await freshClient.exitGracefully()
     const host2Status = await scene.hostStatus(host2)
