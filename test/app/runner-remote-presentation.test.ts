@@ -2658,13 +2658,35 @@ test('explicit Remote New dispatches one Host create and keeps the current exact
   }
   life.defer(() => { reader.read = originalRead })
   const editor = mountedEditor(fixture)
+  const app = fixture.runnerApp() as unknown as {
+    draftImageStoreForTest?: {
+      add(input: { readonly recalledRef: { readonly attachmentId: string; readonly mediaType: 'image/png'; readonly bytes: number; readonly width: number; readonly height: number }; readonly mediaType: 'image/png'; readonly width: number; readonly height: number }): { readonly id: number; readonly placeholder: string }
+      values(): readonly unknown[]
+      remove(id: number): boolean
+    }
+    draftFileStoreForTest?: {
+      add(input: { readonly name: string; readonly byteLength: number; readonly source: { readonly type: 'recalled'; readonly ref: { readonly attachmentId: string; readonly name: string; readonly bytes: number } } }): { readonly id: number; readonly placeholder: string }
+      values(): readonly unknown[]
+      remove(id: number): boolean
+    }
+  }
+  assert.ok(app.draftImageStoreForTest !== undefined && app.draftFileStoreForTest !== undefined)
+  const image = app.draftImageStoreForTest.add({
+    recalledRef: { attachmentId: 'rbs-same-image', mediaType: 'image/png', bytes: 1, width: 1, height: 1 },
+    mediaType: 'image/png', width: 1, height: 1,
+  })
+  const file = app.draftFileStoreForTest.add({
+    name: 'rbs-same.txt', byteLength: 3,
+    source: { type: 'recalled', ref: { attachmentId: 'rbs-same-file', name: 'rbs-same.txt', bytes: 3 } },
+  })
+  const stagedDraft = `draft survives same-binding New ${image.placeholder} ${file.placeholder}`
 
   await openCurrentWorkspace(fixture, '')
   const recallBefore = editor.getInputHistory()
   holdList = true
   await activateCurrentFolderNew(fixture)
   await waitForGate(listEntered, 'the same-binding raw list response')
-  editor.setDraft('draft survives same-binding New')
+  editor.setDraft(stagedDraft)
   listRelease.open()
   try {
     await waitFor('same-binding New closes the Browser', () =>
@@ -2678,20 +2700,78 @@ test('explicit Remote New dispatches one Host create and keeps the current exact
   assert.equal(hydrateReads, 0, 'same owner performs no ordinary reset or hydrate')
   assert.strictEqual(sessions.binding(SessionId(sessionId)), bindingBefore, 'the official binding object is unchanged')
   assert.equal(sessions.retainInfo(SessionId(sessionId)).getSnapshot().referenceCount, refsBefore)
-  assert.equal(editor.getDraft(), 'draft survives same-binding New', 'the active draft stays byte-identical')
+  assert.equal(editor.getDraft(), stagedDraft, 'the active draft stays byte-identical')
+  assert.strictEqual(app.draftImageStoreForTest.values()[0], image, 'the staged image reference survives same-owner New')
+  assert.strictEqual(app.draftFileStoreForTest.values()[0], file, 'the staged file reference survives same-owner New')
   assert.deepEqual(editor.getInputHistory(), recallBefore, 'the same recall scope is not reset')
+  await waitFor('the same-owner live catalog is ready after official create', () =>
+    fixture.aggregate.presentation.sessionFacts.sessionStatus(sessionId)?.preset === presetId, 20_000)
 
-  const currentBinding = sessions.binding(SessionId(sessionId)) as unknown as {
-    session: {
-      prompt(content: readonly { readonly type: 'text'; readonly text: string }[], mode: 'queue' | 'steer'): Promise<unknown>
-    }
-  }
-  assert.ok(currentBinding !== undefined)
-  const promptResult = await currentBinding.session.prompt([{ type: 'text', text: 'next prompt on same binding' }], 'queue')
-  assert.equal((promptResult as { readonly ok?: boolean }).ok, true, `the reused owner refused the next prompt: ${JSON.stringify(promptResult)}`)
+  app.draftImageStoreForTest.remove(image.id)
+  app.draftFileStoreForTest.remove(file.id)
+  editor.setDraft('next prompt on same binding')
+  editor.submitDraft()
   await waitForHostText(host, sessionId, 'user/message', 'next prompt on same binding')
   assert.equal(hostEventTexts(host, sessionId, 'user/message').filter(value => value.includes('next prompt on same binding')).length, 1,
-    'the next real prompt through the reused owner is durable exactly once')
+    'the mounted composer submits through the reused owner exactly once')
+})
+
+test('sessionless explicit Remote New commits the first actual owner through the mounted composer', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'rbs-1-first-owner-preset'
+  const host = await mountRemotePresentationHost(life, presetId)
+  const fixture = await mountRemoteRunner(life, { presetId, host, productionSerializer: true })
+  await waitFor('the sessionless composer is mounted', () => fixture.vt.getViewport().join('\n').includes('❯'), 20_000)
+  const sessions = fixture.aggregate.wire.client.sessions
+  const calls = countOfficialSessionCalls(life, fixture)
+  const editor = mountedEditor(fixture)
+  const app = fixture.runnerApp() as unknown as {
+    draftImageStoreForTest?: {
+      add(input: { readonly recalledRef: { readonly attachmentId: string; readonly mediaType: 'image/png'; readonly bytes: number; readonly width: number; readonly height: number }; readonly mediaType: 'image/png'; readonly width: number; readonly height: number }): { readonly id: number; readonly placeholder: string }
+      values(): readonly unknown[]
+    }
+    draftFileStoreForTest?: {
+      add(input: { readonly name: string; readonly byteLength: number; readonly source: { readonly type: 'recalled'; readonly ref: { readonly attachmentId: string; readonly name: string; readonly bytes: number } } }): { readonly id: number; readonly placeholder: string }
+      values(): readonly unknown[]
+    }
+  }
+  assert.ok(app.draftImageStoreForTest !== undefined && app.draftFileStoreForTest !== undefined)
+  const image = app.draftImageStoreForTest.add({
+    recalledRef: { attachmentId: 'rbs-first-image', mediaType: 'image/png', bytes: 1, width: 1, height: 1 },
+    mediaType: 'image/png', width: 1, height: 1,
+  })
+  const file = app.draftFileStoreForTest.add({
+    name: 'rbs-first.txt', byteLength: 3,
+    source: { type: 'recalled', ref: { attachmentId: 'rbs-first-file', name: 'rbs-first.txt', bytes: 3 } },
+  })
+  const before = new Set(host.ctx.sessions.list().map(session => String(session.id)))
+  editor.setDraft('/new')
+  editor.submitDraft()
+  let actualId: string | undefined
+  await waitFor('the first actual Session is mounted', () => {
+    const created = host.ctx.sessions.list().map(session => String(session.id)).find(id => !before.has(id))
+    if (created === undefined) return false
+    actualId = created
+    return sessions.binding(SessionId(created)) !== undefined
+      && fixture.aggregate.presentation.sessionFacts.sessionStatus(created)?.preset === presetId
+  }, 20_000)
+  assert.ok(actualId !== undefined)
+  assert.equal(calls.creates.length, 1)
+  assert.equal(calls.creates[0]?.sessionId, undefined, 'a sessionless first owner creates without a fabricated candidate id')
+  assert.equal(sessions.retainInfo(SessionId(actualId)).getSnapshot().referenceCount, 1)
+  assert.strictEqual(app.draftImageStoreForTest.values()[0], image, 'first-owner New preserves the staged image reference')
+  assert.strictEqual(app.draftFileStoreForTest.values()[0], file, 'first-owner New preserves the staged file reference')
+  assert.equal(editor.getInputHistory().includes('/new'), false, 'the sessionless New command is not imported into Session recall')
+
+  app.draftImageStoreForTest.remove(image.id)
+  app.draftFileStoreForTest.remove(file.id)
+  await waitFor('the first actual owner composer is ready', () =>
+    fixture.vt.getViewport().join('\n').includes('❯')
+    && !fixture.vt.getViewport().join('\n').includes('type a message to start a session'), 20_000)
+  editor.setDraft('first owner composer prompt')
+  editor.submitDraft()
+  await waitForHostText(host, actualId, 'user/message', 'first owner composer prompt')
+  assert.equal(hostEventTexts(host, actualId, 'user/message').filter(value => value.includes('first owner composer prompt')).length, 1)
 })
 
 test('explicit Remote New adopts the actual Host id and closes pre-retain and hydrate-to-ingress gaps exactly once', async (t) => {
@@ -2820,10 +2900,14 @@ test('explicit Remote New adopts the actual Host id and closes pre-retain and hy
     actualReference.binding.session.getSnapshot().running === false, 20_000)
   hydrateRelease.open()
 
-  await waitFor('the pre-retain event paints once', () =>
-    fixture.vt.getViewport().join('\n').includes('peer event before main retain'), 20_000)
-  await waitFor('the hydrate-gap event paints once', () =>
-    fixture.vt.getViewport().join('\n').includes('peer event during hydrate gap'), 20_000)
+  const renderedCount = (text: string): number => fixture.vt.getViewport().join('\n').split('\n')
+    .filter(line => line.trimStart().startsWith('❯ ') && line.includes(text)).length
+  await waitFor('the pre-retain event paints', () => renderedCount('peer event before main retain') >= 1, 20_000)
+  await waitFor('the hydrate-gap event paints', () => renderedCount('peer event during hydrate gap') >= 1, 20_000)
+  assert.equal(renderedCount('peer event before main retain'), 1,
+    `the pre-retain event is rendered exactly once\n${fixture.vt.getViewport().join('\n')}`)
+  assert.equal(renderedCount('peer event during hydrate gap'), 1,
+    `the hydrate-gap event is rendered exactly once\n${fixture.vt.getViewport().join('\n')}`)
   assert.equal(hostEventTexts(host, publishedId, 'user/message').filter(value => value.includes('peer event before main retain')).length, 1,
     'the pre-retain peer event is durable exactly once')
   assert.equal(hostEventTexts(host, publishedId, 'user/message').filter(value => value.includes('peer event during hydrate gap')).length, 1,
@@ -2842,11 +2926,69 @@ test('explicit Remote New adopts the actual Host id and closes pre-retain and hy
 
   candidateReference.reference.release()
   actualReference.reference.release()
-  const actualMainBinding = sessions.binding(SessionId(publishedId))
-  assert.ok(actualMainBinding !== undefined)
-  await actualMainBinding.session.prompt([{ type: 'text', text: 'next prompt on actual id' }], 'queue')
+  editor.setDraft('next prompt on actual id')
+  editor.submitDraft()
   await waitForHostText(host, publishedId, 'user/message', 'next prompt on actual id')
   assert.equal(hostEventTexts(host, publishedId, 'user/message').filter(value => value.includes('next prompt on actual id')).length, 1)
+})
+
+test('a generation rollover after retain but before owner mapping releases the actual-id acquisition without adoption', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'rbs-1-post-retain-rollover-preset'
+  const oldId = 'rbs-1-post-retain-old'
+  const candidateId = 'rbs-1-post-retain-candidate'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(oldId), undefined, { cwd: host.anchorDir })
+  await seedBlankWorkspaceSessions(host, [candidateId])
+  const oldSession = host.ctx.sessions.get(SessionId(oldId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seedTurns(oldSession, 1, 1, 'old owner remains after rollover')
+  const registry = host.ctx.get('workspaceRegistry') as unknown as {
+    create(path: string): Promise<{ attachSession(id: unknown): Promise<void> }>
+  }
+  const workspace = await registry.create(host.anchorDir)
+  await workspace.attachSession(SessionId(oldId))
+  await workspace.attachSession(SessionId(candidateId))
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: oldId, host, productionSerializer: true })
+  await waitFor('the old owner hydrates before the controlled rollover', () =>
+    fixture.vt.getViewport().join('\n').includes('old owner remains after rollover'), 20_000)
+  const sessions = fixture.aggregate.wire.client.sessions
+  const calls = countOfficialSessionCalls(life, fixture)
+  const connection = fixture.aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const owners = fixture.aggregate.selected.owners
+  const originalFromHandle = owners.fromHandle
+  let armRollover = false
+  let rolled = false
+  owners.fromHandle = function countedFromHandle(this: unknown, handle: Parameters<typeof originalFromHandle>[0]): ReturnType<typeof originalFromHandle> {
+    const owner = originalFromHandle.call(this, handle)
+    if (armRollover && handle.session.id === candidateId) {
+      armRollover = false
+      connection.reconnect()
+      rolled = true
+    }
+    return owner
+  }
+  life.defer(() => { owners.fromHandle = originalFromHandle })
+  const generationBefore = connection.generation.getSnapshot()?.id
+  const editor = mountedEditor(fixture)
+  armRollover = true
+  editor.setDraft('/new')
+  editor.submitDraft()
+  await waitFor('the official Client generation rolls over after retain', () => {
+    const id = connection.generation.getSnapshot()?.id
+    return rolled && id !== undefined && id !== generationBefore
+  }, 20_000)
+  await waitFor('the uncommitted actual-id reference is released', () =>
+    sessions.retainInfo(SessionId(candidateId)).getSnapshot().referenceCount === 0, 20_000)
+  assert.equal(calls.creates.length, 1)
+  assert.deepEqual(calls.creates[0], { workspaceId: expectWorkspaceId(host, oldId), sessionId: candidateId, agentPreset: presetId })
+  assert.equal(calls.retains.length, 1)
+  assert.ok(sessions.binding(SessionId(oldId)) !== undefined, 'the prior exact owner remains the mounted Client owner')
+  assert.ok(fixture.vt.getViewport().join('\n').includes('old owner remains after rollover'), 'no stale actual-id adoption replaces the visible owner')
 })
 
 test('a real raw Session-list response loss cannot authorize create from the ready Client snapshot', async (t) => {
