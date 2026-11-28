@@ -113,10 +113,6 @@ interface RemoteOwnerRecord {
 export interface RemoteSessionOwnerServices {
   readonly owners: SessionOwnerAccess
   readonly retirement: SessionOwnerRetirement
-  /** The already-owned main-surface handle for one exact binding, when this
-   * registry currently owns it. Used by Remote explicit New to reuse the same
-   * generation without a second `retain()`. */
-  currentHandle(sessionId: string, bindingIdentity: unknown): SessionHandle | undefined
 }
 
 /**
@@ -406,17 +402,7 @@ export function createRemoteSessionOwnerServices(
     return { failures, durabilityFailure: undefined }
   }
 
-  const currentHandle = (sessionId: string, bindingIdentity: unknown): SessionHandle | undefined => {
-    if (typeof bindingIdentity !== 'object' || bindingIdentity === null) return undefined
-    const owner = byBinding.get(bindingIdentity)
-    if (owner === undefined) return undefined
-    const record = recordOf(owner)
-    if (record.sessionId !== sessionId || record.currentWrapper === undefined) return undefined
-    return { session: { id: sessionId }, client: record.currentWrapper }
-  }
-
   return {
-    currentHandle,
     owners: {
       fromHandle,
       sessionId,

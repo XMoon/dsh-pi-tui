@@ -244,20 +244,6 @@ test('the same exact binding and wrapper resolve to the SAME owner with no relea
   assert.deepEqual(h.calls.releases, [], 're-wrapping the same wrapper must not release anything')
 })
 
-test('currentHandle returns only the already-owned exact binding without retaining or releasing', async () => {
-  const h = harness()
-  const { handle, wrapper } = retainedHandle(h, 'session-a')
-  const owner = h.ownerOf(handle)
-  assert.ok(owner !== undefined)
-  const current = h.services.currentHandle('session-a', wrapper.bindingIdentity)
-  assert.deepEqual(current, handle, 'the current authoritative wrapper is returned as-is')
-  assert.equal(h.services.currentHandle('session-b', wrapper.bindingIdentity), undefined)
-  assert.equal(h.services.currentHandle('session-a', {}), undefined)
-  assert.deepEqual(h.calls.releases, [])
-  await h.services.retirement.retire(owner, 'transition')
-  assert.equal(h.services.currentHandle('session-a', wrapper.bindingIdentity), undefined)
-})
-
 test('a new wrapper on the same binding transfers authority and releases the old reference once', () => {
   const h = harness()
   const { wrapper: first } = retainedHandle(h, 'session-a')

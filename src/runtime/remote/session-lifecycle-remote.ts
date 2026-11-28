@@ -136,16 +136,6 @@ export interface RemoteLifecycleSessions {
     target: RemoteSessionTarget,
     options: { readonly source: TuiSessionReferenceSource; readonly signal?: AbortSignal },
   ): RemoteSessionReferenceLike
-  /** Borrow the currently retained exact binding, when one exists. */
-  binding?(sessionId: string): {
-    readonly session: { getSnapshot(): { readonly blank: boolean } }
-  } | undefined
-  /** Official Client roster projection used only for the optional preset fact. */
-  readonly list?: {
-    getSnapshot(): {
-      readonly byId: Readonly<Record<string, { readonly projectionValues?: { readonly agentPreset?: unknown } }>>
-    }
-  }
 }
 
 /** One official Host Session-list row (the `session.list` summary subset). */
@@ -154,6 +144,9 @@ export interface RemoteSessionListRowLike {
   readonly cwd?: string
   readonly blank?: boolean
   readonly origin?: 'subagent'
+  readonly projections?: {
+    readonly values?: { readonly agentPreset?: unknown }
+  }
 }
 
 /**
@@ -293,21 +286,12 @@ interface WorkspaceNewConversationProof {
   readonly archivedSessionIds: readonly string[]
 }
 
-/** Return the already-owned main-surface handle for one exact binding. The
- * application owner registry supplies this so same-binding reuse never calls
- * `retain()` a second time. */
-export type RemoteCurrentOwnerHandle = (
-  sessionId: string,
-  binding: unknown,
-) => SessionHandle | undefined
-
 /** The experimental Remote session lifecycle. */
 export class RemoteSessionLifecycle implements SessionLifecycle {
   private readonly sessions: RemoteLifecycleSessions
   private readonly generation: RemoteConnectionGenerationSource
   private readonly workspace: RemoteWorkspaceNamespaceLike
   private readonly sessionList: RemoteSessionListSourceLike
-  private readonly currentOwnerHandle: RemoteCurrentOwnerHandle | undefined
   private readonly workspaceNewProofs = new WeakMap<WorkspaceNewConversationCapture, WorkspaceNewConversationProof>()
 
   constructor(
@@ -315,13 +299,11 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     generation: RemoteConnectionGenerationSource,
     workspace: RemoteWorkspaceNamespaceLike,
     sessionList: RemoteSessionListSourceLike,
-    currentOwnerHandle?: RemoteCurrentOwnerHandle,
   ) {
     this.sessions = sessions
     this.generation = generation
     this.workspace = workspace
     this.sessionList = sessionList
-    this.currentOwnerHandle = currentOwnerHandle
   }
 
   captureWorkspaceNewConversation(): WorkspaceNewConversationCapture | undefined {
@@ -559,8 +541,8 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
       const row = rows.get(sessionId)
       if (row === undefined || row.blank !== true || row.origin === 'subagent' || archived.has(sessionId)) continue
       if (row.cwd !== proof.workspace.path) continue
-      const projectedPreset = this.sessions.list?.getSnapshot().byId[sessionId]?.projectionValues?.agentPreset
-      if (agentPreset !== undefined && typeof projectedPreset === 'string' && projectedPreset !== '' && projectedPreset !== agentPreset) continue
+      const listedPreset = row.projections?.values?.agentPreset
+      if (agentPreset !== undefined && typeof listedPreset === 'string' && listedPreset !== '' && listedPreset !== agentPreset) continue
       return sessionId
     }
     return undefined
@@ -596,13 +578,6 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
         }
       }
       candidateId = this.workspaceNewCandidate(proof, request.agentPreset)
-      const binding = candidateId === undefined ? undefined : this.sessions.binding?.(candidateId)
-      if (candidateId !== undefined && binding?.session.getSnapshot().blank === true) {
-        const current = this.currentOwnerHandle?.(candidateId, binding)
-        if (current !== undefined) {
-          return { ownership: ownership(), outcome: { kind: 'created', handle: current } }
-        }
-      }
     } else {
       candidateId = request.sessionId
     }

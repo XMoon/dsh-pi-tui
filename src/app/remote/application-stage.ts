@@ -110,17 +110,8 @@ export async function composeRemoteApplicationStage(input: {
    * Host dispatch instead of being admitted silently.
    */
   try {
-    // ONE owner registry shared by owners + retirement (never constructed
-    // independently — that would create a second owner truth). It is created
-    // before the lifecycle adapter because explicit New may need to return the
-    // already-owned exact binding without a second retain.
-    ownerServices = createRemoteSessionOwnerServices(
-      input.client.sessions,
-      input.client.connection.generation,
-    )
     backendRuntime = await createRemoteBackendRuntime({
       runtime: input.client,
-      currentOwnerHandle: ownerServices.currentHandle,
       fetch: input.fetch,
       ...(input.trustedHostOrigin === undefined ? {} : { trustedHostOrigin: input.trustedHostOrigin }),
       ...(input.hostShellPathLiteralDialect === undefined ? {} : { hostShellPathLiteralDialect: input.hostShellPathLiteralDialect }),
@@ -132,6 +123,12 @@ export async function composeRemoteApplicationStage(input: {
       ...(input.surfaceRevision === undefined ? {} : { surfaceRevision: input.surfaceRevision }),
       ...(input.onQualification === undefined ? {} : { onQualification: input.onQualification }),
     })
+    // ONE owner registry shared by owners + retirement (never constructed
+    // independently — that would create a second owner truth).
+    ownerServices = createRemoteSessionOwnerServices(
+      input.client.sessions,
+      input.client.connection.generation,
+    )
     // The presentation bundle built from the SAME source. Its Task read owns a
     // retained root Job-roster watch that must be released through this stage
     // before the official Client services are unmounted.

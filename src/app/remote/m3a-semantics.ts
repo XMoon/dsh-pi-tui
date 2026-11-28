@@ -87,7 +87,7 @@ import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import { RemoteSessionReader } from '../../runtime/remote/session-reader-remote.ts'
 import { RemotePendingInputReader } from '../../runtime/remote/pending-input-reader-remote.ts'
 import { RemoteSessionWriter, type RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
-import { RemoteSessionLifecycle, type RemoteCurrentOwnerHandle } from '../../runtime/remote/session-lifecycle-remote.ts'
+import { RemoteSessionLifecycle } from '../../runtime/remote/session-lifecycle-remote.ts'
 import { RemoteSubagentPort } from '../../runtime/remote/subagent-remote.ts'
 import { RemoteModelCatalog } from '../../runtime/remote/model-remote.ts'
 import { RemotePresetCatalog } from '../../runtime/remote/preset-remote.ts'
@@ -150,7 +150,6 @@ export interface RemoteM3ASemanticsOptions {
   readonly surfaceRevision?: number
   /** Qualification-only telemetry forwarded to the Remote interaction port. */
   readonly onQualification?: (record: Record<string, unknown>) => void
-  readonly currentOwnerHandle?: RemoteCurrentOwnerHandle
 }
 
 /** The ONE shared Client sessions service: the intersection of every
@@ -348,7 +347,6 @@ export function createRemoteM3ASemantics(
       generation,
       remote.workspace,
       remote.session,
-      options.currentOwnerHandle,
     ),
     subagent: new RemoteSubagentPort(remote.subagents),
     catalog: {

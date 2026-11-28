@@ -1076,7 +1076,7 @@ test('Remote New fails closed without latching single-flight and retries after c
 
     capture = { generation: { id: 2 } }
     const retry = await h.runCommand('new')
-    assert.equal(retry.kind, 'success')
+    assert.deepEqual(retry, { kind: 'success', text: 'Session ready' })
     assert.equal(resolutions, 1)
     assert.equal(creates, 1)
   } finally {

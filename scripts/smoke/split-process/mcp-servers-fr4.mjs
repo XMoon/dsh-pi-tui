@@ -230,23 +230,23 @@ export async function runMcpServersFr4(context) {
   const basePatchBefore = readFileSync(basePatch, 'utf8')
   const userPatch = join(context.installation.profileDir, 'cordis.patch.yml')
   const userPatchBefore = existsSync(userPatch) ? readFileSync(userPatch, 'utf8') : undefined
-  appendFileSync(basePatch, [
-    '',
-    '- id: mcp-manager',
-    '  config:',
-    '    servers:',
-    `      ${INHERITED_NAME}:`,
-    '        transport: stdio',
-    `        command: ${JSON.stringify(process.execPath)}`,
-    `        args: [${JSON.stringify(serverScript)}]`,
-    '        enabled: true',
-    '',
-  ].join('\n'))
 
   let host
   let client
   let clientB
   try {
+    appendFileSync(basePatch, [
+      '',
+      '- id: mcp-manager',
+      '  config:',
+      '    servers:',
+      `      ${INHERITED_NAME}:`,
+      '        transport: stdio',
+      `        command: ${JSON.stringify(process.execPath)}`,
+      `        args: [${JSON.stringify(serverScript)}]`,
+      '        enabled: true',
+      '',
+    ].join('\n'))
     const started = await scene.startC1Host('mcp-servers-fr4', 'FR4 MCP Host', { C1_FR4_PLUGIN: '1' })
     host = started.host
     const row = await mcpManagerRow(host, 'FR4 initial')
@@ -542,15 +542,16 @@ export async function runMcpServersFr4(context) {
     host = undefined
     return { status: 'PASS' }
   } finally {
-    // Both layers belong to the shared packed Profile. Restore them so later
-    // full-lane cases do not inherit configured MCP tool names.
-    writeFileSync(basePatch, basePatchBefore, { mode: 0o600 })
-    if (userPatchBefore === undefined) rmSync(userPatch, { force: true })
-    else writeFileSync(userPatch, userPatchBefore, { mode: 0o600 })
     if (clientB !== undefined) await clientB.dispose().catch(() => {})
     if (client !== undefined) await client.dispose().catch(() => {})
     await httpFixture.close().catch(() => {})
     await scene.dispose()
+    // Both layers belong to the shared packed Profile. Restore them only after
+    // this case's Host is gone, so a late configuration write cannot re-pollute
+    // the layer a later full-lane case will inherit.
+    writeFileSync(basePatch, basePatchBefore, { mode: 0o600 })
+    if (userPatchBefore === undefined) rmSync(userPatch, { force: true })
+    else writeFileSync(userPatch, userPatchBefore, { mode: 0o600 })
   }
 }
 

@@ -2618,7 +2618,7 @@ test('a real Remote /new leaves the running old turn alive while it commits the 
   void app
 })
 
-test('explicit Remote New reuses the current exact blank binding without create, retain, reset or hydrate', async (t) => {
+test('explicit Remote New dispatches one Host create and keeps the current exact blank binding', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'rbs-1-same-binding-preset'
   const sessionId = 'rbs-1-same-binding-blank'
@@ -2673,8 +2673,8 @@ test('explicit Remote New reuses the current exact blank binding without create,
     throw new Error(`${error instanceof Error ? error.message : String(error)}\nlast frame:\n${fixture.vt.getViewport().join('\n')}`)
   }
 
-  assert.equal(calls.creates.length, 0, 'same exact binding performs no Host create')
-  assert.equal(calls.retains.length, 0, 'same exact binding performs no second retain')
+  assert.equal(calls.creates.length, 1, 'same exact binding still goes through exactly one Host create')
+  assert.equal(calls.retains.length, 1, 'the Host result is retained exactly once for the main surface')
   assert.equal(hydrateReads, 0, 'same owner performs no ordinary reset or hydrate')
   assert.strictEqual(sessions.binding(SessionId(sessionId)), bindingBefore, 'the official binding object is unchanged')
   assert.equal(sessions.retainInfo(SessionId(sessionId)).getSnapshot().referenceCount, refsBefore)

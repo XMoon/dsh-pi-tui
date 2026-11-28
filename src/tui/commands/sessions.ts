@@ -1230,7 +1230,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               runner.imageStore.clearUnpinned()
               runner.fileStore?.clearUnpinned()
             }
-            return { kind: 'success', text: 'started a fresh session' }
+            return { kind: 'success', text: freshSessionId === undefined ? 'Session ready' : 'started a fresh session' }
           }, navigation))
         } catch (error) {
           if (error instanceof SessionNavigationStopError) {
