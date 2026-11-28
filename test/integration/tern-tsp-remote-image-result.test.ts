@@ -20,6 +20,7 @@ import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { readTspBlobMessages } from '../support/tsp-blob-wire.ts'
 import type { TspWireFrame } from '../support/tsp-terminal-fixture.ts'
+import { openSingleCompactWork } from '../support/tsp-picker-wire.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 
 const SESSION_ID = 'prc-remote-image-session'
@@ -148,6 +149,7 @@ test('a Remote lifetime that retires while the read is open refuses the bytes, a
         },
       }, { surfaceOp: 'append' })
 
+      await openSingleCompactWork(pane, waitFor)
       await waitFor('the Remote image Tool row to materialize', () => currentToolIds({ pane }).length > 0, 30_000)
       expandToolCards({ pane })
       await waitFor('the REAL attachment read to start', () => readStarted, 20_000)
@@ -245,6 +247,7 @@ test('a Remote tool-result image is authorized by its retained Session and reach
       // The `b` write is not the end of the chain: the `f` that references the
       // blob leaves the SDK later (frame credit), so the wait observes the frame
       // the assertions below read.
+      await openSingleCompactWork(fixture.pane!, waitFor)
       await waitFor('the Remote Tool node to materialize before disclosure', () =>
         fixture.pane!.frames().some(frame => frame.ops.some(op => op[0] === 'add' && JSON.stringify(op[4]).includes('"k":"tool"'))), 30_000)
       const pane = fixture.pane!
