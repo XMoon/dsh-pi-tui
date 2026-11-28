@@ -67,7 +67,7 @@ import {
 } from './local-scope.ts'
 import {
   createNativeContinuedQuestionReceiver,
-  type NativeContinuedGenerationDelivery,
+  type NativeContinuedDeliveryReservation,
   type NativeContinuedQuestionCall,
   type NativeContinuedQuestionReceiver,
 } from './native-client-continued.ts'
@@ -686,6 +686,7 @@ interface NativeClientState {
   readonly transport: LocalClientTransport
   readonly uploader: RemoteFileReceiptUploader
   readonly generation: RemoteConnectionGenerationSource
+  carrierError?: new (message: string, options?: ErrorOptions) => Error
   readonly identity: NativeHostIdentity
   readonly diag: Diag
   readonly handles: Set<OwnedNativeSession>
@@ -1347,6 +1348,14 @@ function userQuestionsOf(value: unknown): NativeUserQuestionProjection {
   }
 }
 
+function queuedQuestionReply(value: unknown, callId: string): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const source = (value as { readonly source?: unknown }).source
+  if (typeof source !== 'object' || source === null || Array.isArray(source)) return false
+  const record = source as { readonly kind?: unknown; readonly callId?: unknown }
+  return record.kind === 'user-question-reply' && record.callId === callId
+}
+
 function inboxOf(value: unknown): NativeSessionSnapshot['projections']['inbox'] {
   const inbox = recordOf(value, 'inbox projection')
   if (!Array.isArray(inbox['next-turn']) || !Array.isArray(inbox['next-step'])) throw new TypeError('inbox projection: invalid arrays')
@@ -1651,6 +1660,22 @@ class OwnedNativeSession implements NativeSession {
     return face.subscribe(() => listener(face.getSnapshot()))
   }
 
+  continuedEligible(callId: string): boolean {
+    if (this.closed || this.state.closed || currentGeneration(this.state) === undefined
+      || !this.isCurrentBinding()) return false
+    try {
+      const questions = userQuestionsOf(this.projection('userQuestions'))
+      if (questions.settled.some(entry => entry.callId === callId)
+        || !questions.active.some(entry => entry.callId === callId && entry.state === 'continued')) return false
+      const inbox = inboxOf(this.projection('inbox'))
+      if (inbox === undefined) return false
+      return ![...inbox['next-turn'], ...inbox['next-step']]
+        .some(message => queuedQuestionReply(message, callId))
+    } catch {
+      return false
+    }
+  }
+
   private track<T>(operation: Promise<T>): Promise<T> {
     this.operations.add(operation)
     observeSettled(operation, () => { this.operations.delete(operation) })
@@ -1677,10 +1702,8 @@ class OwnedNativeSession implements NativeSession {
   }
 
   snapshot(): NativeReadResult<NativeSessionSnapshot> {
-    if (this.closed || this.state.closed) return this.closed ? closedSessionResult() : closedResult()
-    if (this.state.sessions.binding(this.sessionId as SessionId) !== this.binding) {
-      return { kind: 'stale', code: 'NATIVE_BINDING_STALE', message: 'The owned Session binding is no longer current.' }
-    }
+    const admission = this.admission()
+    if ('kind' in admission) return admission
     try {
       const snapshot: SessionSnapshot = this.binding.session.getSnapshot()
       const projectionState = this.state.sessions.list.getSnapshot().projectionsBySession[this.sessionId as SessionId]?.state ?? 'idle'
@@ -2278,15 +2301,20 @@ class OwnedNativeSession implements NativeSession {
       listener(this.closed ? closedSessionResult() : closedResult())
       return () => {}
     }
-    const generation = currentGeneration(this.state)
-    if (generation === undefined) {
-      listener(unavailableResult('NATIVE_DISCONNECTED', 'No authenticated Host generation is current.'))
+    const carrierError = this.state.carrierError
+    if (carrierError === undefined) {
+      listener(unavailableResult('NATIVE_JOBS_UNAVAILABLE', 'The official Job stream authority is unavailable.'))
       return () => {}
     }
     const stream = this.state.remote.$stream<JobListFrame>({
       name: 'native-client: Job roster observation',
       open: signal => this.state.remote.job.list({ sessionId: this.sessionId as SessionId }, signal),
-      ended: accepted => new Error(`native-client: the Job roster stream ended before ${accepted ? 'settlement' : 'its opening frame'}`),
+      ended: accepted => accepted
+        ? new carrierError('native-client: the Job roster stream ended after an accepted frame')
+        : new Error('native-client: the Job roster stream ended before its opening frame'),
+      carrierFailed: () => {
+        if (!released && !this.closed && !this.state.closed) listener(staleResult())
+      },
     })
     let released = false
     const release = (): void => {
@@ -2306,13 +2334,18 @@ class OwnedNativeSession implements NativeSession {
       try {
         for await (const item of stream) {
           if (released || this.closed || this.state.closed) return
+          const generation = currentGeneration(this.state)
+          if (generation === undefined || item.signal.aborted
+            || this.state.sessions.binding(this.sessionId as SessionId) !== this.binding) {
+            listener(staleResult())
+            continue
+          }
           if (item.value.type !== 'rows') {
             item.accept()
             continue
           }
           const rows = item.value.jobs
           item.accept()
-          if (!Object.is(generation, currentGeneration(this.state))) continue
           try {
             listener({ kind: 'ok', value: rows.map(jobOf) })
           } catch (error) {
@@ -2471,24 +2504,25 @@ function createNativeInteractionReceivers(
       .find(handle => !handle.isClosed && handle.bindingIdentity() === binding && handle.isCurrentBinding())
 
   const deliverContinued = async (
-    delivery: NativeContinuedGenerationDelivery,
+    reservation: NativeContinuedDeliveryReservation,
     call: NativeContinuedQuestionCall,
     onQuestion: NonNullable<NativeAttachOptions['onQuestion']>,
   ): Promise<void> => {
-    const lifetime = AbortSignal.any([delivery.controller.signal, state.lifetime.signal])
+    const lifetime = AbortSignal.any([reservation.controller.signal, state.lifetime.signal])
     const answer = await abortable(onQuestion({
-      sessionId: delivery.sessionId,
+      sessionId: reservation.sessionId,
       callId: call.callId,
       timed: true,
       questions: call.questions as readonly NativeQuestionItem[],
       signal: lifetime,
     }), lifetime)
+    const handle = currentBindingHandle(reservation.sessionId, reservation.binding)
     if (disposed || state.closed || lifetime.aborted
-      || !Object.is(delivery.generation, currentGeneration(state))
-      || currentBindingHandle(delivery.sessionId, delivery.binding) === undefined) {
+      || !Object.is(reservation.generation, currentGeneration(state))
+      || handle === undefined || !handle.continuedEligible(call.callId)) {
       throw nativeError('NATIVE_INTERACTION_STALE', 'the continued Question answer is no longer current')
     }
-    const result = await state.remote.userQuestions.answer(delivery.sessionId as SessionId, call.callId as ToolCallId, {
+    const result = await state.remote.userQuestions.answer(reservation.sessionId as SessionId, call.callId as ToolCallId, {
       answers: officialQuestionAnswers(answer),
     })
     if (!result.ok) {
@@ -2512,27 +2546,23 @@ function createNativeInteractionReceivers(
       onInvalidProjection: error => {
         state.diag.error('native-client: continued Question projection was unusable', { error: safeErrorMessage(error) })
       },
-      onOffer: (sessionId, binding, call) => {
-        if (liveQuestionCalls.has(call.callId)) return undefined
-        const delivery: NativeContinuedGenerationDelivery = {
-          sessionId,
-          binding,
-          callId: call.callId,
-          generation: currentGeneration(state),
-          controller: new AbortController(),
-        }
+      onOffer: (reservation, call) => {
+        if (liveQuestionCalls.has(call.callId)) return false
+        // Register the owned operation before any callback can re-enter close.
+        const operation = Promise.resolve()
+          .then(() => deliverContinued(reservation, call, onQuestion))
+          .finally(() => {
+            pending -= 1
+            changed()
+          })
+        trackClientOperation(state, operation)
         pending += 1
         changed()
-        const operation = deliverContinued(delivery, call, onQuestion).finally(() => {
-          pending -= 1
-          changed()
-        })
-        trackClientOperation(state, operation)
         runDetached('native-client: continued Question delivery', () => operation, {
           diag: state.diag,
-          sessionId: () => sessionId,
+          sessionId: () => reservation.sessionId,
         })
-        return delivery
+        return true
       },
     })
     owned.push(() => continued?.dispose())
@@ -2910,6 +2940,7 @@ export async function attachNativeClient(options: NativeAttachOptions): Promise<
     mountedDomains = await prerequisites.complete({ signal: options.signal })
     prerequisites = undefined
     activeState.jobs = mountedDomains.jobs
+    activeState.carrierError = mountedDomains.workspaceStream.carrierError
     options.signal?.throwIfAborted()
     const client: NativeClient = {
       status,

@@ -354,7 +354,7 @@ test('qualifies the installed Native Client business and interaction paths', { t
 
     // 1. Attach/status/realm/close/reattach plus exact Host identity.
     {
-      const host = await scene.startHost({ scenario: 'foreground-tool', holdTool: true })
+      const host = await scene.startHost({ scenario: 'foreground-tool', holdTool: true, reasoningEffort: true })
       let first: NativeClient | undefined
       let second: NativeClient | undefined
       try {
@@ -479,6 +479,12 @@ test('qualifies the installed Native Client business and interaction paths', { t
         await waitFor('plan active after /plan', async () => ok(await configured.session.configuration(), 'configuration').plan,
           plan => plan?.active === true)
         committed(await configured.session.selectModel({ provider: 'c1-qualification', model: 'c1' }), 'selectModel')
+        const effortSelection = committed(await configured.session.selectModel({
+          provider: 'c1-qualification', model: 'c1', reasoningEffort: 'high',
+        }), 'selectModel with effort')
+        expect(effortSelection.reasoningEffort).toBe('high')
+        const renamed = committed(await configured.session.rename('native renamed session'), 'rename')
+        expect(renamed.title).toBe('native renamed session')
         committed(await configured.session.selectPreset('standard'), 'selectPreset')
         const readOnly = committed(await configured.session.selectPermissionPreset('read-only'), 'selectPermissionPreset')
         expect(readOnly.currentValue).toBe('read-only')
@@ -492,13 +498,22 @@ test('qualifies the installed Native Client business and interaction paths', { t
         const file = ok(await sibling.readFile({ path: 'host-marker.txt' }), 'readFile')
         expect(Buffer.from(file.data).toString('utf8')).toBe('native-host-basic\n')
 
-        const beforeClose = ok(first.status(), 'status before close')
+        const clientToClose = first
+        const beforeClose = ok(clientToClose.status(), 'status before close')
         expect(beforeClose.activeWrappers).toBeGreaterThan(0)
         expect(beforeClose.liveSockets).toBeGreaterThan(0)
-        const firstClose = first.close()
-        expect(first.close()).toBe(firstClose)
+        let closeFromStatus: Promise<void> | undefined
+        let reentrantArmed = false
+        const offCloseReentry = clientToClose.subscribeStatus(() => {
+          if (reentrantArmed) closeFromStatus ??= clientToClose.close()
+        })
+        reentrantArmed = true
+        const firstClose = clientToClose.close()
+        expect(closeFromStatus).toBe(firstClose)
+        expect(clientToClose.close()).toBe(firstClose)
+        offCloseReentry()
         await firstClose
-        const terminalStatus = ok(first.status(), 'terminal status after close')
+        const terminalStatus = ok(clientToClose.status(), 'terminal status after close')
         expect(terminalStatus.transport).toBe('closed')
         expect(terminalStatus.activeWrappers).toBe(0)
         expect(terminalStatus.liveSockets).toBe(0)
@@ -1058,17 +1073,21 @@ test('qualifies the installed Native Client business and interaction paths', { t
 
         let continuedRequest: typeof request | undefined
         let continuedOffers = 0
+        const answerGate = Promise.withResolvers<Awaited<ReturnType<NonNullable<NativeAttachOptions['onQuestion']>>>>()
         second = await attach(scene, host, { onQuestion: async incoming => {
           continuedOffers += 1
           continuedRequest = incoming
-          return { answers: [{ id: 'c1-question', selected: ['Proceed'] }] }
+          return await withAbort(answerGate.promise, incoming.signal)
         } })
         const reopened = ok(await second.openSession(created.sessionId), 'reopen continued Session')
-        const reopenedSibling = ok(await second.openSession(created.sessionId), 'second continued handle')
         const recovered = defined(await waitFor('continued Native reoffer', () => continuedRequest, value => value !== undefined), 'continued Native reoffer')
         expect(recovered.callId).toBe(callId)
+        const reopenedSibling = ok(await second.openSession(created.sessionId), 'second continued handle while first callback is pending')
         await sleep(100)
         expect(continuedOffers).toBe(1)
+        await reopenedSibling.close()
+        expect(continuedOffers).toBe(1)
+        answerGate.resolve({ answers: [{ id: 'c1-question', selected: ['Proceed'] }] })
         await waitFor('continued answer RPC settlement', () => ok(defined(second, 'continued Client').status(), 'continued status').pendingInteractions,
           pending => pending === 0)
         writeFileSync(host.timedDuplicateBarrierPath!, 'duplicate\n', { mode: 0o600, flag: 'wx' })
@@ -1076,6 +1095,7 @@ test('qualifies the installed Native Client business and interaction paths', { t
           event => event.kind === 'answer-probe' && event.phase === 'duplicate',
           'duplicate continued answer')
         expect(duplicate.code).toBe('REPLY_QUEUED')
+        expect(continuedOffers, 'a queued reply must not be offered again').toBe(1)
         writeFileSync(host.timedAfterBarrierPath!, 'release\n', { mode: 0o600, flag: 'wx' })
         const reply = await scene.waitForSessionEvent(created.sessionId, 0,
           event => event.type === 'user/message' && event.data?.source?.kind === 'user-question-reply'
@@ -1307,8 +1327,6 @@ test('qualifies the installed Native Client business and interaction paths', { t
     }
 
     evidence.completedAt = new Date().toISOString()
-    evidence.status = 'PASS'
-    save()
   } catch (error) {
     primary = error
     evidence.status = 'FAIL'
@@ -1329,6 +1347,10 @@ test('qualifies the installed Native Client business and interaction paths', { t
     } catch (cleanupError) {
       if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'Native qualification and Scene cleanup both failed')
       throw cleanupError
+    }
+    if (primary === undefined) {
+      evidence.status = 'PASS'
+      save()
     }
   }
 })

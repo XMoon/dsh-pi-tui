@@ -121,6 +121,7 @@ export interface StartProcessHostOptions {
   imageProbe?: true
   imageSha256?: string
   commandCancel?: true
+  reasoningEffort?: true
 }
 
 export interface SplitProcessHostHandle {
@@ -1447,6 +1448,7 @@ class ProcessScene implements SplitProcessScene {
       ...(options.imageProbe === undefined ? {} : { imageProbe: options.imageProbe }),
       ...(options.imageSha256 === undefined ? {} : { imageSha256: options.imageSha256 }),
       ...(options.commandCancel === undefined ? {} : { commandCancel: options.commandCancel }),
+      ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
     }, 600_000)
     const host: SplitProcessHostHandle = {
       hostId: String(payload.hostId),

@@ -4962,6 +4962,7 @@ async function handleStartHost(message) {
         env.C1_PO4A_IMAGE_PROBE_DIR = probeDir
         if (message.imageSha256 !== undefined) env.C1_PO4A_EXPECTED_IMAGE_SHA256 = message.imageSha256
       }
+      if (message.reasoningEffort === true) env.C1_NATIVE_REASONING_EFFORT = '1'
       if (message.commandCancel === true) {
         commandCancelReleasePath = join(workloadRoot, 'command.release')
         env.C1_COMMAND_CANCEL_ROOT = workloadRoot

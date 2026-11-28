@@ -229,8 +229,9 @@ test('service-reported cancellation after dispatch stays unknown with the prompt
   })
 })
 
-test('production continued receiver revokes stale callbacks before one re-offer', () => {
+test('production continued receiver revokes on rollover and offers only fresh eligibility', () => {
   let generation: object | undefined = { id: 1 }
+  let eligible = true
   const generationListeners = new Set<() => void>()
   const source = {
     getSnapshot: () => generation,
@@ -242,7 +243,6 @@ test('production continued receiver revokes stale callbacks before one re-offer'
   const binding = {}
   const projection = {
     active: [{ callId: 'call-1', questions: [{ id: 'q1', question: 'continue?' }], state: 'continued' as const }],
-    settled: [],
   }
   let projectionListener: ((value: unknown) => void) | undefined
   const handle = {
@@ -250,6 +250,7 @@ test('production continued receiver revokes stale callbacks before one re-offer'
     isClosed: false,
     bindingIdentity: () => binding,
     isCurrentBinding: () => true,
+    continuedEligible: () => eligible,
     observeUserQuestions(listener: (value: unknown) => void): () => void {
       projectionListener = listener
       listener(projection)
@@ -268,24 +269,69 @@ test('production continued receiver revokes stale callbacks before one re-offer'
     isClosed: () => false,
     parseProjection: value => value as typeof projection,
     onInvalidProjection: error => { throw error },
-    onOffer: (sessionId, offeredBinding, call) => {
-      const controller = new AbortController()
-      offers.push({ controller, generation: source.getSnapshot() })
-      return { sessionId, binding: offeredBinding, callId: call.callId, generation: source.getSnapshot(), controller }
+    onOffer: reservation => {
+      offers.push({ controller: reservation.controller, generation: reservation.generation })
+      return true
     },
   })
   assert.equal(offers.length, 1)
   generation = { id: 2 }
   for (const listener of [...generationListeners]) listener()
   assert.equal(offers[0]?.controller.signal.aborted, true)
-  assert.equal(offers.length, 2)
-  assert.equal(offers[1]?.controller.signal.aborted, false)
+  assert.equal(offers.length, 1)
+  eligible = false
   projectionListener?.(projection)
+  assert.equal(offers.length, 1)
+  eligible = true
+  projectionListener?.({ active: [...projection.active] })
+  assert.equal(offers.length, 2)
+  assert.equal(offers[1]?.generation, generation)
+  projectionListener?.({ active: [...projection.active] })
   assert.equal(offers.length, 2)
   receiver.dispose()
   assert.equal(generationListeners.size, 0)
   assert.equal(handleListeners.size, 0)
   assert.equal(offers[1]?.controller.signal.aborted, true)
+})
+
+test('continued receiver reserves delivery before a reentrant close', () => {
+  const generation = { id: 1 }
+  let receiver: ReturnType<typeof createNativeContinuedQuestionReceiver> | undefined
+  let offeredController: AbortController | undefined
+  const source = {
+    getSnapshot: () => generation as object | undefined,
+    subscribe: () => () => {},
+  }
+  const binding = {}
+  const handle = {
+    sessionId: 'session-1',
+    isClosed: false,
+    bindingIdentity: () => binding,
+    isCurrentBinding: () => true,
+    continuedEligible: () => true,
+    observeUserQuestions(listener: (value: unknown) => void): () => void {
+      projectionListener = listener
+      return () => {}
+    },
+  }
+  let projectionListener: ((value: unknown) => void) | undefined
+  const handles = new Set([handle])
+  receiver = createNativeContinuedQuestionReceiver({
+    generation: source,
+    handles,
+    handlesBySession: new Map([['session-1', handles]]),
+    handleListeners: new Set(),
+    isClosed: () => false,
+    parseProjection: value => value as { active: readonly { callId: string; state: 'continued'; questions: readonly unknown[] }[] },
+    onInvalidProjection: error => { throw error },
+    onOffer: reservation => {
+      offeredController = reservation.controller
+      receiver?.dispose()
+      return true
+    },
+  })
+  projectionListener?.({ active: [{ callId: 'call-1', state: 'continued', questions: [] }] })
+  assert.equal(offeredController?.signal.aborted, true)
 })
 
 test('separate module instances share the same Node-realm reservation', async () => {

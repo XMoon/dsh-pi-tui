@@ -1491,6 +1491,9 @@ class C1Model extends LlmAdapter {
     const modelS1Reasoning = process.env.C1_MODEL_S1_ROUTE === model
       ? { reasoning: { efforts: [{ id: 'low', name: 'low' }, { id: 'high', name: 'high' }], defaultEffort: 'low' } }
       : {}
+    const nativeReasoning = process.env.C1_NATIVE_REASONING_EFFORT === '1' && model === 'c1'
+      ? { reasoning: { efforts: [{ id: 'high', name: 'high' }], defaultEffort: 'high' } }
+      : {}
     return {
       provider,
       id: model,
@@ -1498,6 +1501,7 @@ class C1Model extends LlmAdapter {
       ...modelSwitchContext,
       ...projectionRouteContext,
       ...modelS1Reasoning,
+      ...nativeReasoning,
       ...(po4a && model === 'c1' ? { inputModalities: ['text', 'image'] } : {}),
       ...(po4a && model === 'c1-text-only' ? { inputModalities: ['text'] } : {}),
     }
