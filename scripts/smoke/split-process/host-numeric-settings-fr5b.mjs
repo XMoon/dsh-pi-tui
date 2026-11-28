@@ -533,9 +533,10 @@ export async function runHostNumericSettingsFr5B(context) {
     const shellSeeded = profileUserConfig(installation.profileDir, SHELL_NS) ?? {}
     const seededCaps = { timeoutMs: shellSeeded.timeoutMs, maxOutputBytes: shellSeeded.maxOutputBytes }
     const shellOpenedFrame = await frameOf(clientA)
-    assert(/Command timeout \(ms\)\s+60000 ms/u.test(shellOpenedFrame)
-      && /Output cap per stream \(bytes\)\s+64000 bytes/u.test(shellOpenedFrame),
-    `the Shell group must show the official inherited caps and units: ${JSON.stringify(shellOpenedFrame)}`)
+    const shellOpenedDetail = detailColumnText(shellOpenedFrame)
+    assert(/Command timeout\s+60 s/u.test(shellOpenedDetail)
+      && /Output cap per stream\s+64 kB/u.test(shellOpenedDetail),
+    `the Shell group must show the official inherited caps in exact SI display: ${JSON.stringify(shellOpenedDetail)}`)
     assert(!/Edit Command timeout \(ms\)/u.test(shellOpenedFrame),
       'entering the group never opens the raw Input')
     assert(/Save \[S\]/u.test(shellOpenedFrame) === false,
@@ -549,7 +550,7 @@ export async function runHostNumericSettingsFr5B(context) {
     await waitForPattern(clientB, /Settings · Tools · Shell execution/u, 'FR5-B Shell group B')
     // B stages a divergent draft BEFORE A saves: the two pages hold the same
     // captured revision, so B's later Save must be refused, not rebased.
-    await selectFrame(clientB, frame => selectedRow(frame, 'Command timeout (ms)'), 'FR5-B Shell timeout field B')
+    await selectFrame(clientB, frame => selectedRow(frame, 'Command timeout'), 'FR5-B Shell timeout field B')
     clientB.send('\r')
     await waitForText(clientB, 'Edit Command timeout (ms)', 'FR5-B Shell timeout input B')
     clientB.send('\x15')
@@ -561,12 +562,13 @@ export async function runHostNumericSettingsFr5B(context) {
     clientB.send('\r')
     await waitForPattern(clientB, /1 unsaved change/u, 'FR5-B Shell staged B')
     const bStagedFrame = await frameOf(clientB)
-    assert(/Command timeout \(ms\)\s+90000 ms/u.test(bStagedFrame)
-      && /Current: 60000 ms · Unsaved/u.test(bStagedFrame),
-    `B must paint its candidate beside the served Current: ${JSON.stringify(bStagedFrame)}`)
+    const bStagedDetail = detailColumnText(bStagedFrame)
+    assert(/Command timeout\s+90 s/u.test(bStagedDetail)
+      && /Current: 60 s · Unsaved/u.test(bStagedDetail),
+    `B must paint its candidate beside the served Current in exact SI display: ${JSON.stringify(bStagedDetail)}`)
     assertShellCaps(installation.profileDir, seededCaps, 'B local stage')
 
-    await selectFrame(clientA, frame => selectedRow(frame, 'Command timeout (ms)'), 'FR5-B Shell timeout field A')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Command timeout'), 'FR5-B Shell timeout field A')
     clientA.send('\r')
     await waitForText(clientA, 'Edit Command timeout (ms)', 'FR5-B Shell timeout input A')
     clientA.send('\x15')
@@ -577,11 +579,12 @@ export async function runHostNumericSettingsFr5B(context) {
     }
     clientA.send('\r') // stage the first field locally
     const firstStage = await waitForPattern(clientA, /1 unsaved change/u, 'FR5-B Shell first stage A')
-    assert(/Command timeout \(ms\)\s+45000 ms/u.test(firstStage)
-      && /Current: 60000 ms · Unsaved/u.test(firstStage),
-    `A's first stage must paint the candidate beside the served Current: ${JSON.stringify(firstStage)}`)
+    const firstStageDetail = detailColumnText(firstStage)
+    assert(/Command timeout\s+45 s/u.test(firstStageDetail)
+      && /Current: 60 s · Unsaved/u.test(firstStageDetail),
+    `A's first stage must paint the candidate beside the served Current in exact SI display: ${JSON.stringify(firstStageDetail)}`)
     assertShellCaps(installation.profileDir, seededCaps, 'A first local stage (both caps)')
-    await selectFrame(clientA, frame => selectedRow(frame, 'Output cap per stream (bytes)'), 'FR5-B Shell cap field A')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Output cap per stream'), 'FR5-B Shell cap field A')
     clientA.send('\r')
     await waitForText(clientA, 'Edit Output cap per stream (bytes)', 'FR5-B Shell cap input A')
     clientA.send('\x15')
@@ -592,9 +595,10 @@ export async function runHostNumericSettingsFr5B(context) {
     }
     clientA.send('\r')
     const shellStagedFrame = await waitForPattern(clientA, /2 unsaved changes/u, 'FR5-B Shell staged A')
-    assert(/Command timeout \(ms\)\s+45000 ms/u.test(shellStagedFrame)
-      && /Output cap per stream \(bytes\)\s+128000 bytes/u.test(shellStagedFrame),
-    `the Shell group must paint both staged caps: ${JSON.stringify(shellStagedFrame)}`)
+    const shellStagedDetail = detailColumnText(shellStagedFrame)
+    assert(/Command timeout\s+45 s/u.test(shellStagedDetail)
+      && /Output cap per stream\s+128 kB/u.test(shellStagedDetail),
+    `the Shell group must paint both staged caps in exact SI display: ${JSON.stringify(shellStagedDetail)}`)
     assertShellCaps(installation.profileDir, seededCaps, 'A local stages')
     await saveAndVerify(clientA, 'FR5-B Shell saved A', /\bSaved\b/u)
     const shellPatch = profileUserConfig(installation.profileDir, SHELL_NS)
@@ -604,9 +608,9 @@ export async function runHostNumericSettingsFr5B(context) {
     const aVerifiedDetail = detailColumnText(aVerifiedFrame)
     assert(/\bSaved\b/u.test(aVerifiedDetail) && /Settings · Tools · Shell execution/u.test(aVerifiedFrame),
       'a verified Save stays in the SAME group')
-    assert(/Command timeout \(ms\)\s+45000 ms/u.test(aVerifiedDetail)
-      && /Output cap per stream \(bytes\)\s+128000 bytes/u.test(aVerifiedDetail),
-    `the verified Detail paints BOTH authoritative caps: ${JSON.stringify(aVerifiedDetail)}`)
+    assert(/Command timeout\s+45 s/u.test(aVerifiedDetail)
+      && /Output cap per stream\s+128 kB/u.test(aVerifiedDetail),
+    `the verified Detail paints BOTH authoritative caps in exact SI display: ${JSON.stringify(aVerifiedDetail)}`)
 
     // A's committed write invalidated B's captured revision. Depending on
     // whether the shared document-updated event reaches B before the key, the
@@ -619,11 +623,12 @@ export async function runHostNumericSettingsFr5B(context) {
     // fish for a refusal.
     const bAfterSaveAttempt = await waitForPattern(clientB, /Could not save|refresh to review|Last-known/u,
       'FR5-B stale Client B refusal', 30_000)
-    assert(!/\bSaved\b/u.test(bAfterSaveAttempt), 'the stale Client never claims a saved write')
-    assert(/Command timeout \(ms\)\s+90000 ms/u.test(bAfterSaveAttempt)
-      && /Last confirmed: 60000 ms · Unsaved/u.test(bAfterSaveAttempt)
-      && !/Current: 60000 ms/u.test(bAfterSaveAttempt) && !/\bSaved\b/u.test(bAfterSaveAttempt),
-    `the stale Client retains its requested value and the real last-confirmed fact: ${JSON.stringify(bAfterSaveAttempt)}`)
+    const bStaleDetail = detailColumnText(bAfterSaveAttempt)
+    assert(!/\bSaved\b/u.test(bStaleDetail), 'the stale Client never claims a saved write')
+    assert(/Command timeout\s+90 s/u.test(bStaleDetail)
+      && /Last confirmed: 60 s · Unsaved/u.test(bStaleDetail)
+      && !/Current: 60 s/u.test(bStaleDetail) && !/\bSaved\b/u.test(bStaleDetail),
+    `the stale Client retains its requested value and the real last-confirmed fact in exact SI display: ${JSON.stringify(bStaleDetail)}`)
     assertShellCaps(installation.profileDir, { timeoutMs: 45_000, maxOutputBytes: 128_000 },
       'Client B stale Save')
     trace('fr5b.shell-two-client', { bothCapsOneSave: true, staleRefused: true, profileKept: true })
@@ -632,54 +637,48 @@ export async function runHostNumericSettingsFr5B(context) {
     // until the group Save, then the Host readback decides the value.
     const shellCommitted = profileUserConfig(installation.profileDir, SHELL_NS) ?? {}
     const committedCaps = { timeoutMs: shellCommitted.timeoutMs, maxOutputBytes: shellCommitted.maxOutputBytes }
-    await selectFrame(clientA, frame => selectedRow(frame, 'Output cap per stream (bytes)'), 'FR5-B Shell reset field A')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Output cap per stream'), 'FR5-B Shell reset field A')
     clientA.send('?')
     const shellAdvanced = await waitForPattern(clientA, /Reset to inherited…/u, 'FR5-B Shell Advanced A')
     const shellInheritedMatch = /Inherited\s+(\d+) bytes/u.exec(shellAdvanced)
     assert(shellInheritedMatch !== null,
       `the selected field Advanced must paint the real inherited cap: ${JSON.stringify(shellAdvanced)}`)
     const inheritedCap = Number(shellInheritedMatch[1])
+    const inheritedDisplay = Number.isSafeInteger(inheritedCap) && inheritedCap > 0 && inheritedCap % 1000 === 0
+      ? `${inheritedCap / 1000} kB`
+      : `${inheritedCap} bytes`
     assert(new RegExp(`Effective\\s+128000 bytes`, 'u').test(shellAdvanced),
       'Advanced paints the served effective value')
     clientA.send('x')
     const shellResetStaged = await waitForPattern(clientA, /Reset staged/u, 'FR5-B Shell reset staged A')
-    assert(/Output cap per stream \(bytes\)\s+Reset staged/u.test(shellResetStaged),
-      `the official unset is staged on the selected field: ${JSON.stringify(shellResetStaged)}`)
+    const shellResetStagedDetail = detailColumnText(shellResetStaged)
+    assert(/Output cap per stream\s+Reset staged/u.test(shellResetStagedDetail),
+      `the official unset is staged on the selected field in exact browse display: ${JSON.stringify(shellResetStagedDetail)}`)
     assert(/1 unsaved change/u.test(shellResetStaged),
       'the staged reset is a real dirty intent')
     assertShellCaps(installation.profileDir, committedCaps, 'A staged reset (both caps)')
     await saveAndVerify(clientA, 'FR5-B Shell reset saved A', /\bSaved\b/u)
     const shellAfterReset = await frameOf(clientA)
     const shellAfterResetDetail = detailColumnText(shellAfterReset)
-    assert(new RegExp(`Output cap per stream \\(bytes\\)\\s+${inheritedCap} bytes`, 'u').test(shellAfterResetDetail),
-      `the verified Detail paints the Host readback, not the requested unset: ${JSON.stringify(shellAfterResetDetail)}`)
-    assert(/Command timeout \(ms\)\s+45000 ms/u.test(shellAfterResetDetail),
-      `the verified Detail keeps the sibling timeout: ${JSON.stringify(shellAfterResetDetail)}`)
+    assert(new RegExp(`Output cap per stream\\s+${escapeRegExp(inheritedDisplay)}`, 'u').test(shellAfterResetDetail),
+      `the verified Detail paints the Host readback in exact SI display, not the requested unset: ${JSON.stringify(shellAfterResetDetail)}`)
+    assert(/Command timeout\s+45 s/u.test(shellAfterResetDetail),
+      `the verified Detail keeps the sibling timeout in exact SI display: ${JSON.stringify(shellAfterResetDetail)}`)
     const resetPatch = profileUserConfig(installation.profileDir, SHELL_NS)
     assert(resetPatch?.timeoutMs === 45_000,
       `the sibling timeout stays at its saved value after the reset: ${JSON.stringify(resetPatch)}`)
     assert(resetPatch?.maxOutputBytes === undefined || resetPatch?.maxOutputBytes === inheritedCap,
       `the official unset leaves no USER cap or the inherited value, never another number: ${JSON.stringify(resetPatch)}`)
     // Back to Rows: the ROW must read the authoritative Host caps, not the
-    // page's last painted draft.
+    // page's last painted draft. The normal grant paints the complete compact
+    // pair; no obsolete raw-unit prose fallback is accepted.
     clientA.send('\x1b')
     const shellRows = await waitForPattern(clientA, /Settings · Tools · Rows/u, 'FR5-B Shell back to Rows')
-    assert(/Timeout 45000 ms/u.test(shellRows),
-      `the Rows summary reads the authoritative committed timeout: ${JSON.stringify(shellRows)}`)
-    assert(/Timeout 45000 ms/u.test(shellRows),
-      `the Rows summary reads the authoritative committed timeout: ${JSON.stringify(shellRows)}`)
-    // The Rows summary may clip at narrow widths; the Detail preview is the
-    // actual readback route, so select/focus it through the real screen path.
-    let preview = shellRows
-    if (!new RegExp(`Output cap ${inheritedCap} bytes`, 'u').test(preview) || !/Timeout 45000 ms/u.test(preview)) {
-      preview = await selectFrame(clientA, frame => selectedRow(frame, 'Shell execution'), 'FR5-B Shell row readback')
-      clientA.send('\t')
-      await sleep(160)
-      preview = await frameOf(clientA)
-    }
-    assert(new RegExp(`Timeout 45000 ms`, 'u').test(preview)
-      && new RegExp(`Output cap ${inheritedCap} bytes`, 'u').test(preview),
-    `the Rows/Detail readback paints BOTH authoritative caps: ${JSON.stringify(preview)}`)
+    const shellSummary = shellRows.split('\n').find(line => /^\s*(?:> )?Shell execution(?:\s|$)/u.test(line))
+    assert(shellSummary !== undefined,
+      `the Rows frame must keep the real Shell execution row identity: ${JSON.stringify(shellRows)}`)
+    assert(new RegExp(`Shell execution\\s+45 s · ${escapeRegExp(inheritedDisplay)}(?:\\s|$)`, 'u').test(shellSummary),
+      `the Rows summary reads BOTH authoritative caps in exact SI display: ${JSON.stringify(shellSummary)}`)
     trace('fr5b.shell-grouped-reset', { resetStaged: true, readbackDecides: true, siblingKept: true, inheritedCap, rowsReadback: true })
 
     await scene.assertHostIdentityKept(host, identity, 'FR5-B settings writes')

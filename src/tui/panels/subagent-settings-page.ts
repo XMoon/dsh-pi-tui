@@ -1397,7 +1397,8 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       if (field === 'maxDepth') lines.push({ text: color.textDim('Limits') })
       if (field === 'enabled') lines.push({ text: color.textDim('Model selection') })
       const selected = index === this.fieldIndex
-      const marker = selected ? '> ' : '  '
+      const active = selected && this.focused
+      const marker = active ? color.primary('> ') : '  '
       const value = this.fieldValue(snapshot, field)
       const valueWidth = visibleWidth(value)
       const blockStart = lines.length
@@ -1594,7 +1595,8 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
         lines.push({ text: color.textDim(sanitizedPhysicalLine(model.savedRoute === undefined ? model.providerName : 'Saved routes')) })
       }
       const selected = key === this.selectedRoute
-      const marker = selected ? '> ' : '  '
+      const active = selected && this.focused && !this.searching
+      const marker = active ? color.primary('> ') : '  '
       const chip = model.allowed ? ' [allowed]' : ''
       const label = sanitizedPhysicalLine(model.modelName ?? model.modelId)
       const room = Math.max(1, rowWidth - 2 - (chip === '' ? 0 : visibleWidth(chip)))

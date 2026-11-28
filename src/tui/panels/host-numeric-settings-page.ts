@@ -1320,7 +1320,8 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       const valueWidth = visibleWidth(value)
       const blockStart = lines.length
       let blockComplete = valueWidth <= rowWidth
-      const marker = selected ? '> ' : '  '
+      const active = selected && this.focused
+      const marker = active ? color.primary('> ') : '  '
       // Every wrapped label fragment carries the 2-cell marker/indent, so the
       // wrap width is the real row width MINUS that prefix.
       const labelLines = wrapTextWithAnsi(sanitizedPhysicalLine(browseLabel), Math.max(1, rowWidth - 2))
@@ -1332,8 +1333,9 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       }
       if (labelLines.length === 1 && visibleWidth(marker) + visibleWidth(browseLabel) + 2 + valueWidth <= rowWidth) {
         const gap = Math.max(2, rowWidth - visibleWidth(marker) - visibleWidth(browseLabel) - valueWidth)
-        const label = selected ? color.textStrong(browseLabel) : color.text(browseLabel)
-        lines.push({ text: `${marker}${sanitizedPhysicalLine(label)}${' '.repeat(gap)}${color.text(sanitizedPhysicalLine(value))}`, field: field.key, targets: [target] })
+        const labelText = sanitizedPhysicalLine(browseLabel)
+        const label = selected ? color.textStrong(labelText) : color.text(labelText)
+        lines.push({ text: `${marker}${label}${' '.repeat(gap)}${color.text(sanitizedPhysicalLine(value))}`, field: field.key, targets: [target] })
       } else {
         // A label and its canonical value that cannot share ONE line keep the
         // COMPLETE label (wrapped, never cut mid-word) and the value on its own
