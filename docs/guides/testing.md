@@ -634,6 +634,24 @@ not part of `mise run test`, `mise run check` or `verify:release`. The package
 script always passes `--project`; invoking this config without one runs every
 configured project and is not an entry point.
 
+`mise exec -- pnpm test:split:process:optional` selects only the
+`split-process-optional` Vitest project (`test/integration/split-process/optional/**/*.vitest.ts`)
+with the same private `SPLIT_VITEST_TMP_BASE` and `SPLIT_VITEST_CANDIDATE_TGZ`
+inputs on Linux and macOS. It keeps optional locality checks (such as Client
+Git branch non-attribution in a live Remote Session) explicitly separated from
+the default business project.
+
+The bounded read-authority probe (`readAuthority`) also supports a fixed
+`directory-browse` mode over Supervisor-owned Host targets (`home`, `fixture`,
+`missing`, `relative`) with optional `caller` abort or `carrier` drop on the
+`fixture` target, settling on `directory-browse`, `directory-browse-rejected`,
+or correlated `failed` without accepting raw Worker paths. Where a native
+negative (such as an unreadable directory or refused Workspace proposal) cannot
+expose an internal RPC count in the PTY dropdown, the PTY lane proves the
+visible non-fallback outcome over a latency-anchored observation window while
+lower-level Host/Remote contract tests own the `unavailable`-vs-empty and
+zero-dispatch boundaries.
+
 The project carries two distinct kinds of evidence. The PTY anchors drive the
 real terminal surface; the non-PTY installed-entry qualification drives the
 product's own packed Host/Client entries as real processes for bootstrap

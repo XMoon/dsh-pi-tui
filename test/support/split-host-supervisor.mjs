@@ -4767,6 +4767,9 @@ async function handleStartHost(message) {
   if (scene.kind !== 'process' && message.crashSignal !== undefined) {
     throw new Error('START_HOST: only a process Scene accepts a declared Host crash signal')
   }
+  if (scene.kind !== 'process' && message.shellCompletionLocality !== undefined) {
+    throw new Error('START_HOST: only a process Scene accepts shellCompletionLocality')
+  }
 
   let source = 'profile'
   let entry
@@ -4778,6 +4781,7 @@ async function handleStartHost(message) {
   let env
   let scenario
   let crashSignal
+  let shellCompletionLocality = false
   let workloadRoot
   let holdReleasePath
   let jobWorkRoot
@@ -4807,6 +4811,13 @@ async function handleStartHost(message) {
     }
     if (message.extraEnv !== undefined) {
       throw new Error('START_HOST: a process scene does not accept arbitrary extra environment')
+    }
+    if (message.shellCompletionLocality !== undefined && message.shellCompletionLocality !== true) {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST shellCompletionLocality may only be true when set')
+    }
+    shellCompletionLocality = message.shellCompletionLocality === true
+    if (shellCompletionLocality && (scenario !== undefined || crashSignal !== undefined)) {
+      throw new Error('INPUT_UNQUALIFIED: START_HOST shellCompletionLocality requires an ordinary Host without workload or crash variants')
     }
     const variants = {
       holdTool: message.holdTool === true ? 'foreground-tool' : undefined,
@@ -4897,6 +4908,19 @@ async function handleStartHost(message) {
       SPLIT_PROCESS_DSH_ANCHOR: scene.installation.anchor,
       SPLIT_PROCESS_PROFILE: 'pi-tui',
       SPLIT_PROCESS_SCRATCH: hostScratch,
+    }
+    if (shellCompletionLocality) {
+      const completionBin = join(workRoot, 'completion-bin')
+      mkdirSync(completionBin, { recursive: true, mode: 0o700 })
+      writeFileSync(
+        join(completionBin, 'workspace-command-host'),
+        '#!/bin/sh\nprintf "host-fixture-command\\n"\n',
+        { mode: 0o700, flag: 'wx' },
+      )
+      const basePath = env.PATH ?? process.env.PATH ?? '/usr/bin:/bin'
+      env.PATH = `${completionBin}:${basePath}`
+      env.WORKSPACE_COMPLETION_HOST = 'host-fixture'
+      delete env.WORKSPACE_COMPLETION_CLIENT
     }
     if (scenario !== undefined) {
       processC1Work = processC1Work ?? writeC1WorkFixture(scene.installation.profileDir, scene.workDir)
@@ -5036,6 +5060,7 @@ async function handleStartHost(message) {
     source,
     scenario: scenario ?? message.scenario,
     crashSignal,
+    shellCompletionLocality,
     workloadRoot,
     holdReleasePath,
     jobWorkRoot,
@@ -6393,6 +6418,26 @@ async function handleStartProcessClient(message) {
   const serializeBarrierPath = holdSerialize ? join(clientDir, 'serialize-hold.barrier') : undefined
   const workspaceIntentPath = invalidWorkspacePath ? join(clientDir, 'invalid-workspace') : undefined
   const readAuthorityRequestPath = readAuthorityProof ? join(clientDir, 'read-authority-request.json') : undefined
+  const clientShellCompletionLocality = host?.shellCompletionLocality === true
+    && startupStop === undefined
+    && expectedFailure === undefined
+    && terminalMode === 'normal'
+    && hmr === undefined
+    && !dropPromptAck
+    && !recovery
+    && !attach
+    && !fallbackProbe
+    && message.sessionId === undefined
+  let clientCompletionBin
+  if (clientShellCompletionLocality) {
+    clientCompletionBin = join(clientDir, 'completion-bin')
+    mkdirSync(clientCompletionBin, { recursive: true, mode: 0o700 })
+    writeFileSync(
+      join(clientCompletionBin, 'workspace-command-client'),
+      '#!/bin/sh\nprintf "client-fixture-command\\n"\n',
+      { mode: 0o700, flag: 'wx' },
+    )
+  }
   for (const barrier of [holdBarrier, startupBarrier, serializeBarrierPath, workspaceIntentPath]) {
     if (barrier !== undefined && existsSync(barrier)) {
       throw new Error(`START_PROCESS_CLIENT: the Supervisor-allocated barrier already exists: ${barrier}`)
@@ -6550,7 +6595,14 @@ async function handleStartProcessClient(message) {
     ...(readAuthorityProof ? { SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: readAuthorityRequestPath } : {}),
     ...(holdSerialize ? { SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE: serializeBarrierPath } : {}),
     ...(invalidWorkspacePath ? { SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH: workspaceIntentPath } : {}),
+    ...(clientCompletionBin === undefined
+      ? {}
+      : {
+          PATH: `${clientCompletionBin}:${scene.installation.base.env.PATH ?? process.env.PATH ?? '/usr/bin:/bin'}`,
+          WORKSPACE_COMPLETION_CLIENT: 'client-fixture',
+        }),
   }
+  if (clientCompletionBin !== undefined) delete env.WORKSPACE_COMPLETION_HOST
   let opened
   try {
     if (handle.owner !== undefined) {
@@ -6998,8 +7050,11 @@ const READ_AUTHORITY_TERMINALS = {
   read: ['facts', 'failed'],
   activity: ['activity-result', 'failed'],
   workspaces: ['workspaces-ended', 'workspaces-failed', 'failed'],
+  'directory-browse': ['directory-browse', 'directory-browse-rejected', 'failed'],
   'answer-continued': ['continued-answer', 'failed'],
 }
+const DIRECTORY_BROWSE_TARGETS = new Set(['home', 'fixture', 'missing', 'relative'])
+const DIRECTORY_BROWSE_INTERRUPTIONS = new Set(['caller', 'carrier'])
 const READ_AUTHORITY_WINDOWS = {
   activity: { warm: 3_000, cold: 4_000 },
   workspaces: {
@@ -7057,6 +7112,7 @@ function handleProcessClientReadAuthority(message) {
     read: ['op'],
     activity: ['op', 'window'],
     workspaces: ['op', 'window'],
+    'directory-browse': ['op', 'target', 'interruption'],
     'answer-continued': ['op', 'sessionId', 'callId'],
   }
   const unexpected = Object.keys(request).filter(key => !allowedFields[op].includes(key))
@@ -7078,6 +7134,52 @@ function handleProcessClientReadAuthority(message) {
     }
     const window = READ_AUTHORITY_WINDOWS.workspaces[request.window]
     payload = { op, ...window }
+  } else if (op === 'directory-browse') {
+    const { target, interruption } = request
+    if (typeof target !== 'string' || !DIRECTORY_BROWSE_TARGETS.has(target)) {
+      throw new Error('INPUT_UNQUALIFIED: directory-browse target is not declared')
+    }
+    if (interruption !== undefined
+      && (typeof interruption !== 'string' || !DIRECTORY_BROWSE_INTERRUPTIONS.has(interruption))) {
+      throw new Error('INPUT_UNQUALIFIED: directory-browse interruption must be caller or carrier')
+    }
+    if (interruption !== undefined && target !== 'fixture') {
+      throw new Error('INPUT_UNQUALIFIED: directory-browse interruption is allowed only for the fixture target')
+    }
+    const rawHostHome = scene.installation.base.env?.HOME
+    if (typeof rawHostHome !== 'string' || rawHostHome === '' || !existsSync(rawHostHome)) {
+      throw new Error('PROCESS_CLIENT_READ_AUTHORITY: the Scene Host HOME is unavailable')
+    }
+    const hostHome = realpathSync(rawHostHome)
+    const sceneRoot = realpathSync(scene.workDir)
+    const homeRel = relative(sceneRoot, hostHome)
+    if (homeRel === '..' || homeRel.startsWith(`..${sep}`) || isAbsolute(homeRel)) {
+      throw new Error('PROCESS_CLIENT_READ_AUTHORITY: the Scene Host HOME escapes the Scene root')
+    }
+    let browsePath
+    if (target === 'fixture') {
+      const candidate = join(hostHome, 'directory-probe')
+      if (existsSync(candidate)) {
+        const resolved = realpathSync(candidate)
+        const rel = relative(hostHome, resolved)
+        if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+          throw new Error('PROCESS_CLIENT_READ_AUTHORITY: directory-probe escapes the Scene Host HOME')
+        }
+        browsePath = resolved
+      } else {
+        browsePath = candidate
+      }
+    } else if (target === 'missing') {
+      browsePath = join(hostHome, 'directory-probe-missing')
+    } else if (target === 'relative') {
+      browsePath = 'directory-probe'
+    }
+    const abort = interruption === 'caller' ? true : interruption === 'carrier' ? 'drop' : undefined
+    payload = {
+      op,
+      ...(browsePath === undefined ? {} : { path: browsePath }),
+      ...(abort === undefined ? {} : { abort }),
+    }
   } else {
     const { sessionId, callId } = request
     if (typeof sessionId !== 'string' || sessionId === '' || sessionId.length > 200

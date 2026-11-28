@@ -50,6 +50,20 @@ export default defineConfig({
       },
       {
         test: {
+          name: 'split-process-optional',
+          include: ['test/integration/split-process/optional/**/*.vitest.ts'],
+          environment: 'node',
+          pool: 'forks',
+          maxWorkers: 2,
+          fileParallelism: true,
+          retry: 0,
+          testTimeout: 600_000,
+          hookTimeout: 120_000,
+          teardownTimeout: 60_000,
+        },
+      },
+      {
+        test: {
           name: 'split-upgrade',
           include: [
             'test/integration/split-upgrade/client-reload.vitest.ts',

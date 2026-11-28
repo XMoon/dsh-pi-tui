@@ -104,11 +104,17 @@ export type ProcessReadAuthorityRequest =
   | { readonly op: 'read' }
   | { readonly op: 'activity'; readonly window: 'warm' | 'cold' }
   | { readonly op: 'workspaces'; readonly window: 'peer-baseline' | 'stream' | 'recovering' }
+  | {
+      readonly op: 'directory-browse'
+      readonly target: 'home' | 'fixture' | 'missing' | 'relative'
+      readonly interruption?: 'caller' | 'carrier'
+    }
   | { readonly op: 'answer-continued'; readonly sessionId: string; readonly callId: string }
 
 export interface StartProcessHostOptions {
   scenario?: ProcessHostScenario
   crashSignal?: 'SIGHUP' | 'SIGKILL'
+  shellCompletionLocality?: true
   holdTool?: true
   holdChild?: true
   questionEligibility?: true
@@ -1430,6 +1436,7 @@ class ProcessScene implements SplitProcessScene {
     const payload = await this.request('START_HOST', {
       ...(options.scenario === undefined ? {} : { scenario: options.scenario }),
       ...(options.crashSignal === undefined ? {} : { crashSignal: options.crashSignal }),
+      ...(options.shellCompletionLocality === undefined ? {} : { shellCompletionLocality: options.shellCompletionLocality }),
       ...(options.holdTool === undefined ? {} : { holdTool: options.holdTool }),
       ...(options.holdChild === undefined ? {} : { holdChild: options.holdChild }),
       ...(options.questionEligibility === undefined ? {} : { questionEligibility: options.questionEligibility }),
