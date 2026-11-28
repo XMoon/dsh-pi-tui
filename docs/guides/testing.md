@@ -343,17 +343,6 @@ than silently skipped. Host/Client split-process development work may also run
 the lane manually against the actual candidate tarball and record the package
 SHA, DSH version, command, and PASS/FAIL (or `NOT_RUN`).
 
-A failed lane prints the REAL caught error (stack when available) by default;
-`SPLIT_PROCESS_SMOKE_KEEP=1` only preserves the temporary scene and no longer
-decides whether you can see the cause. Each lifecycle scope prints
-`[split] <ISO-UTC> START <step>`, then `DONE <step> durationMs=…` or
-`ERROR <step> durationMs=…`; the failure report records the failing scope as
-`failedStep` and keeps the named case/subscene scopes nested (for example
-`case/recovery.detached-turn-interactions/maintenance-sweep`). The structured
-`failure.json` retains the raw error message/stack; the Web credential
-redactor is applied only to Web-case scopes. `SPLIT_PROCESS_TRACE=<path>` still
-appends optional JSONL business facts and is not required to diagnose a failure.
-
 The lane has one command entry with a strict selector. The DEFAULT form (no
 selector) is the complete qualification of the DEFAULT LANE: it runs every
 registry case that is not marked selectable-only, in registry order, and emits
@@ -518,42 +507,23 @@ same preflight; a selected case installs nothing until that preflight has
 qualified the exact pin. The Upgrade Vitest projects run the same pair guard
 before their Scene root exists.
 
-A default Split Process run is diagnosable without any environment variable.
-The lane announces the qualified artifact identity at startup, one checkpoint
-per setup phase and per business milestone (for example the Web Product group,
-stale-peer and WP11 markers, so a long scene keeps default-visible interim
-progress), and one lifecycle scope per case and Recovery subscene:
-`[split] <ISO-UTC> START <scope>`, then `DONE <scope> durationMs=…` or
-`ERROR <scope> durationMs=…` (nested scopes print their own ERROR; the raw
-stack is printed once). On failure it prints a fixed summary plus the REAL
-caught error (its stack when available) and writes exactly one default-retained
-artifact — a `failure.json` in a fresh private directory under the OS temp root
-(directory `0700`, file `0600`), never inside the work root the lane deletes
-during cleanup. The report keeps the structural fields (lane, category, stable
-code, checkpoint, `failedStep`, assertion site, wait label, elapsed, target pin,
-artifact name/version/SHA, expected and observed notice, recent lifecycle
-entries, per-process exit and official event names) and appends the caught
-`error.name` / `message` / `stack`, bounded but UTF-8 intact, so the root cause
-does not disappear. A failed lane assertion is locatable through its own
-`<lane>.mjs:<line>` site, derived from the real stack, restricted to the lane
-scripts and their extracted case/support modules, and omitted entirely when
-nothing trusted can be read. The only code a report may name is one the lane
-declares; an unknown `error.code` leaves the entry at its category instead of
-becoming reported text, and a report write that fails is announced as
-`DIAGNOSTIC_WRITE_FAILURE` with its errno only — never turning a failure into a
-pass or blocking the cleanup. A passing run writes no report.
+A default Split Process run is diagnosable without extra environment variables.
+The lane prints the qualified candidate, scoped progress and the real caught
+error (including its stack when available). On failure it retains a private
+`failure.json` (0600 in a 0700 directory outside the disposable work root),
+with the failing scope and bounded diagnostics. A report-write failure
+is reported separately and never turns failure into success or prevents cleanup.
+A passing run writes no failure report.
 
-The only redaction applied to that text is the concrete Web credential policy:
-a failure whose `failedStep` is a `case/web.*` scope passes the existing
-redactor over the launch token, `token=` query value, Cookie/Set-Cookie/
-Authorization header and loopback origin before the terminal and the report.
-Non-Web scopes keep their real error text. The diagnostics never capture raw
-terminal bytes, record contents or session text on their own.
-
-`SPLIT_PROCESS_SMOKE_KEEP=1` preserves the isolated Process work root, which
-holds the real profile, session logs and private telemetry of the run; it does
-not gate whether the error text is visible. That directory stays local: never
-attach or upload it as evidence.
+The [diagnostics implementation](../../scripts/lib/split-smoke-diagnostics.mjs)
+owns the report format, trusted assertion sites, error codes and scoped
+credential redaction (Web and Account cases). Diagnostics do not collect raw
+terminal bytes, record contents or Session text on their own.
+`SPLIT_PROCESS_TRACE=<path>` enables optional JSONL business facts; it is not
+needed to see the failure. `SPLIT_PROCESS_SMOKE_KEEP=1` retains the private
+work root, not the error message. Keep that root local: never upload the
+profile, Session logs or private telemetry. Follow
+[retained failure artifact cleanup](#retained-failure-artifacts-investigate-then-clean-up).
 
 Record a lane result exactly as the lane reports it: the candidate package
 SHA256, the exact DSH pin, the command, and the PASS/FAIL with the checkpoint a
@@ -613,16 +583,17 @@ artifacts from genuinely different builds: `SPLIT_VITEST_UPGRADE_OLD_TGZ` and
 `@xmoon76/dsh-pi-tui`, declare a readable SemVer version and the same exact
 `@deepseek-ai/dsh-agent` development pin as this checkout; the default project
 requires different package versions and different SHA256 digests. The pair is
-qualified before any scene root, profile install or Host exists, and an invalid
-pairing fails as `INPUT_UNQUALIFIED`, not as a product regression. The default
-project runs the three default business files with `maxWorkers=2` and real file
-parallelism; it starts no native OS manager. The two native projects
+qualified before any Scene root, profile install or Host exists; an invalid
+pair is `INPUT_UNQUALIFIED`, not a product regression. The default project
+uses real file parallelism and starts no native manager. The native projects
 (`test:split:upgrade:systemd`, `test:split:upgrade:launchd`) are explicit
-opt-in entries only, each with `maxWorkers=1` in its own manager conflict
-domain: systemd needs an isolated Linux user manager, launchd a real macOS
-`gui/<uid>` LaunchAgent. A missing manager environment is a nonzero
-`NOT_VERIFIED`, never a skipped pass. An empty project run exits non-zero with
-no tests; that empty result is a truthful `NOT_READY`, never an Upgrade PASS.
+opt-in entries and serialize work in their own manager conflict domains.
+Systemd needs an isolated Linux user manager; launchd needs a real macOS
+`gui/<uid>` LaunchAgent. A missing manager is nonzero `NOT_VERIFIED`, not a
+skipped pass. Empty discovery is nonzero (`NOT_READY`), never an Upgrade PASS.
+[Vitest configuration](../../vitest.split.config.ts) and
+[package scripts](../../package.json) own project discovery, worker defaults
+and scheduling; do not maintain a second inventory here.
 
 ### Split-process business Project
 
@@ -640,17 +611,13 @@ inputs on Linux and macOS. It keeps optional locality checks (such as Client
 Git branch non-attribution in a live Remote Session) explicitly separated from
 the default business project.
 
-The bounded read-authority probe (`readAuthority`) also supports a fixed
-`directory-browse` mode over Supervisor-owned Host targets (`home`, `fixture`,
-`missing`, `relative`) with optional `caller` abort or `carrier` drop on the
-`fixture` target, settling on `directory-browse`, `directory-browse-rejected`,
-or correlated `failed` without accepting raw Worker paths. Where a native
-negative (such as an unreadable directory or refused Workspace proposal) cannot
-expose an internal RPC count in the PTY dropdown, the PTY lane records only a
-bounded sampled observation of the visible non-fallback state; decisive native
-negative settlement is `NOT_VERIFIED` because no current query completion seam
-is available. Lower-level Host/Remote contract tests own the
-`unavailable`-vs-empty and zero-dispatch boundaries.
+The bounded `readAuthority` probe includes directory browsing with typed,
+Supervisor-owned Host targets and caller/carrier interruption on the fixture
+target. See the [fixture contract](../../test/support/split-process-fixture.ts)
+for the supported requests. A sampled PTY non-fallback observation is not a
+decisive negative settlement when the surface exposes no query completion
+seam: record that boundary as `NOT_VERIFIED`. Lower-level Host/Remote contract
+tests own the unavailable-vs-empty and zero-dispatch proofs.
 
 The project carries two distinct kinds of evidence. The PTY anchors drive the
 real terminal surface; the non-PTY installed-entry qualification drives the
@@ -661,80 +628,48 @@ user journey and never claims a real GUI. The same-birth Linux zombie
 classification is a Linux-only case (explicit `N/A` on Darwin); Darwin uses the
 real dead-Host schema-2 recovery path instead of fabricating `/proc` state.
 
-Two further non-PTY contracts are fixed (Linux and macOS):
+Two further non-PTY contracts apply on Linux and macOS:
 
-- An in-flight authentication cancellation is keyed by the REAL pending
-  `/connect` request, never by a spawn timestamp or sleep. A test-owned loopback
-  origin holds the one expected real `/connect` transaction (the synthetic token
-  is not a product secret), the real installed Client is still unauthenticated
-  and has no Context/Ready/failure, then the test-owned SIGTERM reaches the
-  Supervisor. The Client must close within five seconds, close the held socket
-  and report the one shutdown cleanup, while the original Host and a real
-  already-mounted peer stay usable. The two <5s bounds are conservative
-  same-Worker monotonic measurements from the real request arrival and the
-  signal RPC to the awaited close, not exact OS exit timestamps.
-- A cross-home profile discovery uses ONE fixed alias `DSH_HOME` whose
-  `profiles/pi-tui` resolves to the SAME canonical installed profile: the scope
-  id (UID + canonical profile) is identical while the discovery root is
-  distinct. Its registry/launch/Host log must start absent. The real detached
-  Host candidate must record exactly the product `host-seat-conflict`
-  (`HOST_ALREADY_OWNED`, same scope) and no Ready/profile boot. The exact
-  conflict PID and its detached process group are the terminal authority even
-  when the short-lived candidate was never captured; a captured candidate is
-  bound to that same PID/birth. The Supervisor must settle the alias obligation
-  (real log, no publication, exact PID/group terminal, alias qualification seat
-  free, exact primary seat still held) before it releases the primary Host seat
-  or calls the Scene clean. An unproven alias terminal is `NOT_QUIESCED`, never
-  a pass. An abnormal abort may use the no-spawn branch only when the producer
-  is joined or positively never dispatched, the `ENOENT` Host log is strict and
-  no candidate was ever observed. For a joined producer the independent all-PID
-  scan must find no candidate; for a positively never-dispatched reservation it
-  must find no captured alias entry, because an unreadable unrelated PID cannot
-  be a candidate when no producer ever existed.
+- Authentication cancellation must start from an observed pending real
+  `/connect` request, before authentication/Context/Ready, not a spawn time or
+  sleep. The real unauthenticated Client receives SIGTERM and must close within
+  the five-second bounds measured from request arrival and signal dispatch,
+  release the held socket, report one shutdown cleanup, and leave the original
+  Host and mounted peer usable. Monotonic observations are not exact
+  OS exit timestamps.
+- Cross-home discovery uses a distinct `DSH_HOME` resolving the same canonical
+  profile and scope. It must refuse the competing Host with `HOST_ALREADY_OWNED`
+  and no Ready/profile boot. Prove the real conflict PID (same birth if captured)
+  and detached process/group terminality,
+  alias registry/launch absence and qualification seat free while the primary
+  Host seat remains held. An abnormal no-spawn conclusion requires a joined or
+  positively never-dispatched producer, strict absent Host log and no observed
+  candidate; independently exclude a candidate for a joined producer, or any
+  captured alias entry for a never-dispatched reservation. Unknown ownership
+  or terminality is `NOT_QUIESCED`, never a pass.
 
-The Session write/recovery, shared-session interaction, prompt-policy and
-detached-turn continuity owners use only declared Supervisor operations. The
-Supervisor allocates private public-launch workspace directories,
-startup/serialization barriers and installation-mutation targets; typed
-process-Client `home`/`cwd` remain Worker-supplied and Scene-validated. The
-Worker never supplies arbitrary environment, PIDs, RPC names or result
-envelopes. A declared Client business `SIGKILL` is a single exact business-PID
-signal, never a process-group or Host signal. Pre-ready stops and module-absence
-failures return terminal-only facts; they never expose a half-ready Client
-handle. A stale authenticated Peer result is derived by the Supervisor from that
-Peer's actual interaction/frame identity and sent once through the existing
-official result route.
+Use the existing [typed Process fixture](../../test/support/split-process-fixture.ts)
+and [Supervisor](../../test/support/split-host-supervisor.mjs), not a second
+resource owner. Worker paths and inputs remain Scene-validated; Workers never
+supply arbitrary environment, PIDs, RPC names, request files or raw result
+envelopes. Pre-ready failures expose terminal facts, not half-ready handles.
+Stale-peer results must originate from the actual authenticated interaction
+identity and use the official result route once.
 
-A declared read-authority probe is a bounded observation input, not a second
-reader: the Supervisor owns the per-Client request file and correlation nonce,
-accepts only typed operations with finite windows, and dispatches one `SIGUSR2`
-to the exact live business PID. A Worker never supplies a request path, raw
-JSON, PID, environment or generic signal for it, and a new operation is admitted
-only after the previous one reached its recorded terminal phase. A read result
-proves what the mounted official backend returned; retention, writes and answer
-admission need separate durable evidence. A correlated `failed` record is a
-settled probe outcome, not an in-flight request. A continued answer is admitted
-only for a Session/callId already present in that Client's successful official
-facts; the same observed pair may still reach the product's late-answer refusal.
+Read-authority requests use typed, bounded inputs, one Supervisor-owned nonce
+and one SIGUSR2 to the exact live business PID; require correlated terminal
+settlement before admitting another request. A correlated failure is a
+settled outcome, not a successful read. An observed read does not prove
+retention, writes or answer admission. Continued answers require a
+Session/callId actually observed by that Client; the product may still refuse
+a late answer.
 
-Destructive business probes use the same exact-PID/birth fence and one-shot
-admission as `SIGKILL`: a declared business `SIGHUP` may end as either a native
-signal or the wrapper's exit 129, but is never accepted as a normal client exit.
-A declared replacement-Host refusal is proved by the old Client's official
-identity-mismatch failure, clean shutdown inventory, native exit code 1 and a
-live authenticated successor Host in the same scope; an ordinary exit or forced
-kill is not that proof. Both modes remain owned by the Supervisor's close,
-reclaim and finalization path, and neither widens the generic signal or normal
-terminal contract.
-
-Two fixed external Worker-kill selectors cover the added lifecycle risks:
-`--case client-domain-absent` at `client-opened-before-ack`, and
-`--case stale-question-peer` at `qualification-client-spawned`. Each selector
-is bound to one exact business test and independently proves its live checkpoint
-before the single Worker kill. The former also proves exact module restoration;
-the latter proves the real Peer terminal. They reuse the existing
-`ABORTED_CLEAN`/seat/root audit and add no generic selector. An unrun selector is
-`NOT_RUN`, never a pass.
+Destructive business probes target the exact owned PID/birth once, never a
+guessed PID, Host or process group. A declared business SIGHUP may end with
+the native signal or wrapper exit 129, not normal exit. Replacement-Host
+refusal requires the official identity mismatch, clean shutdown, native exit
+1 and a live authenticated successor in the same scope, not a forced kill.
+The Supervisor owns close, reclaim and finalization throughout.
 
 It requires two private inputs:
 
@@ -825,12 +760,12 @@ SPLIT_VITEST_PNPM_CACHE_ROOT=/absolute/private/pnpm-cache \
   mise exec -- pnpm test:split:process
 ```
 
-The project's files run with real file parallelism. An explicit
-`SPLIT_VITEST_RUN_ID` together with the SAME value in
-`SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID` makes the files report a `parallel-ready`
-checkpoint and prove that the other real Scene's Worker (with its live Vitest
-parent edge), Host and Client kernel identities are live at the same time;
-select the project's files together and use a fresh private run root per round:
+The project's files run in parallel. To qualify actual overlap, select the
+paired files in a single Vitest invocation, use matching explicit run and
+audit IDs and a fresh private root. The proof is simultaneous live distinct
+Worker/Host/Client kernel identities with live Vitest parent edges, not the
+worker setting or a checkpoint alone.
+For the normal pair:
 
 ```sh
 SPLIT_VITEST_RUN_ID=process-overlap-r1 \
@@ -841,28 +776,13 @@ mise exec -- pnpm exec vitest run --config vitest.split.config.ts \
   test/integration/split-process/business/preset-defaults.vitest.ts
 ```
 
-The installed-public-entry anchor
-(`test/integration/split-process/business/public-daemon-entry.vitest.ts`) joins
-that same checkpoint explicitly. It drives the packed public
-`dsh --profile ...` CLI under a real PTY and proves the Direct default, the
-daemon cold start, public Session/preset/peer/alias/Settings paths, the public
-refusal boundary and the two-cold convergent launch on Linux and macOS arm64.
-The public Client is observed through the real OS process tree and the public
-daemon CLI, never an internal JSONL sink. Its cold anchor runs first in the
-file; the remaining public business cases run after the overlap.
-
-The public observation seam is test-only. The production kernel readers remain
-the single birth/liveness authority; the seam adds exact argv/env framing,
-controlling-tty facts and bounded enumeration, and one admission predicate is
-shared by normal, late and destructive callers. The opt-in authority control
-(`SPLIT_VITEST_PUBLIC_AUTHORITY_CONTROL=1`) drives fixed controlled
-parent/child/sibling processes through the real Supervisor; it never accepts an
-arbitrary command, PID or environment. The CLI-only TERM order proof lives in
-the same Supervisor handler as the real TERM: it samples the Client/CLI kernel
-identities immediately after the signal and fails a CLI-first or same-sample
-indeterminate outcome instead of inferring order from timestamps. Select both files in ONE Vitest invocation (the Worker parent-edge
-check requires one real Vitest main), set
-`SPLIT_VITEST_PARALLEL_AUDIT_PAIR=public-daemon-entry`, and use a fresh run id:
+The public-entry pair proves the real installed public CLI and its cold
+convergence on Linux and macOS arm64. Keep the public process-tree observation
+distinct from the internal JSONL entry. The test-only authority control
+(`SPLIT_VITEST_PUBLIC_AUTHORITY_CONTROL=1`) uses fixed owned processes, never
+arbitrary commands, PIDs or environment. The CLI-only TERM ordering must be
+proved from real kernel observations, not timestamp inference; CLI-first or
+indeterminate ordering fails. The fixture owns the supported pairings:
 
 ```sh
 SPLIT_VITEST_RUN_ID=public-overlap-r1 \
@@ -876,85 +796,53 @@ mise exec -- pnpm exec vitest run --config vitest.split.config.ts \
   test/integration/split-process/business/host-file-completion.vitest.ts
 ```
 
-`SPLIT_VITEST_PROCESS_PROBE_POINT` arms the fixed checkpoints the external
-probe uses; `SPLIT_VITEST_PROCESS_FAILURE_POINT` arms the three failure
-controls. A normal run sets neither. The external probe owns every
-kill/main-signal proof:
+The external [Supervisor signal probe](../../test/support/split-supervisor-signal-probe.mjs)
+owns abnormal process qualification. Use the same private inputs as the
+selected project, and leave probe/failure injection settings unset in normal
+runs. The probe source (`PROCESS_ATS`, `PROCESS_AT_TARGETS`,
+`PROCESS_CASE_TARGETS` and argument validation) defines the current windows,
+exact target tests and legal `--mode` / `--at` / `--case` combinations:
 
 ```sh
 mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-worker-kill --at <window>
 mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-main-signal --signal SIGTERM
 ```
 
-`<window>` is one of `bootstrap-install`, `host-spawned-before-ack`,
-`client-reserved-before-spawn`, `client-opened-before-ack`,
-`terminal-owner-client-opened-before-ack`, `clients-ready`, `fallback-host-ready`,
-`host-contenders-spawned`,
-`qualification-client-spawned`, `host-artifact-absent-started`,
-`identity-witness-spawned` (Linux only), `finalize-compensation-started`,
-`public-daemon-before-registry`, `public-daemon-before-ready-ack` and
-`public-daemon-ownership-refused`. The three public windows run on both Linux
-and macOS; the same-birth zombie window stays Linux-only.
-`--case cross-home-seat-refusal` is accepted ONLY together with
-`--mode process-worker-kill --at qualification-client-spawned`. It binds the
-host-seat cross-home refusal test (Linux and macOS) instead of the default
-startup/exit test and requires the same external kill to end in the
-alias-settlement/absence/seat facts below; any other case value or mode/at
-combination is refused.
-Each installed-entry window binds one exact business test and only holds after
-the Supervisor registered the real live child identities. `host-contenders-spawned`
-is the batch of concurrent Host contenders, `qualification-client-spawned` a
-registered live qualification Client against the authenticated Host (with the
-fixed cross-home case, its alias reservation is also registered and its
-registry/launch are still absent),
-`host-artifact-absent-started` a committed scoped installed-copy mutation with a
-live Host attempt, `identity-witness-spawned` the Linux holder registration
-window before its zombie child identity exists, and
-`finalize-compensation-started` the joined compensation of an intentionally
-failed FINALIZE while a registered Client/helper is still live. The
-`terminal-owner-client-opened-before-ack` window holds after the Supervisor
-registered the real PTY Owner, its native session, exact Owner/shell/business
-kernel identities and before the start acknowledgement; the Owner holds the
-`/dev/ptmx` master and the Supervisor holds none. Its external Worker kill must
-reclaim the Owner/helper/shell/business and reach the terminal `ABORTED_CLEAN`
-receipt. The ordinary terminal-owner loss proof is separate: the exact Owner
-SIGKILL leaves the Host PID/birth/instance live, the Client's kernel terminal is
-proven, and a fresh Client authenticates and exits against the same Host.
-`finalize-compensation-started` expects the compensated `NOT_QUIESCED` receipt and a retained diagnostic root;
-the other windows pass only with the terminal `ABORTED_CLEAN` receipt, the
-exact Host seat free, the registered kernel identities gone or
-provably reused, and — for `clients-ready` — a separate real sibling Scene
-already live at its authenticated checkpoint when the target is signalled,
-held across the target's reclaim, then released to continue its own business
-path and finalize. The `--case cross-home-seat-refusal` run additionally
-requires the settled cross-home facts: the recorded real conflict (or the
-admitted no-spawn branch), alias registry/launch absence, the alias
-qualification seat free, the primary seat held before release, and no live
-detached alias candidate after the root is removed. A checkpoint reached
-without an external signal fails; an unrun window is `NOT_RUN`, never a pass.
+Choose a declared window supported by the actual OS. The public-entry windows
+support Linux and macOS; the same-birth zombie window is Linux-only. A
+case-specific selection must use its declared mode/window pairing; for example:
 
-The two positive public windows bind the cold installed-public positive test
-(`starts one real public daemon Client and Host from the installed CLI`) on
-both platforms; `public-daemon-ownership-refused` binds the separate negative test
-(`refuses an unproven public Host ownership signal and compensates truthfully`).
-The `public-daemon-before-registry` hold is after the detached Host/CLI/Client
-are real but before the product registry is published. The external observer
-rechecks the exact registry absence and the live birth-bound CLI/Client/Host
-edge immediately before SIGKILL; if the registry is already published at that
-point the window is `NOT_VERIFIED`/STOP, never a forced pass. A registry that
-appears naturally after the trigger is handled by the ordinary bounded late
-material reconciliation and official Host authentication; there is no
-probe-owned registry-release flag or wait. The positive receipt must prove the
-startup/close handler settlement join, the same captured identities, native
-session/foreground/Host group terminality, both seats and material terminal,
-a complete root removal, and the external Worker exit.
-`public-daemon-before-ready-ack` holds after registry/authentication/surface but
-before the Client start acknowledgement. The ownership-refused negative control
-supplies a mismatched expected Host birth to the SAME destructive admission
-boundary used by ordinary reclaim: the admission must reject it before any
-TERM/KILL, the external probe must observe the same live target and no signal
-attempt, then the probe releases compensation; the final receipt is
-`NOT_QUIESCED` with a retained diagnostic root and a completed compensation.
+```sh
+mise exec -- node test/support/split-supervisor-signal-probe.mjs \
+  --mode process-worker-kill --at qualification-client-spawned --case cross-home-seat-refusal
+```
+
+A Worker-kill proof requires an independently observed real live checkpoint
+with registered identities and the actual external signal. A checkpoint alone
+or an unrun window is not a pass. Positive cleanup requires `ABORTED_CLEAN`,
+exact owned identities gone or provably reused, terminal owned groups and
+applicable native session, free seats, settled producers and removed root. In the sibling
+isolation window, the separate real Scene must remain live through target
+reclaim and then complete its own business and finalization. Terminal-owner
+loss requires the actual Owner/helper/shell/business reclaim; the normal
+terminal-owner loss case separately proves the Host survives and a fresh Client
+can authenticate. A module-absence or stale-peer window must also prove
+the actual module restoration or Peer terminal, respectively. Cross-home
+selection additionally requires the alias settlement/absence/seat facts
+described above.
+
+For public pre-registry qualification, the external observer must recheck
+natural registry absence and the live birth-bound CLI/Client/Host edge at
+the signal; a missed window is `NOT_VERIFIED`/STOP. Do not force publication
+ordering. The pre-ack window requires real authentication and surface
+readiness before the signal. Both require actual startup/close settlement,
+external Worker exit and the full resource terminal proof.
+
+The `finalize-compensation-started` and public ownership-refusal controls
+require truthful `NOT_QUIESCED` with retained diagnostic root and completed compensation,
+not `ABORTED_CLEAN`. The ownership-refusal control must reject mismatched
+birth at the actual destructive admission boundary before any signal,
+and independently observe the original live target before compensation.
 A receipt that claims a signal attempt, loses the live target, or does not
 complete the compensation is not this negative control's pass.
 
