@@ -389,10 +389,13 @@ function main() {
       symlinkSync(extracted, nativePackageLink, 'dir')
       writeFileSync(join(nativeConsumer, 'package.json'), '{"type":"module"}\n')
       writeFileSync(join(nativeConsumer, 'index.ts'), [
-        "import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '@xmoon76/dsh-pi-tui/native-client'",
+        "import { attachNativeClient, NATIVE_CLIENT_API_VERSION, type NativeSession } from '@xmoon76/dsh-pi-tui/native-client'",
         'const version: 1 = NATIVE_CLIENT_API_VERSION',
+        'declare const session: NativeSession',
+        'async function readSkills() { return await session.skills() }',
         'void attachNativeClient',
         'void version',
+        'void readSkills',
         '',
       ].join('\n'))
       const nativeImport = spawnSync(process.execPath, ['--input-type=module', '-e', [
@@ -749,10 +752,13 @@ function main() {
           check('installed Native Client imports through its public subpath',
             installedImport.status === 0, installedImport.stderr.trim())
           writeFileSync(join(probeDir, 'native-client-types.mts'), [
-            "import { attachNativeClient, NATIVE_CLIENT_API_VERSION } from '@xmoon76/dsh-pi-tui/native-client'",
+            "import { attachNativeClient, NATIVE_CLIENT_API_VERSION, type NativeSession } from '@xmoon76/dsh-pi-tui/native-client'",
             'const version: 1 = NATIVE_CLIENT_API_VERSION',
+            'declare const session: NativeSession',
+            'async function readSkills() { return await session.skills() }',
             'void attachNativeClient',
             'void version',
+            'void readSkills',
             '',
           ].join('\n'))
           const installedTsc = createRequire(import.meta.url).resolve('typescript/bin/tsc')

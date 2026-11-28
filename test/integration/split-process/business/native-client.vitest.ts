@@ -665,6 +665,11 @@ test('qualifies the installed Native Client business and interaction paths', { t
       try {
         client = await attach(scene, host)
         const { sessionId, session } = await createSession(scene, client, 'skill')
+        const skillCatalog = ok(await session.skills(), 'human skill catalog')
+        const nativeSkill = defined(skillCatalog.find(skill => skill.name === 'native-skill'), 'public native-skill descriptor')
+        expect(nativeSkill.description).toBe('Native candidate skill')
+        expect(nativeSkill).not.toHaveProperty('path')
+        expect(nativeSkill.modelInvocable).toBeTypeOf('boolean')
         const prompt = accepted(await session.prompt({ content: [{ type: 'text', text: 'native user skill' }] }), 'skill prompt')
         const call = await scene.waitForSessionEvent(sessionId, 0,
           event => event.type === 'tool/call' && event.data?.name === 'skill',
@@ -676,7 +681,10 @@ test('qualifies the installed Native Client business and interaction paths', { t
         expect(result.data?.message?.isError).not.toBe(true)
         expect(eventText(result)).toContain('NATIVE_SKILL_INSTRUCTIONS_MARKER')
         const terminal = await waitForPromptTerminal(scene, sessionId, prompt.requestId, 'skill prompt')
-        pass('user-skill', { sessionId, toolCallId: call.data?.callId, terminal })
+        pass('user-skill', { sessionId, toolCallId: call.data?.callId, terminal, skill: nativeSkill })
+        await session.close()
+        const afterClose = await session.skills()
+        expect(afterClose.kind, resultSummary(afterClose)).toBe('closed')
       } finally {
         await client?.close()
         await scene.stopHost(host)

@@ -20,6 +20,7 @@ import type {
   SessionEventEntry,
   SessionPageRequest,
   SessionProjectionsValue,
+  SkillEntry,
 } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { CommandDescriptor, CommandExecution } from '@deepseek-ai/dsh-commands/types'
 import type { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm/brand'
@@ -532,6 +533,14 @@ export interface NativeCommandDescriptor {
   readonly input?: { readonly hint: string; readonly attachments?: boolean }
 }
 
+/** One official human-invocable skill in the current owned Session. */
+export interface NativeSkillDescriptor {
+  readonly name: string
+  readonly description: string
+  readonly whenToUse?: string
+  readonly modelInvocable: boolean
+}
+
 export type NativeCommandResult =
   | { readonly kind: 'success'; readonly text?: string; readonly sourceEventSeq?: number }
   | { readonly kind: 'error'; readonly text: string }
@@ -623,6 +632,7 @@ export interface NativeSession {
   selectPermissionPreset(presetId: string): Promise<NativeResult<NativePermissionSelection>>
   selectPlanMode(active: boolean): Promise<NativeResult<NativePlanProjection>>
   commands(): Promise<NativeResult<readonly NativeCommandDescriptor[]>>
+  skills(): Promise<NativeResult<readonly NativeSkillDescriptor[]>>
   command(line: string): Promise<NativeResult<NativeCommandExecution | { readonly matched: false }>>
   readFile(input: NativeFileReadInput): Promise<NativeResult<NativeFileBytes>>
   readAttachment(attachment: NativeImageAttachmentRef): Promise<NativeResult<NativeStoredImage>>
@@ -1414,6 +1424,15 @@ function commandDescriptorOf(value: CommandDescriptor): NativeCommandDescriptor 
   }
 }
 
+function skillDescriptorOf(value: SkillEntry): NativeSkillDescriptor {
+  return {
+    name: value.name,
+    description: value.description,
+    ...value.whenToUse === undefined ? {} : { whenToUse: value.whenToUse },
+    modelInvocable: value.modelInvocable,
+  }
+}
+
 function commandExecutionOf(value: CommandExecution): NativeCommandExecution {
   return {
     commandId: value.commandId,
@@ -2147,6 +2166,17 @@ class OwnedNativeSession implements NativeSession {
       admission.generation,
       this.state.generation,
       value => value.map(commandDescriptorOf),
+    ))
+  }
+
+  async skills(): Promise<NativeResult<readonly NativeSkillDescriptor[]>> {
+    const admission = this.admission()
+    if ('kind' in admission) return admission
+    return await this.track(settleRead(
+      () => abortable(this.state.remote.skills.list({ sessionId: this.sessionId as SessionId }, admission.signal), admission.signal),
+      admission.generation,
+      this.state.generation,
+      value => value.skills.map(skillDescriptorOf),
     ))
   }
 
