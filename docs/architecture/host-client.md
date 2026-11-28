@@ -285,12 +285,13 @@ available on Windows over the same profile-scoped local endpoint (see
   and evolves separately from the wire protocol below. The same canonical
   profile directory shares one scope across workspaces and package builds; the
   Client cwd is not a scope input. Scope identity is independent of the installed
-   build fingerprint: read-only discovery and management of an already running
-   Host do not walk the package `dist`. Host self-publication, a new Client/reexec
-   target, a fresh service definition and a restart that must replace the Host
-   still materialize the strict build fingerprint and fail closed when its payload
-   is unreadable. A pruned current package therefore cannot invalidate an already
-   authenticated Host or be used to claim a new build is startable.
+  build fingerprint: read-only discovery and management decisions do not require
+  a successful package `dist` walk; `daemon status` may still perform a best-effort
+  diagnostic build comparison. Host self-publication, a new Client/reexec target,
+  a fresh service definition and a restart that must replace the Host still
+  materialize the strict build fingerprint and fail closed when its payload is
+  unreadable. A pruned current package therefore cannot invalidate an already
+  authenticated Host or be used to claim a new build is startable.
 - **Single Host seat, qualification-only Client seat.** The Host holds one
   platform kernel claim from before the profile Context exists until process
   termination: one abstract socket on Linux, one `O_EXLOCK` file descriptor on
