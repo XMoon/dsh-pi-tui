@@ -25,6 +25,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -500,6 +501,50 @@ export async function runAuthenticatedLifecycle(context) {
       authenticatedIdentity: identityResponse.status,
       generationId: c1Ready.generationId,
     })
+
+    // DS-05: the exact read-only workspace-object route must share the official
+    // admission fence. A positive owner request must reach the real Host stat;
+    // anonymous/forged requests with the SAME legal body must carry no object
+    // facts. This is not the separate workspace/create RPC below.
+    const workspaceObjectRoute = `${origin}/api/pi-tui.workspace-object`
+    const workspaceObjectBody = JSON.stringify({
+      instanceId: hostReady.localHost.instanceId,
+      path: registry.profileRealpath,
+    })
+    const workspaceObjectInit = {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: workspaceObjectBody,
+    }
+    const anonymousObject = await fetchStatus(workspaceObjectRoute, workspaceObjectInit)
+    assert([401, 403].includes(anonymousObject.status),
+      `DS-05 anonymous workspace-object returned ${String(anonymousObject.status)}`)
+    assert(!/device|inode|instanceId|application\/json/u.test(anonymousObject.body),
+      'DS-05 anonymous workspace-object leaked an object fact')
+    const forgedObject = await fetchStatus(workspaceObjectRoute, {
+      ...workspaceObjectInit,
+      headers: { ...workspaceObjectInit.headers, cookie: 'dsh_session=deadbeef' },
+    })
+    assert([401, 403].includes(forgedObject.status),
+      `DS-05 forged-Cookie workspace-object returned ${String(forgedObject.status)}`)
+    assert(!/device|inode|instanceId|application\/json/u.test(forgedObject.body),
+      'DS-05 forged-Cookie workspace-object leaked an object fact')
+    const hostObjectStat = statSync(registry.profileRealpath, { bigint: true })
+    const authenticatedObject = await fetchStatus(workspaceObjectRoute, {
+      ...workspaceObjectInit,
+      headers: { ...workspaceObjectInit.headers, cookie: validCookie },
+    })
+    assert(authenticatedObject.status === 200,
+      `DS-05 authenticated workspace-object returned ${String(authenticatedObject.status)}`)
+    const objectFacts = JSON.parse(authenticatedObject.body)
+    assert(objectFacts.schema === 1, 'DS-05 workspace-object schema mismatch')
+    assert(objectFacts.instanceId === hostReady.localHost.instanceId,
+      'DS-05 workspace-object answered for another instance')
+    assert(objectFacts.device === String(hostObjectStat.dev), 'DS-05 workspace-object device mismatch')
+    assert(objectFacts.inode === String(hostObjectStat.ino), 'DS-05 workspace-object inode mismatch')
+    trace('ds05-workspace-object', { anonymous: anonymousObject.status, forged: forgedObject.status, authenticated: authenticatedObject.status })
 
     // T06/WS1-06: the SAME admission fence must cover the Workspace Remote
     // namespace, not just the identity route. Each refusal below is decided by

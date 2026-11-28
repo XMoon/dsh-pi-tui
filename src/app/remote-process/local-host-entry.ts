@@ -418,20 +418,14 @@ interface HostScratchOwner {
 type LocalRequestInit = RequestInit & { readonly cache?: 'no-store' }
 
 /** Wait for one unauthenticated route to answer with the expected refusal. */
-async function waitForRefusal(
-  url: string,
-  timeoutMs = 10_000,
-  init: { readonly method?: string; readonly headers?: Record<string, string>; readonly body?: string } = {},
-): Promise<void> {
+async function waitForRefusal(url: string, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     try {
       const request: LocalRequestInit = {
-        method: init.method ?? 'GET',
+        method: 'GET',
         redirect: 'manual',
         cache: 'no-store',
-        ...(init.headers === undefined ? {} : { headers: init.headers }),
-        ...(init.body === undefined ? {} : { body: init.body }),
       }
       const response = await fetch(url, request)
       await response.body?.cancel()
@@ -2227,31 +2221,6 @@ async function publishLocalHost(
       methods: ['GET', 'POST'],
       requestBody: 'buffered',
       fetch: createLocalWebControlHandler(instanceId, webAccess),
-    })
-    // Admission runs before the exact routes; this proves every route sits
-    // behind the official Connection owner rather than a bare webserver
-    // handler. The POST probe uses the read-only `url` operation so a broken
-    // fence cannot toggle Web during publication.
-    await waitForRefusal(`${origin}/api/pi-tui.local-host`)
-    await waitForRefusal(`${origin}${LOCAL_WORKSPACE_OBJECT_ROUTE}`, 10_000, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ instanceId, path: scope.profileRealpath }),
-    })
-    await waitForRefusal(`${origin}${LOCAL_ACP_STATUS_ROUTE}`)
-    // The write probe carries a legal `enable` body under THIS instance so a
-    // broken Owner fence would actually toggle the listener: the following
-    // status/daemon verdicts are real business negatives, never a shape check.
-    await waitForRefusal(`${origin}${LOCAL_ACP_CONTROL_ROUTE}`, 10_000, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ schema: 1, instanceId, op: 'enable' }),
-    })
-    await waitForRefusal(`${origin}${LOCAL_WEB_CONTROL_ROUTE}`)
-    await waitForRefusal(`${origin}${LOCAL_WEB_CONTROL_ROUTE}`, 10_000, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ schema: 1, instanceId, op: 'url' }),
     })
     // The READY commit re-proves BOTH authorities immediately before the
     // registry becomes discoverable: the kernel process identity is still the
