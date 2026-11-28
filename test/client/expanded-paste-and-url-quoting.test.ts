@@ -1,12 +1,13 @@
 /**
  * Round-2 review regressions: outbound draft paths must carry EXPANDED
  * paste content (steer / getDraft / the external-editor suspend rollback)
- * and the Windows URL launcher must quote transcript-controlled URLs
- * against cmd.exe metacharacter injection.
+ * and the Windows URL launcher must carry transcript-controlled URLs only as
+ * Base64 data through a fixed PowerShell EncodedCommand.
  * @module @xmoon76/dsh-pi-tui/expanded-paste-and-url-quoting.test
  */
 
 import assert from 'node:assert/strict'
+import { Buffer } from 'node:buffer'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
@@ -103,11 +104,20 @@ test('a partially-applied suspend (stop throws mid-way) is rolled back to a runn
   app.stop()
 })
 
-test('openerFor quotes hostile URLs for cmd.exe (Windows injection guard)', () => {
-  const hostile = 'https://example.com/?a=1&b=2&c=<pipe>'
+test('openerFor carries hostile Windows URLs only as Base64 data through PowerShell EncodedCommand', () => {
+  const hostile = 'https://example.com/?a=1&b=%26&c="quoted"'
   const { command, args } = openerFor(hostile, 'win32')
-  assert.equal(command, 'cmd')
-  assert.deepEqual(args, ['/c', 'start', '', `"${hostile}"`], 'the URL must ride as ONE quoted token — & must never split commands')
+  assert.equal(command, 'powershell.exe')
+  assert.deepEqual(args.slice(0, 4), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand'])
+  assert.equal(args.length, 5)
+  assert.match(args[4]!, /^[A-Za-z0-9+/]+={0,2}$/u, 'the EncodedCommand payload must be Base64-only')
+  const script = Buffer.from(args[4]!, 'base64').toString('utf16le')
+  const urlData = /FromBase64String\('([A-Za-z0-9+/]+={0,2})'\)/u.exec(script)?.[1]
+  assert.ok(urlData !== undefined, 'the fixed script must carry one Base64 data literal')
+  assert.equal(Buffer.from(urlData, 'base64').toString('utf8'), hostile)
+  assert.ok(!script.includes(hostile), 'the raw URL must not become PowerShell source')
+  assert.ok(!script.includes('&'), 'query metacharacters must not enter the fixed script')
+  assert.ok(script.endsWith('Start-Process -FilePath $url -ErrorAction Stop'), 'the fixed script must request the default handler and fail truthfully')
 })
 
 test('openerFor passes the URL through on unix platforms', () => {

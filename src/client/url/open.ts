@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
 
 /**
@@ -33,17 +34,18 @@ export function openExternalUrl(rawUrl: string): void {
 }
 
 /**
- * The platform opener command line. WINDOWS INJECTION SAFETY (round-2
- * review P1): `cmd /c start` re-parses its command line with shell
- * metacharacter rules, so a transcript-controlled `&` in a query string
- * would split into a second COMMAND. The URL is therefore wrapped in
- * literal double quotes — the WHATWG URL serializer never emits a raw
- * quote/space/control character in href, so the quoted token cannot be
- * escaped — and cmd treats everything inside double quotes as literal.
+ * The platform opener command line. Windows carries the URL as Base64 data in a
+ * fixed PowerShell script, then carries that script as an EncodedCommand. The
+ * raw URL never enters cmd, a PowerShell source string or any log/diagnostic.
  */
 export function openerFor(href: string, platform: string = process.platform): { command: string; args: string[] } {
   if (platform === 'win32') {
-    return { command: 'cmd', args: ['/c', 'start', '', `"${href}"`] }
+    const urlData = Buffer.from(href, 'utf8').toString('base64')
+    const script = `$url = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${urlData}'))\r\nStart-Process -FilePath $url -ErrorAction Stop`
+    return {
+      command: 'powershell.exe',
+      args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+    }
   }
   if (platform === 'darwin') {
     return { command: 'open', args: [href] }
