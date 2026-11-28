@@ -176,7 +176,7 @@ function blockKinds(blocks: readonly FocusProjectedBlock[]): string[] {
 test('display preset resolution normalizes legacy values defensively', () => {
   assert.equal(resolveDisplayPreset({ focusMode: 'on' }).preset, 'focus')
   assert.equal(resolveDisplayPreset({ focusMode: 'off' }).preset, 'full')
-  assert.equal(resolveDisplayPreset({ focusMode: undefined }).preset, 'full')
+  assert.equal(resolveDisplayPreset({ focusMode: undefined }).preset, 'compact')
   assert.equal(resolveDisplayPreset({ focusMode: '' }).preset, 'full')
   assert.equal(resolveDisplayPreset({ focusMode: 'yes' }).preset, 'full')
   assert.equal(resolveDisplayPreset({ focusMode: 'ON' }).preset, 'full')
