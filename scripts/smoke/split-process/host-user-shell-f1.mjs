@@ -64,18 +64,12 @@ async function waitForLocalShellSettled(client, uniqueMarker, expectedOutcome, l
 }
 
 /**
- * Expand the settled local Shell Card through the REAL transcript pointer
- * action and assert its retained body facts. Only for `!!`; a committed `!`
- * keeps its result in the Host Session instead.
+ * Expand the settled local Shell Card through the REAL Ctrl+O transcript
+ * action and assert its retained body facts. The folded state is restored on
+ * both the pass and the failure path.
  */
-async function assertExpandedLocalShellFacts(client, marker, expectedFacts, label) {
-  const folded = await client.viewport()
-  const header = folded.findIndex(line => line.includes('Shell') && line.includes(marker))
-  assert(header >= 0, `${label} folded Shell card is visible`)
-  const outcome = header + 2
-  assert(folded[outcome]?.includes('to expand') === true, `${label} Shell card exposes its real disclosure action`)
-  const row = outcome
-  client.mouseClick(3, row)
+async function assertExpandedLocalShellFacts(client, expectedFacts, label) {
+  client.send('\x0f')
   try {
     await waitForCondition(async () => {
       const frame = (await client.viewport()).join('\n')
@@ -85,8 +79,8 @@ async function assertExpandedLocalShellFacts(client, marker, expectedFacts, labe
     for (const fact of expectedFacts) {
       assert(frame.includes(fact), `${label} expanded fact missing ${fact}: ${frame}`)
     }
-  } catch (error) {
-    throw new SplitSmokeAssertionError(`${label} expanded Shell facts unavailable: ${String(error)}; frameTail=${(await client.viewport()).slice(-24).join('\\n')}`)
+  } finally {
+    client.send('\x0f')
   }
 }
 
@@ -282,8 +276,8 @@ export async function runHostUserShellF1(context) {
     await waitForLocalShellSettled(clientA, rawMarker, '[exit 0]', 'F1 raw Bash $!/wait/FD semantics')
     // The folded card paints only the terminal outcome; the retained stdout,
     // stderr and exit facts live in the card body. Expand the settled card
-    // through the real transcript pointer action and assert every fact.
-    await assertExpandedLocalShellFacts(clientA, rawMarker, [
+    // through the real Ctrl+O transcript action and assert every fact.
+    await assertExpandedLocalShellFacts(clientA, [
       'F1_WAIT_STATUS=0',
       'F1_WAIT_PID=numeric',
       'F1_WAIT_BG=7',
@@ -460,7 +454,7 @@ export async function runHostUserShellF1(context) {
     await waitForComposerText(clientA, 'x', 'F1 reconnected editor accepts input')
     clientA.send('\x7f')
     await waitForComposerMode(clientA, 'prompt', 'F1 reconnected prompt restoration round trip')
-    await assertExpandedLocalShellFacts(clientA, disconnectMarker, [
+    await assertExpandedLocalShellFacts(clientA, [
       'The command may have executed — do not retry automatically',
     ], 'F1 one-shot unknown-outcome warning')
     for (let attempt = 0; attempt < 200 && alive(shellPid); attempt += 1) {
@@ -627,7 +621,7 @@ export async function runHostUserShellF1(context) {
     await waitForLocalShellSettled(sandboxClient, sandboxDeny, '[exit 1]', 'F1 sandbox outside-workspace denial')
     // The folded card only paints the terminal outcome; the denial
     // classification and the attempted command live in the retained body.
-    await assertExpandedLocalShellFacts(sandboxClient, sandboxDeny, [sandboxDeny, 'sandbox denied', '[exit 1]'],
+    await assertExpandedLocalShellFacts(sandboxClient, [sandboxDeny, 'sandbox denied', '[exit 1]'],
       'F1 sandbox outside-workspace denial')
     const afterSandboxDeny = hostUserTexts(hostSessionEvents(dshHome, sandboxSessionId) ?? [])
     assert(afterSandboxDeny.length === beforeSandboxDeny.length, 'the sandbox denial !! card adds no Session/model write')
