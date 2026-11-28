@@ -65,15 +65,21 @@ test('canonical persistence wins over legacy Focus for every recognized preset',
   })
 })
 
-test('legacy Focus migration maps on to Focus and everything else to Full', () => {
+test('legacy Focus migration maps on to Focus and other supplied values to Full', () => {
   assert.deepEqual(resolveDisplayPreset({ focusMode: 'on' }), {
     preset: 'focus', canonicalize: true, source: 'legacy-focus',
   })
-  for (const focusMode of ['off', '', 'ON', 'yes', undefined]) {
+  for (const focusMode of ['off', '', 'ON', 'yes']) {
     assert.deepEqual(resolveDisplayPreset({ focusMode }), {
       preset: 'full', canonicalize: true, source: 'legacy-full',
     })
   }
+})
+
+test('an absent display preference resolves to Compact', () => {
+  assert.deepEqual(resolveDisplayPreset({}), {
+    preset: 'compact', canonicalize: true, source: 'default',
+  })
 })
 
 test('one shared DisplayState drives the Focus prompt, TuiApp, and status projection', () => {
