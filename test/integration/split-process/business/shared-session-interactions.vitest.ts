@@ -604,7 +604,7 @@ test('keeps sibling Session writes separate and survives one Client exit', async
   }
 })
 
-test('recalls accepted Session input without reading or rewriting legacy history files', async () => {
+test('recalls accepted Session input without importing legacy history or modifying its files', async () => {
   const scene = await createSplitProcessScene()
   let primary: unknown
   try {
