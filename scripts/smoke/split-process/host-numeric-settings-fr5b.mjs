@@ -548,6 +548,7 @@ export async function runHostNumericSettingsFr5B(context) {
     await selectFrame(clientB, frame => selectedRow(frame, 'Shell execution'), 'FR5-B Shell row B')
     clientB.send('\r')
     await waitForPattern(clientB, /Settings · Tools · Shell execution/u, 'FR5-B Shell group B')
+    await waitForDetailPattern(clientB, /Command timeout/u, 'FR5-B Shell fields B hydrated')
     // B stages a divergent draft BEFORE A saves: the two pages hold the same
     // captured revision, so B's later Save must be refused, not rebased.
     await selectFrame(clientB, frame => selectedRow(frame, 'Command timeout'), 'FR5-B Shell timeout field B')
@@ -568,6 +569,7 @@ export async function runHostNumericSettingsFr5B(context) {
     `B must paint its candidate beside the served Current in exact SI display: ${JSON.stringify(bStagedDetail)}`)
     assertShellCaps(installation.profileDir, seededCaps, 'B local stage')
 
+    await waitForDetailPattern(clientA, /Command timeout/u, 'FR5-B Shell fields A hydrated')
     await selectFrame(clientA, frame => selectedRow(frame, 'Command timeout'), 'FR5-B Shell timeout field A')
     clientA.send('\r')
     await waitForText(clientA, 'Edit Command timeout (ms)', 'FR5-B Shell timeout input A')
@@ -584,6 +586,7 @@ export async function runHostNumericSettingsFr5B(context) {
       && /Current: 60 s · Unsaved/u.test(firstStageDetail),
     `A's first stage must paint the candidate beside the served Current in exact SI display: ${JSON.stringify(firstStageDetail)}`)
     assertShellCaps(installation.profileDir, seededCaps, 'A first local stage (both caps)')
+    await waitForDetailPattern(clientA, /Output cap per stream/u, 'FR5-B Shell cap field A hydrated')
     await selectFrame(clientA, frame => selectedRow(frame, 'Output cap per stream'), 'FR5-B Shell cap field A')
     clientA.send('\r')
     await waitForText(clientA, 'Edit Output cap per stream (bytes)', 'FR5-B Shell cap input A')
