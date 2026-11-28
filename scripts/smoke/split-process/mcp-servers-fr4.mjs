@@ -33,7 +33,7 @@
  * @module split-process/mcp-servers-fr4
  */
 
-import { appendFileSync, chmodSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -227,6 +227,9 @@ export async function runMcpServersFr4(context) {
   // patch — a layer BELOW the user document. The run's command-line overlay
   // would win over the user layer and make ConfigEditor refuse every write.
   const basePatch = join(context.installation.profilePackage, 'cordis.patch.yml')
+  const basePatchBefore = readFileSync(basePatch, 'utf8')
+  const userPatch = join(context.installation.profileDir, 'cordis.patch.yml')
+  const userPatchBefore = existsSync(userPatch) ? readFileSync(userPatch, 'utf8') : undefined
   appendFileSync(basePatch, [
     '',
     '- id: mcp-manager',
@@ -539,6 +542,11 @@ export async function runMcpServersFr4(context) {
     host = undefined
     return { status: 'PASS' }
   } finally {
+    // Both layers belong to the shared packed Profile. Restore them so later
+    // full-lane cases do not inherit configured MCP tool names.
+    writeFileSync(basePatch, basePatchBefore, { mode: 0o600 })
+    if (userPatchBefore === undefined) rmSync(userPatch, { force: true })
+    else writeFileSync(userPatch, userPatchBefore, { mode: 0o600 })
     if (clientB !== undefined) await clientB.dispose().catch(() => {})
     if (client !== undefined) await client.dispose().catch(() => {})
     await httpFixture.close().catch(() => {})
