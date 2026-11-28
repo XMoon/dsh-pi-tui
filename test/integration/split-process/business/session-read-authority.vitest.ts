@@ -46,7 +46,8 @@ function messageText(message: Record<string, any> | undefined): string {
 
 function composerDraft(frame: string): string | undefined {
   const lines = frame.split('\n')
-  const marker = lines.findLastIndex(line => line.trimStart().startsWith('❯'))
+  const marker = lines.findLastIndex(line => line.trimStart().startsWith('❯')
+    && !line.includes('[connection]'))
   if (marker < 0) return undefined
   const at = lines[marker]!.indexOf('❯')
   return lines[marker]!.slice(at + '❯'.length).trim()
@@ -58,15 +59,26 @@ async function waitForComposerDraft(
   label: string,
   timeoutMs = 120_000,
 ): Promise<void> {
-  const matches = (draft: string | undefined): boolean => expected === ''
-    // An empty editor paints `……`, and the marker can be absent while idle.
-    ? draft === undefined || draft === '' || /^…{1,2}$/u.test(draft)
-    : draft === expected
   const started = Date.now()
   let last: string | undefined
   for (;;) {
     last = composerDraft(await client.text())
-    if (matches(last)) return
+    if (expected === '') {
+      // A defined marker is the positive current-editor-seat control: `undefined`
+      // means an overlay/transition, while `……` is the painted empty placeholder.
+      if (typeof last === 'string' && (last === '' || /^…{1,2}$/u.test(last))) {
+        const seat = await client.waitForSurfaceStatus(record => record.transport === 'connected'
+          && record.surfaceMounted === true, `${label}: current editor seat`,
+        Math.max(1, timeoutMs - (Date.now() - started)))
+        expect(seat.transport, `${label}: current seat transport`).toBe('connected')
+        expect(seat.surfaceMounted, `${label}: current surface is not mounted`).toBe(true)
+        last = composerDraft(await client.text())
+        if (typeof last === 'string' && (last === '' || /^…{1,2}$/u.test(last))) return
+        continue
+      }
+    } else if (last === expected) {
+      return
+    }
     if (Date.now() - started >= timeoutMs) {
       throw new Error(`${label}: the composer did not hold ${JSON.stringify(expected)} (observed ${JSON.stringify(last)})`)
     }
@@ -128,7 +140,8 @@ function expectNoNewHostEvents(
   boundary: number,
   label: string,
 ): void {
-  expect(eventCount(scene, sessionId), `${label}: the read wrote a durable Host event`).toBe(boundary)
+  const events = scene.sessionEvents(sessionId) ?? []
+  expect(events.length, `${label}: the read wrote durable Host events ${JSON.stringify(events.slice(boundary).map(event => event.type))}`).toBe(boundary)
 }
 
 function factOf(record: ProbeRecord, sessionId: string, label: string): ProbeRecord {
@@ -307,6 +320,7 @@ test('reads another Session without retaining it or admitting its Question', asy
     await waitFrame(clientB, '[1] Proceed', 'B paints the live Question')
 
     const writeBoundary = eventCount(scene, sessionX)
+    const yWriteBoundary = eventCount(scene, sessionY)
     const sessionIdsBefore = await scene.sessionIds()
     await expect(scene.request('PROCESS_CLIENT_READ_AUTHORITY', {
       clientId: clientA.clientId, request: { op: 'write' },
@@ -330,29 +344,6 @@ test('reads another Session without retaining it or admitting its Question', asy
         clientId: clientA.clientId, request: { op: 'workspaces', window: inheritedWindow },
       })).rejects.toThrow(/workspaces window/u)
     }
-    const failedDispatch = await clientA.readAuthority({
-      op: 'answer-continued', sessionId: 'missing-session', callId: 'missing-call',
-    })
-    const failed = await waitProbePhases(clientA, failedDispatch.nonce,
-      ['continued-answer', 'failed'], 'rejected continued answer')
-    expect(failed.phase, 'a rejected continued answer did not reach the official failed terminal').toBe('failed')
-    const recovered = await readFacts(clientA, 'A reads after the rejected continued answer')
-    expect(recovered.openSessionId, 'the rejected answer changed the current Session').toBe(sessionY)
-    const reloadClient = await scene.startClient({
-      label: 'reload-refusal', ...clientDirectories(scene, 'reload-refusal'), readAuthorityProof: true,
-    })
-    await expect(reloadClient.type('/reload-client')).rejects.toThrow(/printable text without a leading slash/u)
-    await expect(reloadClient.submit('/reload-client')).rejects.toThrow(/bounded text/u)
-    await expect(reloadClient.type('\r')).rejects.toThrow(/printable text without a leading slash/u)
-    await expect(reloadClient.press('Return')).rejects.toThrow(/rejects key/u)
-    await expect(reloadClient.press('/')).rejects.toThrow(/rejects key/u)
-    await reloadClient.type('reload-cli')
-    await expect(reloadClient.press('e', 'n', 't', 'Enter'))
-      .rejects.toThrow(/rejects mixed-key Enter batches/u)
-    await reloadClient.press('Ctrl+U')
-    await waitForComposerDraft(reloadClient, '', 'mixed reload batch left no draft', 30_000)
-    await exitByDeclaredSignal(reloadClient, 'reload refusal Client')
-
     const read = await readFacts(clientA, 'A reads the pending Session from Y')
     expect(read.openSessionId, 'A was no longer on Y').toBe(sessionY)
     expect(read.sessionOpen, 'A had no open Session').toBe(true)
@@ -371,6 +362,7 @@ test('reads another Session without retaining it or admitting its Question', asy
       'the two-Session corpus unexpectedly contained a child row').toBe(true)
     expect((await clientA.text()).includes('[1] Proceed'), 'A admitted another Session\'s Question').toBe(false)
     expectNoNewHostEvents(scene, sessionX, writeBoundary, 'read of the pending Question')
+    expectNoNewHostEvents(scene, sessionY, yWriteBoundary, 'read of the pending Question left Y untouched')
     expect(await scene.sessionIds(), 'the read created a Session').toEqual(sessionIdsBefore)
 
     const activityDispatched = await clientA.readAuthority({ op: 'activity', window: 'warm' })
@@ -394,12 +386,14 @@ test('reads another Session without retaining it or admitting its Question', asy
     expect(latest.rosterRevision, 'no separate roster revision').toBeTypeOf('number')
     expect(latest.revision, 'no separate Activity revision').toBeTypeOf('number')
     expectNoNewHostEvents(scene, sessionX, writeBoundary, 'incremental Activity observation')
+    expectNoNewHostEvents(scene, sessionY, yWriteBoundary, 'incremental Activity observation left Y untouched')
 
     const readAgain = await readFacts(clientA, 'A reads again after the observation')
     expectNotRetained(readAgain, sessionX, 'second read')
     expect(readAgain.generationId, 'the observation changed the Connection generation').toBe(read.generationId)
     expect(readAgain.openSessionId, 'A left Y').toBe(sessionY)
     expectNoNewHostEvents(scene, sessionX, writeBoundary, 'second read')
+    expectNoNewHostEvents(scene, sessionY, yWriteBoundary, 'second read left Y untouched')
 
     const navigateBoundary = eventCount(scene, sessionX)
     await submitKnown(clientA, `/resume ${sessionX}`, 'A navigates to the pending Session')
@@ -568,6 +562,7 @@ test('queues a continued Question reply for an unopened Session exactly once', a
       event => event.kind === 'after-timed-held' && event.sessionId === sessionX, 'continued Turn held')
 
     const heldBoundary = eventCount(scene, sessionX)
+    const heldBoundaryY = eventCount(scene, sessionY)
     const read = await readFactsUntil(clientA, record => {
       const fact = (record.facts ?? []).find((entry: ProbeRecord) => entry.sessionId === sessionX)
       return fact !== undefined && Array.isArray(fact.continuedQuestionCallIds)
@@ -579,6 +574,7 @@ test('queues a continued Question reply for an unopened Session exactly once', a
     expect(factX.attention, 'continued Question attention').toBe('question')
     expect(factX.attentionSourceState, 'continued Question authority state').toBe('known')
     expect(factX.pendingKinds, 'the timed-out Question still reports a Gateway pending').not.toContain('question')
+    expect(factX.continuedQuestionCallIds, 'the successful facts read did not publish the continued callId').toContain(callId)
     expectNoNewHostEvents(scene, sessionX, heldBoundary, 'read of the continued Question')
 
     const answerDispatched = await clientA.readAuthority({
@@ -608,6 +604,7 @@ test('queues a continued Question reply for an unopened Session exactly once', a
         && String(event.data?.source?.callId) === callId,
       'durable continued reply')
     expect(messageText(reply.data), 'the durable reply lost the Proceed answer').toContain('Proceed')
+    expectNoNewHostEvents(scene, sessionY, heldBoundaryY, 'continued reply left Y untouched')
 
     const replyBoundary = eventCount(scene, sessionX)
     const repeatDispatched = await clientA.readAuthority({
@@ -659,6 +656,16 @@ test('reads an unanswered continued Question after a clean Host restart without 
     const oldHostPid = host.ready.hostPid ?? host.ready.localHost?.hostPid
     const oldInstanceId = host.ready.localHost?.instanceId
     await scene.stopHost(host)
+    const originalEvents = scene.sessionEvents(sessionX) ?? []
+    const originalCall = originalEvents.find(event => event.type === 'tool/call'
+      && String(event.data?.callId) === callId)
+    expect(originalCall, 'the clean predecessor lost the original Question call').toBeDefined()
+    const originalTurn = originalCall!.data?.turn
+    expect(originalTurn, 'the original Question call has no Turn identity').toBeTypeOf('number')
+    expect(originalEvents.filter(event => event.type === 'tool/result'
+      && String(event.data?.message?.toolCallId) === callId), 'original Question result count').toHaveLength(1)
+    expect(originalEvents.filter(event => event.type === 'turn/end'
+      && event.data?.turn === originalTurn), 'original Question Turn end count').toHaveLength(1)
 
     const coldHost = await scene.startHost({ scenario: 'question' })
     expect(coldHost.ready.hostPid ?? coldHost.ready.localHost?.hostPid,
@@ -670,8 +677,8 @@ test('reads an unanswered continued Question after a clean Host restart without 
       readAuthorityProof: true,
     })
     expect(cold.ready.sessionOpen, 'the cold reader opened a Session at startup').toBe(false)
-    // The restarted Host owns a fresh session roster: locate the persisted
-    // Question by its durable tool/call identity, never by the pre-restart id.
+    // Locate the persisted Session through the restarted Host's real roster and
+    // durable call identity, then require that its identity did not migrate.
     const started = Date.now()
     let persistedSessionId: string | undefined
     while (Date.now() - started < 30_000) {
@@ -681,33 +688,39 @@ test('reads an unanswered continued Question after a clean Host restart without 
       await sleep(200)
     }
     expect(persistedSessionId, 'the restarted Host did not list the persisted continued Session').toBeTypeOf('string')
-    const coldSessionId = persistedSessionId as string
-    const coldReadBoundary = eventCount(scene, coldSessionId)
+    expect(persistedSessionId, 'the persisted Session identity changed across a clean Host restart').toBe(sessionX)
+    const coldReadBoundary = eventCount(scene, sessionX)
 
     const read = await readFactsUntil(cold, record => {
-      const fact = (record.facts ?? []).find((entry: ProbeRecord) => entry.sessionId === coldSessionId)
+      const fact = (record.facts ?? []).find((entry: ProbeRecord) => entry.sessionId === sessionX)
       return fact !== undefined && Array.isArray(fact.continuedQuestionCallIds)
         && fact.continuedQuestionCallIds.includes(callId)
     }, 'cold read of the persisted continued Question', 120_000)
-    rowOf(read, coldSessionId, 'cold persisted Session row')
-    const fact = factOf(read, coldSessionId, 'cold persisted continued fact')
+    rowOf(read, sessionX, 'cold persisted Session row')
+    const fact = factOf(read, sessionX, 'cold persisted continued fact')
     expect(fact.attention, 'cold continued attention').toBe('question')
     expect(fact.attentionSourceState, 'cold continued authority state').toBe('known')
     expect(fact.pendingKinds, 'the cold timed-out Question still reports a Gateway pending').not.toContain('question')
-    expectNotRetained(read, coldSessionId, 'cold read of the persisted Question')
-    expect((scene.sessionEvents(coldSessionId) ?? []).filter(event => event.type === 'tool/call'
-      && String(event.data?.callId) === callId), 'the cold Session was migrated or re-triggered').toHaveLength(1)
+    expectNotRetained(read, sessionX, 'cold read of the persisted Question')
 
     const activityDispatched = await cold.readAuthority({ op: 'activity', window: 'cold' })
     expect(activityDispatched.op, 'wrong cold activity dispatch').toBe('activity')
     const activity = await waitProbe(cold, activityDispatched.nonce, 'activity-result', 'cold Activity result')
     const snapshot = (activity.snapshots ?? []).find((entry: ProbeRecord) =>
-      (entry.facts ?? []).some((item: ProbeRecord) => item.sessionId === coldSessionId
+      (entry.facts ?? []).some((item: ProbeRecord) => item.sessionId === sessionX
         && Array.isArray(item.continuedQuestionCallIds) && item.continuedQuestionCallIds.includes(callId)))
     expect(snapshot, 'cold Activity never published the continued fact').toBeDefined()
     expect(snapshot.rosterRevision, 'cold Activity carries no roster revision').toBeTypeOf('number')
     expect(snapshot.revision, 'cold Activity carries no Activity revision').toBeTypeOf('number')
-    expectNoNewHostEvents(scene, coldSessionId, coldReadBoundary, 'cold read and Activity observation')
+    expectNoNewHostEvents(scene, sessionX, coldReadBoundary, 'cold read and Activity observation')
+    const coldEvents = scene.sessionEvents(sessionX) ?? []
+    expect(coldEvents, 'cold startup, read or Activity rewrote the original Session history').toEqual(originalEvents)
+    expect(coldEvents.filter(event => event.type === 'tool/call'
+      && String(event.data?.callId) === callId), 'the cold Session was migrated or re-triggered').toHaveLength(1)
+    expect(coldEvents.filter(event => event.type === 'tool/result'
+      && String(event.data?.message?.toolCallId) === callId), 'the cold Question result was rewritten').toHaveLength(1)
+    expect(coldEvents.filter(event => event.type === 'turn/end'
+      && event.data?.turn === originalTurn), 'the cold Question Turn terminal was rewritten').toHaveLength(1)
 
     await exitByDeclaredSignal(cold, 'cold reader')
     await scene.stopHost(coldHost)
@@ -734,6 +747,7 @@ test('follows Host Workspace membership across a replaced carrier without adopti
     })
     expect(clientB.ready.sessionOpen, 'the peer opened a Session of its own').toBe(false)
 
+    const streamYBoundary = eventCount(scene, sessionY)
     const streamDispatched = await clientA.readAuthority({ op: 'workspaces', window: 'stream' })
     expect(streamDispatched.op, 'wrong membership stream dispatch').toBe('workspaces')
     await waitProbe(clientA, streamDispatched.nonce, 'workspaces-open', 'Host Workspace stream opened')
@@ -777,11 +791,19 @@ test('follows Host Workspace membership across a replaced carrier without adopti
       expect(updated, 'the replacement lost the original Workspace').toBeDefined()
       expect(updated.sessionIds, 'the replacement lost the new member').toContain(sessionX)
     }
+    // A newly created Session emits its own permission/sandbox/approval policy
+    // projections asynchronously. Wait for those authoritative initialization
+    // facts before measuring whether the stream/read writes anything else.
+    await scene.waitForSessionEvent(sessionX, 0, event => event.type === 'permission/preset',
+      'new Session permission preset initialized')
+    await scene.waitForSessionEvent(sessionX, 0, event => event.type === 'sandbox/mode',
+      'new Session sandbox mode initialized')
+    await scene.waitForSessionEvent(sessionX, 0, event => event.type === 'approval/policy',
+      'new Session approval policy initialized')
+    const streamXBoundary = eventCount(scene, sessionX)
     await waitProbe(clientA, streamDispatched.nonce, 'workspaces-ended', 'Host Workspace stream ended',
       () => true, 150_000)
 
-    const yStreamBoundary = eventCount(scene, sessionY)
-    const xStreamBoundary = eventCount(scene, sessionX)
     const afterStream = await readFacts(clientA, 'A reads after the stream settled')
     expect(afterStream.openSessionId, 'A left the Session it created during the stream').toBe(sessionX)
     expectNotRetained(afterStream, sessionY, 'read after the Workspace stream')
@@ -789,9 +811,12 @@ test('follows Host Workspace membership across a replaced carrier without adopti
     // the product's current-surface contract, not an effect of the read probe.
     expect(retentionCount(rowOf(afterStream, sessionX, 'current Session row'), 'current Session row'),
       'A did not retain its own current Session').toBeGreaterThanOrEqual(1)
-    expectNoNewHostEvents(scene, sessionY, yStreamBoundary, 'Workspace stream read')
-    expectNoNewHostEvents(scene, sessionX, xStreamBoundary, 'Workspace stream read')
+    expectNoNewHostEvents(scene, sessionY, streamYBoundary, 'membership stream and read left Y untouched')
+    expectNoNewHostEvents(scene, sessionX, streamXBoundary,
+      'membership stream and read added no X event after Workspace membership increment')
 
+    const recoveringYBoundary = eventCount(scene, sessionY)
+    const recoveringXBoundary = eventCount(scene, sessionX)
     const recoveringDispatched = await clientA.readAuthority({ op: 'workspaces', window: 'recovering' })
     await waitProbe(clientA, recoveringDispatched.nonce, 'workspaces-open', 'recovering stream opened')
     const recoveringBaseline = await waitProbe(clientA, recoveringDispatched.nonce, 'workspaces-frame',
@@ -864,6 +889,8 @@ test('follows Host Workspace membership across a replaced carrier without adopti
     expect(afterReconnect.generationId, 'the post-reconnect read ran on the old generation').toBe(reconnected.generationId)
     expect(factOf(afterReconnect, sessionX, 'post-reconnect Session fact').attentionSourceState,
       'the post-reconnect read published no fact state').toBeDefined()
+    expectNoNewHostEvents(scene, sessionY, recoveringYBoundary, 'recovering stream and read left Y untouched')
+    expectNoNewHostEvents(scene, sessionX, recoveringXBoundary, 'recovering stream and read added no X event')
 
     await exitNormally(clientB, 'peer Workspace reader')
     await exitNormally(clientA, 'A Workspace reader')

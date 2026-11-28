@@ -178,6 +178,35 @@ function headerFacts(header: SessionEvent, label: string): Record<string, any> {
   return header as Record<string, any>
 }
 
+async function waitForAssistantText(
+  scene: SplitProcessScene,
+  sessionId: string,
+  afterIndex: number,
+  text: string,
+  label: string,
+): Promise<SessionEvent> {
+  return await scene.waitForSessionEvent(sessionId, afterIndex,
+    event => event.type === 'assistant/message' && assistantText(event) === text, label)
+}
+
+function conversationPrefix(events: SessionEvent[]): Array<Record<string, any>> {
+  return events.flatMap((event): Array<Record<string, any>> => {
+    if (event.type === 'turn/start') return [{ type: event.type, turn: event.data?.turn }]
+    if (event.type === 'user/message') {
+      return [{ type: event.type, text: userText(event), sourceKind: event.data?.source?.kind }]
+    }
+    if (event.type === 'assistant/message') return [{ type: event.type, text: assistantText(event) }]
+    if (event.type === 'turn/end') {
+      return [{ type: event.type, turn: event.data?.turn, reason: event.data?.reason }]
+    }
+    return []
+  })
+}
+
+function longTurnAnswer(sessionId: string, attempt: number): string {
+  return `long-turn answer ${String(attempt)} long-turn-${sessionId}`
+}
+
 function durableEventIndex(events: SessionEvent[], event: SessionEvent, label: string): number {
   const seq = (event as SessionEvent & { seq?: unknown }).seq
   expect(seq, `${label}: durable event has no sequence`).toBeTypeOf('number')
@@ -485,28 +514,61 @@ async function runCompletedPrefixCase(kind: 'fork' | 'rewind'): Promise<void> {
     const firstText = `${kind} prefix first`
     const secondText = `${kind} prefix second`
     const heldText = `${kind} held source prompt`
+    const firstWorkBoundary = fixtureHelpers.readC1WorkEvents(host.workloadRoot!).length
     const { sessionId: sessionX, seed } = await startHeldSession(scene, host, clientA, firstText, `${kind} first prefix`)
+    const firstHeld = await waitForWorkAfter(host, firstWorkBoundary,
+      event => event.kind === 'long-turn-held' && event.sessionId === sessionX,
+      `${kind} first prefix held`)
+    const firstAttempt = Number(firstHeld.attempt)
+    expect(firstAttempt, `${kind}: first prefix did not use the first per-session attempt`).toBe(1)
     const firstTurn = claimedTurn(scene.sessionEvents(sessionX) ?? [], seed, `${kind} first prefix Turn`)
     releaseHold(host)
-    await waitForTurnEnd(scene, sessionX, 0, firstTurn.turn, `${kind} first prefix completed`)
+    const firstEnd = await waitForTurnEnd(scene, sessionX, 0, firstTurn.turn, `${kind} first prefix completed`)
+    expect(firstEnd.data?.reason?.kind, `${kind}: first prefix did not complete normally`).toBe('completed')
+    const firstAnswerText = longTurnAnswer(sessionX, firstAttempt)
+    const firstAnswer = await waitForAssistantText(scene, sessionX, 0, firstAnswerText,
+      `${kind} first prefix assistant answer`)
+    expect(firstAnswer.data?.turn, `${kind}: first answer belongs to another Turn`).toBe(firstTurn.turn)
+    const firstCompletedCut = scene.sessionEvents(sessionX) ?? []
 
+    const secondWorkBoundary = fixtureHelpers.readC1WorkEvents(host.workloadRoot!).length
     const secondBoundary = scene.sessionEvents(sessionX)?.length ?? 0
     await clientA.submit(secondText)
     const secondMessage = await waitForUserMessage(scene, sessionX, secondBoundary,
       event => userText(event) === secondText, `${kind} second prefix accepted`)
+    const secondHeld = await waitForWorkAfter(host, secondWorkBoundary,
+      event => event.kind === 'long-turn-held' && event.sessionId === sessionX,
+      `${kind} second prefix attempt`)
+    const secondAttempt = Number(secondHeld.attempt)
+    expect(secondAttempt, `${kind}: second prefix did not use the next per-session attempt`)
+      .toBe(firstAttempt + 1)
     const secondTurn = claimedTurn(scene.sessionEvents(sessionX) ?? [], secondMessage, `${kind} second prefix Turn`)
-    await waitForTurnEnd(scene, sessionX, secondBoundary, secondTurn.turn, `${kind} second prefix completed`)
+    const secondEnd = await waitForTurnEnd(scene, sessionX, secondBoundary,
+      secondTurn.turn, `${kind} second prefix completed`)
+    expect(secondEnd.data?.reason?.kind, `${kind}: second prefix did not complete normally`).toBe('completed')
+    const secondAnswerText = longTurnAnswer(sessionX, secondAttempt)
+    const secondAnswer = await waitForAssistantText(scene, sessionX, secondBoundary, secondAnswerText,
+      `${kind} second prefix assistant answer`)
+    expect(secondAnswer.data?.turn, `${kind}: second answer belongs to another Turn`).toBe(secondTurn.turn)
+    const forkCompletedCut = scene.sessionEvents(sessionX) ?? []
 
     rehold(host, `${kind} held wave`)
     const heldWorkBoundary = fixtureHelpers.readC1WorkEvents(host.workloadRoot!).length
     const heldBoundary = scene.sessionEvents(sessionX)?.length ?? 0
     await clientA.submit(heldText)
-    await waitForWorkAfter(host, heldWorkBoundary,
+    const heldHeld = await waitForWorkAfter(host, heldWorkBoundary,
       event => event.kind === 'long-turn-held' && event.sessionId === sessionX,
       `${kind} source Turn held`)
+    const heldAttempt = Number(heldHeld.attempt)
+    expect(heldAttempt, `${kind}: held source did not use the next per-session attempt`)
+      .toBe(secondAttempt + 1)
     const heldMessage = await waitForUserMessage(scene, sessionX, heldBoundary,
       event => userText(event) === heldText, `${kind} held source occurrence`)
     const heldTurn = claimedTurn(scene.sessionEvents(sessionX) ?? [], heldMessage, `${kind} held source Turn`)
+    const heldAnswerText = longTurnAnswer(sessionX, heldAttempt)
+    expect(scene.sessionEvents(sessionX)?.slice(heldBoundary).some(event =>
+      event.type === 'assistant/message' && assistantText(event) === heldAnswerText),
+    `${kind}: held source answer existed before release`).toBe(false)
     expect(existsSync(holdPath(host)), `${kind}: source hold was released before ${kind}`).toBe(false)
 
     const clientB = await scene.startClient({
@@ -560,22 +622,43 @@ async function runCompletedPrefixCase(kind: 'fork' | 'rewind'): Promise<void> {
     expect(childHeader.isSeeded, `${kind}: child is not a seeded Session`).toBe(true)
     expect(childHeader.parentSession, `${kind}: child claimed a parent Session`).toBeUndefined()
     expect(childHeader.origin, `${kind}: child claimed a subagent origin`).toBeUndefined()
-    const childTexts = (scene.sessionEvents(childId) ?? [])
-      .filter(event => event.type === 'user/message').map(event => userText(event))
-    expect(childTexts.filter(text => text === firstText), `${kind}: child lost the first completed Turn`)
-      .toHaveLength(1)
+    const childEventsAtAdoption = scene.sessionEvents(childId) ?? []
+    const expectedPrefixCut = kind === 'fork' ? forkCompletedCut : firstCompletedCut
+    expect(conversationPrefix(childEventsAtAdoption),
+      `${kind}: child seeded prefix does not match the source completed-prefix content and terminals`)
+      .toEqual(conversationPrefix(expectedPrefixCut))
+    expect(childEventsAtAdoption.filter(event =>
+      event.type === 'session/end-seed' && event.data?.inherited === true),
+    `${kind}: child has no single inherited seed boundary`).toHaveLength(1)
+    const childPrefixAnswers = childEventsAtAdoption
+      .filter(event => event.type === 'assistant/message').map(event => assistantText(event))
+    expect(childPrefixAnswers.filter(text => text === firstAnswerText),
+      `${kind}: child lost the first completed assistant answer`).toHaveLength(1)
     if (kind === 'fork') {
-      expect(childTexts.filter(text => text === secondText), 'fork lost the latest completed Turn')
-        .toHaveLength(1)
+      expect(childPrefixAnswers.filter(text => text === secondAnswerText),
+        'fork lost the latest completed assistant answer').toHaveLength(1)
+      expect(childEventsAtAdoption.some(event => event.type === 'user/message'
+        && userText(event) === secondText), 'fork lost the latest completed prompt').toBe(true)
+      expect(childEventsAtAdoption.some(event => event.type === 'turn/end'
+        && event.data?.turn === secondTurn.turn && event.data?.reason?.kind === 'completed'),
+      'fork lost the latest completed Turn terminal').toBe(true)
     } else {
-      expect(childTexts.filter(text => text === secondText), 'rewind kept the selected Turn')
-        .toHaveLength(0)
+      expect(childPrefixAnswers.filter(text => text === secondAnswerText),
+        'rewind kept the truncated assistant answer').toHaveLength(0)
+      expect(childEventsAtAdoption.some(event => event.type === 'user/message'
+        && userText(event) === secondText), 'rewind kept the truncated selected prompt').toBe(false)
+      expect(childEventsAtAdoption.some(event => event.type === 'turn/end'
+        && event.data?.turn === secondTurn.turn), 'rewind kept the truncated Turn terminal').toBe(false)
+    }
+    expect(childEventsAtAdoption.some(event => event.type === 'user/message'
+      && userText(event) === heldText), `${kind}: child inherited the running source prompt`).toBe(false)
+    expect(childPrefixAnswers.filter(text => text === heldAnswerText),
+      `${kind}: child inherited the running source answer`).toHaveLength(0)
+    if (kind === 'rewind') {
       await waitForComposerDraft(clientA, secondText, 'rewind restored the selected prompt into the editor')
       await clientA.press('Ctrl+U')
       await waitForComposerDraft(clientA, '', 'rewind restored prompt cleared from the editor')
     }
-    expect(childTexts.filter(text => text === heldText), `${kind}: child inherited the running source Turn`)
-      .toHaveLength(0)
     expect(scene.sessionEvents(sessionX)?.slice(heldBoundary).some(event => event.type === 'turn/end'),
       `${kind}: source Turn ended before the hold was released`).toBe(false)
     expect(existsSync(holdPath(host)), `${kind}: source hold was released by navigation`).toBe(false)
@@ -586,22 +669,39 @@ async function runCompletedPrefixCase(kind: 'fork' | 'rewind'): Promise<void> {
     const childBoundary = scene.sessionEvents(childId)?.length ?? 0
     const childWorkBoundary = fixtureHelpers.readC1WorkEvents(host.workloadRoot!).length
     await clientA.submit(childOwnText)
-    await waitForWorkAfter(host, childWorkBoundary,
+    const childHeld = await waitForWorkAfter(host, childWorkBoundary,
       event => event.kind === 'long-turn-held' && event.sessionId === childId,
       `${kind}: child prompt held`)
-    await waitForUserMessage(scene, childId, childBoundary,
+    const childAttempt = Number(childHeld.attempt)
+    expect(childAttempt, `${kind}: child did not start its own per-session attempt sequence`).toBe(1)
+    const childOwnMessage = await waitForUserMessage(scene, childId, childBoundary,
       event => userText(event) === childOwnText, `${kind}: child prompt committed`)
+    const childTurn = claimedTurn(scene.sessionEvents(childId) ?? [], childOwnMessage, `${kind}: child Turn`)
+    const childAnswerText = longTurnAnswer(childId, childAttempt)
 
     const sourceReleaseIndex = scene.sessionEvents(sessionX)?.length ?? 0
     releaseHold(host)
     const sourceEnd = await waitForTurnEnd(scene, sessionX, sourceReleaseIndex,
       heldTurn.turn, `${kind}: source Turn completed`)
     expect(sourceEnd.data?.reason?.kind, `${kind}: source Turn did not complete normally`).toBe('completed')
-    await waitFrame(clientB, 'long-turn answer 1', `${kind}: peer read the source completion`)
-    const childTurnEvent = await waitForUserMessage(scene, childId, childBoundary,
-      event => userText(event) === childOwnText, `${kind}: child occurrence after release`)
-    const childTurn = claimedTurn(scene.sessionEvents(childId) ?? [], childTurnEvent, `${kind}: child Turn`)
-    await waitForTurnEnd(scene, childId, childBoundary, childTurn.turn, `${kind}: child Turn completed`)
+    const heldAnswer = await waitForAssistantText(scene, sessionX, sourceReleaseIndex,
+      heldAnswerText, `${kind}: held source Turn produced its own assistant answer`)
+    expect(heldAnswer.data?.turn, `${kind}: held answer belongs to another Turn`).toBe(heldTurn.turn)
+    expect((scene.sessionEvents(sessionX) ?? []).filter(event =>
+      event.type === 'assistant/message' && assistantText(event) === heldAnswerText),
+    `${kind}: held source answer committed more than once`).toHaveLength(1)
+    await waitFrame(clientB, heldAnswerText, `${kind}: peer read the fresh held source answer`)
+    const childEnd = await waitForTurnEnd(scene, childId, childBoundary,
+      childTurn.turn, `${kind}: child Turn completed`)
+    expect(childEnd.data?.reason, `${kind}: child Turn did not complete normally`).toMatchObject({
+      kind: 'completed',
+    })
+    const childAnswer = await waitForAssistantText(scene, childId, childBoundary,
+      childAnswerText, `${kind}: child Turn produced its own assistant answer`)
+    expect(childAnswer.data?.turn, `${kind}: child answer belongs to another Turn`).toBe(childTurn.turn)
+    expect((scene.sessionEvents(childId) ?? []).filter(event =>
+      event.type === 'assistant/message' && assistantText(event) === childAnswerText),
+    `${kind}: child answer committed more than once`).toHaveLength(1)
     expect((scene.sessionEvents(sessionX) ?? []).some(event =>
       event.type === 'user/message' && userText(event) === childOwnText),
     `${kind}: child-only prompt leaked into the source Session`).toBe(false)

@@ -5630,6 +5630,10 @@ function assertHostReplacementRefusal(handle, reason) {
       || successor.ready.localHost?.instanceId === predecessor.ready?.localHost?.instanceId) {
       throw new Error(`${reason}: the successor Host is not a different authenticated live instance`)
     }
+    assertHostIdentityMatchesKernel(successor.ready.localHost, successor.child.pid, `${reason} successor Host`)
+    if (!pidAlive(successor.child.pid) || !processGroupAlive(hostPgid(successor))) {
+      throw new Error(`${reason}: the successor Host child/group is not live`)
+    }
     if (successor.ready.localHost?.scopeId !== predecessor.ready?.localHost?.scopeId) {
       throw new Error(`${reason}: the successor Host is not in the same scope`)
     }
@@ -5644,20 +5648,30 @@ function assertHostReplacementRefusal(handle, reason) {
     handle.replacementRefusalFacts = facts
   }
   const records = readOfficialClientRecords(handle.recordFile, handle.label)
-  const failure = records.find(record => record?.m4a0 === 'failure' && record.code === 'HOST_IDENTITY_MISMATCH')
-  if (failure === undefined) throw new Error(`${reason}: ${handle.label} has no HOST_IDENTITY_MISMATCH failure`)
-  const cleanup = records.find(record => record?.m4a0 === 'shutdown-stage' && record.phase === 'cleanup-complete')
+  const failures = records.filter(record => record?.m4a0 === 'failure' && record.code === 'HOST_IDENTITY_MISMATCH')
+  if (failures.length !== 1) throw new Error(`${reason}: ${handle.label} does not have exactly one HOST_IDENTITY_MISMATCH failure`)
+  const failure = failures[0]
+  const cleanups = records.filter(record => record?.m4a0 === 'shutdown-stage' && record.phase === 'cleanup-complete')
   // A replacement refusal is a truthful Client failure: cleanup must settle
   // with zero errors, but the cleanup record retains failure=true.
-  if (cleanup === undefined || cleanup.failure !== true || cleanup.errors !== 0) {
-    throw new Error(`${reason}: ${handle.label} has no clean shutdown cleanup-complete record after the refusal`)
+  if (cleanups.length !== 1 || cleanups[0].failure !== true || cleanups[0].errors !== 0) {
+    throw new Error(`${reason}: ${handle.label} has no unique clean shutdown cleanup-complete record after the refusal`)
   }
-  const closed = records.find(record => record?.m4b2s === 'client-closed')
-  if (closed === undefined) throw new Error(`${reason}: ${handle.label} has no final owner inventory`)
+  if (records.some(record => record?.m4a0 === 'cleanup-failure')) {
+    throw new Error(`${reason}: ${handle.label} recorded a cleanup failure`)
+  }
+  const closedRecords = records.filter(record => record?.m4b2s === 'client-closed')
+  if (closedRecords.length !== 1) throw new Error(`${reason}: ${handle.label} has no unique final owner inventory`)
+  const closed = closedRecords[0]
   for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
     if (closed.owners?.[owner] !== 0) {
       throw new Error(`${reason}: ${handle.label} left ${owner} owner alive after the refusal`)
     }
+  }
+  const failureIndex = records.indexOf(failure)
+  if (records.slice(failureIndex + 1).some(record => record?.m4b2s === 'surface-status'
+    && (record.sessionOpen === true || record.surfaceMounted === true))) {
+    throw new Error(`${reason}: ${handle.label} kept a Session or surface mounted after the refusal`)
   }
   if (records.some(record => record?.host?.instanceId === facts.successorInstanceId)) {
     throw new Error(`${reason}: ${handle.label} recorded the successor Host identity`)
@@ -6257,6 +6271,12 @@ async function handleStartProcessClient(message) {
   if ((privateRpcProof ? 1 : 0) + (readAuthorityProof ? 1 : 0) + (holdSerialize ? 1 : 0) > 1) {
     throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT private RPC, read authority and serializer probes are mutually exclusive')
   }
+  if (readAuthorityProof && invalidWorkspacePath) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT read authority excludes invalid Workspace probes')
+  }
+  if (readAuthorityProof && (recoverFromHostId !== undefined || attachRecoveredHostId !== undefined)) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT read authority excludes recovery and attach')
+  }
   if (hmr === 'hold' && terminalMode !== 'normal') {
     throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT HMR hold requires the normal terminal contract')
   }
@@ -6339,6 +6359,9 @@ async function handleStartProcessClient(message) {
     if (host.ready === undefined) throw new Error('START_PROCESS_CLIENT: the Scene Host is not ready')
     if (host.ready.localHost?.scopeId !== processScope?.scopeId) {
       throw new Error('START_PROCESS_CLIENT: the ready Host is not this Scene scope')
+    }
+    if (terminalMode === 'host-replacement-refusal' && host.crashSignal !== 'SIGKILL') {
+      throw new Error('START_PROCESS_CLIENT: host-replacement-refusal requires a declared SIGKILL predecessor')
     }
   }
   const domainAbsence = expectedFailure === 'client-domain-module-absent'
@@ -6855,48 +6878,6 @@ async function handleProcessClientInput(message) {
   if (handle.owner !== undefined) {
     throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_INPUT is not available on a terminal-owner-loss Client')
   }
-  if (handle.readAuthorityProof && input.type === 'type' && typeof input.text === 'string') {
-    if (READ_AUTHORITY_CONTROL_BYTE.test(input.text) || input.text.startsWith('/')) {
-      throw new Error('INPUT_UNQUALIFIED: read-authority type accepts printable text without a leading slash')
-    }
-  }
-  if (handle.readAuthorityProof && input.type === 'press' && Array.isArray(input.keys)
-    && input.keys.every(key => typeof key === 'string' && key !== '')) {
-    const enters = input.keys.filter(key => key === 'Enter')
-    if (enters.length > 0 && input.keys.length > 1) {
-      throw new Error('INPUT_UNQUALIFIED: a read-authority Client rejects mixed-key Enter batches')
-    }
-    if (enters.length === 0) {
-      for (const key of input.keys) {
-        const printable = /^[\x20-\x7e]$/u.test(key) && key !== '/'
-        if (!READ_AUTHORITY_SAFE_KEYS.has(key) && !printable) {
-          throw new Error(`INPUT_UNQUALIFIED: read-authority press rejects key ${JSON.stringify(key)}`)
-        }
-      }
-    }
-  }
-  if (handle.readAuthorityProof && input.type === 'submit') {
-    if (typeof input.text === 'string') {
-      const submitted = input.text.trim()
-      if (READ_AUTHORITY_CONTROL_BYTE.test(input.text)
-        || (submitted.startsWith('/') && !READ_AUTHORITY_SLASH_COMMAND.test(submitted))) {
-        throw new Error('INPUT_UNQUALIFIED: read-authority submit accepts only bounded text and /new, /resume or /exit')
-      }
-    }
-    const frame = await withProcessNativeOperation('client-read-authority-command-fence', handle.clientId,
-      () => handle.terminal.text())
-    if (frame.includes('reload-client')) {
-      throw new Error('INPUT_UNQUALIFIED: a read-authority Client rejects manual Client re-execution')
-    }
-  }
-  if (handle.readAuthorityProof && input.type === 'press' && Array.isArray(input.keys)
-    && input.keys.length === 1 && input.keys[0] === 'Enter') {
-    const frame = await withProcessNativeOperation('client-read-authority-command-fence', handle.clientId,
-      () => handle.terminal.text())
-    if (frame.includes('reload-client')) {
-      throw new Error('INPUT_UNQUALIFIED: a read-authority Client rejects manual Client re-execution')
-    }
-  }
   let body
   if (input.type === 'type') {
     if (typeof input.text !== 'string') {
@@ -7024,11 +7005,6 @@ const READ_AUTHORITY_WINDOWS = {
     recovering: { mode: 'recovering', windowMs: 120_000, maxFrames: 64 },
   },
 }
-const READ_AUTHORITY_SAFE_KEYS = new Set([
-  'Ctrl+U', 'Escape', 'Up', 'Down', 'Left', 'Right', 'Tab', 'Space', 'Backspace',
-])
-const READ_AUTHORITY_SLASH_COMMAND = /^\/(?:new|exit|resume\s+\S+)$/u
-const READ_AUTHORITY_CONTROL_BYTE = /[\u0000-\u001f\u007f]/u
 
 function assertPriorReadAuthoritySettled(handle) {
   if (handle.readAuthorityNonce === undefined) return
@@ -7039,6 +7015,17 @@ function assertPriorReadAuthoritySettled(handle) {
     && terminal.includes(record.phase))
   if (!settled) {
     throw new Error(`PROCESS_CLIENT_READ_AUTHORITY: ${handle.label} still has an unsettled ${handle.readAuthorityOp} request`)
+  }
+}
+
+function assertObservedContinuedPair(handle, sessionId, callId) {
+  const records = readOfficialClientRecords(handle.recordFile, handle.label)
+  const observed = records.some(record => record?.m4b2s === 'qualification'
+    && record.op === 'read-authority-proof' && record.phase === 'facts'
+    && Array.isArray(record.facts) && record.facts.some(fact => fact?.sessionId === sessionId
+      && Array.isArray(fact.continuedQuestionCallIds) && fact.continuedQuestionCallIds.includes(callId)))
+  if (!observed) {
+    throw new Error('INPUT_UNQUALIFIED: answer-continued requires a Session/callId already observed by this Client')
   }
 }
 
@@ -7094,6 +7081,7 @@ function handleProcessClientReadAuthority(message) {
       || typeof callId !== 'string' || callId === '' || callId.length > 200) {
       throw new Error('INPUT_UNQUALIFIED: answer-continued requires a bounded sessionId and callId')
     }
+    assertObservedContinuedPair(handle, sessionId, callId)
     payload = {
       op,
       sessionId,

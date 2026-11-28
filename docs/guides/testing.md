@@ -695,11 +695,9 @@ JSON, PID, environment or generic signal for it, and a new operation is admitted
 only after the previous one reached its recorded terminal phase. A read result
 proves what the mounted official backend returned; retention, writes and answer
 admission need separate durable evidence. A correlated `failed` record is a
-settled probe outcome, not an in-flight request. A read-authority Client has a
-bounded canonical input capability: raw control bytes, slash construction through
-`type`, non-allowlisted keys and mixed-key `Enter` batches are rejected, and slash
-`submit` is limited to `/new`, `/resume` and `/exit`. This keeps the qualification
-mode from leaking into a replacement process.
+settled probe outcome, not an in-flight request. A continued answer is admitted
+only for a Session/callId already present in that Client's successful official
+facts; the same observed pair may still reach the product's late-answer refusal.
 
 Destructive business probes use the same exact-PID/birth fence and one-shot
 admission as `SIGKILL`: a declared business `SIGHUP` may end as either a native

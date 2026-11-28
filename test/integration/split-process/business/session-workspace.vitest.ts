@@ -152,14 +152,15 @@ async function waitForComposerPrefix(
   }
 }
 
-/** An empty editor paints its `……` placeholder, never an empty string. */
+/** Empty means the real composer marker is painted with an empty value or its `……` placeholder. */
 async function waitForEmptyComposer(client: SplitProcessClient, label: string, timeoutMs = 30_000): Promise<void> {
   const started = Date.now()
   for (;;) {
     const draft = composerDraft(await client.text())
-    if (draft === undefined || draft === '' || /^…{1,2}$/u.test(draft)) return
+    // `undefined` means no composer marker (overlay/transition), never empty.
+    if (typeof draft === 'string' && (draft === '' || /^…{1,2}$/u.test(draft))) return
     if (Date.now() - started >= timeoutMs) {
-      throw new Error(`${label}: composer draft was still ${JSON.stringify(draft)}`)
+      throw new Error(`${label}: no painted empty composer; draft=${JSON.stringify(draft)}`)
     }
     await sleep(25)
   }
@@ -415,6 +416,22 @@ test('keeps Session Workspace read-only through activity refresh until a Session
     expectNoInteractionSettlement(scene, host, sessionX, workIndex, eventIndex, callId,
       'late Question arrival while a different Session is selected')
 
+    // Capture the actual durable and inventory boundary before either read-only
+    // surface opens. `openSessionId unchanged` is currentness evidence only;
+    // these cuts are the zero-write / no-extra-Session oracle.
+    const readerXEvents = durableEvents(scene, sessionX)
+    const readerYEvents = durableEvents(scene, sessionY)
+    const readerSessionInventory = new Set(await scene.sessionIds())
+    const readerGeneration = lastSurfaceStatus(clientA)?.generationId
+    expect(readerGeneration, 'A had no current generation before the Reader').toBeTypeOf('number')
+    const expectReadOnlyCut = async (phase: string): Promise<void> => {
+      expect(durableEvents(scene, sessionX), `${phase}: X durable log changed`).toEqual(readerXEvents)
+      expect(durableEvents(scene, sessionY), `${phase}: Y durable log changed`).toEqual(readerYEvents)
+      expect(new Set(await scene.sessionIds()), `${phase}: Session inventory changed`).toEqual(readerSessionInventory)
+      expect(lastSurfaceStatus(clientA)?.generationId, `${phase}: Client generation changed`).toBe(readerGeneration)
+      expect(lastSurfaceStatus(clientA)?.openSessionId, `${phase}: current Session changed`).toBe(sessionY)
+    }
+
     // Space pins the committed-transcript Reader to the selected row.
     await clientA.press('Space')
     await waitFrame(clientA, `Transcript · ${shortSessionId(sessionX)}`, 'pinned Reader header')
@@ -424,8 +441,10 @@ test('keeps Session Workspace read-only through activity refresh until a Session
     await waitFrame(clientA, `Transcript · ${shortSessionId(sessionX)}`, 'Enter stays inert in the Reader')
     expect(lastSurfaceStatus(clientA)?.openSessionId, 'Enter resumed a Session from the Reader').toBe(sessionY)
     expectNoInteractionSettlement(scene, host, sessionX, workIndex, eventIndex, callId, 'Enter inside the Reader')
+    await expectReadOnlyCut('Reader open after inert Enter')
     await clientA.press('Space')
     await waitFrameGone(clientA, 'Transcript ·', 'Space closed the Reader back to the list')
+    await expectReadOnlyCut('Reader closed')
 
     // F2 pins the read-only Inspector to the same typed row.
     await clientA.press('F2')
@@ -437,8 +456,10 @@ test('keeps Session Workspace read-only through activity refresh until a Session
     }
     expect(lastSurfaceStatus(clientA)?.openSessionId, 'an Inspector key resumed a Session').toBe(sessionY)
     expectNoInteractionSettlement(scene, host, sessionX, workIndex, eventIndex, callId, 'keys inside the Inspector')
+    await expectReadOnlyCut('Inspector open after inert keys')
     await clientA.press('Escape')
     await waitFrameGone(clientA, 'Session Inspector', 'Esc returned from the Inspector to the list')
+    await expectReadOnlyCut('Inspector closed')
 
     // Only the committed result-row Enter opens X and admits the same Question.
     await clientA.press('Enter')

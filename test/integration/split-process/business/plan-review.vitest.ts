@@ -60,29 +60,6 @@ async function waitFrameGone(client: SplitProcessClient, text: string, label: st
   }
 }
 
-async function waitFrameChange(client: SplitProcessClient, previous: string, timeoutMs = 5000): Promise<void> {
-  const started = Date.now()
-  for (;;) {
-    if ((await client.text()) !== previous) return
-    if (Date.now() - started >= timeoutMs) return
-    await sleep(25)
-  }
-}
-
-/** Return from a painted plan seat to the composer before a normal /exit. */
-async function leavePlanSeat(client: SplitProcessClient, label: string): Promise<void> {
-  const seatMarkers = ['Plan review ·', 'Request changes', 'Reading the submitted plan', 'Full review text']
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const frame = await client.text()
-    if (!seatMarkers.some(marker => frame.includes(marker))) return
-    await client.press('Escape')
-    await waitFrameChange(client, frame)
-  }
-  const frame = await client.text()
-  expect(seatMarkers.some(marker => frame.includes(marker)),
-    `${label}: the plan seat is still painted before exit`).toBe(false)
-}
-
 /** Scroll the real read-only plan viewport until its authored tail is painted. */
 async function revealPlanTail(client: SplitProcessClient, label: string): Promise<void> {
   for (let attempt = 0; attempt < 12; attempt += 1) {
@@ -152,15 +129,8 @@ async function enterPlanMode(
     event => event.type === 'plan/mode' && event.data?.active === true, `${label}: durable plan mode active`)
 }
 
-async function disposeScene(
-  scene: SplitProcessScene,
-  primary: unknown,
-  client: SplitProcessClient | undefined,
-): Promise<void> {
+async function disposeScene(scene: SplitProcessScene, primary: unknown): Promise<void> {
   try {
-    // A failed case can leave a plan decision/feedback/reading seat painted;
-    // /exit only reaches the main composer after those visible seats close.
-    if (client !== undefined && !client.closed) await leavePlanSeat(client, 'cleanup')
     await scene.dispose()
   } catch (cleanupError) {
     if (primary !== undefined) {
@@ -248,7 +218,7 @@ test('approves a reviewed plan only after returning from its read-only view', as
     primary = error
     throw error
   } finally {
-    await disposeScene(scene, primary, client)
+    await disposeScene(scene, primary)
   }
 })
 
@@ -312,15 +282,32 @@ test('returns plan feedback without leaving plan mode and accepts the next Turn'
       'plan feedback: genuine next Turn occurrence')
     const afterNext = scene.sessionEvents(sessionId) ?? []
     const nextIndex = eventIndex(afterNext, nextUser, 'plan feedback next occurrence')
-    await scene.waitForSessionEvent(sessionId, nextIndex,
+    const turnStartIndex = afterNext.slice(0, nextIndex).findLastIndex(event => event.type === 'turn/start')
+    expect(turnStartIndex, 'plan feedback: no authoritative Turn start precedes the next occurrence')
+      .toBeGreaterThanOrEqual(0)
+    const nextTurn = afterNext[turnStartIndex]?.data?.turn
+    expect(nextTurn, 'plan feedback: the next Turn start carries no numeric identity').toBeTypeOf('number')
+    expect(afterNext.slice(turnStartIndex + 1, nextIndex).some(event =>
+      event.type === 'turn/end' && event.data?.turn === nextTurn),
+    'plan feedback: the preceding Turn ended before the next occurrence was claimed').toBe(false)
+    const nextAnswer = await scene.waitForSessionEvent(sessionId, nextIndex,
       event => event.type === 'assistant/message' && messageText(event.data?.message).includes('next-step answer'),
       'plan feedback: next Turn answer')
-    await scene.waitForSessionEvent(sessionId, nextIndex,
-      event => event.type === 'turn/end', 'plan feedback: next Turn end')
+    const answerIndex = eventIndex(scene.sessionEvents(sessionId) ?? [], nextAnswer, 'plan feedback next answer')
+    const nextEnd = await scene.waitForSessionEvent(sessionId, answerIndex,
+      event => event.type === 'turn/end' && event.data?.turn === nextTurn,
+      'plan feedback: exact next Turn end')
+    expect(nextEnd.data?.reason?.kind, 'plan feedback: the next Turn completed normally').toBe('completed')
     const finalEvents = scene.sessionEvents(sessionId) ?? []
+    expect(eventIndex(finalEvents, nextEnd, 'plan feedback next Turn end'),
+      'plan feedback: the final cut does not include the real next Turn terminal').toBeGreaterThan(answerIndex)
     expect(finalEvents.filter(event => event.type === 'user/message'
       && messageText(event.data).includes(nextStepPlanMarker)),
     'plan feedback: the next-step occurrence is claimed once').toHaveLength(1)
+    expect(lastPlanMode(finalEvents), 'plan feedback: plan mode stays active through the next Turn terminal')
+      .toBe(true)
+    expect(finalEvents.some(event => event.type === 'plan/mode' && event.data?.active === false),
+      'plan feedback: no plan exit was written through the next Turn terminal').toBe(false)
 
     await client.exitGracefully()
     const exit = await client.close()
@@ -331,6 +318,6 @@ test('returns plan feedback without leaving plan mode and accepts the next Turn'
     primary = error
     throw error
   } finally {
-    await disposeScene(scene, primary, client)
+    await disposeScene(scene, primary)
   }
 })

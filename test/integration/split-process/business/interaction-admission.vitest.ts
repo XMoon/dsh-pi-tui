@@ -128,14 +128,15 @@ async function waitForComposerPrefix(
   }
 }
 
-/** An empty editor paints its `……` placeholder, never an empty string. */
+/** Empty means the real composer marker is painted with an empty value or its `……` placeholder. */
 async function waitForEmptyComposer(client: SplitProcessClient, label: string, timeoutMs = 30_000): Promise<void> {
   const started = Date.now()
   for (;;) {
     const draft = composerDraft(await client.text())
-    if (draft === undefined || draft === '' || /^…{1,2}$/u.test(draft)) return
+    // `undefined` means no composer marker (overlay/transition), never empty.
+    if (typeof draft === 'string' && (draft === '' || /^…{1,2}$/u.test(draft))) return
     if (Date.now() - started >= timeoutMs) {
-      throw new Error(`${label}: composer draft was still ${JSON.stringify(draft)}`)
+      throw new Error(`${label}: no painted empty composer; draft=${JSON.stringify(draft)}`)
     }
     await sleep(25)
   }
@@ -504,6 +505,7 @@ test('reoffers the same Approval after navigating away without deciding it', asy
       await startSharedApproval(scene, 'approval navigation reoffer')
     const workIndex = workEvents(host).length
     const eventIndex = durableEvents(scene, sessionX).length
+    const yEventsBeforeNavigation = durableEvents(scene, sessionY)
     const marker = join(host.workloadRoot!, 'approval-allow.marker')
 
     await enterNavigationHold(clientA, '[y] Allow once', 'A leaves the pending Approval')
@@ -517,9 +519,7 @@ test('reoffers the same Approval after navigating away without deciding it', asy
       event.type === 'tool/result' && String(event.data?.message?.toolCallId) === toolCallId),
     'navigating away produced an Approval result').toBe(false)
     expect(existsSync(marker), 'the approved command ran before the human decision').toBe(false)
-    expect(durableEvents(scene, sessionY).some(event =>
-      event.type === 'approval/asked' || event.type === 'approval/decided'),
-    'the empty Session published Approval activity').toBe(false)
+    expect(durableEvents(scene, sessionY), 'navigating to Y changed its durable log').toEqual(yEventsBeforeNavigation)
 
     await resumeSession(clientA, sessionX, 'A re-enters the pending Session')
     await waitFrame(clientA, '[y] Allow once', 'the same Approval is re-offered')
