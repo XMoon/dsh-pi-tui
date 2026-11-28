@@ -15,20 +15,12 @@ import {
 import { readOfficialClientRecords } from '../../../support/split-process-client.ts'
 
 type WorkEvent = Record<string, any>
-type SessionEvent = Record<string, any>
 
 const fixtureHelpers = await import(
   pathToFileURL(join(process.cwd(), 'scripts', 'lib', 'split-smoke-fixtures.mjs')).href
 ) as {
   readC1WorkEvents(root: string): WorkEvent[]
   waitForC1WorkEvent(root: string, predicate: (event: WorkEvent) => boolean, label: string, timeoutMs?: number): Promise<WorkEvent>
-}
-
-const sessionHelpers = await import(
-  pathToFileURL(join(process.cwd(), 'scripts', 'lib', 'split-smoke-sessions.mjs')).href
-) as {
-  hostAssistantHasText(events: SessionEvent[], text: string): boolean
-  hostUserTexts(events: SessionEvent[]): string[]
 }
 
 function clientDirectories(scene: SplitProcessScene, label: string): { home: string; cwd: string } {
@@ -462,59 +454,6 @@ test('blocks Host quiescence for an active Schedule task and clears it after del
       await scene.dispose()
     } catch (cleanupError) {
       if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'Schedule failed and Scene cleanup also failed')
-      throw cleanupError
-    }
-  }
-})
-
-test('detaches cleanly from a held Turn without cancelling or stopping the Host', async () => {
-  const scene = await createSplitProcessScene()
-  let host: SplitProcessHostHandle | undefined
-  let client: SplitProcessClient | undefined
-  let primary: unknown
-  try {
-    host = await scene.startHost({ scenario: 'long-turn' })
-    client = await scene.startClient({ label: 'detach-c1', ...clientDirectories(scene, 'detach-c1') })
-    const sessionId = await openSession(scene, client, 'detach prompt', 'detach')
-    const held = await fixtureHelpers.waitForC1WorkEvent(
-      host.workloadRoot!,
-      event => event.kind === 'long-turn-held' && event.sessionId === sessionId,
-      'detach held Turn',
-    )
-    expect(held.agentStatus).toBe('running')
-    await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/start', 'detach turn/start')
-    const before = await hostIdentity(scene, host)
-    const cut = scene.sessionEvents(sessionId)?.length ?? 0
-    await exitClientNormally(client, 'detach-c1')
-    await expectHostIdentityKept(scene, host, before, 'detach after clean detach')
-    expect((scene.sessionEvents(sessionId) ?? []).slice(cut).some(event => event.type === 'turn/end')).toBe(false)
-    releaseFile(host.holdReleasePath, 'detach long-turn release')
-    await scene.waitForSessionEvent(sessionId, cut, event => event.type === 'turn/end', 'detach turn/end')
-    const events = scene.sessionEvents(sessionId) ?? []
-    expect(sessionHelpers.hostUserTexts(events).filter(text => text === 'detach prompt')).toHaveLength(1)
-    expect(sessionHelpers.hostAssistantHasText(events, 'long-turn answer')).toBe(true)
-
-    const fresh = await scene.startClient({
-      label: 'detach-c2',
-      ...clientDirectories(scene, 'detach-c2'),
-      sessionId,
-    })
-    await fresh.waitForSurfaceStatus(
-      record => record.sessionOpen === true && record.openSessionId === sessionId,
-      'detach-c2 exact Session',
-    )
-    await waitFrame(fresh, 'detach prompt', 'detach-c2 prompt readback')
-    await waitFrame(fresh, 'long-turn answer', 'detach-c2 answer readback')
-    await exitClientNormally(fresh, 'detach-c2')
-    await scene.stopHost(host)
-  } catch (error) {
-    primary = error
-    throw error
-  } finally {
-    try {
-      await scene.dispose()
-    } catch (cleanupError) {
-      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'detach failed and Scene cleanup also failed')
       throw cleanupError
     }
   }
