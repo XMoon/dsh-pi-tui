@@ -167,6 +167,21 @@ test('a legacy document alone migrates into the canonical row and completes mark
   ])
 })
 
+test('legacy display opinions keep their historical mapping without pinning an absent preference', async () => {
+  for (const [fields, expected] of [
+    ['  theme: dark\n', undefined],
+    ['  focusMode: "off"\n', 'full'],
+    ['  focusMode: false\n', 'full'],
+    ['  displayPreset: invalid\n', 'full'],
+    ['  displayPreset: null\n', 'full'],
+    ['  displayPreset: full\n', 'full'],
+  ] as const) {
+    const h = withLegacy(harness(), `dsh-pi-tui:\n${fields}`)
+    await migrateProfileTuiPreferences(h.input())
+    assert.equal(h.writes[0]!.displayPreset, expected)
+  }
+})
+
 test('a single legacy Direct or Split profile USER value migrates without needing the row ACTIVE', async () => {
   const direct = await migrateProfileTuiPreferences(harness({ direct: { theme: 'dark', responseStyle: 'concise' } }).input())
   assert.equal(direct.status, 'migrated')
