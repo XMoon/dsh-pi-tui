@@ -332,22 +332,26 @@ is the pointer equivalent of the same action.
     Ctrl+Shift+F, a custom binding or a leader sequence.
 
 13. **A fullscreen Job workspace has fixed Job-local read-only verbs that
-    are NOT configurable action ids.** `v` opens the shell Command page
-    from the Output page and `C` (`shift+c`) copies the CURRENT reading
-    page's own source — the retained Output on the Output page, the
-    original command label on the Command page — through the existing
-    Client-local clipboard capability. They are component logic, not an
-    entry in `APP_KEYBINDINGS`: they take part in no conflict
-    classification, move with no remap and never shadow the global
-    Transcript, picker or editor bindings, which still own those letters
-    everywhere else. Their precedence inside the workspace is fixed: the
-    physical `Home`/`End` viewport keys and the effective Find binding are
-    matched FIRST (see 11/12 above), `tasks.stop` keeps its existing branch
-    BEFORE the two verbs, and in the search `NAVIGATE` state — and in
-    `EDIT`, where the query Input owns every printable key — all three are
-    inert and the Action Bar advertises none of them. The Command page
-    never advertises or dispatches Stop; `Esc` there is the page's own
-    return to Output, and only an Output-page `Esc` runs the close.
+    are NOT configurable action ids (`JOB_LOCAL_KEYS`).** `Tab` toggles
+    between the Output and Command pages in both directions, `F2` toggles the
+    Output page's passive multi-line Command Preview visibility, and `c` copies
+    the CURRENT reading page's own source — the retained Output on the Output
+    page, the original observed command label on the Command page — through the
+    existing Client-local clipboard capability (`v` is inert). They are
+    component logic, not entries in `APP_KEYBINDINGS`: they take part in no
+    conflict classification, move with no remap and never shadow the global
+    Transcript, picker or editor bindings everywhere else. `Home`, `End`, `Tab`
+    and `F2` are reserved from Job-scoped Find (`JOB_LOCAL_FIND_RESERVED_KEYS`):
+    direct Find remaps, leader Find completions and the live Find hint all
+    exclude them, and the panel consumes them BEFORE Find resolution. Higher-
+    priority Host `app.exit.request` direct bindings and an active leader
+    prefix keep their existing precedence in the Job input ladder; when `Tab`
+    or `F2` is preempted by either, the workspace omits its key badge while
+    keeping the corresponding mouse action live. `tasks.stop` keeps its
+    existing branch on Output BEFORE `c`; in search `NAVIGATE` and `EDIT`
+    modes, `Tab`/`F2`/`c`/Stop are inert and unadvertised. The Command page
+    never advertises or dispatches Stop; `Esc` there returns to Output, and
+    only an Output-page `Esc` (with Find inactive) closes the workspace.
 14. **The Host Editor `←←` Workspace entry is a contextual editor gesture,
     not a binding.** `left` stays in `EDITOR_OWNED_KEY_IDS`, so the first
     unclaimed Left always reaches the fork editor and a user remap or a

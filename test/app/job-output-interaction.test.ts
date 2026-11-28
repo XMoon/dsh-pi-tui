@@ -379,7 +379,7 @@ test('the real Job screen follows the tail, PgUp/Home/arrows really scroll the O
   assert.match(painted, /Follow on/)
   assert.match(painted, /Job · job-a · bash.*‣ Running/)
   assert.match(painted, /Back \[Esc\]/)
-  assert.equal(bodyTop(vt), 'line 165', 'the 35-row Output viewport starts at the retained tail')
+  assert.equal(bodyTop(vt), 'line 166', 'the 34-row Output viewport starts at the retained tail')
 
   // PgUp is an active browse: pause and move the body.
   vt.sendInput('\x1b[5~')
@@ -387,7 +387,7 @@ test('the real Job screen follows the tail, PgUp/Home/arrows really scroll the O
   painted = view(vt)
   assert.match(painted, /Follow paused/)
   assert.ok(!/line 199/.test(painted), 'the tail leaves the viewport')
-  assert.equal(bodyTop(vt), 'line 134')
+  assert.equal(bodyTop(vt), 'line 136')
   assert.match(painted, /Job · job-a · bash.*‣ Running/, 'the Header stays pinned')
   assert.match(painted, /Back \[Esc\]/, 'the Action Bar stays the last row')
 
@@ -412,7 +412,7 @@ test('the real Job screen follows the tail, PgUp/Home/arrows really scroll the O
   painted = view(vt)
   assert.match(painted, /Follow on/)
   assert.match(painted, /line 199/)
-  assert.match(painted, /rows 166-200\/200/, 'the position is the retained preview, not Job history')
+  assert.match(painted, /rows 167-200\/200/, 'the position is the retained preview, not Job history')
 
   // The background surface never moved and never received the keys.
   assert.equal(app.hostEditorTextForTest(), 'kept draft')
@@ -431,15 +431,15 @@ test('a newer official snapshot never moves a PAUSED viewport; End catches up an
   await vt.waitForRender()
   vt.sendInput('\x1b[5~')
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 134')
+  assert.equal(bodyTop(vt), 'line 136')
   const opensBefore = observation.records.length
 
   // A pure append while PAUSED: the top row must not move.
   observation.latest()!.emit({ text: numberedLines(0, 239) })
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 134', 'a pure append never pulls the user to the tail')
+  assert.equal(bodyTop(vt), 'line 136', 'a pure append never pulls the user to the tail')
   assert.match(view(vt), /Follow paused/)
-  assert.match(view(vt), /rows 135-169\/240/)
+  assert.match(view(vt), /rows 137-170\/240/)
 
   // End catches up and follows the newer tail; the NEXT push keeps following.
   vt.sendInput('\x1b[F')
@@ -500,11 +500,13 @@ test('a real scrollbar press, drag and release move the Output, keep it paused a
   await vt.waitForRender()
   assert.match(view(vt), /Follow paused/)
   const topIndex = (): number => Number(bodyTop(vt).split(' ')[1])
-  assert.equal(topIndex(), 179, 'one wheel notch above the tail')
+  assert.equal(topIndex(), 180, 'one wheel notch above the tail')
 
   // Press near the TRACK TOP (not on the thumb, which sits at the bottom): the
   // fork jumps the track and starts the drag through the overridden `scrollTo`.
-  vt.sendInput('\x1b[<0;80;4M')
+  // With the 1-row Command preview, the Output body starts at 0-based row 4
+  // (1-based row 5).
+  vt.sendInput('\x1b[<0;80;5M')
   await vt.waitForRender()
   assert.equal(topIndex(), 0, 'the scrollbar press jumped to the top')
   assert.match(view(vt), /Follow paused/)
@@ -716,14 +718,15 @@ test('the Action Bar drops the inert End/Find hints while the query is being edi
   vt.sendInput('\x1b[5~')
   await vt.waitForRender()
   const bar = (): string => rawView(vt).at(-1) ?? ''
-  assert.match(bar(), /Follow paused · End resume/)
+  assert.match(view(vt), /Follow paused/)
+  assert.match(bar(), /Resume \[End\]/)
   assert.match(bar(), /Ctrl\+F find/)
 
   vt.sendInput('\x06')
   await vt.waitForRender()
   assert.match(view(vt), /Find Output:/)
-  assert.match(bar(), /Follow paused/)
-  assert.ok(!bar().includes('End resume'),
+  assert.match(view(vt), /Follow paused/)
+  assert.ok(!bar().includes('Resume [End]'),
     `End belongs to the query Input while editing, so the bar must not promise it:\n${bar()}`)
   assert.ok(!bar().includes('Ctrl+F find'),
     `the Find entry cannot re-enter while already editing:\n${bar()}`)
@@ -731,7 +734,8 @@ test('the Action Bar drops the inert End/Find hints while the query is being edi
 
   vt.sendInput('\r') // NAVIGATE: End really resumes, Find really re-enters
   await vt.waitForRender()
-  assert.match(bar(), /Follow paused · End resume/)
+  assert.match(view(vt), /Follow paused/)
+  assert.match(bar(), /Resume \[End\]/)
   assert.match(bar(), /Ctrl\+F find/)
   assert.ok(!bar().includes('stop'), 'NAVIGATE keeps the read-only result keys')
   vt.sendInput('\x1b')
@@ -1021,7 +1025,8 @@ test('a Find binding remapped onto the reserved physical End cannot shadow the o
     },
   }))
   await vt.waitForRender()
-  assert.match(bar(), /Follow paused · End resume/, 'End still really resumes follow')
+  assert.match(view(vt), /Follow paused/)
+  assert.match(bar(), /Resume \[End\]/, 'End still really resumes follow')
   assert.match(bar(), /\/ find/, 'the Job-local `/` alias is the only live Find entry')
   assert.ok(!/End find/.test(bar()),
     `a Find binding the Job reserves must never be advertised as usable:\n${bar()}`)
@@ -1171,13 +1176,13 @@ test('a truncated retained window rebases a provable anchor, never fabricates GA
   // Pause at a provable row, then evict ten old rows in the new window.
   vt.sendInput('\x1b[5~')
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 134')
+  assert.equal(bodyTop(vt), 'line 136')
   observation.latest()!.emit({ text: numberedLines(10, 199) })
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 134', 'the same provable row stays visible across the eviction')
+  assert.equal(bodyTop(vt), 'line 136', 'the same provable row stays visible across the eviction')
   assert.match(view(vt), /Follow paused/)
   assert.ok(!/\[GAP\]/.test(view(vt)), 'a local window change never fabricates GAP')
-  assert.match(view(vt), /rows 125-159\/190/, 'the position is relative to the retained window')
+  assert.match(view(vt), /rows 127-160\/190/, 'the position is relative to the retained window')
 
   // The official gap fact is the ONLY source of [GAP].
   observation.latest()!.emit({ text: numberedLines(10, 199), gapBefore: true })
@@ -1208,18 +1213,17 @@ test('several snapshots before the next frame keep the anchor on the same provab
   await vt.waitForRender()
   vt.sendInput('\x1b[5~')
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 134', 'the DRAWN baseline (line 134) is the anchor')
+  assert.equal(bodyTop(vt), 'line 136', 'the DRAWN baseline (line 136) is the anchor')
 
   // THREE windows land BEFORE the next frame (no render in between). The anchor
   // is compared against the last DRAWN window and moved by the TOTAL proven
-  // eviction (5 + 5 + 5), so `line 134` — still present in the newest window —
-  // stays visible. Rebasing each undrawn hop separately (or re-applying an
-  // eviction) would drift to `line 149`.
+  // eviction (5 + 5 + 5), so `line 136` — still present in the newest window —
+  // stays visible.
   observation.latest()!.emit({ text: numberedLines(5, 199) })
   observation.latest()!.emit({ text: numberedLines(10, 199) })
   observation.latest()!.emit({ text: numberedLines(15, 199) })
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 134',
+  assert.equal(bodyTop(vt), 'line 136',
     'the total proven eviction against the drawn baseline preserves the row')
   assert.match(view(vt), /Follow paused/)
   assert.ok(!/\[GAP\]/.test(view(vt)), 'no fabricated GAP')
@@ -1229,8 +1233,8 @@ test('several snapshots before the next frame keep the anchor on the same provab
   // the viewport clamps it into the new (shorter) window.
   observation.latest()!.emit({ text: Array.from({ length: 40 }, (_, index) => `fresh ${String(index).padStart(3, '0')}`).join('\n') })
   await vt.waitForRender()
-  assert.match((rawView(vt)[3] ?? '').trim(), /^fresh 005/,
-    'an unprovable window safely clamps the offset into the new window (40 rows, 35 body rows)')
+  assert.match((rawView(vt)[4] ?? '').trim(), /^fresh 006/,
+    'an unprovable window safely clamps the offset into the new window (40 rows, 34 body rows)')
   assert.match(view(vt), /Follow paused/)
   assert.ok(!/\[GAP\]/.test(view(vt)), 'a clamp never fabricates a GAP')
   app.stop()
@@ -1577,7 +1581,7 @@ test('a Find binding remapped onto the reserved Tab cannot shadow the page toggl
   }))
   await vt.waitForRender()
 
-  assert.match(view(vt), /Tab switch/, 'the page toggle is advertised')
+  assert.match(view(vt), /Expand \[Tab\]/, 'the page toggle is advertised')
   assert.ok(!/Tab find/.test(view(vt)), 'a Find remapped onto the reserved Tab is never advertised')
   assert.match(view(vt), /\/ find/, '`/` is the only live Find entry left to name')
 
@@ -1595,15 +1599,12 @@ test('a Find binding remapped onto the reserved Tab cannot shadow the page toggl
   assert.match(view(vt), /Find Output:/, '`/` still opens the Output Find')
 
   // ── NAVIGATE: the reserved key is consumed there too, it never re-enters EDIT ──
-  // A Find binding remapped onto `Tab` used to reach `openFind()` in this state and
-  // flip the search back to EDIT. The discriminator is the SEARCH ROW itself: in EDIT
-  // a printable key is query text, in NAVIGATE it is inert.
   const searchRow = (): string => rawView(vt).find(line => line.includes('Find Output:')) ?? ''
   vt.sendInput('line')
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
-  assert.match(bar(), /Follow paused · End resume/, 'Enter left the Output Find in NAVIGATE')
+  assert.match(bar(), /Resume \[End\]/, 'Enter left the Output Find in NAVIGATE')
   const navigateRow = searchRow()
   assert.ok(navigateRow !== '', 'the Output search row is still painted in NAVIGATE')
 
@@ -1611,7 +1612,7 @@ test('a Find binding remapped onto the reserved Tab cannot shadow the page toggl
   await vt.waitForRender()
   assert.match(bar(), /Leave find \[Esc\]/, 'Tab did NOT switch the page out of a NAVIGATE Find')
   assert.ok(!/Output \[Esc\]/.test(view(vt)), 'the Command page was never entered')
-  assert.match(bar(), /Follow paused · End resume/, 'Tab did NOT re-enter EDIT')
+  assert.match(bar(), /Resume \[End\]/, 'Tab did NOT re-enter EDIT')
   vt.sendInput('z')
   await vt.waitForRender()
   assert.equal(searchRow(), navigateRow, 'a printable key is still inert: the search is still NAVIGATE, not EDIT')
@@ -1639,5 +1640,137 @@ test('a Find binding remapped onto the reserved Tab cannot shadow the page toggl
   vt.sendInput('z')
   await vt.waitForRender()
   assert.equal(commandRow(), commandNavigateRow, 'the Command Find is still NAVIGATE, not EDIT')
+  app.stop()
+})
+
+// ── JUX-05: F2 Find reservation + Exit/leader preemption hides key badges ───
+
+test('JUX-05: F2 is reserved from direct/leader Find, and Exit/leader preemption hides [F2]/[Tab] badges while mouse stays live', async () => {
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ label: 'echo alpha\necho beta', text: 'out-1\nout-2' })
+  await vt.waitForRender()
+
+  // (1) Remap Find direct + leader onto F2: F2 must NOT be advertised for Find
+  // and pressing F2 must toggle preview instead of opening Find.
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: {
+      'app.transcript.search.view': 'f2',
+      'app.transcript.search': '<leader>f2',
+    },
+  }))
+  await vt.waitForRender()
+  assert.ok(!/F2 find|Leader F2 find/.test(view(vt)), 'reserved F2 Find binding is never advertised')
+  assert.match(view(vt), /\/ find/, '`/` fallback is advertised when only reserved F2 Find exists')
+  vt.sendInput('\x1bOQ') // F2
+  await vt.waitForRender()
+  assert.ok(!/Find Output:/.test(view(vt)), 'direct F2 never opens Find')
+  assert.match(view(vt), /Show \[F2\]/, 'direct F2 toggles Command preview')
+  // Leader + F2 cancels leader and toggles preview instead of opening Find.
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('\x1bOQ')
+  await vt.waitForRender()
+  assert.ok(!/Find Output:/.test(view(vt)), 'leader F2 never opens Find')
+  assert.match(view(vt), /Hide \[F2\]/, 'leader F2 restores Command preview')
+
+  // While Find is active, F2 is consumed inert (no toggle).
+  vt.sendInput('/')
+  await vt.waitForRender()
+  vt.sendInput('\r') // NAVIGATE
+  await vt.waitForRender()
+  vt.sendInput('\x1bOQ')
+  await vt.waitForRender()
+  assert.match(view(vt), /echo beta/, 'F2 is inert while Find is active')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+
+  // (2) Bind live Exit direct to F2 and active leader prefix to Tab: badges
+  // `[F2]` and `[Tab]` disappear, while mouse `Hide` and `Expand` still act!
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'tab',
+    bindings: {
+      'app.exit.request': ['ctrl+c', 'f2'],
+      'app.transcript.search.view': '<leader>f',
+      'app.transcript.search': false,
+    },
+  }))
+  await vt.waitForRender()
+  const headerLine = rawView(vt).find(line => line.startsWith('Command')) ?? ''
+  assert.ok(!headerLine.includes('[F2]'), `preempted F2 omits [F2] badge:\n${headerLine}`)
+  assert.ok(!headerLine.includes('[Tab]'), `preempted Tab omits [Tab] badge:\n${headerLine}`)
+  assert.match(headerLine, /Copy Command · Expand · Hide/, 'unbadged mouse controls remain visible')
+
+  const headerRow = rawView(vt).findIndex(line => line.startsWith('Command'))
+  const hideCol = rawView(vt)[headerRow]!.indexOf('Hide')
+  vt.sendInput(`\x1b[<0;${hideCol + 1};${headerRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${hideCol + 1};${headerRow + 1}m`)
+  await vt.waitForRender()
+  assert.match(rawView(vt)[headerRow]!, /Show/, 'mouse Hide still works when F2 is preempted')
+  app.stop()
+})
+
+// ── JUX-06: SearchRow mouse flow & 0-match negative ────────────────────────
+
+test('JUX-06: Output SearchRow buttons drive EDIT/NAVIGATE/reveal and 0 matches omits Prev/Next', async () => {
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  const lines = Array.from({ length: 120 }, (_, i) =>
+    i === 5 || i === 60 || i === 110 ? `target-row-${i}` : `line ${String(i).padStart(3, '0')}`).join('\n')
+  harness.observation.latest()!.emit({ text: lines })
+  await vt.waitForRender()
+
+  // Click Find span on Action Bar.
+  const barRow = rawView(vt).length - 1
+  const findCol = rawView(vt)[barRow]!.indexOf('Ctrl+F find')
+  assert.ok(findCol >= 0)
+  vt.sendInput(`\x1b[<0;${findCol + 2};${barRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${findCol + 2};${barRow + 1}m`)
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/)
+
+  // 0 matches: NAVIGATE omits Prev/Next targets.
+  vt.sendInput('zzzz-no-match')
+  await vt.waitForRender()
+  const searchRowIdx = rawView(vt).findIndex(line => line.includes('Search [Enter]'))
+  const commitCol = rawView(vt)[searchRowIdx]!.indexOf('Search [Enter]')
+  vt.sendInput(`\x1b[<0;${commitCol + 2};${searchRowIdx + 1}M`)
+  vt.sendInput(`\x1b[<0;${commitCol + 2};${searchRowIdx + 1}m`)
+  await vt.waitForRender()
+  assert.match(view(vt), /0\/0 · No matches/)
+  assert.ok(!/Next \[N\]|Prev \[Shift\+N\]/.test(view(vt)), '0 matches never paints Prev/Next')
+
+  // Click Edit -> clear -> type `target-row` -> click Search [Enter] -> Next [N] -> Prev [Shift+N].
+  const editCol = rawView(vt)[searchRowIdx]!.indexOf('Edit')
+  vt.sendInput(`\x1b[<0;${editCol + 2};${searchRowIdx + 1}M`)
+  vt.sendInput(`\x1b[<0;${editCol + 2};${searchRowIdx + 1}m`)
+  await vt.waitForRender()
+  vt.sendInput('\x15')
+  vt.sendInput('target-row')
+  await vt.waitForRender()
+  assert.match(view(vt), /3\/3/, 'nearest match to tail viewport is 3/3')
+  const commitCol2 = rawView(vt)[searchRowIdx]!.indexOf('Search [Enter]')
+  vt.sendInput(`\x1b[<0;${commitCol2 + 1};${searchRowIdx + 1}M`)
+  vt.sendInput(`\x1b[<0;${commitCol2 + 1};${searchRowIdx + 1}m`)
+  await paintedWhen(vt, frame => frame.includes('Next [N]'))
+  const nextCol = rawView(vt)[searchRowIdx]!.indexOf('Next [N]')
+  assert.ok(nextCol >= 0, `Next [N] must be painted in NAVIGATE:\n${view(vt)}`)
+  vt.sendInput(`\x1b[<0;${nextCol + 2};${searchRowIdx + 1}M`)
+  vt.sendInput(`\x1b[<0;${nextCol + 2};${searchRowIdx + 1}m`)
+  await paintedWhen(vt, frame => frame.includes('target-row-5'))
+  assert.match(view(vt), /1\/3/, 'Next [N] wraps from 3/3 to 1/3 and reveals target-row-5')
+  assert.match(view(vt), /target-row-5/)
+  const prevCol = rawView(vt)[searchRowIdx]!.indexOf('Prev [Shift+N]')
+  assert.ok(prevCol >= 0)
+  vt.sendInput(`\x1b[<0;${prevCol + 2};${searchRowIdx + 1}M`)
+  vt.sendInput(`\x1b[<0;${prevCol + 2};${searchRowIdx + 1}m`)
+  await paintedWhen(vt, frame => frame.includes('target-row-110'))
+  assert.match(view(vt), /3\/3/, 'Prev [Shift+N] steps back to 3/3 and reveals target-row-110')
+  assert.match(view(vt), /target-row-110/)
   app.stop()
 })

@@ -869,21 +869,26 @@ workspace must return to.
   with the physical focus only moving between the panel root and the CURRENT
   page's Search row. `Esc` on the Command page returns to Output (a logical
   intent of the same panel), never a screen swap.
-- **The header's copy/reading affordances resolve against the LAST PAINTED
-  frame.** The Command summary row, its `↗ Command` entry, its `Copy All [C]`
-  button and the other reading page's tab are plain painted cells with no
-  mouse-handling component, so the alt screen's existing `onCellPress`/
-  `onCellClick` callbacks reach the panel. The panel reads its hit regions and the
-  header's painted top row at the frame-painted boundary (the same X054 geometry
-  query the Command selection uses) and a click acts only when the release
-  re-proves the press-time action, page, Command source identity AND the same
-  relative row/cell range; a repaint in between refuses it, and a row the frame
-  truncated keeps only the label cells it really painted (the ellipsis that
-  `truncateToWidth` substitutes is inert). The Command BODY is the one region that DOES own the
-  pointer: its published `MouseRegion` returns `capture: true` on a left press,
-  and the gesture, its selection and its timer are released on any page switch,
-  label change, resize, blur or dispose, so no ghost selection or timer can
-  outlive the frame it belonged to.
+- **Fixed chrome owns component pointer dispatch; bodies keep their own
+  selection.** The mounted fixed chrome children (Header with its passive
+  Command preview, SearchRow, reading-facts row, notice row and pinned Action
+  Bar) route `TuiMouseEvent` through the alt screen's standard component
+  dispatch into ONE panel gesture owner instead of the native-selection
+  `onCellPress`/`onCellClick` callbacks. A wheel over fixed chrome is always
+  consumed (never bubbles into `routeWheel` or pauses Output follow). A left
+  press on fixed chrome captures the gesture without requesting fork focus
+  (keeping inert chrome free of native word-copy); non-chrome-origin drags and
+  releases return unhandled so an Output-body native selection drag that
+  crosses into chrome still clamps and completes through the fork's native
+  ScrollView anchor. Only a same-cell synthetic `click` with `clickCount === 1`
+  that re-proves the press-time live terminal grant, painted boxes (X054),
+  viewport positions, action span and semantic state executes the handler;
+  truncation ellipses and clipped actions publish no hit, and terminal blur
+  revokes any in-flight gesture. The passive Command preview has no focus or
+  viewport of its own. The Command BODY keeps its `MouseRegion` (`capture: true`
+  on left press) for exact original-text selection and its short-lived edge
+  auto-scroll timer, released on page switch, label change, resize, blur or
+  dispose.
 - **Final dispose releases the lease first.** `TuiApp.dispose()` closes a still
   leased workspace before the overlay teardown and the screen stops, so no
   temporary screen keeps a terminal input handler into the dying surface.

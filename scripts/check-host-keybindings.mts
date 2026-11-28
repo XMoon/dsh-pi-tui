@@ -219,6 +219,10 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // fullscreen component owns Tab/Shift+Tab with no Host keymap action and no
   // remap, so this table is its key authority and the panel imports the label.
   { file: 'src/tui/keybindings/hints.ts', line: "folderCycle: { keys: ['tab', 'shift+tab'], label: 'Tab/Shift+Tab' }," },
+  // (14) The Job Workspace Find row's fixed previous-match chord: the search
+  // bar owns n/Shift+N/Enter locally (no Host keymap action, no remap), so
+  // `JOB_SEARCH_LOCAL_KEYS` in the key-label authority owns its KeyId.
+  { file: 'src/tui/keybindings/hints.ts', line: "prev: 'shift+n'," },
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */
